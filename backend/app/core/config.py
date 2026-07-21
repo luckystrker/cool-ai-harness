@@ -28,7 +28,14 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", description="development|production")
     debug: bool = True
     # Comma-separated list of allowed CORS origins. "*" allows all.
-    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    # Dev defaults cover Vite (5173), and common alt ports.
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+        ]
+    )
 
     # --- Database ---
     # SQLite by default. Use e.g. postgresql+psycopg://user:pass@host/db for product.
