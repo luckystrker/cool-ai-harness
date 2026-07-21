@@ -41,6 +41,12 @@ class AgentEvent:
     def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "payload": self.payload}
 
+    def to_dict_json(self) -> str:
+        """JSON-serialized to_dict(), defaulting unknown types to str."""
+        import json
+
+        return json.dumps(self.to_dict(), default=str, ensure_ascii=False)
+
     # --- ergonomic constructors ---
 
     @classmethod

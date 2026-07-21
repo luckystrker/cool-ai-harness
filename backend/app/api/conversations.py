@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from sse_starlette.sse import EventSourceResponse
 
-from app.agent import AgentConfig, AgentExecutor
+from app.agent.runners import run_conversation_turn
 from app.agent.service import (
     append_message,
     create_conversation,
@@ -18,7 +17,6 @@ from app.agent.service import (
     get_or_create_default_user,
     list_conversations,
     list_messages,
-    load_history,
 )
 from app.api.schemas import (
     ConversationCreate,
@@ -29,10 +27,7 @@ from app.api.schemas import (
 )
 from app.core.config import get_settings
 from app.core.db import get_session
-from app.core.logging import get_logger
 from app.providers import get_default_provider
-
-log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -144,52 +139,15 @@ async def post_message(
     provider = get_default_provider()
 
     async def event_stream() -> AsyncIterator[dict]:
-        # Load full history (including the user message we just saved) for the loop.
-        history = load_history(session, conv_id)
-        executor = AgentExecutor(
+        async for event in run_conversation_turn(
+            session=session,
+            conversation_id=conv_id,
             provider=provider,
-            config=AgentConfig(
-                model=model,
-                system_prompt=body.system_prompt,
-                tool_names=body.tool_names,
-            ),
-            history=history,
-        )
-
-        # Buffer the assistant content / tool calls so we can persist them on finish.
-        assistant_content: list[str] = []
-        last_tool_calls: list[dict] | None = None
-
-        async for event in executor.stream(None):
-            # Persist intermediate tool messages so the DB matches the loop.
-            if event.kind == "tool_call_start":
-                # Tool result message will be persisted on the tool_result event.
-                pass
-            elif event.kind == "tool_result":
-                payload = event.payload
-                append_message(
-                    session,
-                    conversation_id=conv_id,
-                    role="tool",
-                    content=payload["result"]["output"],
-                    tool_calls=None,
-                )
-            elif event.kind == "token":
-                assistant_content.append(event.payload.get("text", ""))
-            elif event.kind == "message":
-                last_tool_calls = event.payload.get("tool_calls")
-            elif event.kind == "finish":
-                # Persist the final assistant message (one row for the turn).
-                content = "".join(assistant_content) or None
-                if content or last_tool_calls:
-                    append_message(
-                        session,
-                        conversation_id=conv_id,
-                        role="assistant",
-                        content=content,
-                        tool_calls=last_tool_calls,
-                        usage=event.payload.get("usage"),
-                    )
-            yield {"event": event.kind, "data": json.dumps(event.payload, default=str)}
+            model=model,
+            user_input=None,  # already persisted above
+            system_prompt=body.system_prompt,
+            tool_names=body.tool_names,
+        ):
+            yield {"event": event.kind, "data": event.to_dict_json()}
 
     return EventSourceResponse(event_stream())
