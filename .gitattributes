@@ -1,0 +1,28 @@
+# Normalize line endings: text files checked in with LF in the repo.
+* text=auto eol=lf
+
+# Explicit LF for source code.
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+*.env text eol=lf
+Dockerfile text eol=lf
+
+# Binary files — never touch.
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
