@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # --- Telegram ---
     telegram_bot_token: str = ""
 
+    # --- Web search (tools) ---
+    search_provider: str = Field(
+        default="", description="serper | tavily | searxng (empty = tool errors gracefully)"
+    )
+    serper_api_key: str = ""
+    tavily_api_key: str = ""
+    searxng_url: str = ""  # e.g. http://localhost:8080
+
     # --- Paths ---
     data_dir: Path = REPO_ROOT / "data"
     workspaces_dir: Path = REPO_ROOT / "workspaces"
