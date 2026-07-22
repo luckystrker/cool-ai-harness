@@ -76,6 +76,7 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 
 - **Фаза 0** — Foundation *(current)*
 - **Фаза 1** — Agent loop + tools + chat MVP
+- **Фаза 1.5** — Надёжность запусков, безопасность, артефакты и evals
 - **Фаза 2** — Skills + MCP + subagents
 - **Фаза 3a** — Long-term memory + personalities + observability
 - **Фаза 3b** — Recurring tasks / cron jobs ⏰
