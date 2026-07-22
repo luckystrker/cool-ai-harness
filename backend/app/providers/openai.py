@@ -56,7 +56,13 @@ class OpenAIProvider(LLMProvider):
         if m.content is not None:
             out["content"] = m.content
         if m.tool_calls is not None:
-            out["tool_calls"] = m.tool_calls
+            # The harness stores tool_calls in a flat canonical shape:
+            #   {"id", "type", "name", "arguments": <dict>}
+            # OpenAI's Chat Completions API requires the nested shape:
+            #   {"id", "type", "function": {"name", "arguments": <json-string>}}
+            # Normalize both incoming shapes so we never send a 400 back to the
+            # provider when replaying an assistant's tool calls in a later turn.
+            out["tool_calls"] = [_to_openai_tool_call(tc) for tc in m.tool_calls]
         if m.tool_call_id is not None:
             out["tool_call_id"] = m.tool_call_id
         if m.name is not None:
@@ -141,6 +147,10 @@ class OpenAIProvider(LLMProvider):
             tool_calls=choice.get("tool_calls"),
             usage=self._parse_usage(data.get("usage")),
             finish_reason=data["choices"][0].get("finish_reason"),
+            # Reasoning models (DeepSeek-R1 via OpenRouter, etc.) put the
+            # chain-of-thought under `reasoning_content` (DeepSeek) or
+            # `reasoning` (OpenRouter). Pick whichever is present.
+            reasoning=choice.get("reasoning_content") or choice.get("reasoning"),
             raw=data,
         )
 
@@ -192,6 +202,9 @@ class OpenAIProvider(LLMProvider):
 
                 event = ChatStreamEvent(
                     delta=delta_obj.get("content") or "",
+                    reasoning=delta_obj.get("reasoning_content")
+                    or delta_obj.get("reasoning")
+                    or "",
                     tool_call_delta=(delta_obj.get("tool_calls") or None),
                     finish_reason=finish_reason,
                     finish=finish_reason is not None,
@@ -199,3 +212,26 @@ class OpenAIProvider(LLMProvider):
                 if chunk.get("usage"):
                     event.usage = self._parse_usage(chunk["usage"])
                 yield event
+
+
+def _to_openai_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
+    """Coerce a stored tool call into OpenAI's wire shape.
+
+    Accepts both the harness's flat canonical form (``{id, type, name,
+    arguments}``) and an already-OpenAI-shaped call (``{id, type,
+    function: {name, arguments}}``). ``arguments`` is serialized to a JSON
+    string, as the API requires.
+    """
+    fn = tc.get("function")
+    if isinstance(fn, dict):
+        name = fn.get("name", "")
+        args = fn.get("arguments", {})
+    else:
+        name = tc.get("name", "")
+        args = tc.get("arguments", {})
+    args_str = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
+    return {
+        "id": tc.get("id"),
+        "type": tc.get("type", "function"),
+        "function": {"name": name, "arguments": args_str},
+    }

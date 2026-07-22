@@ -17,14 +17,19 @@ from app.agent.service import (
     get_or_create_default_user,
     list_conversations,
     list_messages,
+    update_conversation,
 )
 from app.api.schemas import (
     ConversationCreate,
     ConversationDetail,
     ConversationOut,
+    ConversationUpdate,
     MessageOut,
     SendMessageRequest,
+    ToolApprovalRequest,
 )
+from app.agent.approvals import approval_registry
+from app.agent.permissions import validate as validate_permissions
 from app.core.config import get_settings
 from app.core.db import get_session
 from app.providers import get_default_provider
@@ -38,6 +43,8 @@ def _conv_to_out(conv) -> ConversationOut:
         user_id=conv.user_id,
         title=conv.title,
         model=conv.model,
+        working_directory=conv.working_directory,
+        permissions=conv.permissions,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -51,6 +58,8 @@ def _msg_to_out(m) -> MessageOut:
         content=m.content,
         tool_calls=m.tool_calls,
         usage=m.usage,
+        thinking=m.thinking,
+        tool_result=m.tool_result,
         created_at=m.created_at,
     )
 
@@ -62,6 +71,8 @@ def _msg_to_out(m) -> MessageOut:
 def post_conversation(
     body: ConversationCreate, session: Session = Depends(get_session)
 ) -> ConversationOut:
+    if errors := validate_permissions(body.permissions):
+        raise HTTPException(status_code=400, detail="; ".join(errors))
     user = get_or_create_default_user(session)
     settings = get_settings()
     conv = create_conversation(
@@ -69,6 +80,8 @@ def post_conversation(
         user_id=user.id,
         title=body.title,
         model=body.model or settings.default_model,
+        working_directory=body.working_directory,
+        permissions=body.permissions,
     )
     return _conv_to_out(conv)
 
@@ -108,6 +121,28 @@ def delete_conversation_route(
     return {"deleted": conv_id}
 
 
+@router.patch("/conversations/{conv_id}", response_model=ConversationOut)
+def patch_conversation(
+    conv_id: int,
+    body: ConversationUpdate,
+    session: Session = Depends(get_session),
+) -> ConversationOut:
+    """Update updatable conversation fields (title, model, working_directory, permissions)."""
+    if errors := validate_permissions(body.permissions):
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+    conv = update_conversation(
+        session,
+        conv_id,
+        title=body.title,
+        model=body.model,
+        working_directory=body.working_directory,
+        permissions=body.permissions,
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return _conv_to_out(conv)
+
+
 # --- streaming chat ---
 
 
@@ -139,15 +174,44 @@ async def post_message(
     provider = get_default_provider()
 
     async def event_stream() -> AsyncIterator[dict]:
-        async for event in run_conversation_turn(
-            session=session,
-            conversation_id=conv_id,
-            provider=provider,
-            model=model,
-            user_input=None,  # already persisted above
-            system_prompt=body.system_prompt,
-            tool_names=body.tool_names,
-        ):
-            yield {"event": event.kind, "data": event.to_dict_json()}
+        try:
+            async for event in run_conversation_turn(
+                session=session,
+                conversation_id=conv_id,
+                provider=provider,
+                model=model,
+                user_input=None,  # already persisted above
+                system_prompt=body.system_prompt,
+                tool_names=body.tool_names,
+                working_directory=conv.working_directory,
+                conversation_permissions=conv.permissions,
+            ):
+                yield {"event": event.kind, "data": event.to_dict_json()}
+        finally:
+            # If the client disconnects mid-approval (SSE closed), cancel any
+            # pending approval we were waiting on so the loop doesn't hang.
+            approval_registry.cancel_for_conversation(conv_id)
 
     return EventSourceResponse(event_stream())
+
+
+@router.post("/conversations/{conv_id}/tool_calls/{call_id}/approval")
+def post_tool_approval(
+    conv_id: int,
+    call_id: str,
+    body: ToolApprovalRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Resolve a pending tool-call approval.
+
+    The agent loop, gated behind an ``ask`` permission, blocks on the approval
+    Future registered under ``call_id``. This endpoint resolves it: the loop
+    runs the tool if approved, or continues with a denied tool_result if not.
+    """
+    conv = get_conversation(session, conv_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not approval_registry.has(call_id):
+        raise HTTPException(status_code=404, detail="No pending approval for that call_id")
+    resolved = approval_registry.resolve(call_id, body.approved)
+    return {"resolved": resolved, "approved": body.approved}

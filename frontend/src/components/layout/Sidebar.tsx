@@ -1,28 +1,16 @@
-import { useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Plus, Settings, Trash2, MessageSquare, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
 export function Sidebar() {
   const navigate = useNavigate()
   const { conversationId } = useParams()
   const queryClient = useQueryClient()
-  const [newOpen, setNewOpen] = useState(false)
-  const [title, setTitle] = useState("")
 
   const { data: conversations = [], isLoading } = useQuery({
     queryKey: ["conversations"],
@@ -33,8 +21,6 @@ export function Sidebar() {
     mutationFn: conversationsApi.create,
     onSuccess: (conv) => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
-      setNewOpen(false)
-      setTitle("")
       navigate(`/chat/${conv.id}`)
     },
     onError: (e) => toast.error("Failed to create conversation", { description: String(e) }),
@@ -49,7 +35,7 @@ export function Sidebar() {
     onError: (e) => toast.error("Failed to delete", { description: String(e) }),
   })
 
-  const handleCreate = () => createMutation.mutate({ title: title.trim() || undefined })
+  const handleCreate = () => createMutation.mutate({})
   const handleDelete = (id: number) => deleteMutation.mutate(id)
 
   return (
@@ -62,38 +48,21 @@ export function Sidebar() {
         <span className="font-semibold tracking-tight">Harness</span>
       </div>
 
-      {/* New chat */}
+      {/* New chat — creates a conversation immediately, no title prompt.
+          The title can be edited later via the conversation settings. */}
       <div className="p-3">
-        <Dialog open={newOpen} onOpenChange={setNewOpen}>
-          <DialogTrigger asChild>
-            <Button className="w-full justify-start gap-2">
-              <Plus className="h-4 w-4" /> New conversation
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>New conversation</DialogTitle>
-            </DialogHeader>
-            <Input
-              autoFocus
-              placeholder="Title (optional)"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleCreate()
-              }}
-            />
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setNewOpen(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleCreate} disabled={createMutation.isPending}>
-                {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                Create
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <Button
+          className="w-full justify-start gap-2"
+          onClick={handleCreate}
+          disabled={createMutation.isPending}
+        >
+          {createMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Plus className="h-4 w-4" />
+          )}
+          New conversation
+        </Button>
       </div>
 
       {/* Conversation list */}

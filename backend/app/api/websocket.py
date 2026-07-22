@@ -81,11 +81,18 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                         user_input=None,  # already persisted
                         system_prompt=body.system_prompt,
                         tool_names=body.tool_names,
+                        working_directory=conv.working_directory,
+                        conversation_permissions=conv.permissions,
                     ):
                         await websocket.send_text(event.to_dict_json())
                 except Exception as exc:
                     log.error("ws.turn_failed", conv_id=conv_id, error=str(exc))
                     await _send_error(websocket, f"Turn failed: {exc}")
+                finally:
+                    # Release any pending approvals if the turn ended early.
+                    from app.agent.approvals import approval_registry
+
+                    approval_registry.cancel_for_conversation(conv_id)
     except WebSocketDisconnect:
         log.info("ws.disconnected", conv_id=conv_id)
     except Exception as exc:

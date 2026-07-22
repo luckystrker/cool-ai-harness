@@ -18,11 +18,14 @@ same code drives the chat UI, subagents (Фаза 2), and cron jobs (Фаза 3b
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent.approvals import DEFAULT_APPROVAL_TIMEOUT_S, approval_registry
 from app.agent.events import AgentEvent
+from app.agent.permissions import Decision, PermissionsConfig
 from app.core.logging import get_logger
 from app.providers import (
     LLMProvider,
@@ -31,6 +34,7 @@ from app.providers import (
     Usage,
 )
 from app.tools import ToolResult, get_tool
+from app.tools.context import RunContext, reset_run_context, set_run_context
 
 log = get_logger(__name__)
 
@@ -55,6 +59,14 @@ class AgentConfig:
     # Whitelist of tool names exposed to the model. None = all registered tools.
     tool_names: list[str] | None = None
     limits: AgentLimits = field(default_factory=AgentLimits)
+    # Working directory for file/code tools this run. None = global default.
+    working_directory: str | None = None
+    # Effective tool permissions (global + conversation already merged).
+    # None means "no explicit config" → resolve() falls back to "ask".
+    permissions: PermissionsConfig | None = None
+    # When True, "ask" tools run without prompting (non-interactive runners:
+    # cron jobs, subagents). The approval event is never emitted.
+    auto_approve: bool = False
 
 
 class AgentExecutor:
@@ -109,89 +121,151 @@ class AgentExecutor:
             self.history.append(Message(role="user", content=user_input))
 
         total_usage = Usage()
-        yield AgentEvent.start()
+        run_started = time.monotonic()
 
-        for iteration in range(1, limits.max_iterations + 1):
-            content_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
-            usage: Usage | None = None
-            finish_reason: str | None = None
+        # Install the run's execution context so file/code tools pick up the
+        # per-run working directory and permissions. Reset on exit so a later
+        # run (same task) starts clean.
+        ctx = self._build_run_context()
+        ctx_token = set_run_context(ctx)
 
-            try:
-                async for event in self.provider.chat_completion_stream(
-                    self.history,
-                    model=self.config.model,
-                    tools=tools or None,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                ):
-                    if event.delta:
-                        content_parts.append(event.delta)
-                        yield AgentEvent.token(event.delta)
-                    if event.tool_call_delta:
-                        _merge_tool_call_delta(tool_calls, event.tool_call_delta)
-                    if event.usage:
-                        usage = event.usage
-                    if event.finish:
-                        finish_reason = event.finish_reason or "stop"
-            except Exception as exc:
-                log.error("agent.iteration_failed", iteration=iteration, error=str(exc))
-                yield AgentEvent.error(
-                    f"LLM error on iteration {iteration}", detail=str(exc)
+        try:
+            yield AgentEvent.start()
+
+            for iteration in range(1, limits.max_iterations + 1):
+                content_parts: list[str] = []
+                reasoning_parts: list[str] = []
+                tool_calls: list[dict[str, Any]] = []
+                usage: Usage | None = None
+                finish_reason: str | None = None
+
+                try:
+                    async for event in self.provider.chat_completion_stream(
+                        self.history,
+                        model=self.config.model,
+                        tools=tools or None,
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                    ):
+                        if event.reasoning:
+                            reasoning_parts.append(event.reasoning)
+                            yield AgentEvent.thinking(event.reasoning)
+                        if event.delta:
+                            content_parts.append(event.delta)
+                            yield AgentEvent.token(event.delta)
+                        if event.tool_call_delta:
+                            _merge_tool_call_deltas(tool_calls, event.tool_call_delta)
+                        if event.usage:
+                            usage = event.usage
+                        if event.finish:
+                            finish_reason = event.finish_reason or "stop"
+                except Exception as exc:
+                    log.error("agent.iteration_failed", iteration=iteration, error=str(exc))
+                    yield AgentEvent.error(
+                        f"LLM error on iteration {iteration}", detail=str(exc)
+                    )
+                    return
+
+                if usage:
+                    _accumulate(total_usage, usage)
+
+                content = "".join(content_parts) or None
+                thinking = "".join(reasoning_parts) or None
+                # Normalize tool_calls: parse JSON-string arguments into dicts.
+                normalized_calls = (
+                    [_normalize_tool_call(c) for c in tool_calls] if tool_calls else None
                 )
-                return
 
-            if usage:
-                _accumulate(total_usage, usage)
-
-            content = "".join(content_parts) or None
-            # Normalize tool_calls: parse JSON-string arguments into dicts.
-            normalized_calls = [_normalize_tool_call(c) for c in tool_calls] if tool_calls else None
-
-            self.history.append(
-                Message(
-                    role="assistant",
+                self.history.append(
+                    Message(
+                        role="assistant",
+                        content=content,
+                        tool_calls=normalized_calls,
+                    )
+                )
+                yield AgentEvent.message(
                     content=content,
                     tool_calls=normalized_calls,
+                    thinking=thinking,
                 )
+
+                # Enforce ceilings.
+                if (
+                    limits.max_total_tokens is not None
+                    and total_usage.total_tokens >= limits.max_total_tokens
+                ):
+                    yield AgentEvent.finish(
+                        reason="token_limit",
+                        usage=total_usage,
+                        iterations=iteration,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
+
+                if not normalized_calls:
+                    yield AgentEvent.finish(
+                        reason=finish_reason or "stop",
+                        usage=total_usage,
+                        iterations=iteration,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
+
+                # Execute tool calls, append results, continue the loop.
+                for call in normalized_calls:
+                    async for ev in self._run_tool_call(call):
+                        yield ev
+
+            yield AgentEvent.finish(
+                reason="max_iterations",
+                usage=total_usage,
+                iterations=limits.max_iterations,
+                elapsed_ms=_elapsed_ms(run_started),
             )
-            yield AgentEvent.message(content=content, tool_calls=normalized_calls)
-
-            # Enforce ceilings.
-            if (
-                limits.max_total_tokens is not None
-                and total_usage.total_tokens >= limits.max_total_tokens
-            ):
-                yield AgentEvent.finish(
-                    reason="token_limit",
-                    usage=total_usage,
-                    iterations=iteration,
-                )
-                return
-
-            if not normalized_calls:
-                yield AgentEvent.finish(
-                    reason=finish_reason or "stop",
-                    usage=total_usage,
-                    iterations=iteration,
-                )
-                return
-
-            # Execute tool calls, append results, continue the loop.
-            for call in normalized_calls:
-                async for ev in self._run_tool_call(call):
-                    yield ev
-
-        yield AgentEvent.finish(
-            reason="max_iterations",
-            usage=total_usage,
-            iterations=limits.max_iterations,
-        )
+        finally:
+            # Always release the run context, even on early return / exception,
+            # so a cancelled turn doesn't leak its workdir into the next one.
+            reset_run_context(ctx_token)
 
     # ---- internals ----
 
+    def _build_run_context(self) -> RunContext:
+        """Construct the RunContext (workdir + permissions) for this run."""
+        from pathlib import Path
+
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if self.config.working_directory:
+            workdir = Path(self.config.working_directory)
+        elif settings.default_working_directory:
+            workdir = Path(settings.default_working_directory)
+        else:
+            workdir = Path(settings.workspaces_dir)
+        perms = self.config.permissions.tools if self.config.permissions else {}
+        return RunContext(workdir=workdir, permissions=dict(perms))
+
+    def _resolve_decision(self, name: str, dangerous: bool) -> Decision:
+        """Effective allow/ask/deny for a tool, honoring auto_approve.
+
+        Default (no permissions configured at all) is ``"allow"``: the MVP is
+        single-user and trusted, matching pre-permission behavior, and tests /
+        cron runs that never set a policy must keep working. As soon as ANY
+        permission config is supplied (even just ``{"*": "ask"}``), that config
+        decides — unknown tools fall back to ``"ask"`` within it.
+        """
+        if self.config.permissions is None:
+            # No policy configured: legacy trusted behavior.
+            decision: Decision = "allow"
+        else:
+            decision = self.config.permissions.resolve(name, dangerous=dangerous)
+        # Non-interactive runners (cron, subagents) treat "ask" as "allow".
+        if decision == "ask" and self.config.auto_approve:
+            return "allow"
+        return decision
+
     async def _run_tool_call(self, call: dict[str, Any]) -> AsyncIterator[AgentEvent]:
-        """Validate, run, and emit events for a single tool call."""
+        """Validate, gate, run, and emit events for a single tool call."""
         call_id = call.get("id") or call.get("name") or "call"
         name = call.get("name", "")
         args = call.get("arguments") or {}
@@ -199,26 +273,68 @@ class AgentExecutor:
         yield AgentEvent.tool_call_start(call_id=call_id, name=name, arguments=args)
 
         tool = get_tool(name)
+        t0 = time.monotonic()
+
+        # Permission gate: decide whether to run, ask, or deny before executing.
+        decision = self._resolve_decision(name, dangerous=bool(tool and tool.dangerous))
+
+        if decision == "ask":
+            yield AgentEvent.tool_approval_request(
+                call_id=call_id,
+                name=name,
+                arguments=args,
+                reason=f"Tool {name!r} requires approval",
+            )
+            approved = await self._wait_for_approval(call_id)
+            if not approved:
+                result = ToolResult.err(
+                    "Permission denied: the request was rejected or timed out."
+                )
+                result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
+                await self._finalize_tool_call(call_id, name, result)
+                yield AgentEvent.tool_result(
+                    call_id=call_id,
+                    name=name,
+                    result={
+                        "output": result.output,
+                        "is_error": result.is_error,
+                        "error": result.error,
+                        "metadata": result.metadata,
+                    },
+                )
+                return
+        elif decision == "deny":
+            result = ToolResult.err(f"Permission denied (policy): tool {name!r} is blocked.")
+            result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
+            await self._finalize_tool_call(call_id, name, result)
+            yield AgentEvent.tool_result(
+                call_id=call_id,
+                name=name,
+                result={
+                    "output": result.output,
+                    "is_error": result.is_error,
+                    "error": result.error,
+                    "metadata": result.metadata,
+                },
+            )
+            return
+
         if tool is None:
             result = ToolResult.err(f"Unknown tool: {name}")
         else:
-            log.info("agent.tool.start", name=name, args=args)
+            log.info("agent.tool.start", name=name, args=args, decision=decision)
             result = await tool.run(args)
             log.info(
                 "agent.tool.done",
                 name=name,
                 success=not result.is_error,
             )
+        # Surface how long the tool took so the UI can show it inline.
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["duration_ms"] = _elapsed_ms(t0)
 
-        self.history.append(
-            Message(
-                role="tool",
-                content=result.output,
-                tool_call_id=call_id,
-                name=name,
-            )
-        )
-
+        await self._finalize_tool_call(call_id, name, result)
         yield AgentEvent.tool_result(
             call_id=call_id,
             name=name,
@@ -230,8 +346,39 @@ class AgentExecutor:
             },
         )
 
+    async def _wait_for_approval(self, call_id: str) -> bool:
+        """Block until the client resolves the approval (or timeout auto-denies)."""
+        import asyncio
+
+        future = approval_registry.register(call_id)
+        try:
+            return await asyncio.wait_for(future, timeout=DEFAULT_APPROVAL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # Auto-deny on timeout so a forgotten prompt never hangs the turn.
+            approval_registry.cancel(call_id)
+            log.warning("approval.timeout", call_id=call_id)
+            return False
+
+    async def _finalize_tool_call(
+        self, call_id: str, name: str, result: ToolResult
+    ) -> None:
+        """Append the tool message to history (kept as a helper for clarity)."""
+        self.history.append(
+            Message(
+                role="tool",
+                content=result.output,
+                tool_call_id=call_id,
+                name=name,
+            )
+        )
+
 
 # --- module-level helpers --------------------------------------------------
+
+
+def _elapsed_ms(started: float) -> int:
+    """Whole-millisecond elapsed since ``started`` (a time.monotonic() value)."""
+    return int((time.monotonic() - started) * 1000)
 
 
 def _all_tool_names() -> set[str]:
@@ -248,8 +395,25 @@ def _accumulate(total: Usage, delta: Usage) -> None:
         total.cost_usd = (total.cost_usd or 0.0) + delta.cost_usd
 
 
-def _merge_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any]) -> None:
-    """Merge a streamed tool_call delta (OpenAI-shaped) into the accumulator."""
+def _merge_tool_call_deltas(
+    calls: list[dict[str, Any]], delta: dict[str, Any] | list[dict[str, Any]]
+) -> None:
+    """Merge streamed tool_call delta(s) (OpenAI-shaped) into the accumulator.
+
+    OpenAI streams ``delta.tool_calls`` as a **list** of partial tool-call
+    objects, one per chunk. Some callers (and the test ScriptedProvider) emit a
+    single dict instead. We accept both: a dict is wrapped in a list, a list is
+    iterated. Each entry is OpenAI-shaped::
+
+        {"index": 0, "id": "...", "type": "function",
+         "function": {"name": "...", "arguments": "<json-string fragments>"}}
+    """
+    deltas = [delta] if isinstance(delta, dict) else delta
+    for d in deltas:
+        _merge_one_tool_call_delta(calls, d)
+
+
+def _merge_one_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any]) -> None:
     idx = delta.get("index", 0)
     while len(calls) <= idx:
         calls.append(

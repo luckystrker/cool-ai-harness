@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import textwrap
+from pathlib import Path
 
 from app.tools.base import ToolArgs, ToolResult, register_tool
 
@@ -44,6 +45,24 @@ _RUNNER_TEMPLATE = textwrap.dedent(
 )
 
 
+def _subprocess_argv(runner: str) -> list[str]:
+    """Build the argv for launching the runner script.
+
+    On Windows the process may be running under ``pythonw.exe`` (no console) or
+    a launcher that ``create_subprocess_exec`` can't spawn directly — prefer the
+    matching console ``python.exe`` when one sits next to the current
+    interpreter. Returns the argv list to pass to ``create_subprocess_exec``.
+    """
+    exe = sys.executable
+    if exe.lower().endswith("pythonw.exe"):
+        import os
+
+        console = exe[: -len("pythonw.exe")] + "python.exe"
+        if os.path.exists(console):
+            exe = console
+    return [exe, "-c", runner]
+
+
 class PythonExecuteArgs(ToolArgs):
     code: str
     timeout: float = 15.0
@@ -57,29 +76,27 @@ async def python_execute(
     # Escape triple-quotes so user code can't break out of the heredoc.
     safe_code = code.replace("'''", "\\'\\'\\'")
     runner = _RUNNER_TEMPLATE.replace("__USER_CODE__", safe_code)
+    argv = _subprocess_argv(runner)
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            runner,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except Exception as exc:
-        return ToolResult.err(f"Failed to start subprocess: {exc}")
+    loop = asyncio.get_running_loop()
+    # Resolve the working directory from the active run context (honors the
+    # per-conversation override; falls back to global workspaces_dir).
+    from app.tools.context import get_run_context
 
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return ToolResult.err(
-            f"python_execute timed out after {timeout}s", timeout=True
-        )
+    workdir = get_run_context().workdir
+    # On Windows, a SelectorEventLoop (e.g. some uvicorn/uvloop setups) cannot
+    # spawn subprocesses via the asyncio API — create_subprocess_exec raises
+    # NotImplementedError with an empty message. Fall back to running a plain
+    # subprocess in a worker thread, which works on any event loop.
+    if _loop_supports_subprocess(loop):
+        result = await _run_subprocess_async(argv, timeout, cwd=workdir)
+    else:
+        result = await asyncio.to_thread(_run_subprocess_sync, argv, timeout, cwd=workdir)
 
+    if isinstance(result, str):
+        return ToolResult.err(result)
+
+    stdout_b, stderr_b, returncode = result
     stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
     stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
 
@@ -91,9 +108,76 @@ async def python_execute(
     return ToolResult.ok(
         stdout.strip() or "(no stdout)",
         stderr=stderr.strip() or None,
-        exit_code=proc.returncode,
+        exit_code=returncode,
         truncated=truncated,
     )
+
+
+def _loop_supports_subprocess(loop: asyncio.AbstractEventLoop) -> bool:
+    """True if the running loop can spawn subprocesses via the asyncio API.
+
+    On Windows, ProactorEventLoop supports subprocesses; SelectorEventLoop does
+    not (its ``subprocess_exec`` raises NotImplementedError, even though the
+    method exists). Detect by class name rather than duck-typing. Unix loops do.
+    """
+    if sys.platform != "win32":
+        return True
+    loop_kind = type(loop).__name__
+    return loop_kind == "ProactorEventLoop"
+
+
+async def _run_subprocess_async(
+    argv: list[str], timeout: float, *, cwd: Path | None = None
+) -> tuple[bytes, bytes, int] | str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd) if cwd is not None else None,
+        )
+    except Exception as exc:
+        loop_kind = type(asyncio.get_running_loop()).__name__
+        return (
+            f"Failed to start subprocess ({type(exc).__name__}: {exc!r}); "
+            f"interpreter={sys.executable!r}; loop={loop_kind}"
+        )
+
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return f"python_execute timed out after {timeout}s"
+
+    return stdout_b or b"", stderr_b or b"", proc.returncode if proc.returncode is not None else 0
+
+
+def _run_subprocess_sync(
+    argv: list[str], timeout: float, *, cwd: Path | None = None
+) -> tuple[bytes, bytes, int] | str:
+    """Thread-pool fallback: run the subprocess synchronously via subprocess.run.
+
+    Used when the running event loop can't spawn subprocesses (Windows
+    SelectorEventLoop). Runs off-loop so it never blocks the loop.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            cwd=str(cwd) if cwd is not None else None,
+        )
+    except subprocess.TimeoutExpired:
+        return f"python_execute timed out after {timeout}s"
+    except Exception as exc:
+        return f"Failed to start subprocess ({type(exc).__name__}: {exc!r}); interpreter={sys.executable!r}"
+
+    return completed.stdout or b"", completed.stderr or b"", completed.returncode
 
 
 def register_code_tools() -> None:

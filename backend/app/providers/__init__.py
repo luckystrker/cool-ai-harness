@@ -11,7 +11,11 @@ from app.providers.base import (
     Usage,
 )
 from app.providers.openai import OpenAIProvider
-from app.providers.registry import get_default_provider
+from app.providers.registry import (
+    get_default_provider,
+    get_default_provider_cached,
+    get_provider_from_db,
+)
 
 __all__ = [
     "ChatResult",
@@ -22,4 +26,6 @@ __all__ = [
     "ToolSpec",
     "Usage",
     "get_default_provider",
+    "get_default_provider_cached",
+    "get_provider_from_db",
 ]

@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.config import get_settings
 from app.tools.base import ToolArgs, ToolResult, register_tool
+from app.tools.context import get_run_context
 
 
 def _workspace_root() -> Path:
-    return Path(get_settings().workspaces_dir)
+    """Workspace root for the active run (per-conversation override aware)."""
+    return get_run_context().workdir
 
 
 def _resolve(path: str) -> Path:

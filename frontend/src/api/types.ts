@@ -12,11 +12,20 @@ export interface HealthResponse {
 
 // --- conversations ---
 
+export type ToolPermission = "allow" | "ask" | "deny"
+
+/** Tool permission map: tool name (or "*" wildcard) -> decision. */
+export type ToolPermissions = Record<string, ToolPermission>
+
 export interface Conversation {
   id: number
   user_id: number
   title: string | null
   model: string | null
+  /** Per-conversation working directory (overrides the global default). */
+  working_directory: string | null
+  /** Per-conversation tool permissions (override global defaults). */
+  permissions: ToolPermissions | null
   created_at: string
   updated_at: string
 }
@@ -26,6 +35,16 @@ export interface ConversationCreate {
   system_prompt?: string
   model?: string
   tool_names?: string[]
+  working_directory?: string
+  permissions?: ToolPermissions
+}
+
+/** PATCH /api/conversations/{id} — only provided fields are applied. */
+export interface ConversationUpdate {
+  title?: string
+  model?: string
+  working_directory?: string
+  permissions?: ToolPermissions
 }
 
 /** One row of a stored message. Matches app/api/schemas.MessageOut. */
@@ -36,7 +55,19 @@ export interface Message {
   content: string | null
   tool_calls?: ToolCall[] | null
   usage?: Record<string, unknown> | null
+  /** Reasoning / chain-of-thought (assistant messages), when the provider exposes one. */
+  thinking?: string | null
+  /** Structured tool result (role="tool" messages). */
+  tool_result?: { tool_call_id?: string | null; name?: string | null; result?: ToolResultPayload } | null
   created_at: string
+}
+
+/** Shape of the `result` object inside a tool_result event / tool_result row. */
+export interface ToolResultPayload {
+  output?: string
+  is_error?: boolean
+  error?: string | null
+  metadata?: Record<string, unknown>
 }
 
 export interface ToolCall {
@@ -92,13 +123,24 @@ export interface ProviderUpdate {
 
 export type AgentEventKind =
   | "start"
+  | "thinking"
   | "token"
   | "tool_call_start"
   | "tool_call_delta"
+  | "tool_approval_request"
   | "tool_result"
   | "message"
   | "finish"
   | "error"
+
+/** Payload shape for a tool_approval_request event. */
+export interface ToolApprovalRequestPayload {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+  reason: string
+  requires_decision: true
+}
 
 export interface AgentEvent {
   kind: AgentEventKind

@@ -78,3 +78,6 @@ frontend/node_modules/
 
 # --- Docker ---
 *.pid
+
+# --- Editor / agent local state ---
+.zcode/

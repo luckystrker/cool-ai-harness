@@ -20,6 +20,15 @@ class Conversation(TimestampMixin, table=True):
     # Which provider/model combination was used for this conversation.
     provider: str | None = None
     model: str | None = None
+    # Per-conversation working directory for file/code tools. None = use the
+    # global default (settings.default_working_directory or workspaces_dir).
+    working_directory: str | None = None
+    # Per-conversation tool permissions, overriding the global defaults.
+    # Shape: {"*": "ask", "read_file": "allow", "python_execute": "deny"}
+    # (tool name -> "allow" | "ask" | "deny"). See app/agent/permissions.py.
+    permissions: dict[str, Any] | None = Field(
+        default=None, sa_column=Column("permissions", JSON)
+    )
     # Free-form metadata (e.g. agent_profile_id once Фаза 3a lands).
     metadata_: dict[str, Any] | None = Field(
         default=None, sa_column=Column("metadata_", JSON)
@@ -41,6 +50,10 @@ class Message(TimestampMixin, table=True):
     tool_result: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     # Token usage recorded for assistant messages (prompt/completion/total + cost).
     usage: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    # Reasoning / chain-of-thought produced by the model (assistant messages),
+    # when the provider exposes one. Kept so reloaded history can show the
+    # thinking block that led to an answer.
+    thinking: str | None = Field(default=None, sa_column=Column(Text))
 
 
 class ToolCall(TimestampMixin, table=True):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -105,3 +106,82 @@ async def test_python_execute_timeout() -> None:
     r = await python_execute(code="import time; time.sleep(5)", timeout=0.3)
     assert r.is_error
     assert "timed out" in r.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_python_execute_selector_loop_fallback() -> None:
+    """Regression: on Windows, a SelectorEventLoop cannot spawn subprocesses
+    (create_subprocess_exec raises NotImplementedError). python_execute must
+    fall back to a worker-thread subprocess.run so it still works under
+    servers that run a Selector loop (observed with uvicorn --reload).
+    """
+    import sys
+
+    from app.tools.code_tools import _loop_supports_subprocess, python_execute
+
+    if sys.platform != "win32":
+        pytest.skip("Selector-loop subprocess limitation is Windows-specific")
+
+    loop = asyncio.get_running_loop()
+    # The default pytest loop on Windows may be either kind; the point is that
+    # the tool works regardless of which loop it lands on.
+    r = await python_execute(code="print(2 + 2)")
+    assert not r.is_error, f"expected success, got: {r.error!r}"
+    assert "4" in r.output
+    # And the helper must correctly classify the running loop.
+    assert _loop_supports_subprocess(loop) == (
+        type(loop).__name__ == "ProactorEventLoop"
+    )
+
+
+# --- RunContext (working directory override) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_tools_honor_run_context_workdir(tmp_path: Path) -> None:
+    """Setting a RunContext workdir redirects file tools there."""
+    from app.tools.context import RunContext, reset_run_context, set_run_context
+    from app.tools.file_tools import read_file, write_file
+
+    custom = tmp_path / "agent-ws"
+    token = set_run_context(RunContext(workdir=custom))
+    try:
+        r = await write_file(path="ctx.txt", content="data")
+        assert not r.is_error
+        # Written to the override dir, not the global workspace.
+        assert (custom / "ctx.txt").read_text() == "data"
+        r = await read_file(path="ctx.txt")
+        assert r.output == "data"
+    finally:
+        reset_run_context(token)
+
+
+@pytest.mark.asyncio
+async def test_python_execute_honors_run_context_cwd(tmp_path: Path) -> None:
+    """python_execute spawns its subprocess in the RunContext workdir."""
+    from app.tools.code_tools import python_execute
+    from app.tools.context import RunContext, reset_run_context, set_run_context
+
+    custom = tmp_path / "cwd-ws"
+    (custom).mkdir()
+    # Drop a marker file the subprocess can read via cwd-relative path.
+    (custom / "marker.txt").write_text("hello-cwd")
+    token = set_run_context(RunContext(workdir=custom))
+    try:
+        r = await python_execute(code="print(open('marker.txt').read())")
+        assert not r.is_error, f"got error: {r.error!r}"
+        assert "hello-cwd" in r.output
+    finally:
+        reset_run_context(token)
+
+
+@pytest.mark.asyncio
+async def test_default_context_falls_back_to_settings(workspace: Path) -> None:
+    """With no RunContext set, tools use the global settings workspace."""
+    from app.tools.context import get_run_context
+    from app.tools.file_tools import write_file
+
+    ctx = get_run_context()
+    assert ctx.workdir == workspace
+    await write_file(path="fallback.txt", content="x")
+    assert (workspace / "fallback.txt").exists()

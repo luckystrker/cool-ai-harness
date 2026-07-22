@@ -18,7 +18,8 @@ class ScriptedProvider(LLMProvider):
       - a string → streamed as text tokens, then a finish event
       - a list of tool calls → streamed as tool_call deltas, finish, then
         the loop executes the tools and re-enters the loop
-      - a dict {"text": str, "tool_calls": [...]} → both
+      - a dict {"text": str, "reasoning": str, "tool_calls": [...]} → any combo;
+        ``reasoning`` is streamed as ChatStreamEvent.reasoning chunks
 
     The provider records every call so tests can assert on history.
     """
@@ -52,6 +53,7 @@ class ScriptedProvider(LLMProvider):
         turn = self.turns.pop(0)
 
         text: str = ""
+        reasoning: str = ""
         tool_calls: list[dict[str, Any]] | None = None
         if isinstance(turn, str):
             text = turn
@@ -59,10 +61,14 @@ class ScriptedProvider(LLMProvider):
             tool_calls = turn
         elif isinstance(turn, dict):
             text = turn.get("text", "")
+            reasoning = turn.get("reasoning", "")
             tool_calls = turn.get("tool_calls")
         else:
             raise TypeError(f"Bad scripted turn: {turn!r}")
 
+        if reasoning:
+            for word in reasoning.split(" "):
+                yield ChatStreamEvent(reasoning=word + " ")
         if text:
             for word in text.split(" "):
                 yield ChatStreamEvent(delta=word + " ")

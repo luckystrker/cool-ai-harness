@@ -53,6 +53,19 @@ class ConversationCreate(BaseModel):
     system_prompt: str | None = None
     model: str | None = None
     tool_names: list[str] | None = None
+    # Per-conversation working directory (overrides the global default).
+    working_directory: str | None = None
+    # Per-conversation tool permissions: {"*": "ask", "read_file": "allow", ...}
+    # Each value must be one of allow|ask|deny. Validated by the route layer.
+    permissions: dict[str, str] | None = None
+
+
+class ConversationUpdate(BaseModel):
+    # All fields optional; only provided fields are applied.
+    title: str | None = None
+    model: str | None = None
+    working_directory: str | None = None
+    permissions: dict[str, str] | None = None
 
 
 class ConversationOut(BaseModel):
@@ -60,6 +73,8 @@ class ConversationOut(BaseModel):
     user_id: int
     title: str | None = None
     model: str | None = None
+    working_directory: str | None = None
+    permissions: dict[str, str] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -71,6 +86,8 @@ class MessageOut(BaseModel):
     content: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     usage: dict[str, Any] | None = None
+    thinking: str | None = None
+    tool_result: dict[str, Any] | None = None
     created_at: datetime
 
 
@@ -84,3 +101,14 @@ class SendMessageRequest(BaseModel):
     model: str | None = None
     system_prompt: str | None = None
     tool_names: list[str] | None = None
+
+
+class ToolApprovalRequest(BaseModel):
+    """Client decision for a pending tool-call approval.
+
+    ``call_id`` may also be supplied in the URL path; the body value wins if
+    both are present. ``approved=False`` denies the call (the loop continues
+    with a Permission-denied tool_result).
+    """
+
+    approved: bool

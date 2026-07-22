@@ -72,6 +72,22 @@ class Settings(BaseSettings):
     workspaces_dir: Path = REPO_ROOT / "workspaces"
     skills_dir: Path = REPO_ROOT / "skills"
 
+    # --- Agent permissions & working directory (defaults) ---
+    # Per-conversation settings override these. Empty path = use workspaces_dir.
+    # Set via env as a path string, e.g. DEFAULT_WORKING_DIRECTORY=/tmp/agent.
+    default_working_directory: Path | None = Field(
+        default=None,
+        description="Default agent working directory; empty = workspaces_dir",
+    )
+    # Default tool permissions applied when a conversation has none. Set via
+    # env as a JSON object string, e.g.
+    #   DEFAULT_TOOL_PERMISSIONS={"*":"ask","read_file":"allow"}
+    # pydantic-settings parses JSON for dict[str,str] fields automatically.
+    default_tool_permissions: dict[str, str] = Field(
+        default_factory=dict,
+        description='Tool permission map: {"*":"ask","read_file":"allow",...}',
+    )
+
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
         for path in (self.data_dir, self.workspaces_dir, self.skills_dir):

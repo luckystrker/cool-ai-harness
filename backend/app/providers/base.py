@@ -57,6 +57,10 @@ class ChatResult:
     tool_calls: list[dict[str, Any]] | None = None
     usage: Usage | None = None
     finish_reason: str | None = None
+    # Provider reasoning / thinking trace, when the model exposes one
+    # (DeepSeek `reasoning_content`, OpenRouter `reasoning`, etc.). None when
+    # the model produced no reasoning block.
+    reasoning: str | None = None
     raw: Any | None = None  # provider-native payload, for debugging
 
 
@@ -65,12 +69,20 @@ class ChatStreamEvent:
     """One event in a streaming completion.
 
     - delta: incremental text (may be empty)
+    - reasoning: incremental reasoning / thinking text (may be empty). Providers
+      that surface a chain-of-thought (DeepSeek `reasoning_content`, OpenRouter
+      `reasoning`, etc.) emit it here; others leave it empty.
     - tool_call_delta: incremental tool call fragment (provider-shaped)
     - finish: True on the terminal event (carries usage / finish_reason)
     """
 
     delta: str = ""
-    tool_call_delta: dict[str, Any] | None = None
+    reasoning: str = ""
+    # OpenAI streams delta.tool_calls as a LIST of partial tool-call objects,
+    # so providers should emit that list here (even for a single call). The
+    # agent loop's _merge_tool_call_deltas() also tolerates a bare dict for
+    # convenience/test doubles.
+    tool_call_delta: list[dict[str, Any]] | dict[str, Any] | None = None
     finish: bool = False
     finish_reason: str | None = None
     usage: Usage | None = None

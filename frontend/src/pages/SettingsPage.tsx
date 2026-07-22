@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2 } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
-import type { Provider, ProviderCreate } from "@/api/types"
+import type { Provider, ProviderCreate, ProviderUpdate } from "@/api/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -36,8 +36,9 @@ const EMPTY_FORM: ProviderCreate = {
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
-  const [open, setOpen] = useState(false)
-  const [form, setForm] = useState<ProviderCreate>(EMPTY_FORM)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createForm, setCreateForm] = useState<ProviderCreate>(EMPTY_FORM)
+  const [editing, setEditing] = useState<Provider | null>(null)
 
   const { data: providers = [], isLoading } = useQuery({
     queryKey: ["providers"],
@@ -49,10 +50,21 @@ export function SettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["providers"] })
       toast.success("Provider added")
-      setOpen(false)
-      setForm(EMPTY_FORM)
+      setCreateOpen(false)
+      setCreateForm(EMPTY_FORM)
     },
     onError: (e) => toast.error("Failed to add provider", { description: String(e) }),
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (vars: { id: number; body: ProviderUpdate }) =>
+      providersApi.update(vars.id, vars.body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["providers"] })
+      toast.success("Provider updated")
+      setEditing(null)
+    },
+    onError: (e) => toast.error("Failed to update provider", { description: String(e) }),
   })
 
   const deleteMutation = useMutation({
@@ -64,12 +76,12 @@ export function SettingsPage() {
     onError: (e) => toast.error("Failed to delete", { description: String(e) }),
   })
 
-  const handleSubmit = () => {
-    if (!form.api_key.trim()) {
+  const handleCreate = () => {
+    if (!createForm.api_key.trim()) {
       toast.error("API key is required")
       return
     }
-    createMutation.mutate(form)
+    createMutation.mutate(createForm)
   }
 
   return (
@@ -88,7 +100,7 @@ export function SettingsPage() {
             </div>
           </div>
 
-          <Dialog open={open} onOpenChange={setOpen}>
+          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
               <Button className="gap-2">
                 <Plus className="h-4 w-4" /> Add provider
@@ -98,12 +110,12 @@ export function SettingsPage() {
               <DialogHeader>
                 <DialogTitle>Add provider</DialogTitle>
               </DialogHeader>
-              <ProviderForm form={form} onChange={setForm} />
+              <ProviderForm form={createForm} onChange={setCreateForm} />
               <DialogFooter>
-                <Button variant="outline" onClick={() => setOpen(false)}>
+                <Button variant="outline" onClick={() => setCreateOpen(false)}>
                   Cancel
                 </Button>
-                <Button onClick={handleSubmit} disabled={createMutation.isPending}>
+                <Button onClick={handleCreate} disabled={createMutation.isPending}>
                   {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   Save
                 </Button>
@@ -128,6 +140,7 @@ export function SettingsPage() {
               <ProviderRow
                 key={p.id}
                 provider={p}
+                onEdit={() => setEditing(p)}
                 onDelete={() => deleteMutation.mutate(p.id)}
                 deleting={deleteMutation.isPending}
               />
@@ -135,16 +148,31 @@ export function SettingsPage() {
           </div>
         )}
       </div>
+
+      <EditProviderDialog
+        // Remount the dialog for each provider so its internal form state
+        // reseeds from the new provider automatically.
+        key={editing?.id ?? "none"}
+        provider={editing}
+        onClose={() => setEditing(null)}
+        onSubmit={(body) => {
+          if (!editing) return
+          updateMutation.mutate({ id: editing.id, body })
+        }}
+        pending={updateMutation.isPending}
+      />
     </div>
   )
 }
 
 function ProviderRow({
   provider: p,
+  onEdit,
   onDelete,
   deleting,
 }: {
   provider: Provider
+  onEdit: () => void
   onDelete: () => void
   deleting: boolean
 }) {
@@ -164,16 +192,27 @@ function ProviderRow({
               <Badge variant="warning">disabled</Badge>
             )}
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-muted-foreground hover:text-destructive"
-            onClick={onDelete}
-            disabled={deleting}
-            title="Delete"
-          >
-            {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={onEdit}
+              title="Edit"
+            >
+              <Pencil className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={onDelete}
+              disabled={deleting}
+              title="Delete"
+            >
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </Button>
+          </div>
         </div>
         <CardDescription>
           {p.base_url || "(default endpoint)"} · {p.default_model || "(default model)"}
@@ -193,6 +232,7 @@ function ProviderRow({
   )
 }
 
+/** Create-provider form. */
 function ProviderForm({
   form,
   onChange,
@@ -200,9 +240,6 @@ function ProviderForm({
   form: ProviderCreate
   onChange: (next: ProviderCreate) => void
 }) {
-  // Reset form when opened fresh.
-  useEffect(() => {}, [form])
-
   const set = (patch: Partial<ProviderCreate>) => onChange({ ...form, ...patch })
 
   return (
@@ -257,5 +294,114 @@ function ProviderForm({
         />
       </div>
     </div>
+  )
+}
+
+/**
+ * Edit-provider dialog. The provider identifier (`name`) is read-only — it's
+ * an opaque key the backend routes by, not something users should rename.
+ *
+ * Mounting this with `key={provider.id}` (done by the caller) makes the
+ * internal `useState` initializers re-run for each provider, so the form
+ * reseeds automatically without a render-phase effect.
+ */
+function EditProviderDialog({
+  provider,
+  onClose,
+  onSubmit,
+  pending,
+}: {
+  provider: Provider | null
+  onClose: () => void
+  onSubmit: (body: ProviderUpdate) => void
+  pending: boolean
+}) {
+  const [label, setLabel] = useState(provider?.label ?? "")
+  const [base_url, setBaseUrl] = useState(provider?.base_url ?? "")
+  const [default_model, setDefaultModel] = useState(provider?.default_model ?? "")
+  // Empty api_key means "keep the stored secret unchanged".
+  const [api_key, setApiKey] = useState("")
+
+  const handleSubmit = () => {
+    const body: ProviderUpdate = {
+      label,
+      base_url,
+      default_model,
+      ...(api_key.trim() ? { api_key } : {}),
+    }
+    onSubmit(body)
+  }
+
+  return (
+    <Dialog open={provider !== null} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Edit provider
+            {provider && (
+              <Badge variant="outline" className="ml-2 font-mono">
+                {provider.name}
+              </Badge>
+            )}
+          </DialogTitle>
+        </DialogHeader>
+        {provider && (
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="e-label">Label</Label>
+              <Input
+                id="e-label"
+                placeholder="Personal"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="e-base">Base URL</Label>
+              <Input
+                id="e-base"
+                placeholder="https://api.openai.com/v1"
+                value={base_url}
+                onChange={(e) => setBaseUrl(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="e-model">Default model</Label>
+              <Input
+                id="e-model"
+                placeholder="gpt-4o-mini"
+                value={default_model}
+                onChange={(e) => setDefaultModel(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="e-key">
+                API key{" "}
+                <span className="text-xs font-normal text-muted-foreground">
+                  (leave blank to keep current: {provider.api_key_hint || "none"})
+                </span>
+              </Label>
+              <Textarea
+                id="e-key"
+                placeholder="sk-…"
+                value={api_key}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="font-mono text-xs"
+                rows={2}
+              />
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={pending}>
+            {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Save changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

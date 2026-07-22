@@ -1,7 +1,9 @@
 import { User, Sparkles, Terminal } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, formatDuration } from "@/lib/utils"
+import type { UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
+import { ThinkingBlock } from "./ThinkingBlock"
 
 export interface MessageViewModel {
   id: string
@@ -9,6 +11,14 @@ export interface MessageViewModel {
   content: string
   /** Tool calls attached to this assistant message, with optional result. */
   toolCalls?: (ToolCallBlockProps & { key: string })[]
+  /** Reasoning / chain-of-thought text, when the provider exposes one. */
+  thinking?: string
+  /** Total elapsed time for the assistant turn, when known (live stream). */
+  elapsedMs?: number
+  /** Token usage from the terminal finish event, when reported. */
+  usage?: UsagePayload
+  /** Finish reason (e.g. "stop", "max_iterations"). */
+  finishReason?: string
   /** Streaming = assistant currently generating; show caret. */
   streaming?: boolean
 }
@@ -24,6 +34,12 @@ export function MessageBubble({ msg }: { msg: MessageViewModel }) {
   if (msg.role === "tool") return null // tool results render inside the assistant message that called them
   const meta = ROLE_META[msg.role]
   const Icon = meta.icon
+  const isAssistant = msg.role === "assistant"
+
+  // Footnote: elapsed time / token usage, shown once the assistant turn is done.
+  const totalTokens = msg.usage?.total_tokens
+  const showFootnote =
+    isAssistant && !msg.streaming && (msg.elapsedMs != null || totalTokens != null)
 
   return (
     <div
@@ -48,6 +64,15 @@ export function MessageBubble({ msg }: { msg: MessageViewModel }) {
         )}
       >
         <div className="text-xs font-medium text-muted-foreground">{meta.label}</div>
+
+        {/* Reasoning trace sits above the answer, collapsed by default. */}
+        {isAssistant && msg.thinking && (
+          <ThinkingBlock
+            content={msg.thinking}
+            durationMs={msg.elapsedMs}
+            streaming={msg.streaming}
+          />
+        )}
 
         {msg.content && (
           <div
@@ -80,9 +105,23 @@ export function MessageBubble({ msg }: { msg: MessageViewModel }) {
         )}
 
         {/* Assistant currently running tools but no text yet — show a hint. */}
-        {msg.role === "assistant" && msg.streaming && !msg.content && !(msg.toolCalls?.length) && (
+        {isAssistant && msg.streaming && !msg.content && !(msg.toolCalls?.length) && !msg.thinking && (
           <div className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
             Thinking…
+          </div>
+        )}
+
+        {showFootnote && (
+          <div className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground/70">
+            {msg.elapsedMs != null && <span>{formatDuration(msg.elapsedMs)}</span>}
+            {msg.elapsedMs != null && totalTokens != null && <span>·</span>}
+            {totalTokens != null && <span>{totalTokens} tokens</span>}
+            {msg.finishReason && msg.finishReason !== "stop" && (
+              <>
+                <span>·</span>
+                <span>{msg.finishReason}</span>
+              </>
+            )}
           </div>
         )}
       </div>

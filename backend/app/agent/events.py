@@ -16,9 +16,11 @@ from app.providers import Usage
 # Event type tags. Keep stable — clients (frontend, telegram) parse them.
 EventKind = Literal[
     "start",                # loop started
+    "thinking",             # a streamed reasoning / chain-of-thought fragment
     "token",                # a streamed assistant text token
     "tool_call_start",      # model requested a tool call (full call info)
     "tool_call_delta",      # incremental tool-call args fragment (rare; usually we batch)
+    "tool_approval_request",  # tool needs human approval before running; client must respond
     "tool_result",          # tool finished with its ToolResult
     "message",              # a complete assistant message persisted
     "finish",               # loop finished (terminal); carries usage + reason
@@ -30,11 +32,16 @@ EventKind = Literal[
 class AgentEvent:
     kind: EventKind
     # Free-form payload, shape depends on kind:
+    #   thinking:         {"text": str}
     #   token:            {"text": str}
     #   tool_call_start:  {"id": str, "name": str, "arguments": dict}
+    #   tool_approval_request: {"id": str, "name": str, "arguments": dict,
+    #                           "reason": str, "requires_decision": True}
     #   tool_result:      {"id": str, "name": str, "result": ToolResult-dict}
-    #   message:          {"role": "assistant", "content": str, "tool_calls": ...}
-    #   finish:           {"reason": str, "usage": Usage-dict | None, "iterations": int}
+    #   message:          {"role": "assistant", "content": str, "tool_calls": ...,
+    #                      "thinking": str | None}
+    #   finish:           {"reason": str, "usage": Usage-dict | None, "iterations": int,
+    #                      "elapsed_ms": int | None}
     #   error:            {"message": str, "detail": str | None}
     payload: dict[str, Any] = field(default_factory=dict)
 
@@ -54,6 +61,10 @@ class AgentEvent:
         return cls(kind="start", payload={"conversation_id": conversation_id})
 
     @classmethod
+    def thinking(cls, text: str) -> AgentEvent:
+        return cls(kind="thinking", payload={"text": text})
+
+    @classmethod
     def token(cls, text: str) -> AgentEvent:
         return cls(kind="token", payload={"text": text})
 
@@ -65,6 +76,32 @@ class AgentEvent:
         )
 
     @classmethod
+    def tool_approval_request(
+        cls,
+        *,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        reason: str = "Tool requires approval",
+    ) -> AgentEvent:
+        """Emit when a tool call is gated behind human approval.
+
+        The client must POST its decision to the approval endpoint; the loop is
+        blocked on the matching approval Future until then. ``requires_decision``
+        is always True so clients can branch on a stable boolean.
+        """
+        return cls(
+            kind="tool_approval_request",
+            payload={
+                "id": call_id,
+                "name": name,
+                "arguments": arguments,
+                "reason": reason,
+                "requires_decision": True,
+            },
+        )
+
+    @classmethod
     def tool_result(cls, *, call_id: str, name: str, result: Any) -> AgentEvent:
         return cls(
             kind="tool_result",
@@ -72,20 +109,39 @@ class AgentEvent:
         )
 
     @classmethod
-    def message(cls, *, content: str | None, tool_calls: list[dict] | None) -> AgentEvent:
+    def message(
+        cls,
+        *,
+        content: str | None,
+        tool_calls: list[dict] | None,
+        thinking: str | None = None,
+    ) -> AgentEvent:
         return cls(
             kind="message",
-            payload={"role": "assistant", "content": content, "tool_calls": tool_calls},
+            payload={
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls,
+                "thinking": thinking,
+            },
         )
 
     @classmethod
-    def finish(cls, *, reason: str, usage: Usage | None, iterations: int) -> AgentEvent:
+    def finish(
+        cls,
+        *,
+        reason: str,
+        usage: Usage | None,
+        iterations: int,
+        elapsed_ms: int | None = None,
+    ) -> AgentEvent:
         return cls(
             kind="finish",
             payload={
                 "reason": reason,
                 "usage": vars(usage) if usage else None,
                 "iterations": iterations,
+                "elapsed_ms": elapsed_ms,
             },
         )
 
