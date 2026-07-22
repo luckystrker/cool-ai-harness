@@ -2,7 +2,7 @@
 
 Personal AI agent harness with provider abstraction, tools, skills, MCP, subagents, long-term memory, multi-personality agents, observability, and recurring tasks. Control via web UI and Telegram (Bot + Web App).
 
-> Status: **Фаза 0 (foundation)** — see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
+> Status: **Фаза 1.5 (durable runs, security, artifacts, evals)** 🔄 — see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
 
 ## Stack
 
@@ -74,15 +74,20 @@ cool-ai-harness/
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 
-- **Фаза 0** — Foundation *(current)*
-- **Фаза 1** — Agent loop + tools + chat MVP
-- **Фаза 1.5** — Надёжность запусков, безопасность, артефакты и evals
-- **Фаза 2** — Skills + MCP + subagents
-- **Фаза 3a** — Long-term memory + personalities + observability
-- **Фаза 3b** — Recurring tasks / cron jobs ⏰
-- **Фаза 4** — Deep research + D&D + code workflows
-- **Фаза 5** — Telegram (Bot + Web App)
-- **Фаза 6** — Product readiness
+| Фаза | Статус |
+|------|--------|
+| **Фаза 0** — Foundation | ✅ Done |
+| **Фаза 1** — Agent loop + tools + chat MVP | ✅ **MVP ready** |
+| **Фаза 1.5** — Надёжность запусков, безопасность, артефакты, evals, HITL | 🔄 **Current** |
+| **Фаза 2** — Skills + MCP + subagents + planning mode | ⏳ |
+| **Фаза 3a** — Memory + personalities + observability + KB | ⏳ |
+| **Фаза 3b** — Recurring tasks + RSS + webhook | ⏳ |
+| **Фаза 4** — Deep research + D&D + code + multimodal + browser | ⏳ |
+| **Фаза 5** — Telegram + voice interface | ⏳ |
+| **Фаза 6** — Product readiness + backlog | ⏳ |
+| **Фаза 7** — UX polish + DevX | ⏳ |
+
+Each phase has its own file in [`docs/phases/`](docs/phases/).
 
 ## License
 
