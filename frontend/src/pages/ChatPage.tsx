@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { MessageSquare, Sparkles, ChevronDown, Check, Pencil, Settings2 } from "lucide-react"
+import { MessageSquare, Sparkles, ChevronDown, Check, Pencil, Settings2, Paperclip } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
+import { artifactsApi } from "@/api/artifacts"
 import { providersApi } from "@/api/providers"
 import type { BreakpointConfig, Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ApprovalDialog } from "@/components/chat/ApprovalDialog"
+import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
 import { ConversationSettingsDialog } from "@/components/chat/ConversationSettingsDialog"
 import { useConversationStream } from "@/hooks/useConversationStream"
@@ -52,6 +54,8 @@ export function ChatPage() {
   } = useConversationStream()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [artifactsOpen, setArtifactsOpen] = useState(false)
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
 
   // When a different conversation is selected, drop any pending bubbles.
   useEffect(() => {
@@ -101,6 +105,19 @@ export function ChatPage() {
 
   const handleSend = async (content: string) => {
     if (!convId) return
+    // Upload any pending file attachments first.
+    if (pendingFiles.length > 0) {
+      try {
+        for (const file of pendingFiles) {
+          await artifactsApi.upload(convId, file)
+        }
+        queryClient.invalidateQueries({ queryKey: ["artifacts", convId] })
+        toast.success(`${pendingFiles.length} file(s) attached`)
+      } catch (e) {
+        toast.error("Upload failed", { description: String(e) })
+      }
+      setPendingFiles([])
+    }
     // Pass the conversation's current model as a per-message override so a
     // freshly-picked model applies immediately without a round-trip.
     await stream(convId, content, detail?.model || undefined)
@@ -108,6 +125,16 @@ export function ChatPage() {
     await queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     queryClient.invalidateQueries({ queryKey: ["conversations"] })
     clearPending()
+  }
+
+  const handleAttach = (files: File[]) => {
+    setPendingFiles((prev) => [...prev, ...files])
+    // Open the artifacts panel so the user sees the context.
+    setArtifactsOpen(true)
+  }
+
+  const handleRemoveFile = (index: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
   if (!convId) return <EmptyState />
@@ -136,37 +163,59 @@ export function ChatPage() {
         >
           <Settings2 className="h-4 w-4" />
         </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn("px-2", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
+          title="Toggle attachments panel"
+          onClick={() => setArtifactsOpen((v) => !v)}
+        >
+          <Paperclip className="h-4 w-4" />
+        </Button>
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl py-4">
-          {isLoading ? (
-            <div className="py-16 text-center text-sm text-muted-foreground">
-              Loading…
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto">
+            <div className="mx-auto max-w-3xl py-4">
+              {isLoading ? (
+                <div className="py-16 text-center text-sm text-muted-foreground">
+                  Loading…
+                </div>
+              ) : historyMsgs.length === 0 && pendingMsgs.length === 0 ? (
+                <div className="py-16 text-center text-sm text-muted-foreground">
+                  Send a message to start the conversation.
+                </div>
+              ) : (
+                <>
+                  {historyMsgs.map((m) => (
+                    <MessageBubble key={m.id} msg={m} />
+                  ))}
+                  {pendingMsgs.map((m) => (
+                    <MessageBubble key={m.id} msg={m} />
+                  ))}
+                </>
+              )}
             </div>
-          ) : historyMsgs.length === 0 && pendingMsgs.length === 0 ? (
-            <div className="py-16 text-center text-sm text-muted-foreground">
-              Send a message to start the conversation.
-            </div>
-          ) : (
-            <>
-              {historyMsgs.map((m) => (
-                <MessageBubble key={m.id} msg={m} />
-              ))}
-              {pendingMsgs.map((m) => (
-                <MessageBubble key={m.id} msg={m} />
-              ))}
-            </>
-          )}
-        </div>
-      </div>
+          </div>
 
-      <div className="mx-auto w-full max-w-3xl">
-        <ChatComposer
-          onSend={handleSend}
-          onCancel={cancel}
-          streaming={isStreaming}
-        />
+          <div className="mx-auto w-full max-w-3xl">
+            <ChatComposer
+              onSend={handleSend}
+              onCancel={cancel}
+              onAttach={handleAttach}
+              streaming={isStreaming}
+              pendingFiles={pendingFiles}
+              onRemoveFile={handleRemoveFile}
+            />
+          </div>
+        </div>
+
+        {artifactsOpen && (
+          <div className="w-72 shrink-0">
+            <ArtifactPanel conversationId={convId} />
+          </div>
+        )}
       </div>
 
       <ApprovalDialog approval={pendingApproval} onRespond={respondApproval} />

@@ -7,6 +7,7 @@ Importing this package registers every table on SQLModel.metadata so that
 from __future__ import annotations
 
 from app.models.approval import ApprovalAudit
+from app.models.artifact import Artifact
 from app.models.base import TimestampMixin
 from app.models.conversation import Conversation, Message, ToolCall
 from app.models.provider import Provider
@@ -16,6 +17,7 @@ from app.models.user import User
 __all__ = [
     "AgentRun",
     "ApprovalAudit",
+    "Artifact",
     "Conversation",
     "Message",
     "Provider",

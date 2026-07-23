@@ -49,4 +49,18 @@ export const api = {
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  /** Multipart form upload (no Content-Type header — browser sets boundary). */
+  upload: async <T>(path: string, formData: FormData): Promise<T> => {
+    const resp = await fetch(path, { method: "POST", body: formData })
+    if (!resp.ok) {
+      let detail: unknown
+      try {
+        detail = await resp.json()
+      } catch {
+        detail = await resp.text().catch(() => undefined)
+      }
+      throw new ApiError(resp.status, `API ${resp.status} on ${path}`, detail)
+    }
+    return (await resp.json()) as T
+  },
 }

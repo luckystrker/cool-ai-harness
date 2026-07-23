@@ -75,6 +75,19 @@ class Settings(BaseSettings):
     data_dir: Path = REPO_ROOT / "data"
     workspaces_dir: Path = REPO_ROOT / "workspaces"
     skills_dir: Path = REPO_ROOT / "skills"
+    artifacts_dir: Path = REPO_ROOT / "data" / "artifacts"
+
+    # --- Artifacts (Фаза 1.5 §3) ---
+    # Max upload size per artifact file (bytes). 0 = no limit.
+    artifact_max_upload_bytes: int = Field(
+        default=50_000_000,
+        description="Max artifact upload size in bytes; 0 = no limit",
+    )
+    # Max extracted text stored per artifact (chars). Longer text is truncated.
+    artifact_max_extracted_chars: int = Field(
+        default=100_000,
+        description="Max chars of extracted text stored per artifact",
+    )
 
     # --- Agent permissions & working directory (defaults) ---
     # Per-conversation settings override these. Empty path = use workspaces_dir.
@@ -171,7 +184,7 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
-        for path in (self.data_dir, self.workspaces_dir, self.skills_dir):
+        for path in (self.data_dir, self.workspaces_dir, self.skills_dir, self.artifacts_dir):
             Path(path).mkdir(parents=True, exist_ok=True)
 
 

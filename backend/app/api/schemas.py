@@ -190,3 +190,39 @@ class ApprovalAuditOut(BaseModel):
     breakpoint_type: str | None = None
     duration_ms: int | None = None
     created_at: datetime
+
+
+# --- artifacts (Фаза 1.5 §3 — artifacts & attachments) ---
+
+
+class ArtifactOut(BaseModel):
+    """Summary of a stored artifact."""
+
+    id: int
+    conversation_id: int
+    run_id: int | None = None
+    tool_call_id: str | None = None
+    filename: str
+    media_type: str
+    kind: str
+    size_bytes: int
+    sha256: str | None = None
+    version: int = 1
+    parent_id: int | None = None
+    metadata_: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactDetail(ArtifactOut):
+    """Artifact with extracted text (for preview/context)."""
+
+    extracted_text: str | None = None
+    versions: list[ArtifactOut] = []
+
+
+class ArtifactUploadResponse(BaseModel):
+    """Result of a successful artifact upload."""
+
+    artifact: ArtifactOut
+    message: str = "uploaded"

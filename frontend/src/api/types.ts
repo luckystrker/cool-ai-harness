@@ -217,3 +217,44 @@ export interface ApprovalAudit {
   duration_ms: number | null
   created_at: string
 }
+
+// --- artifacts (Фаза 1.5 §3) ---
+
+export type ArtifactKind =
+  | "file"
+  | "image"
+  | "document"
+  | "code"
+  | "report"
+  | "audio"
+  | "tool_result"
+
+/** Matches app/api/schemas.ArtifactOut. */
+export interface Artifact {
+  id: number
+  conversation_id: number
+  run_id: number | null
+  tool_call_id: string | null
+  filename: string
+  media_type: string
+  kind: ArtifactKind
+  size_bytes: number
+  sha256: string | null
+  version: number
+  parent_id: number | null
+  metadata_: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+/** Matches app/api/schemas.ArtifactDetail. */
+export interface ArtifactDetail extends Artifact {
+  extracted_text: string | null
+  versions: Artifact[]
+}
+
+/** Matches app/api/schemas.ArtifactUploadResponse. */
+export interface ArtifactUploadResponse {
+  artifact: Artifact
+  message: string
+}
