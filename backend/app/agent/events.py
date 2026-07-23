@@ -25,6 +25,10 @@ EventKind = Literal[
     "message",  # a complete assistant message persisted
     "finish",  # loop finished (terminal); carries usage + reason
     "error",  # unrecoverable error
+    # --- ReAct lifecycle events (Thought → Action → Observation) ---
+    "react_thought",  # explicit Thought phase (reasoning before action)
+    "react_action",  # explicit Action phase (tool invocation intent)
+    "react_observation",  # explicit Observation phase (tool result interpretation)
 ]
 
 
@@ -157,3 +161,26 @@ class AgentEvent:
     @classmethod
     def error(cls, message: str, detail: str | None = None) -> AgentEvent:
         return cls(kind="error", payload={"message": message, "detail": detail})
+
+    # --- ReAct lifecycle constructors ---
+
+    @classmethod
+    def react_thought(cls, *, step: int, text: str) -> AgentEvent:
+        """Explicit Thought phase: the model's reasoning before taking action."""
+        return cls(kind="react_thought", payload={"step": step, "text": text})
+
+    @classmethod
+    def react_action(cls, *, step: int, tool_name: str, arguments: dict[str, Any], call_id: str) -> AgentEvent:
+        """Explicit Action phase: the model decides to invoke a tool."""
+        return cls(
+            kind="react_action",
+            payload={"step": step, "tool_name": tool_name, "arguments": arguments, "call_id": call_id},
+        )
+
+    @classmethod
+    def react_observation(cls, *, step: int, tool_name: str, result_summary: str, is_error: bool = False) -> AgentEvent:
+        """Explicit Observation phase: the result of the action is interpreted."""
+        return cls(
+            kind="react_observation",
+            payload={"step": step, "tool_name": tool_name, "result_summary": result_summary, "is_error": is_error},
+        )

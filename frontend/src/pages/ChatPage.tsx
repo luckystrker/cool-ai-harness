@@ -8,7 +8,6 @@ import { artifactsApi } from "@/api/artifacts"
 import { providersApi } from "@/api/providers"
 import type { Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
-import { ApprovalDialog } from "@/components/chat/ApprovalDialog"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
 import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
@@ -41,7 +40,6 @@ export function ChatPage() {
     stream,
     cancel,
     clearPending,
-    pendingApproval,
     respondApproval,
   } = useConversationStream()
 
@@ -141,9 +139,12 @@ export function ChatPage() {
     // Pass the conversation's current model as a per-message override so a
     // freshly-picked model applies immediately without a round-trip.
     await stream(convId, content, detail?.model || undefined)
-    // Persisted history is now the source of truth — refetch and drop pending.
+    // Persisted history is now the source of truth — refetch and drop pending
+    // only after the fresh data is in the cache (avoids a blank flash between
+    // the stream ending and the history arriving).
     await queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     queryClient.invalidateQueries({ queryKey: ["conversations"] })
+    await queryClient.refetchQueries({ queryKey: ["conversation", convId] })
     clearPending()
   }
 
@@ -197,7 +198,11 @@ export function ChatPage() {
                     <MessageBubble key={m.id} msg={m} />
                   ))}
                   {pendingMsgs.map((m) => (
-                    <MessageBubble key={m.id} msg={m} />
+                    <MessageBubble
+                      key={m.id}
+                      msg={m}
+                      onRespondApproval={respondApproval}
+                    />
                   ))}
                 </>
               )}
@@ -234,8 +239,6 @@ export function ChatPage() {
           </div>
         )}
       </div>
-
-      <ApprovalDialog approval={pendingApproval} onRespond={respondApproval} />
     </div>
   )
 }

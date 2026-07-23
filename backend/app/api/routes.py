@@ -1,4 +1,4 @@
-"""API routes — health, and the simple chat smoke endpoint (MVP).
+"""API routes — health, settings, and the simple chat smoke endpoint (MVP).
 
 The full agent loop (with tool-calling, persistence, streaming) lives in
 app/agent and will be exposed via /api/conversations/* + /ws/chat/* later
@@ -9,7 +9,9 @@ configured provider.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
+from app.agent import get_default_system_prompt
 from app.api.schemas import (
     ChatRequest,
     ChatResponse,
@@ -66,4 +68,51 @@ async def chat(req: ChatRequest) -> ChatResponse:
         model=req.model or settings.default_model,
         usage=usage,
         finish_reason=result.finish_reason,
+    )
+
+
+# --- System prompt settings ---
+
+
+class SystemPromptOut(BaseModel):
+    """Current effective system prompt and whether it's customized."""
+    prompt: str
+    is_custom: bool
+    source: str  # "inline" | "file" | "builtin"
+
+
+class SystemPromptUpdate(BaseModel):
+    """Update the system prompt. Empty string resets to built-in default."""
+    prompt: str
+
+
+@router.get("/settings/system-prompt", response_model=SystemPromptOut)
+def get_system_prompt() -> SystemPromptOut:
+    """Return the current effective system prompt."""
+    settings = get_settings()
+    prompt = get_default_system_prompt()
+    if settings.default_system_prompt:
+        return SystemPromptOut(prompt=prompt, is_custom=True, source="inline")
+    if settings.system_prompt_file and settings.system_prompt_file.exists():
+        return SystemPromptOut(prompt=prompt, is_custom=True, source="file")
+    return SystemPromptOut(prompt=prompt, is_custom=False, source="builtin")
+
+
+@router.put("/settings/system-prompt", response_model=SystemPromptOut)
+def update_system_prompt(body: SystemPromptUpdate) -> SystemPromptOut:
+    """Update the default system prompt (stored in settings, applied to all new runs).
+
+    Pass an empty string to reset to the built-in default.
+    Note: This updates the in-memory settings for the current process. For
+    persistence across restarts, set DEFAULT_SYSTEM_PROMPT in .env.
+    """
+    settings = get_settings()
+    # Update the cached settings instance (lru_cache singleton).
+    settings.default_system_prompt = body.prompt
+    prompt = get_default_system_prompt()
+    is_custom = bool(body.prompt.strip())
+    return SystemPromptOut(
+        prompt=prompt,
+        is_custom=is_custom,
+        source="inline" if is_custom else "builtin",
     )

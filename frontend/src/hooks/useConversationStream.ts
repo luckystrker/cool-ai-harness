@@ -1,24 +1,10 @@
 import { useCallback, useRef, useState } from "react"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
-import type { AgentEvent, ToolApprovalRequestPayload, UsagePayload } from "@/api/types"
+import type { AgentEvent, ReActStep, ToolApprovalRequestPayload, UsagePayload } from "@/api/types"
 import type { ToolCallBlockProps } from "@/components/chat/ToolCallBlock"
 import type { MessageViewModel } from "@/components/chat/MessageBubble"
-
-/** A tool call awaiting the user's approve/deny decision. */
-export interface PendingApproval {
-  conversationId: number
-  callId: string
-  name: string
-  arguments: Record<string, unknown>
-  reason: string
-  /** True when triggered by a breakpoint (vs a regular "ask" tool). */
-  isBreakpoint?: boolean
-  /** Breakpoint type, when isBreakpoint is true. */
-  breakpointType?: string
-  /** Result preview (for after_tool_result breakpoints). */
-  resultPreview?: string
-}
+import type { InlineApproval } from "@/components/chat/ApprovalCard"
 
 interface Accumulator {
   /** Pending user message (sent but not yet persisted). */
@@ -34,29 +20,37 @@ interface Accumulator {
   usage?: UsagePayload
   /** Reason from the terminal `finish` event, if any. */
   finishReason?: string
+  /** Inline approval request currently shown in the chat flow. */
+  approval?: InlineApproval
+  /** ReAct trace steps (Thought → Action → Observation). */
+  reactSteps: ReActStep[]
 }
 
 const newAcc = (): Accumulator => ({
   toolCalls: new Map(),
   content: "",
   thinking: "",
+  reactSteps: [],
 })
 
 /**
  * Drives a single agent turn over the SSE stream and produces the two
  * optimistic messages (user + in-flight assistant) that the UI renders
  * while waiting for the persisted history to reload.
+ *
+ * Approvals are rendered inline in the chat (no modal): the assistant
+ * message carries an `approval` field with Allow/Deny buttons.
  */
 export function useConversationStream() {
   const [pendingMsgs, setPendingMsgs] = useState<MessageViewModel[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
-  /** When set, a tool call is blocked waiting for the user's decision. */
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null)
   /** Conversation id for the active stream, so respondApproval knows the URL. */
   const convIdRef = useRef<number | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   /** monotonic timestamp captured when the run starts (for elapsed time). */
   const startedAtRef = useRef<number | null>(null)
+  /** Live accumulator ref so respondApproval can mutate approval status. */
+  const accRef = useRef<Accumulator | null>(null)
 
   const flush = (acc: Accumulator, streaming = true) => {
     const tcs = Array.from(acc.toolCalls.values())
@@ -74,6 +68,8 @@ export function useConversationStream() {
       usage: acc.usage,
       finishReason: acc.finishReason,
       toolCalls: tcs.length ? tcs : undefined,
+      approval: acc.approval,
+      reactSteps: acc.reactSteps.length ? acc.reactSteps : undefined,
     }
     const msgs = acc.user ? [acc.user, assistant] : [assistant]
     setPendingMsgs(msgs)
@@ -89,6 +85,51 @@ export function useConversationStream() {
         acc.content += (ev.payload.text as string) || ""
         flush(acc)
         break
+      case "react_thought": {
+        const step = (ev.payload.step as number) || 1
+        const text = (ev.payload.text as string) || ""
+        // Find or create the ReAct step entry.
+        let entry = acc.reactSteps.find((s) => s.step === step)
+        if (!entry) {
+          entry = { step, actions: [], observations: [] }
+          acc.reactSteps.push(entry)
+        }
+        entry.thought = text
+        flush(acc)
+        break
+      }
+      case "react_action": {
+        const step = (ev.payload.step as number) || 1
+        let entry = acc.reactSteps.find((s) => s.step === step)
+        if (!entry) {
+          entry = { step, actions: [], observations: [] }
+          acc.reactSteps.push(entry)
+        }
+        entry.actions.push({
+          step,
+          tool_name: (ev.payload.tool_name as string) || "",
+          arguments: (ev.payload.arguments as Record<string, unknown>) || {},
+          call_id: (ev.payload.call_id as string) || "",
+        })
+        flush(acc)
+        break
+      }
+      case "react_observation": {
+        const step = (ev.payload.step as number) || 1
+        let entry = acc.reactSteps.find((s) => s.step === step)
+        if (!entry) {
+          entry = { step, actions: [], observations: [] }
+          acc.reactSteps.push(entry)
+        }
+        entry.observations.push({
+          step,
+          tool_name: (ev.payload.tool_name as string) || "",
+          result_summary: (ev.payload.result_summary as string) || "",
+          is_error: Boolean(ev.payload.is_error),
+        })
+        flush(acc)
+        break
+      }
       case "tool_call_start": {
         const id = (ev.payload.id as string) || `tc-${acc.toolCalls.size}`
         const name = (ev.payload.name as string) || "unknown"
@@ -108,6 +149,11 @@ export function useConversationStream() {
           entry.pending = false
           entry.awaitingApproval = false
           entry.result = ev.payload.result as ToolCallBlockProps["result"]
+        }
+        // If this tool had an unresolved inline approval, the server resolved
+        // it (timeout auto-deny) — reflect the outcome on the card.
+        if (acc.approval && acc.approval.callId === id && acc.approval.status === "pending") {
+          acc.approval = { ...acc.approval, status: "timed_out" }
         }
         flush(acc)
         break
@@ -131,19 +177,19 @@ export function useConversationStream() {
             awaitingApproval: true,
           })
         }
-        flush(acc)
-        if (convIdRef.current != null) {
-          setPendingApproval({
-            conversationId: convIdRef.current,
-            callId: id,
-            name: p.name,
-            arguments: args,
-            reason: p.reason,
-            isBreakpoint: p.is_breakpoint,
-            breakpointType: p.breakpoint_type,
-            resultPreview: p.result_preview,
-          })
+        // Inline approval: attach the request to the assistant message so the
+        // card renders directly in the chat flow (no modal popup).
+        acc.approval = {
+          callId: id,
+          name: p.name,
+          arguments: args,
+          reason: p.reason,
+          isBreakpoint: p.is_breakpoint,
+          breakpointType: p.breakpoint_type,
+          resultPreview: p.result_preview,
+          status: "pending",
         }
+        flush(acc)
         break
       }
       case "message": {
@@ -189,9 +235,9 @@ export function useConversationStream() {
       abortRef.current = controller
       convIdRef.current = conversationId
       startedAtRef.current = performance.now()
-      setPendingApproval(null)
 
       const acc = newAcc()
+      accRef.current = acc
       acc.user = {
         id: `local-user-${Date.now()}`,
         role: "user",
@@ -230,29 +276,41 @@ export function useConversationStream() {
         setIsStreaming(false)
         abortRef.current = null
         convIdRef.current = null
-        setPendingApproval(null)
+        accRef.current = null
       }
     },
     []
   )
 
-  /** Resolve a pending approval via the approval REST endpoint. */
+  /**
+   * Resolve the inline approval shown in the chat flow.
+   * Updates the card status (resolving → approved/denied) and calls the
+   * approval REST endpoint; the agent loop resumes server-side.
+   */
   const respondApproval = useCallback(async (approved: boolean) => {
-    const pending = pendingApproval
-    setPendingApproval(null)
-    if (!pending) return
+    const acc = accRef.current
+    const pending = acc?.approval
+    if (!pending || pending.status !== "pending") return
+
+    // Optimistically flip the card to "resolving".
+    acc!.approval = { ...pending, status: "resolving" }
+    flush(acc!)
+
     try {
       await conversationsApi.approveToolCall(
-        pending.conversationId,
+        convIdRef.current!,
         pending.callId,
         approved
       )
+      acc!.approval = { ...pending, status: approved ? "approved" : "denied" }
     } catch {
       // If the resolve fails (e.g. 404 — already timed out), the server-side
-      // timeout/auto-deny handles the loop. Surface nothing here; the result
-      // event will arrive over SSE regardless.
+      // timeout/auto-deny handles the loop. Show denied so the card doesn't
+      // stay stuck in "resolving".
+      acc!.approval = { ...pending, status: "denied" }
     }
-  }, [pendingApproval])
+    if (accRef.current) flush(accRef.current)
+  }, [])
 
   const cancel = useCallback(() => {
     abortRef.current?.abort()
@@ -266,7 +324,6 @@ export function useConversationStream() {
     stream,
     cancel,
     clearPending,
-    pendingApproval,
     respondApproval,
   }
 }

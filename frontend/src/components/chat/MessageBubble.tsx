@@ -1,9 +1,11 @@
 import { User, Sparkles, Terminal } from "lucide-react"
 import { cn, formatDuration } from "@/lib/utils"
-import type { UsagePayload } from "@/api/types"
+import type { ReActStep, UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
 import { ThinkingBlock } from "./ThinkingBlock"
+import { ReActTrace } from "./ReActTrace"
+import { ApprovalCard, type InlineApproval } from "./ApprovalCard"
 
 export interface MessageViewModel {
   id: string
@@ -21,6 +23,10 @@ export interface MessageViewModel {
   finishReason?: string
   /** Streaming = assistant currently generating; show caret. */
   streaming?: boolean
+  /** Inline approval request rendered in the chat flow (approve/deny). */
+  approval?: InlineApproval
+  /** ReAct trace steps (Thought → Action → Observation). */
+  reactSteps?: ReActStep[]
 }
 
 const ROLE_META = {
@@ -30,7 +36,14 @@ const ROLE_META = {
   tool: { label: "Tool", icon: Terminal, color: "bg-muted-foreground text-background" },
 } as const
 
-export function MessageBubble({ msg }: { msg: MessageViewModel }) {
+export function MessageBubble({
+  msg,
+  onRespondApproval,
+}: {
+  msg: MessageViewModel
+  /** Callback to resolve an inline approval (approve/deny). */
+  onRespondApproval?: (approved: boolean) => void
+}) {
   if (msg.role === "tool") return null // tool results render inside the assistant message that called them
   const meta = ROLE_META[msg.role]
   const Icon = meta.icon
@@ -74,6 +87,11 @@ export function MessageBubble({ msg }: { msg: MessageViewModel }) {
           />
         )}
 
+        {/* ReAct trace (Thought → Action → Observation) rendered as a structured timeline. */}
+        {isAssistant && msg.reactSteps && msg.reactSteps.length > 0 && (
+          <ReActTrace steps={msg.reactSteps} streaming={msg.streaming} />
+        )}
+
         {msg.content && (
           <div
             className={cn(
@@ -102,6 +120,14 @@ export function MessageBubble({ msg }: { msg: MessageViewModel }) {
               <ToolCallBlock key={key} {...blockProps} />
             ))}
           </div>
+        )}
+
+        {/* Inline approval card — approve/deny directly in the chat flow. */}
+        {msg.approval && (
+          <ApprovalCard
+            approval={msg.approval}
+            onRespond={onRespondApproval ?? (() => {})}
+          />
         )}
 
         {/* Assistant currently running tools but no text yet — show a hint. */}

@@ -170,6 +170,10 @@ export type AgentEventKind =
   | "message"
   | "finish"
   | "error"
+  // ReAct lifecycle events
+  | "react_thought"
+  | "react_action"
+  | "react_observation"
 
 /** Payload shape for a tool_approval_request event. */
 export interface ToolApprovalRequestPayload {
@@ -196,6 +200,47 @@ export interface UsagePayload {
   completion_tokens?: number
   total_tokens?: number
   cost_usd?: number | null
+}
+
+// --- ReAct trace (Thought → Action → Observation) ---
+
+export interface ReActThought {
+  step: number
+  text: string
+}
+
+export interface ReActAction {
+  step: number
+  tool_name: string
+  arguments: Record<string, unknown>
+  call_id: string
+}
+
+export interface ReActObservation {
+  step: number
+  tool_name: string
+  result_summary: string
+  is_error: boolean
+}
+
+/** A single ReAct step groups thought + actions + observations. */
+export interface ReActStep {
+  step: number
+  thought?: string
+  actions: ReActAction[]
+  observations: ReActObservation[]
+}
+
+// --- System prompt settings ---
+
+export interface SystemPromptResponse {
+  prompt: string
+  is_custom: boolean
+  source: "inline" | "file" | "builtin"
+}
+
+export interface SystemPromptUpdate {
+  prompt: string
 }
 
 // --- approval audit (Фаза 1.5 §2) ---

@@ -160,6 +160,8 @@ class AgentExecutor:
 
             yield AgentEvent.start(run_id=self.config.run_id)
 
+            react_step = 0  # ReAct step counter (Thought→Action→Observation)
+
             for iteration in range(1, limits.max_iterations + 1):
                 # Check for cancellation at the top of every iteration so a
                 # cancel mid-tool-loop stops before the next LLM round-trip.
@@ -262,6 +264,11 @@ class AgentExecutor:
                     )
                     return
 
+                # --- ReAct: emit Thought phase ---
+                react_step += 1
+                thought_text = thinking or content or f"Deciding to use tool(s) to proceed."
+                yield AgentEvent.react_thought(step=react_step, text=thought_text)
+
                 # Execute tool calls, append results, continue the loop.
                 # One more cancel check first — a cancel that arrived while we
                 # were streaming shouldn't trigger another tool execution.
@@ -275,7 +282,25 @@ class AgentExecutor:
                     return
 
                 for call in normalized_calls:
+                    # --- ReAct: emit Action phase ---
+                    yield AgentEvent.react_action(
+                        step=react_step,
+                        tool_name=call.get("name", ""),
+                        arguments=call.get("arguments") or {},
+                        call_id=call.get("id") or call.get("name") or "call",
+                    )
                     async for ev in self._run_tool_call(call):
+                        # --- ReAct: emit Observation after tool_result ---
+                        if ev.kind == "tool_result":
+                            result_data = ev.payload.get("result") or {}
+                            output = result_data.get("output") or ""
+                            summary = output[:300] + ("…" if len(output) > 300 else "")
+                            yield AgentEvent.react_observation(
+                                step=react_step,
+                                tool_name=ev.payload.get("name", ""),
+                                result_summary=summary,
+                                is_error=bool(result_data.get("is_error")),
+                            )
                         yield ev
 
             yield AgentEvent.finish(

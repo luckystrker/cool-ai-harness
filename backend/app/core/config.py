@@ -89,6 +89,19 @@ class Settings(BaseSettings):
         description="Max chars of extracted text stored per artifact",
     )
 
+    # --- Agent system prompt ---
+    # Path to a custom system prompt file. If empty, uses the built-in default.
+    system_prompt_file: Path | None = Field(
+        default=None,
+        description="Path to custom system prompt file; empty = built-in default",
+    )
+    # Inline system prompt override (takes precedence over file). Stored in
+    # localStorage on the frontend and sent per-request.
+    default_system_prompt: str = Field(
+        default="",
+        description="Default system prompt text; empty = load from file/built-in",
+    )
+
     # --- Agent permissions & working directory (defaults) ---
     # Per-conversation settings override these. Empty path = use workspaces_dir.
     # Set via env as a path string, e.g. DEFAULT_WORKING_DIRECTORY=/tmp/agent.

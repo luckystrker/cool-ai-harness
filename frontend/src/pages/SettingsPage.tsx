@@ -1,8 +1,9 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
+import { settingsApi } from "@/api/settings"
 import type {
   BreakpointConfig,
   BreakpointType,
@@ -169,6 +170,9 @@ export function SettingsPage() {
 
         {/* Global agent configuration (defaults for new conversations). */}
         <AgentConfigSection />
+
+        {/* System prompt editor */}
+        <SystemPromptSection />
       </div>
 
       <EditProviderDialog
@@ -606,6 +610,112 @@ function AgentConfigSection() {
         <div className="flex justify-end">
           <Button onClick={handleSave}>Save agent defaults</Button>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- System prompt editor ---
+
+/**
+ * System prompt editor: view and customize the default system prompt sent
+ * to the LLM on every agent run. Supports resetting to the built-in default.
+ */
+function SystemPromptSection() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["system-prompt"],
+    queryFn: settingsApi.getSystemPrompt,
+  })
+
+  const [prompt, setPrompt] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+
+  // Seed the textarea once data arrives.
+  const effectiveValue = prompt ?? data?.prompt ?? ""
+
+  const saveMutation = useMutation({
+    mutationFn: (value: string) => settingsApi.updateSystemPrompt({ prompt: value }),
+    onSuccess: (res) => {
+      setDirty(false)
+      toast.success("System prompt updated", {
+        description: res.is_custom ? "Custom prompt active." : "Reset to built-in default.",
+      })
+    },
+    onError: (e) => toast.error("Failed to save system prompt", { description: String(e) }),
+  })
+
+  const handleSave = () => {
+    saveMutation.mutate(effectiveValue)
+  }
+
+  const handleReset = () => {
+    setPrompt("")
+    setDirty(true)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <FileText className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-lg">System Prompt</CardTitle>
+            <CardDescription>
+              The default instruction set sent to the LLM on every agent run.
+              {data && (
+                <span className="ml-1">
+                  Source: <Badge variant="outline" className="font-mono text-[10px]">{data.source}</Badge>
+                </span>
+              )}
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading ? (
+          <div className="flex justify-center py-6">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <>
+            <Textarea
+              value={effectiveValue}
+              onChange={(e) => {
+                setPrompt(e.target.value)
+                setDirty(true)
+              }}
+              rows={16}
+              className="font-mono text-xs leading-relaxed"
+              placeholder="Enter your custom system prompt…"
+            />
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleReset}
+                  className="gap-1.5"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reset to default
+                </Button>
+                {data?.is_custom && (
+                  <Badge variant="secondary">customized</Badge>
+                )}
+              </div>
+              <Button
+                onClick={handleSave}
+                disabled={!dirty || saveMutation.isPending}
+                className="gap-1.5"
+              >
+                {saveMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Save prompt
+              </Button>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   )

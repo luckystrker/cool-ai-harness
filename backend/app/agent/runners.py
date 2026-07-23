@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 
 from sqlmodel import Session
 
-from app.agent import AgentConfig, AgentEvent, AgentExecutor, AgentLimits
+from app.agent import AgentConfig, AgentEvent, AgentExecutor, AgentLimits, get_default_system_prompt
 from app.agent.permissions import PermissionsConfig
 from app.agent.permissions import merge as merge_permissions
 from app.agent.runs import run_registry
@@ -47,7 +47,8 @@ log = get_logger(__name__)
 # these "structural" kinds are flushed immediately because they're the spine of
 # a replay and are infrequent enough that batching adds no benefit.
 _STRUCTUREAL_KINDS = frozenset(
-    {"start", "message", "tool_call_start", "tool_result", "finish", "error"}
+    {"start", "message", "tool_call_start", "tool_result", "finish", "error",
+     "react_thought", "react_action", "react_observation"}
 )
 
 
@@ -129,6 +130,10 @@ async def run_conversation_turn(
     history = load_history(session, conversation_id)
 
     settings = get_settings()
+
+    # Resolve the effective system prompt: per-request > settings default > built-in file.
+    effective_system_prompt = system_prompt or get_default_system_prompt() or None
+
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )
@@ -144,7 +149,7 @@ async def run_conversation_turn(
         provider=provider,
         config=AgentConfig(
             model=model,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             tool_names=tool_names,
             limits=effective_limits,
             working_directory=working_directory,
