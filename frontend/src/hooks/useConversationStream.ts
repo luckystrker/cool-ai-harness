@@ -115,6 +115,9 @@ export function useConversationStream() {
       case "tool_approval_request": {
         const p = ev.payload as unknown as ToolApprovalRequestPayload
         const id = p.id || `tc-${acc.toolCalls.size}`
+        // arguments can be missing/null on malformed events; coerce to {}
+        // so renderers (Object.keys / JSON.stringify) never crash.
+        const args = p.arguments ?? {}
         // Ensure there's a toolCall block to mark as awaiting approval; if the
         // tool_call_start event already created it, just flip the flag.
         const existing = acc.toolCalls.get(id)
@@ -123,7 +126,7 @@ export function useConversationStream() {
         } else {
           acc.toolCalls.set(id, {
             key: id,
-            call: { id, name: p.name, arguments: p.arguments },
+            call: { id, name: p.name, arguments: args },
             pending: true,
             awaitingApproval: true,
           })
@@ -134,7 +137,7 @@ export function useConversationStream() {
             conversationId: convIdRef.current,
             callId: id,
             name: p.name,
-            arguments: p.arguments,
+            arguments: args,
             reason: p.reason,
             isBreakpoint: p.is_breakpoint,
             breakpointType: p.breakpoint_type,

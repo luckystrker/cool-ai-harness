@@ -23,7 +23,7 @@ interface ApprovalDialogProps {
 export function ApprovalDialog({ approval, onRespond }: ApprovalDialogProps) {
   const open = approval !== null
   const argsJson =
-    approval && Object.keys(approval.arguments).length > 0
+    approval && Object.keys(approval.arguments ?? {}).length > 0
       ? JSON.stringify(approval.arguments, null, 2)
       : null
   const isBreakpoint = approval?.isBreakpoint ?? false

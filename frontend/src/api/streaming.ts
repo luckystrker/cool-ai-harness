@@ -98,8 +98,20 @@ function parseSseEvent(raw: string): AgentEvent | null {
   if (dataLines.length === 0) return null
 
   try {
-    const payload = JSON.parse(dataLines.join("\n"))
-    return { kind: kind as AgentEvent["kind"], payload }
+    const parsed = JSON.parse(dataLines.join("\n"))
+    // The backend serializes events as {"kind": ..., "payload": {...}}
+    // (AgentEvent.to_dict_json). Unwrap the inner payload so consumers can
+    // access fields (text, id, arguments, …) directly on ev.payload. Fall
+    // back to the raw object for flat payloads.
+    const payload =
+      parsed && typeof parsed === "object" && "payload" in parsed
+        ? parsed.payload ?? {}
+        : parsed
+    const eventKind =
+      parsed && typeof parsed === "object" && "kind" in parsed && parsed.kind
+        ? (parsed.kind as string)
+        : kind
+    return { kind: eventKind as AgentEvent["kind"], payload }
   } catch {
     return null
   }
