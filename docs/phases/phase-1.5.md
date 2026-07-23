@@ -71,11 +71,18 @@ API: `POST /conversations/{id}/artifacts` (upload), `GET .../artifacts` (list с
 аудио, генерация превью изображений — по мере подключения соответствующих
 инструментов в Фазах 2–3.
 
-## 4. Agent evals (`backend/evals/`)
+## 4. Agent evals (`backend/evals/`) ✅
 
-- Набор сценариев для tool selection, отказа от небезопасных действий, корректности цитат и лимитов стоимости
-- Replay сохранённых трасс и сравнение модели/промпта по качеству, latency и цене
-- CI quality gate: изменение агента не принимается при регрессии критичных сценариев
+**Реализовано:** Фреймворк сценарных eval'ов для агентского цикла:
+- `EvalScenario` — декларативное описание сценария (ввод, скрипт LLM, ассерты, теги, severity)
+- `EvalRunner` — выполняет сценарии через `AgentExecutor`, собирает метрики (latency, tokens, iterations), проверяет ассерты
+- 21 встроенный сценарий: tool selection (8), safety/capability denial (8), cost/iteration limits (5)
+- Replay & comparison: `TraceStore` сохраняет baselines, `compare_runs()` строит `ComparisonReport` с регрессиями/фиксами/метриками
+- CI quality gate: `python -m evals` — exit code 0/1/2, фильтр по тегам, сравнение с baseline, verbose-режим
+- Pytest-интеграция: `tests/test_evals.py` (20 тестов) прогоняет все сценарии и проверяет replay/gate логику
+
+**Что отложено**: live-провайдер evals (реальные LLM-вызовы для A/B тестирования промптов) — по мере
+подключения Provider Resilience (§5) и Inspector (§6).
 
 ## 5. Provider Resilience & Cost Guards (`app/providers/`, `app/security/`)
 

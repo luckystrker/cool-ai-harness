@@ -71,6 +71,67 @@ alembic upgrade head                          # apply migrations
 alembic revision --autogenerate -m "..."      # create a new migration
 ```
 
+## Agent evals (CI quality gate)
+
+The `backend/evals/` package contains a scenario-driven evaluation framework
+that verifies the agent loop's tool selection, safety policy enforcement, and
+cost/iteration limits. All scenarios are **deterministic** (scripted LLM
+responses) — no API keys needed.
+
+```bash
+cd backend
+
+# Run all 21 scenarios (gate fails if any critical scenario fails)
+python -m evals
+
+# Filter by tag
+python -m evals --tag safety
+python -m evals --tag tool_selection
+python -m evals --tag cost
+
+# Verbose output (shows per-assertion details on failure)
+python -m evals -v
+
+# Save current results as a baseline for future comparison
+python -m evals --update-baseline
+
+# Compare against a saved baseline (fails on critical regressions)
+python -m evals --baseline default
+```
+
+**Exit codes:** `0` = gate passed, `1` = critical regression/failure, `2` = config error.
+
+**Pytest integration** — evals also run as part of the test suite:
+
+```bash
+python -m pytest tests/test_evals.py -v
+```
+
+**Writing new scenarios** — add an `EvalScenario` to the appropriate suite in
+`backend/evals/scenarios/` (tool_selection, safety, or cost_limits). Each
+scenario declares a scripted LLM response and assertions:
+
+```python
+from evals.scenario import EvalScenario, ScenarioAssertion, Severity
+
+EvalScenario(
+    id="my_scenario",
+    name="Description",
+    tags=["safety"],
+    severity=Severity.CRITICAL,
+    input="User message",
+    script=[
+        [{"name": "tool_name", "arguments": {"key": "value"}}],  # LLM calls a tool
+        "Final text response",                                     # LLM responds
+    ],
+    assertions=[
+        ScenarioAssertion(type="tool_called", name="tool_name"),
+        ScenarioAssertion(type="finish_reason", reason="stop"),
+    ],
+    config={"capability_policy": {"execute": "deny"}},  # optional overrides
+)
+```
+
 ## Project layout
 
 ```
@@ -81,7 +142,8 @@ cool-ai-harness/
 │   │   ├── core/                # config, logging, db, security
 │   │   ├── providers/           # LLM provider abstraction (OpenAI-compatible)
 │   │   ├── agent/               # agent loop + durable runs + approvals
-│   │   ├── tools/               # tool registry + builtins (planned)
+│   │   ├── security/            # capability policy, SSRF, secrets, sandbox, breakpoints
+│   │   ├── tools/               # tool registry + builtins (files, code, web)
 │   │   ├── skills/              # skill registry + builtins (planned)
 │   │   ├── mcp/                 # MCP client (planned)
 │   │   ├── memory/              # long-term memory (planned, Фаза 3a)
@@ -90,10 +152,11 @@ cool-ai-harness/
 │   │   ├── telegram/            # bot + web app (planned, Фаза 5)
 │   │   ├── models/              # SQLModel tables
 │   │   └── observability/       # analytics (planned, Фаза 3a)
-│   ├── alembic/                 # database migrations (Фаза 1.5)
+│   ├── evals/                   # agent eval scenarios + CI gate
+│   ├── alembic/                 # database migrations
 │   ├── tests/
 │   └── pyproject.toml
-├── frontend/                    # React SPA (planned)
+├── frontend/                    # React SPA
 ├── docs/
 │   └── PLAN.md                  # full roadmap
 └── .env.example
