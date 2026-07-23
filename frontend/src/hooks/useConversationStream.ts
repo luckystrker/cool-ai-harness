@@ -12,6 +12,12 @@ export interface PendingApproval {
   name: string
   arguments: Record<string, unknown>
   reason: string
+  /** True when triggered by a breakpoint (vs a regular "ask" tool). */
+  isBreakpoint?: boolean
+  /** Breakpoint type, when isBreakpoint is true. */
+  breakpointType?: string
+  /** Result preview (for after_tool_result breakpoints). */
+  resultPreview?: string
 }
 
 interface Accumulator {
@@ -130,6 +136,9 @@ export function useConversationStream() {
             name: p.name,
             arguments: p.arguments,
             reason: p.reason,
+            isBreakpoint: p.is_breakpoint,
+            breakpointType: p.breakpoint_type,
+            resultPreview: p.result_preview,
           })
         }
         break

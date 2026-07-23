@@ -39,13 +39,20 @@ def create_conversation(
     model: str | None = None,
     working_directory: str | None = None,
     permissions: dict | None = None,
+    capability_policy: dict | None = None,
+    breakpoints: list[dict] | None = None,
 ) -> Conversation:
+    metadata: dict | None = None
+    if breakpoints is not None:
+        metadata = {"breakpoints": breakpoints}
     conv = Conversation(
         user_id=user_id,
         title=title,
         model=model,
         working_directory=working_directory,
         permissions=permissions,
+        capability_policy=capability_policy,
+        metadata_=metadata,
     )
     session.add(conv)
     session.commit()
@@ -73,12 +80,15 @@ def update_conversation(
     model: str | None = None,
     working_directory: str | None = None,
     permissions: dict | None = None,
+    capability_policy: dict | None = None,
+    breakpoints: list[dict] | None = None,
 ) -> Conversation | None:
     """Patch updatable fields on a conversation.
 
     Each argument is optional and uses a sentinel-style guard: ``None`` means
     "leave unchanged". To explicitly clear ``working_directory`` or
     ``permissions``, pass an empty value (``""`` / ``{}`` respectively).
+    ``capability_policy`` and ``breakpoints`` follow the same convention.
     """
     conv = session.get(Conversation, conv_id)
     if conv is None:
@@ -91,6 +101,15 @@ def update_conversation(
         conv.working_directory = working_directory or None
     if permissions is not None:
         conv.permissions = permissions or None
+    if capability_policy is not None:
+        conv.capability_policy = capability_policy or None
+    if breakpoints is not None:
+        meta = dict(conv.metadata_ or {})
+        if breakpoints:
+            meta["breakpoints"] = breakpoints
+        else:
+            meta.pop("breakpoints", None)
+        conv.metadata_ = meta or None
     session.add(conv)
     session.commit()
     session.refresh(conv)

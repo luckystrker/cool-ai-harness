@@ -18,9 +18,13 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.config import get_settings
+
+if TYPE_CHECKING:
+    from app.security.breakpoints import BreakpointsConfig
+    from app.security.capabilities import CapabilityPolicy
 
 # Effective tool permission map: tool name -> "allow" | "ask" | "deny".
 # The special key "*" is the catch-all default. See app/agent/permissions.py.
@@ -37,10 +41,16 @@ class RunContext:
         permissions: Effective permission map (already merged with globals).
             Tools don't read this directly; the executor uses it to gate
             execution. Kept here so audit/logging has access from one place.
+        capability_policy: Effective capability policy (merged). The executor
+            checks this before the per-tool permission map.
+        breakpoints: Effective breakpoint config (merged). The executor checks
+            these at each checkpoint in the tool-call chain.
     """
 
     workdir: Path
     permissions: PermissionsMap = field(default_factory=dict)
+    capability_policy: CapabilityPolicy | None = None
+    breakpoints: BreakpointsConfig | None = None
 
     def resolve_workdir(self) -> Path:
         """Return workdir, ensuring it exists."""

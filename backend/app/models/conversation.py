@@ -29,6 +29,12 @@ class Conversation(TimestampMixin, table=True):
     permissions: dict[str, Any] | None = Field(
         default=None, sa_column=Column("permissions", JSON)
     )
+    # Per-conversation capability policy, overriding the global defaults.
+    # Shape: {"execute": "ask", "network": "ask", "write": "allow"}
+    # (capability name -> "allow" | "ask" | "deny"). See app/security/capabilities.py.
+    capability_policy: dict[str, Any] | None = Field(
+        default=None, sa_column=Column("capability_policy", JSON)
+    )
     # Free-form metadata (e.g. agent_profile_id once Фаза 3a lands).
     metadata_: dict[str, Any] | None = Field(
         default=None, sa_column=Column("metadata_", JSON)

@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
-import type { ToolPermission, ToolPermissions } from "@/api/types"
+import type {
+  BreakpointConfig,
+  BreakpointType,
+  CapabilityPolicy,
+  ToolPermission,
+  ToolPermissions,
+} from "@/api/types"
 import {
   Dialog,
   DialogContent,
@@ -26,6 +32,23 @@ const TOOL_NAMES = [
   "web_search",
   "web_fetch",
 ] as const
+
+const CAPABILITY_NAMES = [
+  "*",
+  "read",
+  "write",
+  "execute",
+  "network",
+  "git",
+  "send_external",
+] as const
+
+const BREAKPOINT_TYPES: { type: BreakpointType; label: string; hint: string }[] = [
+  { type: "before_tool", label: "Before tool", hint: "Pause before any tool call" },
+  { type: "before_write", label: "Before write", hint: "Pause before file writes" },
+  { type: "after_tool_result", label: "After result", hint: "Pause after a tool returns" },
+  { type: "before_send", label: "Before send", hint: "Pause before sending to LLM" },
+]
 
 const PERMISSIONS: ToolPermission[] = ["allow", "ask", "deny"]
 
@@ -75,6 +98,8 @@ interface ConversationSettingsDialogProps {
   conversationId: number
   workingDirectory: string | null
   permissions: ToolPermissions | null
+  capabilityPolicy: CapabilityPolicy | null
+  breakpoints: BreakpointConfig[] | null
   onSaved: () => void
 }
 
@@ -88,20 +113,26 @@ export function ConversationSettingsDialog({
   conversationId,
   workingDirectory,
   permissions,
+  capabilityPolicy,
+  breakpoints,
   onSaved,
 }: ConversationSettingsDialogProps) {
   // Remount-driven form seed: parent controls `open`, and we sync from props
   // whenever the dialog opens so edits always start from the persisted state.
   const [workdir, setWorkdir] = useState(workingDirectory ?? "")
   const [perms, setPerms] = useState<ToolPermissions>(permissions ?? {})
+  const [capPolicy, setCapPolicy] = useState<CapabilityPolicy>(capabilityPolicy ?? {})
+  const [bpList, setBpList] = useState<BreakpointConfig[]>(breakpoints ?? [])
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (open) {
       setWorkdir(workingDirectory ?? "")
       setPerms(permissions ?? {})
+      setCapPolicy(capabilityPolicy ?? {})
+      setBpList(breakpoints ?? [])
     }
-  }, [open, workingDirectory, permissions])
+  }, [open, workingDirectory, permissions, capabilityPolicy, breakpoints])
 
   const cycle = (tool: string) => {
     setPerms((cur) => {
@@ -112,12 +143,33 @@ export function ConversationSettingsDialog({
     })
   }
 
+  const cycleCap = (cap: string) => {
+    setCapPolicy((cur) => {
+      const current = (cur[cap] ?? "allow") as ToolPermission
+      const nextIdx = (PERMISSIONS.indexOf(current) + 1) % PERMISSIONS.length
+      const next = PERMISSIONS[nextIdx]
+      return { ...cur, [cap]: next }
+    })
+  }
+
+  const toggleBreakpoint = (type: BreakpointType) => {
+    setBpList((cur) => {
+      const exists = cur.some((bp) => bp.type === type)
+      if (exists) {
+        return cur.filter((bp) => bp.type !== type)
+      }
+      return [...cur, { type, fallback: "deny" as const }]
+    })
+  }
+
   const handleSave = async () => {
     setSaving(true)
     try {
       await conversationsApi.update(conversationId, {
         working_directory: workdir.trim() || undefined,
         permissions: perms,
+        capability_policy: capPolicy,
+        breakpoints: bpList,
       })
       onSaved()
       onOpenChange(false)
@@ -210,6 +262,76 @@ export function ConversationSettingsDialog({
                       {value}
                     </button>
                   </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Capability policy */}
+          <div className="space-y-2">
+            <Label>Capability policy</Label>
+            <p className="text-xs text-muted-foreground">
+              Coarse-grained gates applied before per-tool permissions. The more
+              restrictive of the two layers wins. Click to cycle:
+              allow → ask → deny.
+            </p>
+            <div className="rounded-md border">
+              {CAPABILITY_NAMES.map((cap, i) => {
+                const value = (capPolicy[cap] ?? (cap === "*" ? "allow" : "inherit")) as
+                  | ToolPermission
+                  | "inherit"
+                return (
+                  <div
+                    key={cap}
+                    className={cn(
+                      "flex items-center justify-between px-3 py-2",
+                      i > 0 && "border-t"
+                    )}
+                  >
+                    <span className="font-mono text-xs">{cap}</span>
+                    <button
+                      type="button"
+                      onClick={() => cycleCap(cap)}
+                      className={cn(
+                        "rounded px-2 py-0.5 text-xs font-medium capitalize transition-colors",
+                        value === "inherit"
+                          ? "bg-muted text-muted-foreground"
+                          : PERM_STYLES[value]
+                      )}
+                    >
+                      {value}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Breakpoints */}
+          <div className="space-y-2">
+            <Label>Breakpoints</Label>
+            <p className="text-xs text-muted-foreground">
+              Pause the agent at key points for human review. Toggle on to
+              enable; the agent blocks until you approve or the timeout fires.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {BREAKPOINT_TYPES.map(({ type, label, hint }) => {
+                const active = bpList.some((bp) => bp.type === type)
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => toggleBreakpoint(type)}
+                    className={cn(
+                      "rounded-md border px-2 py-1.5 text-left transition-colors",
+                      active
+                        ? "border-primary bg-primary/10"
+                        : "hover:bg-muted"
+                    )}
+                  >
+                    <div className="text-xs font-medium">{label}</div>
+                    <div className="text-[10px] text-muted-foreground">{hint}</div>
+                  </button>
                 )
               })}
             </div>

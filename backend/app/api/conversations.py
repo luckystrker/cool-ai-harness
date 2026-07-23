@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlmodel import Session
+from sqlmodel import Session, select
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.approvals import approval_registry
@@ -24,6 +24,7 @@ from app.agent.service import (
     update_conversation,
 )
 from app.api.schemas import (
+    ApprovalAuditOut,
     ConversationCreate,
     ConversationDetail,
     ConversationOut,
@@ -34,12 +35,15 @@ from app.api.schemas import (
 )
 from app.core.config import get_settings
 from app.core.db import get_session
+from app.models import ApprovalAudit
 from app.providers import get_default_provider
+from app.security.capabilities import validate_policy as validate_capability_policy
 
 router = APIRouter()
 
 
 def _conv_to_out(conv) -> ConversationOut:
+    meta = conv.metadata_ or {}
     return ConversationOut(
         id=conv.id,
         user_id=conv.user_id,
@@ -47,6 +51,8 @@ def _conv_to_out(conv) -> ConversationOut:
         model=conv.model,
         working_directory=conv.working_directory,
         permissions=conv.permissions,
+        capability_policy=conv.capability_policy,
+        breakpoints=meta.get("breakpoints"),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -75,6 +81,8 @@ def post_conversation(
 ) -> ConversationOut:
     if errors := validate_permissions(body.permissions):
         raise HTTPException(status_code=400, detail="; ".join(errors))
+    if errors := validate_capability_policy(body.capability_policy):
+        raise HTTPException(status_code=400, detail="; ".join(errors))
     user = get_or_create_default_user(session)
     settings = get_settings()
     conv = create_conversation(
@@ -84,6 +92,8 @@ def post_conversation(
         model=body.model or settings.default_model,
         working_directory=body.working_directory,
         permissions=body.permissions,
+        capability_policy=body.capability_policy,
+        breakpoints=body.breakpoints,
     )
     return _conv_to_out(conv)
 
@@ -127,8 +137,10 @@ def patch_conversation(
     body: ConversationUpdate,
     session: Session = Depends(get_session),
 ) -> ConversationOut:
-    """Update updatable conversation fields (title, model, working_directory, permissions)."""
+    """Update updatable conversation fields."""
     if errors := validate_permissions(body.permissions):
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+    if errors := validate_capability_policy(body.capability_policy):
         raise HTTPException(status_code=400, detail="; ".join(errors))
     conv = update_conversation(
         session,
@@ -137,6 +149,8 @@ def patch_conversation(
         model=body.model,
         working_directory=body.working_directory,
         permissions=body.permissions,
+        capability_policy=body.capability_policy,
+        breakpoints=body.breakpoints,
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -189,6 +203,8 @@ async def post_message(
                 tool_names=body.tool_names,
                 working_directory=conv.working_directory,
                 conversation_permissions=conv.permissions,
+                conversation_capability_policy=conv.capability_policy,
+                conversation_breakpoints=(conv.metadata_ or {}).get("breakpoints"),
                 run_id=run.id,
                 cancellable=True,
             ):
@@ -223,3 +239,52 @@ def post_tool_approval(
         raise HTTPException(status_code=404, detail="No pending approval for that call_id")
     resolved = approval_registry.resolve(call_id, body.approved)
     return {"resolved": resolved, "approved": body.approved}
+
+
+# --- approval audit trail (Фаза 1.5 §2) ---
+
+
+@router.get("/conversations/{conv_id}/approvals", response_model=list[ApprovalAuditOut])
+def get_approval_audits(
+    conv_id: int,
+    run_id: int | None = None,
+    limit: int = 100,
+    session: Session = Depends(get_session),
+) -> list[ApprovalAuditOut]:
+    """List approval audit records for a conversation.
+
+    Optional ``run_id`` query param filters to a single run. Results are
+    newest-first, capped at ``limit`` (default 100, max 500).
+    """
+    conv = get_conversation(session, conv_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    limit = min(limit, 500)
+    stmt = (
+        select(ApprovalAudit)
+        .where(ApprovalAudit.conversation_id == conv_id)
+        .order_by(ApprovalAudit.id.desc())
+        .limit(limit)
+    )
+    if run_id is not None:
+        stmt = stmt.where(ApprovalAudit.run_id == run_id)
+    rows = session.exec(stmt).all()
+    return [
+        ApprovalAuditOut(
+            id=r.id,
+            conversation_id=r.conversation_id,
+            run_id=r.run_id,
+            call_id=r.call_id,
+            tool_name=r.tool_name,
+            arguments=r.arguments,
+            approved=r.approved,
+            decision_source=r.decision_source,
+            decided_by=r.decided_by,
+            reason=r.reason,
+            is_breakpoint=r.is_breakpoint,
+            breakpoint_type=r.breakpoint_type,
+            duration_ms=r.duration_ms,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]

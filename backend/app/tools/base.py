@@ -12,9 +12,12 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from app.security.capabilities import Capability
 
 
 @dataclass
@@ -64,6 +67,10 @@ class Tool:
     func: ToolFunc
     args_model: type[ToolArgs]
     dangerous: bool = False  # e.g. code execution; surfaced in UI/scheduler
+    # Capabilities this tool requires (read, write, execute, network, git,
+    # send_external). Used by the capability security layer to gate access.
+    # None/empty = no capability gating (per-tool permissions still apply).
+    capabilities: frozenset[Capability] | None = None
 
     def parameters_schema(self) -> dict[str, Any]:
         """JSON Schema for this tool's arguments (OpenAI function-calling shape)."""
@@ -98,6 +105,7 @@ def register_tool(
     args_model: type[ToolArgs],
     func: ToolFunc,
     dangerous: bool = False,
+    capabilities: frozenset[Capability] | None = None,
     registry: dict[str, Tool] | None = None,
 ) -> Tool:
     """Register a tool. Returns the Tool instance for chaining."""
@@ -110,6 +118,7 @@ def register_tool(
         func=func,
         args_model=args_model,
         dangerous=dangerous,
+        capabilities=capabilities,
     )
     _reg[name] = instance
     return instance

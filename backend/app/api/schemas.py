@@ -58,6 +58,12 @@ class ConversationCreate(BaseModel):
     # Per-conversation tool permissions: {"*": "ask", "read_file": "allow", ...}
     # Each value must be one of allow|ask|deny. Validated by the route layer.
     permissions: dict[str, str] | None = None
+    # Per-conversation capability policy: {"execute": "ask", "network": "ask", ...}
+    # Each value must be one of allow|ask|deny. Validated by the route layer.
+    capability_policy: dict[str, str] | None = None
+    # Per-conversation breakpoints: [{"type": "before_write", "tool": "write_file"}, ...]
+    # Stored in conversation metadata. See app/security/breakpoints.py.
+    breakpoints: list[dict[str, Any]] | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -66,6 +72,8 @@ class ConversationUpdate(BaseModel):
     model: str | None = None
     working_directory: str | None = None
     permissions: dict[str, str] | None = None
+    capability_policy: dict[str, str] | None = None
+    breakpoints: list[dict[str, Any]] | None = None
 
 
 class ConversationOut(BaseModel):
@@ -75,6 +83,8 @@ class ConversationOut(BaseModel):
     model: str | None = None
     working_directory: str | None = None
     permissions: dict[str, str] | None = None
+    capability_policy: dict[str, str] | None = None
+    breakpoints: list[dict[str, Any]] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -158,3 +168,25 @@ class CancelRunResponse(BaseModel):
 
     run_id: int
     cancelled: bool
+
+
+# --- approval audit (Фаза 1.5 §2 — approval audit trail) ---
+
+
+class ApprovalAuditOut(BaseModel):
+    """One row of the approval audit trail."""
+
+    id: int
+    conversation_id: int
+    run_id: int | None = None
+    call_id: str
+    tool_name: str
+    arguments: dict[str, Any] | None = None
+    approved: bool
+    decision_source: str
+    decided_by: str | None = None
+    reason: str | None = None
+    is_breakpoint: bool = False
+    breakpoint_type: str | None = None
+    duration_ms: int | None = None
+    created_at: datetime

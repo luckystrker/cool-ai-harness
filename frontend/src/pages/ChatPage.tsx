@@ -5,7 +5,7 @@ import { MessageSquare, Sparkles, ChevronDown, Check, Pencil, Settings2 } from "
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { providersApi } from "@/api/providers"
-import type { Message, ToolPermissions } from "@/api/types"
+import type { BreakpointConfig, Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ApprovalDialog } from "@/components/chat/ApprovalDialog"
 import { ChatComposer } from "@/components/chat/ChatComposer"
@@ -176,6 +176,8 @@ export function ChatPage() {
         conversationId={convId}
         workingDirectory={detail?.working_directory ?? null}
         permissions={(detail?.permissions as ToolPermissions | null) ?? null}
+        capabilityPolicy={(detail?.capability_policy as ToolPermissions | null) ?? null}
+        breakpoints={(detail?.breakpoints as BreakpointConfig[] | null) ?? null}
         onSaved={() => {
           queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
         }}

@@ -119,6 +119,56 @@ class Settings(BaseSettings):
         description="Wall-clock timeout per run in seconds; None = no timeout",
     )
 
+    # --- Capability security (Фаза 1.5 §2) ---
+    # Capability-level policy: maps capability name to allow|ask|deny.
+    # Applied as a coarse-grained gate BEFORE the per-tool permission check.
+    # e.g. {"execute": "ask", "network": "ask", "write": "allow"}
+    capability_policy: dict[str, str] = Field(
+        default_factory=dict,
+        description='Capability policy: {"execute":"ask","network":"ask",...}',
+    )
+    # Comma-separated list of allowed domains for web_fetch / network tools.
+    # Empty = allow all (no domain allowlist). When set, fetches to non-listed
+    # domains are denied.
+    network_allowed_domains: list[str] = Field(
+        default_factory=list,
+        description="Domain allowlist for network tools; empty = allow all",
+    )
+    # When True, block requests to private/internal IP ranges (RFC 1918,
+    # loopback, link-local) to prevent SSRF.
+    ssrf_block_private_ips: bool = Field(
+        default=True,
+        description="Block requests to private/internal IPs (SSRF protection)",
+    )
+    # Max response body size for web_fetch (bytes). 0 = no limit.
+    network_max_response_bytes: int = Field(
+        default=500_000,
+        description="Max response body size for web_fetch; 0 = no limit",
+    )
+    # When True, mask secrets (API keys, tokens, passwords) in tool outputs,
+    # log messages, and LLM-visible tool results.
+    mask_secrets: bool = Field(
+        default=True,
+        description="Mask secrets in tool outputs, messages, traces, and logs",
+    )
+    # When True, strip environment variables that look like secrets before
+    # spawning subprocesses for code execution.
+    sandbox_strip_env: bool = Field(
+        default=True,
+        description="Strip secret-looking env vars from subprocess environment",
+    )
+    # Breakpoint TTL: how long the executor waits for a breakpoint approval
+    # before applying the fallback action.
+    breakpoint_timeout_s: float = Field(
+        default=60.0,
+        description="Seconds to wait for a breakpoint approval before fallback",
+    )
+    # Fallback action when a breakpoint times out: deny or skip.
+    breakpoint_fallback: str = Field(
+        default="deny",
+        description='Breakpoint timeout fallback: "deny" or "skip"',
+    )
+
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
         for path in (self.data_dir, self.workspaces_dir, self.skills_dir):

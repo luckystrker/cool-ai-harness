@@ -17,6 +17,36 @@ export type ToolPermission = "allow" | "ask" | "deny"
 /** Tool permission map: tool name (or "*" wildcard) -> decision. */
 export type ToolPermissions = Record<string, ToolPermission>
 
+/** Capability names matching the backend Capability enum. */
+export type CapabilityName =
+  | "read"
+  | "write"
+  | "execute"
+  | "network"
+  | "git"
+  | "send_external"
+
+/** Capability policy: capability name (or "*" wildcard) -> decision. */
+export type CapabilityPolicy = Record<string, ToolPermission>
+
+/** Breakpoint type — when in the tool-call chain a breakpoint fires. */
+export type BreakpointType =
+  | "before_tool"
+  | "after_tool_result"
+  | "before_send"
+  | "before_write"
+
+/** A single breakpoint rule. */
+export interface BreakpointConfig {
+  type: BreakpointType
+  /** If set, only fire for this specific tool. Undefined = any tool. */
+  tool?: string
+  /** TTL in seconds before fallback. */
+  ttl_s?: number
+  /** Fallback action on timeout: "deny" or "skip". */
+  fallback?: "deny" | "skip"
+}
+
 export interface Conversation {
   id: number
   user_id: number
@@ -26,6 +56,10 @@ export interface Conversation {
   working_directory: string | null
   /** Per-conversation tool permissions (override global defaults). */
   permissions: ToolPermissions | null
+  /** Per-conversation capability policy (override global defaults). */
+  capability_policy: CapabilityPolicy | null
+  /** Per-conversation breakpoints (stored in metadata). */
+  breakpoints: BreakpointConfig[] | null
   created_at: string
   updated_at: string
 }
@@ -37,6 +71,8 @@ export interface ConversationCreate {
   tool_names?: string[]
   working_directory?: string
   permissions?: ToolPermissions
+  capability_policy?: CapabilityPolicy
+  breakpoints?: BreakpointConfig[]
 }
 
 /** PATCH /api/conversations/{id} — only provided fields are applied. */
@@ -45,6 +81,8 @@ export interface ConversationUpdate {
   model?: string
   working_directory?: string
   permissions?: ToolPermissions
+  capability_policy?: CapabilityPolicy
+  breakpoints?: BreakpointConfig[]
 }
 
 /** One row of a stored message. Matches app/api/schemas.MessageOut. */
@@ -140,6 +178,12 @@ export interface ToolApprovalRequestPayload {
   arguments: Record<string, unknown>
   reason: string
   requires_decision: true
+  /** True when this was triggered by a breakpoint (vs a regular "ask" tool). */
+  is_breakpoint?: boolean
+  /** Breakpoint type, if is_breakpoint is true. */
+  breakpoint_type?: BreakpointType
+  /** Result preview (for after_tool_result breakpoints). */
+  result_preview?: string
 }
 
 export interface AgentEvent {
@@ -152,4 +196,24 @@ export interface UsagePayload {
   completion_tokens?: number
   total_tokens?: number
   cost_usd?: number | null
+}
+
+// --- approval audit (Фаза 1.5 §2) ---
+
+/** One row of the approval audit trail. Matches app/api/schemas.ApprovalAuditOut. */
+export interface ApprovalAudit {
+  id: number
+  conversation_id: number
+  run_id: number | null
+  call_id: string
+  tool_name: string
+  arguments: Record<string, unknown> | null
+  approved: boolean
+  decision_source: string
+  decided_by: string | null
+  reason: string | null
+  is_breakpoint: boolean
+  breakpoint_type: string | null
+  duration_ms: number | null
+  created_at: string
 }

@@ -17,6 +17,9 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.security.capabilities import Capability
+from app.security.secrets import mask_tool_output
+from app.security.ssrf import check_url_safety
 from app.tools.base import ToolArgs, ToolResult, register_tool
 
 # --- web_search -----------------------------------------------------------
@@ -125,11 +128,50 @@ _WS = re.compile(rb"\s+")
 
 
 async def web_fetch(*, url: str, max_chars: int = 20_000) -> ToolResult:
-    """Fetch a URL and return extracted main text (HTML stripped)."""
+    """Fetch a URL and return extracted main text (HTML stripped).
+
+    SSRF-protected: blocks private IPs, enforces domain allowlist, and caps
+    response body size.
+    """
+    settings = get_settings()
+
+    # SSRF check: block private IPs and enforce domain allowlist.
+    safety = check_url_safety(
+        url,
+        allowed_domains=settings.network_allowed_domains or None,
+        block_private_ips=settings.ssrf_block_private_ips,
+    )
+    if not safety.safe:
+        return ToolResult.err(
+            f"URL blocked (SSRF protection): {safety.reason}",
+            blocked_url=url,
+            blocked_ip=safety.blocked_ip,
+        )
+
+    max_bytes = settings.network_max_response_bytes
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, headers={"User-Agent": "CoolAIHarness/0.1"})
-        resp.raise_for_status()
-        body = resp.content
+        # Stream the response so we can enforce a size limit without downloading
+        # an arbitrarily large body.
+        async with client.stream(
+            "GET", url, headers={"User-Agent": "CoolAIHarness/0.1"}
+        ) as resp:
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            size_truncated = False
+            async for chunk in resp.aiter_bytes(chunk_size=8192):
+                total += len(chunk)
+                if max_bytes and total > max_bytes:
+                    size_truncated = True
+                    # Keep only up to the limit.
+                    remaining = max_bytes - (total - len(chunk))
+                    if remaining > 0:
+                        chunks.append(chunk[:remaining])
+                    break
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            status_code = resp.status_code
+            final_url = str(resp.url)
 
     body = _TAG_SCRIPT.sub(b" ", body)
     body = _TAG.sub(b" ", body)
@@ -138,11 +180,17 @@ async def web_fetch(*, url: str, max_chars: int = 20_000) -> ToolResult:
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n[... truncated at {max_chars} chars]"
         truncated = True
+    if size_truncated:
+        text += f"\n[... response body truncated at {max_bytes} bytes]"
+        truncated = True
+    # Mask secrets in the fetched content.
+    safe_text = mask_tool_output(text or "(empty body)")
     return ToolResult.ok(
-        text or "(empty body)",
-        final_url=str(resp.url),
-        status_code=resp.status_code,
+        safe_text,
+        final_url=final_url,
+        status_code=status_code,
         truncated=truncated,
+        size_truncated=size_truncated,
     )
 
 
@@ -155,13 +203,17 @@ def register_web_tools() -> None:
         ),
         args_model=WebSearchArgs,
         func=web_search,
+        capabilities=frozenset({Capability.NETWORK}),
     )
     register_tool(
         name="web_fetch",
         description=(
             "Download a URL and return its main text content with HTML tags "
-            "stripped. Useful for reading an article returned by web_search."
+            "stripped. SSRF-protected: private IPs are blocked and a domain "
+            "allowlist may be configured. Useful for reading an article "
+            "returned by web_search."
         ),
         args_model=WebFetchArgs,
         func=web_fetch,
+        capabilities=frozenset({Capability.NETWORK}),
     )

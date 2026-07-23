@@ -34,6 +34,9 @@ from app.providers import (
     ToolSpec,
     Usage,
 )
+from app.security.breakpoints import BreakpointsConfig, BreakpointType, is_write_tool
+from app.security.capabilities import CapabilityPolicy, stricter
+from app.security.secrets import mask_secrets_in_value
 from app.tools import ToolResult, get_tool
 from app.tools.context import RunContext, reset_run_context, set_run_context
 
@@ -65,6 +68,12 @@ class AgentConfig:
     # Effective tool permissions (global + conversation already merged).
     # None means "no explicit config" → resolve() falls back to "ask".
     permissions: PermissionsConfig | None = None
+    # Effective capability policy (global + conversation already merged).
+    # None means no capability gating (opt-in). See app/security/capabilities.py.
+    capability_policy: CapabilityPolicy | None = None
+    # Effective breakpoint config (global + conversation already merged).
+    # None means no breakpoints. See app/security/breakpoints.py.
+    breakpoints: BreakpointsConfig | None = None
     # When True, "ask" tools run without prompting (non-interactive runners:
     # cron jobs, subagents). The approval event is never emitted.
     auto_approve: bool = False
@@ -298,7 +307,7 @@ class AgentExecutor:
         return run_registry.is_cancelled(self.config.run_id)
 
     def _build_run_context(self) -> RunContext:
-        """Construct the RunContext (workdir + permissions) for this run."""
+        """Construct the RunContext (workdir + permissions + capabilities + breakpoints) for this run."""
         from pathlib import Path
 
         from app.core.config import get_settings
@@ -311,29 +320,55 @@ class AgentExecutor:
         else:
             workdir = Path(settings.workspaces_dir)
         perms = self.config.permissions.tools if self.config.permissions else {}
-        return RunContext(workdir=workdir, permissions=dict(perms))
+        return RunContext(
+            workdir=workdir,
+            permissions=dict(perms),
+            capability_policy=self.config.capability_policy,
+            breakpoints=self.config.breakpoints,
+        )
 
     def _resolve_decision(self, name: str, dangerous: bool) -> Decision:
-        """Effective allow/ask/deny for a tool, honoring auto_approve.
+        """Effective allow/ask/deny for a tool, honoring capability + tool policies.
 
-        Default (no permissions configured at all) is ``"allow"``: the MVP is
-        single-user and trusted, matching pre-permission behavior, and tests /
-        cron runs that never set a policy must keep working. As soon as ANY
-        permission config is supplied (even just ``{"*": "ask"}``), that config
-        decides — unknown tools fall back to ``"ask"`` within it.
+        Two layers are checked and the *more restrictive* wins:
+        1. Capability policy (coarse-grained: read/write/execute/network/...)
+        2. Per-tool permission map (fine-grained: read_file/python_execute/...)
+
+        Default (no policy configured at all) is ``"allow"``: the MVP is
+        single-user and trusted, matching pre-permission behavior. As soon as
+        ANY permission or capability config is supplied, that config decides.
         """
+        # Layer 1: capability policy (coarse-grained).
+        cap_decision: Decision = "allow"
+        if self.config.capability_policy is not None:
+            cap_decision = self.config.capability_policy.resolve_tool(name)
+
+        # Layer 2: per-tool permission map (fine-grained).
         if self.config.permissions is None:
-            # No policy configured: legacy trusted behavior.
-            decision: Decision = "allow"
+            tool_decision: Decision = "allow"
         else:
-            decision = self.config.permissions.resolve(name, dangerous=dangerous)
+            tool_decision = self.config.permissions.resolve(name, dangerous=dangerous)
+
+        # The more restrictive of the two layers wins.
+        decision = stricter(cap_decision, tool_decision)
+
         # Non-interactive runners (cron, subagents) treat "ask" as "allow".
         if decision == "ask" and self.config.auto_approve:
             return "allow"
         return decision
 
     async def _run_tool_call(self, call: dict[str, Any]) -> AsyncIterator[AgentEvent]:
-        """Validate, gate, run, and emit events for a single tool call."""
+        """Validate, gate, run, and emit events for a single tool call.
+
+        Gates (in order):
+        1. ``before_tool`` breakpoint (any tool) — pause before the call.
+        2. ``before_write`` breakpoint (write tools only) — pause before write.
+        3. Capability + per-tool permission check (allow/ask/deny).
+        4. Execute the tool.
+        5. ``after_tool_result`` breakpoint — pause after the result.
+
+        Secret masking is applied to the tool result before it's yielded.
+        """
         call_id = call.get("id") or call.get("name") or "call"
         name = call.get("name", "")
         args = call.get("arguments") or {}
@@ -343,7 +378,29 @@ class AgentExecutor:
         tool = get_tool(name)
         t0 = time.monotonic()
 
-        # Permission gate: decide whether to run, ask, or deny before executing.
+        # --- Breakpoint: before_tool (any tool) ---
+        if self._should_break(BreakpointType.BEFORE_TOOL, tool_name=name):
+            yield self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_TOOL)
+            bp_approved = await self._wait_for_approval(call_id)
+            if not bp_approved:
+                result = ToolResult.err("Breakpoint denied: the action was rejected or timed out.")
+                result.metadata = {"denied": True, "breakpoint": "before_tool", "duration_ms": _elapsed_ms(t0)}
+                await self._finalize_tool_call(call_id, name, result)
+                yield self._masked_tool_result(call_id, name, result)
+                return
+
+        # --- Breakpoint: before_write (write tools only) ---
+        if is_write_tool(name) and self._should_break(BreakpointType.BEFORE_WRITE, tool_name=name):
+            yield self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_WRITE)
+            bp_approved = await self._wait_for_approval(call_id)
+            if not bp_approved:
+                result = ToolResult.err("Breakpoint denied: the write was rejected or timed out.")
+                result.metadata = {"denied": True, "breakpoint": "before_write", "duration_ms": _elapsed_ms(t0)}
+                await self._finalize_tool_call(call_id, name, result)
+                yield self._masked_tool_result(call_id, name, result)
+                return
+
+        # --- Permission gate: capability + per-tool ---
         decision = self._resolve_decision(name, dangerous=bool(tool and tool.dangerous))
 
         if decision == "ask":
@@ -358,31 +415,13 @@ class AgentExecutor:
                 result = ToolResult.err("Permission denied: the request was rejected or timed out.")
                 result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
                 await self._finalize_tool_call(call_id, name, result)
-                yield AgentEvent.tool_result(
-                    call_id=call_id,
-                    name=name,
-                    result={
-                        "output": result.output,
-                        "is_error": result.is_error,
-                        "error": result.error,
-                        "metadata": result.metadata,
-                    },
-                )
+                yield self._masked_tool_result(call_id, name, result)
                 return
         elif decision == "deny":
             result = ToolResult.err(f"Permission denied (policy): tool {name!r} is blocked.")
             result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
             await self._finalize_tool_call(call_id, name, result)
-            yield AgentEvent.tool_result(
-                call_id=call_id,
-                name=name,
-                result={
-                    "output": result.output,
-                    "is_error": result.is_error,
-                    "error": result.error,
-                    "metadata": result.metadata,
-                },
-            )
+            yield self._masked_tool_result(call_id, name, result)
             return
 
         if tool is None:
@@ -401,11 +440,60 @@ class AgentExecutor:
         result.metadata["duration_ms"] = _elapsed_ms(t0)
 
         await self._finalize_tool_call(call_id, name, result)
-        yield AgentEvent.tool_result(
+        yield self._masked_tool_result(call_id, name, result)
+
+        # --- Breakpoint: after_tool_result ---
+        if self._should_break(BreakpointType.AFTER_TOOL_RESULT, tool_name=name):
+            yield self._breakpoint_event(
+                call_id, name, args, BreakpointType.AFTER_TOOL_RESULT,
+                extra_context={"result_preview": (result.output or "")[:500]},
+            )
+            await self._wait_for_approval(call_id)
+
+    def _should_break(self, bp_type: BreakpointType, *, tool_name: str | None = None) -> bool:
+        """True if a breakpoint of ``bp_type`` should fire for ``tool_name``."""
+        if self.config.breakpoints is None or self.config.breakpoints.is_empty:
+            return False
+        # Non-interactive runners skip breakpoints (same as auto_approve for ask).
+        if self.config.auto_approve:
+            return False
+        return self.config.breakpoints.should_break(bp_type, tool_name=tool_name) is not None
+
+    def _breakpoint_event(
+        self,
+        call_id: str,
+        name: str,
+        args: dict[str, Any],
+        bp_type: BreakpointType,
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        """Build a breakpoint approval-request event (not yet yielded)."""
+        payload: dict[str, Any] = {
+            "id": call_id,
+            "name": name,
+            "arguments": args,
+            "reason": f"Breakpoint ({bp_type.value}): review before proceeding.",
+            "requires_decision": True,
+            "is_breakpoint": True,
+            "breakpoint_type": bp_type.value,
+        }
+        if extra_context:
+            payload.update(extra_context)
+        return AgentEvent(kind="tool_approval_request", payload=payload)
+
+    def _masked_tool_result(self, call_id: str, name: str, result: ToolResult) -> AgentEvent:
+        """Build a tool_result event with secret masking applied to the output."""
+        from app.core.config import get_settings
+
+        masked_output = mask_secrets_in_value(
+            result.output, enabled=get_settings().mask_secrets
+        )
+        return AgentEvent.tool_result(
             call_id=call_id,
             name=name,
             result={
-                "output": result.output,
+                "output": masked_output,
                 "is_error": result.is_error,
                 "error": result.error,
                 "metadata": result.metadata,

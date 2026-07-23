@@ -17,6 +17,9 @@ import sys
 import textwrap
 from pathlib import Path
 
+from app.security.capabilities import Capability
+from app.security.sandbox import build_sandbox_env
+from app.security.secrets import mask_tool_output
 from app.tools.base import ToolArgs, ToolResult, register_tool
 
 # Capture stdout/stderr from a heredoc'd script.
@@ -88,10 +91,18 @@ async def python_execute(
     # spawn subprocesses via the asyncio API — create_subprocess_exec raises
     # NotImplementedError with an empty message. Fall back to running a plain
     # subprocess in a worker thread, which works on any event loop.
+    # Build a sandboxed environment with host secrets stripped.
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    sandbox_env = build_sandbox_env(strip_secrets=settings.sandbox_strip_env)
+
     if _loop_supports_subprocess(loop):
-        result = await _run_subprocess_async(argv, timeout, cwd=workdir)
+        result = await _run_subprocess_async(argv, timeout, cwd=workdir, env=sandbox_env)
     else:
-        result = await asyncio.to_thread(_run_subprocess_sync, argv, timeout, cwd=workdir)
+        result = await asyncio.to_thread(
+            _run_subprocess_sync, argv, timeout, cwd=workdir, env=sandbox_env
+        )
 
     if isinstance(result, str):
         return ToolResult.err(result)
@@ -105,9 +116,12 @@ async def python_execute(
         stdout = stdout[:max_output_chars] + f"\n[... truncated at {max_output_chars} chars]"
         truncated = True
 
+    # Mask secrets in stdout/stderr before returning to the model.
+    safe_stdout = mask_tool_output(stdout.strip() or "(no stdout)")
+    safe_stderr = mask_tool_output(stderr.strip()) if stderr.strip() else None
     return ToolResult.ok(
-        stdout.strip() or "(no stdout)",
-        stderr=stderr.strip() or None,
+        safe_stdout,
+        stderr=safe_stderr,
         exit_code=returncode,
         truncated=truncated,
     )
@@ -127,7 +141,8 @@ def _loop_supports_subprocess(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 async def _run_subprocess_async(
-    argv: list[str], timeout: float, *, cwd: Path | None = None
+    argv: list[str], timeout: float, *, cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[bytes, bytes, int] | str:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -135,6 +150,7 @@ async def _run_subprocess_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd is not None else None,
+            env=env,
         )
     except Exception as exc:
         loop_kind = type(asyncio.get_running_loop()).__name__
@@ -154,7 +170,8 @@ async def _run_subprocess_async(
 
 
 def _run_subprocess_sync(
-    argv: list[str], timeout: float, *, cwd: Path | None = None
+    argv: list[str], timeout: float, *, cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[bytes, bytes, int] | str:
     """Thread-pool fallback: run the subprocess synchronously via subprocess.run.
 
@@ -171,6 +188,7 @@ def _run_subprocess_sync(
             timeout=timeout,
             check=False,
             cwd=str(cwd) if cwd is not None else None,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return f"python_execute timed out after {timeout}s"
@@ -186,10 +204,12 @@ def register_code_tools() -> None:
         description=(
             "Execute Python 3 code in an isolated subprocess and return its "
             "stdout. Stderr, exit code, and truncation are reported in "
-            "metadata. Default timeout 15s. Suitable for calculations, data "
-            "processing, and quick experimentation — NOT a security sandbox."
+            "metadata. Default timeout 15s. Host secrets are stripped from the "
+            "subprocess environment. Suitable for calculations, data "
+            "processing, and quick experimentation — NOT a full security sandbox."
         ),
         args_model=PythonExecuteArgs,
         func=python_execute,
         dangerous=True,
+        capabilities=frozenset({Capability.EXECUTE}),
     )

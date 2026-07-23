@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from app.agent import AgentConfig, AgentExecutor
-from app.providers import ChatResult, ChatStreamEvent, LLMProvider, Message, ToolSpec, Usage
+from app.providers import ChatResult, ChatStreamEvent, LLMProvider, Message, Usage
 
 
 class _ProviderBase(LLMProvider):

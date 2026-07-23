@@ -1,5 +1,6 @@
 import { api } from "./client"
 import type {
+  ApprovalAudit,
   Conversation,
   ConversationCreate,
   ConversationDetail,
@@ -27,4 +28,15 @@ export const conversationsApi = {
       `/api/conversations/${convId}/tool_calls/${callId}/approval`,
       { approved }
     ),
+
+  /** List approval audit records for a conversation. */
+  listApprovals: (convId: number, params?: { run_id?: number; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.run_id != null) qs.set("run_id", String(params.run_id))
+    if (params?.limit != null) qs.set("limit", String(params.limit))
+    const query = qs.toString()
+    return api.get<ApprovalAudit[]>(
+      `/api/conversations/${convId}/approvals${query ? `?${query}` : ""}`
+    )
+  },
 }

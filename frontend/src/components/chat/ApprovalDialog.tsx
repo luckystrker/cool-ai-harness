@@ -1,4 +1,4 @@
-import { ShieldAlert } from "lucide-react"
+import { ShieldAlert, Bug } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -17,7 +17,8 @@ interface ApprovalDialogProps {
 
 /**
  * Modal shown when the agent wants to run a tool gated behind an "ask"
- * permission. The agent loop is blocked server-side until the user decides.
+ * permission or a breakpoint. The agent loop is blocked server-side until
+ * the user decides.
  */
 export function ApprovalDialog({ approval, onRespond }: ApprovalDialogProps) {
   const open = approval !== null
@@ -25,6 +26,7 @@ export function ApprovalDialog({ approval, onRespond }: ApprovalDialogProps) {
     approval && Object.keys(approval.arguments).length > 0
       ? JSON.stringify(approval.arguments, null, 2)
       : null
+  const isBreakpoint = approval?.isBreakpoint ?? false
 
   return (
     <Dialog
@@ -38,11 +40,17 @@ export function ApprovalDialog({ approval, onRespond }: ApprovalDialogProps) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <ShieldAlert className="h-5 w-5 text-amber-500" />
-            Approve tool call?
+            {isBreakpoint ? (
+              <Bug className="h-5 w-5 text-blue-500" />
+            ) : (
+              <ShieldAlert className="h-5 w-5 text-amber-500" />
+            )}
+            {isBreakpoint ? "Breakpoint hit" : "Approve tool call?"}
           </DialogTitle>
           <DialogDescription>
-            The agent wants to run a tool that requires your approval.
+            {isBreakpoint
+              ? `A ${approval?.breakpointType ?? ""} breakpoint fired. Review before proceeding.`
+              : "The agent wants to run a tool that requires your approval."}
           </DialogDescription>
         </DialogHeader>
 
@@ -57,6 +65,14 @@ export function ApprovalDialog({ approval, onRespond }: ApprovalDialogProps) {
                 <div className="mb-1 text-muted-foreground">Arguments</div>
                 <pre className="max-h-56 overflow-auto rounded bg-muted p-2 font-mono text-[11px]">
                   {argsJson}
+                </pre>
+              </div>
+            )}
+            {approval.resultPreview && (
+              <div>
+                <div className="mb-1 text-muted-foreground">Result preview</div>
+                <pre className="max-h-56 overflow-auto rounded bg-muted p-2 font-mono text-[11px]">
+                  {approval.resultPreview}
                 </pre>
               </div>
             )}

@@ -29,6 +29,8 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
     ("messages", "thinking", "TEXT"),
     ("conversations", "working_directory", "TEXT"),
     ("conversations", "permissions", "JSON"),
+    ("conversations", "capability_policy", "JSON"),
+    ("conversations", "metadata_", "JSON"),
 ]
 
 

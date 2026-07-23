@@ -13,6 +13,7 @@ stopped via the run registry.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 
 from sqlmodel import Session
@@ -30,10 +31,14 @@ from app.agent.service import (
 )
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.models import ApprovalAudit
 from app.models import Message as MessageRow
 from app.models import ToolCall as ToolCallRow
 from app.models.run import RUN_STATUS_RUNNING
 from app.providers import LLMProvider
+from app.security.breakpoints import merge_breakpoints
+from app.security.capabilities import merge_policy as merge_capability_policy
+from app.security.secrets import mask_secrets_in_value
 
 log = get_logger(__name__)
 
@@ -87,6 +92,8 @@ async def run_conversation_turn(
     tool_names: list[str] | None = None,
     working_directory: str | None = None,
     conversation_permissions: dict[str, str] | None = None,
+    conversation_capability_policy: dict[str, str] | None = None,
+    conversation_breakpoints: list[dict] | None = None,
     auto_approve: bool = False,
     limits: AgentLimits | None = None,
     run_id: int | None = None,
@@ -125,6 +132,12 @@ async def run_conversation_turn(
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )
+    effective_capability_policy = merge_capability_policy(
+        dict(settings.capability_policy), conversation_capability_policy
+    )
+    effective_breakpoints = merge_breakpoints(
+        None, conversation_breakpoints  # Global breakpoints from settings (future)
+    )
     effective_limits = limits or _default_limits(settings)
 
     executor = AgentExecutor(
@@ -136,6 +149,8 @@ async def run_conversation_turn(
             limits=effective_limits,
             working_directory=working_directory,
             permissions=effective_permissions,
+            capability_policy=effective_capability_policy,
+            breakpoints=effective_breakpoints,
             auto_approve=auto_approve,
             run_id=run_id,
             cancellable=cancellable,
@@ -168,6 +183,10 @@ async def run_conversation_turn(
     # ToolCall observability row (written on tool_result) can record what was
     # actually invoked, not just the result.
     pending_tool_args: dict[str, dict] = {}
+    # tool_call_id -> (name, t0_monotonic) for approval audit timing.
+    pending_approval_meta: dict[str, tuple[str, float]] = {}
+    # call_ids that had an explicit approval request (vs auto-allowed).
+    approval_requested: set[str] = set()
     # Count of completed LLM iterations for the run row.
     iteration_count = 0
     terminal_reason: str | None = None
@@ -201,6 +220,21 @@ async def run_conversation_turn(
                 call_id = event.payload.get("id")
                 if call_id is not None:
                     pending_tool_args[call_id] = event.payload.get("arguments") or {}
+                    pending_approval_meta[call_id] = (
+                        event.payload.get("name", ""),
+                        time.monotonic(),
+                    )
+            elif event.kind == "tool_approval_request":
+                # Track that an approval was requested so we can audit it when
+                # the tool_result arrives (approved or denied).
+                call_id = event.payload.get("id")
+                if call_id is not None:
+                    approval_requested.add(call_id)
+                    if call_id not in pending_approval_meta:
+                        pending_approval_meta[call_id] = (
+                            event.payload.get("name", ""),
+                            time.monotonic(),
+                        )
             elif event.kind == "tool_result":
                 payload = event.payload
                 result = payload.get("result") or {}
@@ -221,16 +255,57 @@ async def run_conversation_turn(
                 )
                 # Observability: one row per tool invocation (Фаза 3a prep).
                 metadata = result.get("metadata") or {}
+                tool_args = pending_tool_args.pop(call_id, None)
                 session.add(
                     ToolCallRow(
                         conversation_id=conversation_id,
                         message_id=persisted_last_assistant_id,
                         name=payload.get("name", ""),
-                        arguments=pending_tool_args.pop(call_id, None),
+                        arguments=tool_args,
                         result=result,
                         duration_ms=metadata.get("duration_ms"),
                         success=not result.get("is_error", False),
                         error=result.get("error"),
+                    )
+                )
+                # Approval audit: record the decision (approved/denied/auto).
+                # If the tool was denied, the metadata carries {"denied": True}.
+                is_denied = bool(metadata.get("denied"))
+                is_breakpoint = bool(metadata.get("breakpoint"))
+                bp_type = metadata.get("breakpoint")
+                audit_name, audit_t0 = pending_approval_meta.pop(call_id, (payload.get("name", ""), 0.0))
+                audit_duration_ms = int((time.monotonic() - audit_t0) * 1000) if audit_t0 else None
+                # Determine the decision source:
+                #   - "timeout": approval was requested but timed out (auto-denied)
+                #   - "user":    approval was requested and resolved by the user
+                #   - "policy":  denied by capability/permission policy (no user)
+                #   - "auto":    allowed without asking (auto_approve or allow)
+                if is_denied and call_id in approval_requested:
+                    decision_source = "timeout"
+                elif call_id in approval_requested:
+                    decision_source = "user"
+                elif is_denied:
+                    decision_source = "policy"
+                else:
+                    decision_source = "auto"
+                approval_requested.discard(call_id)
+                session.add(
+                    ApprovalAudit(
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        call_id=call_id or "",
+                        tool_name=audit_name,
+                        arguments=mask_secrets_in_value(
+                            tool_args or {},
+                            enabled=settings.mask_secrets,
+                        ),
+                        approved=not is_denied,
+                        decision_source=decision_source,
+                        decided_by="default",
+                        reason=f"Breakpoint: {bp_type}" if is_breakpoint else None,
+                        is_breakpoint=is_breakpoint,
+                        breakpoint_type=bp_type if is_breakpoint else None,
+                        duration_ms=audit_duration_ms,
                     )
                 )
                 session.commit()

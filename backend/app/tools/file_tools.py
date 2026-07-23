@@ -8,8 +8,11 @@ arrives in Фаза 4 with the code-task workflow.
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 
+from app.security.capabilities import Capability
+from app.security.secrets import mask_tool_output
 from app.tools.base import ToolArgs, ToolResult, register_tool
 from app.tools.context import get_run_context
 
@@ -45,7 +48,9 @@ async def read_file(*, path: str, max_bytes: int = 200_000) -> ToolResult:
         truncated = len(data) > max_bytes
         text = data[:max_bytes].decode("utf-8", errors="replace")
         suffix = f"\n\n[... truncated, {len(data)} bytes total]" if truncated else ""
-        return ToolResult.ok(text + suffix, bytes=len(data), truncated=truncated)
+        # Mask any secrets that might be in the file content.
+        safe_text = mask_tool_output(text + suffix)
+        return ToolResult.ok(safe_text, bytes=len(data), truncated=truncated)
     except PermissionError as exc:
         return ToolResult.err(str(exc))
     except Exception as exc:
@@ -59,16 +64,46 @@ class WriteFileArgs(ToolArgs):
 
 
 async def write_file(*, path: str, content: str, append: bool = False) -> ToolResult:
-    """Write text to a file inside the workspace. Creates parent dirs."""
+    """Write text to a file inside the workspace. Creates parent dirs.
+
+    When overwriting an existing file, the result metadata includes a unified
+    diff so the UI can show a preview of what changed.
+    """
     try:
         full = _resolve(path)
         full.parent.mkdir(parents=True, exist_ok=True)
+
+        # Capture the old content for a diff (only on overwrite, not append).
+        old_text: str | None = None
+        if not append and full.is_file():
+            try:
+                old_text = full.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                old_text = None
+
         mode = "a" if append else "w"
         with full.open(mode, encoding="utf-8") as f:
             f.write(content)
+
+        # Build a unified diff if we overwrote an existing file.
+        diff: str | None = None
+        if old_text is not None and old_text != content:
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    content.splitlines(keepends=True),
+                    fromfile=f"{path} (old)",
+                    tofile=f"{path} (new)",
+                    n=3,
+                )
+            )
+            diff = "".join(diff_lines) if diff_lines else None
+
         return ToolResult.ok(
             f"Wrote {len(content)} chars to {path} ({mode} mode)",
             bytes=len(content.encode("utf-8")),
+            diff=diff,
+            created=old_text is None and not append,
         )
     except PermissionError as exc:
         return ToolResult.err(str(exc))
@@ -90,7 +125,7 @@ async def list_files(*, path: str = ".") -> ToolResult:
             return ToolResult.ok(f"{path} (file)")
         entries = sorted(p.name + ("/" if p.is_dir() else "") for p in full.iterdir())
         listing = "\n".join(entries) if entries else "(empty)"
-        return ToolResult.ok(listing)
+        return ToolResult.ok(mask_tool_output(listing))
     except PermissionError as exc:
         return ToolResult.err(str(exc))
     except Exception as exc:
@@ -106,19 +141,23 @@ def register_file_tools() -> None:
         ),
         args_model=ReadFileArgs,
         func=read_file,
+        capabilities=frozenset({Capability.READ}),
     )
     register_tool(
         name="write_file",
         description=(
             "Write text to a file in the agent's workspace. Creates parent "
-            "directories. Set append=True to add to an existing file."
+            "directories. Set append=True to add to an existing file. "
+            "When overwriting, a unified diff is included in the result metadata."
         ),
         args_model=WriteFileArgs,
         func=write_file,
+        capabilities=frozenset({Capability.WRITE}),
     )
     register_tool(
         name="list_files",
         description="List files and directories under a path in the workspace.",
         args_model=ListFilesArgs,
         func=list_files,
+        capabilities=frozenset({Capability.READ}),
     )
