@@ -345,7 +345,14 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
         const result = toolRow?.tool_result?.result
         return {
           key: `${m.id}-tc-${i}`,
-          call: { id, type: tc.type, name: tc.name, arguments: tc.arguments },
+          call: {
+            id,
+            type: tc.type,
+            name: tc.name,
+            // arguments can be null in stored rows (older data); coerce so the
+            // ToolCallBlock renderer never hits Object.keys(undefined).
+            arguments: tc.arguments ?? {},
+          },
           pending: false,
           ...(result ? { result } : {}),
         }

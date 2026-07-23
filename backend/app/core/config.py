@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # Default OpenAI-compatible endpoint. Override for OpenRouter/DeepSeek/Groq/Ollama.
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
+    # Native Anthropic Messages API (used when default_provider == "anthropic").
+    anthropic_base_url: str = "https://api.anthropic.com"
     anthropic_api_key: str = ""
 
     # --- Telegram ---
@@ -86,6 +88,13 @@ class Settings(BaseSettings):
     default_tool_permissions: dict[str, str] = Field(
         default_factory=dict,
         description='Tool permission map: {"*":"ask","read_file":"allow",...}',
+    )
+    # How long the agent waits for a human approve/deny on an "ask" tool before
+    # auto-denying. 5 minutes was far too long for an interactive chat — a
+    # forgotten prompt shouldn't tie up a turn for that long.
+    approval_timeout_s: float = Field(
+        default=30.0,
+        description="Seconds to wait for a tool approval before auto-deny",
     )
 
     def ensure_dirs(self) -> None:

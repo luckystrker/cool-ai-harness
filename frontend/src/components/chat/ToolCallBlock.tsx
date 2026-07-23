@@ -79,11 +79,11 @@ export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolC
 
       {open && (
         <div className="space-y-2 border-t px-3 py-2">
-          {Object.keys(call.arguments).length > 0 && (
+          {Object.keys(call.arguments ?? {}).length > 0 && (
             <div>
               <div className="mb-1 text-muted-foreground">Arguments</div>
               <pre className="overflow-x-auto rounded bg-background p-2 font-mono text-[11px]">
-                {JSON.stringify(call.arguments, null, 2)}
+                {JSON.stringify(call.arguments ?? {}, null, 2)}
               </pre>
             </div>
           )}

@@ -23,6 +23,7 @@ from app.core.db import engine
 from app.core.logging import get_logger
 from app.core.security import decrypt
 from app.models import Provider as ProviderRow
+from app.providers.anthropic import AnthropicProvider
 from app.providers.base import LLMProvider
 from app.providers.openai import OpenAIProvider
 
@@ -44,9 +45,18 @@ def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
     base_url = row.base_url or _default_base_url_for(row.name)
     model = row.default_model or get_settings().default_model
 
-    # Currently every OpenAI-compatible backend (openai/openrouter/deepseek/
-    # groq/ollama/local) is served by OpenAIProvider. Anthropic and subscription
-    # adapters will dispatch to their own classes here once added.
+    name = (row.name or "").lower()
+    if name == "anthropic":
+        # Native Anthropic Messages API — not OpenAI-compatible.
+        return AnthropicProvider(
+            base_url=base_url,
+            api_key=api_key,
+            default_model=model,
+        )
+
+    # Every OpenAI-compatible backend (openai/openrouter/deepseek/groq/ollama/
+    # local) is served by OpenAIProvider. Subscription adapters will dispatch
+    # to their own classes here once added.
     return OpenAIProvider(
         base_url=base_url,
         api_key=api_key or "ollama",  # ollama ignores the key
@@ -57,6 +67,7 @@ def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
 def _default_base_url_for(name: str) -> str:
     defaults = {
         "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com",
         "openrouter": "https://openrouter.ai/api/v1",
         "open_router": "https://openrouter.ai/api/v1",
         "deepseek": "https://api.deepseek.com/v1",
@@ -102,6 +113,19 @@ def get_default_provider() -> LLMProvider:
 def _from_settings() -> LLMProvider:
     """Env-only provider — the pre-database behavior (tests, dev, no UI setup)."""
     settings = get_settings()
+    if settings.default_provider == "anthropic":
+        if not settings.anthropic_api_key:
+            log.warning(
+                "providers.no_api_key",
+                provider="anthropic",
+                hint="Set ANTHROPIC_API_KEY in .env",
+            )
+        return AnthropicProvider(
+            base_url=settings.anthropic_base_url,
+            api_key=settings.anthropic_api_key,
+            default_model=settings.default_model,
+        )
+
     if settings.default_provider in {
         "openai", "openrouter", "deepseek", "groq", "ollama", "local", "open_router",
     }:

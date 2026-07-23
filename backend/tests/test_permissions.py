@@ -21,9 +21,18 @@ class TestResolve:
         cfg = PermissionsConfig(tools={"*": "allow"})
         assert cfg.resolve("python_execute") == "allow"
 
-    def test_fallback_is_ask_when_nothing_configured(self) -> None:
+    def test_safe_tool_falls_back_to_allow_when_nothing_configured(self) -> None:
         cfg = PermissionsConfig(tools={})
-        assert cfg.resolve("read_file") == "ask"
+        # Read-only tools run straight through by default — no approval dialog,
+        # no 30s wait. This is what makes web_search / read_file work out of
+        # the box without configuring default_tool_permissions.
+        assert cfg.resolve("read_file") == "allow"
+        assert cfg.resolve("web_search") == "allow"
+
+    def test_dangerous_tool_falls_back_to_ask_when_nothing_configured(self) -> None:
+        cfg = PermissionsConfig(tools={})
+        # Side-effecting tools (code execution, destructive ops) still prompt.
+        assert cfg.resolve("python_execute", dangerous=True) == "ask"
 
     def test_dangerous_flag_does_not_override_explicit_allow(self) -> None:
         cfg = PermissionsConfig(tools={"python_execute": "allow"})

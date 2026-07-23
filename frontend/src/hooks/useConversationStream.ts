@@ -144,7 +144,14 @@ export function useConversationStream() {
             if (!acc.toolCalls.has(id)) {
               acc.toolCalls.set(id, {
                 key: id,
-                call: { id, name: tc.name, arguments: tc.arguments },
+                call: {
+                  id,
+                  name: tc.name,
+                  // arguments may be missing/null if the provider emitted a
+                  // tool call without arguments; coerce to {} so the renderer
+                  // (Object.keys, JSON.stringify) never crashes on undefined.
+                  arguments: tc.arguments ?? {},
+                },
                 pending: true,
               })
             }

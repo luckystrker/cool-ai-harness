@@ -350,13 +350,18 @@ class AgentExecutor:
         """Block until the client resolves the approval (or timeout auto-denies)."""
         import asyncio
 
+        from app.core.config import get_settings
+
         future = approval_registry.register(call_id)
+        # Configurable via Settings (default 30s). The module constant is kept
+        # only so existing tests can monkeypatch it to shrink the wait.
+        timeout = get_settings().approval_timeout_s or DEFAULT_APPROVAL_TIMEOUT_S
         try:
-            return await asyncio.wait_for(future, timeout=DEFAULT_APPROVAL_TIMEOUT_S)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             # Auto-deny on timeout so a forgotten prompt never hangs the turn.
             approval_registry.cancel(call_id)
-            log.warning("approval.timeout", call_id=call_id)
+            log.warning("approval.timeout", call_id=call_id, timeout_s=timeout)
             return False
 
     async def _finalize_tool_call(

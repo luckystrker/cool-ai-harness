@@ -13,11 +13,13 @@ from collections.abc import AsyncIterator
 from sqlmodel import Session
 
 from app.agent import AgentConfig, AgentEvent, AgentExecutor
-from app.agent.permissions import PermissionsConfig, merge as merge_permissions
+from app.agent.permissions import PermissionsConfig
+from app.agent.permissions import merge as merge_permissions
 from app.agent.service import append_message, load_history
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models import Message as MessageRow
+from app.models import ToolCall as ToolCallRow
 from app.providers import LLMProvider
 
 log = get_logger(__name__)
@@ -42,7 +44,9 @@ async def run_conversation_turn(
       - the user message is assumed already saved by the caller (so SSE can
         echo it before the loop starts). ``user_input`` here is forwarded to
         the executor's in-memory history, not written to disk.
-      - each tool result as a ``tool`` row when the corresponding event fires
+      - each tool result as a ``tool`` row when the corresponding event fires,
+        plus an observability ``tool_calls`` row capturing name/arguments/
+        result/duration/success (Фаза 3a prep).
       - the final assistant message as one row on the finish event
 
     Permissions & workdir:
@@ -78,6 +82,10 @@ async def run_conversation_turn(
     # last message was saved on `finish`, which dropped the tool_calls when a
     # follow-up text turn overwrote them).
     persisted_last_assistant_id: int | None = None
+    # tool_call_id -> arguments dict. Captured from tool_call_start so the
+    # ToolCall observability row (written on tool_result) can record what was
+    # actually invoked, not just the result.
+    pending_tool_args: dict[str, dict] = {}
 
     async for event in executor.stream(user_input):
         if event.kind == "message":
@@ -95,9 +103,16 @@ async def run_conversation_turn(
                     thinking=thinking,
                 )
                 persisted_last_assistant_id = row.id
+        elif event.kind == "tool_call_start":
+            # Remember the arguments so the observability row (written when the
+            # tool finishes) can record them.
+            call_id = event.payload.get("id")
+            if call_id is not None:
+                pending_tool_args[call_id] = event.payload.get("arguments") or {}
         elif event.kind == "tool_result":
             payload = event.payload
             result = payload.get("result") or {}
+            call_id = payload.get("id")
             # Persist the structured result plus a tool_call_id/name so the
             # reloaded history can reconstruct the provider tool message and
             # the UI can show the result inline with its call.
@@ -107,11 +122,26 @@ async def run_conversation_turn(
                 role="tool",
                 content=result.get("output"),
                 tool_result={
-                    "tool_call_id": payload.get("id"),
+                    "tool_call_id": call_id,
                     "name": payload.get("name"),
                     "result": result,
                 },
             )
+            # Observability: one row per tool invocation (Фаза 3a prep).
+            metadata = result.get("metadata") or {}
+            session.add(
+                ToolCallRow(
+                    conversation_id=conversation_id,
+                    message_id=persisted_last_assistant_id,
+                    name=payload.get("name", ""),
+                    arguments=pending_tool_args.pop(call_id, None),
+                    result=result,
+                    duration_ms=metadata.get("duration_ms"),
+                    success=not result.get("is_error", False),
+                    error=result.get("error"),
+                )
+            )
+            session.commit()
         elif event.kind == "finish":
             # Attach the aggregated usage to the most recent assistant message.
             usage = event.payload.get("usage")

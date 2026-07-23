@@ -13,7 +13,8 @@ Resolution order for a tool ``T``:
     2. per-conversation ``"*"`` wildcard
     3. global explicit entry for ``T``
     4. global ``"*"`` wildcard
-    5. fallback: ``"ask"``
+    5. fallback: ``"allow"`` for safe tools (``dangerous=False``),
+       ``"ask"`` for dangerous ones
 
 ``"ask"`` means the executor emits a ``tool_approval_request`` event and waits
 for the client to approve/deny via the approval endpoint.
@@ -48,21 +49,21 @@ class PermissionsConfig:
     def resolve(self, tool_name: str, *, dangerous: bool = False) -> Decision:
         """Resolve the effective decision for ``tool_name``.
 
-        Precedence: explicit name > ``"*"`` > fallback ``"ask"``. The
-        ``dangerous`` flag is informational and does not override the map; it
-        only affects the fallback reasoning if you choose to extend this. The
-        default fallback is ``"ask"`` so unknown tools never silently run.
+        Precedence: explicit name > ``"*"`` > dangerous-aware fallback. The
+        fallback is ``"allow"`` for safe tools (``dangerous=False``, e.g.
+        ``web_search`` / ``read_file``) so read-only tools run straight through
+        out of the box, and ``"ask"`` for dangerous ones (``python_execute``)
+        so side-effecting tools still require confirmation. Explicit entries
+        and the wildcard always take precedence over the fallback.
         """
         if tool_name in self.tools:
             decision = self.tools[tool_name]
         elif "*" in self.tools:
             decision = self.tools["*"]
         else:
-            # Safe default: ask before running anything unconfigured. Dangerous
-            # tools are also "ask" (they would be anyway), but kept explicit
-            # for readability / future tuning.
-            _ = dangerous  # noqa: F841 - documented, not currently branching
-            decision = "ask"
+            # No policy applies. Safe tools run by default; dangerous ones
+            # (code execution, destructive ops) still prompt.
+            decision = "ask" if dangerous else "allow"
         return _coerce_decision(decision, tool_name)  # type: ignore[return-value]
 
     def to_dict(self) -> dict[str, str]:

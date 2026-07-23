@@ -35,6 +35,40 @@ const PERM_STYLES: Record<ToolPermission, string> = {
   deny: "bg-red-500/15 text-red-600",
 }
 
+/**
+ * Quick permission presets. Selecting one writes a permission map that
+ * expresses the chosen posture; the user can then fine-tune individual tools
+ * in the matrix below. "allow edits" runs file/list tools freely but still
+ * confirms before executing code (the riskiest built-in).
+ */
+type PermissionMode = "ask" | "allow" | "allow_edits"
+
+const MODE_PRESETS: Record<PermissionMode, ToolPermissions> = {
+  ask: { "*": "ask" },
+  allow: { "*": "allow" },
+  allow_edits: { "*": "allow", python_execute: "ask" },
+}
+
+const MODE_LABELS: { mode: PermissionMode; label: string; hint: string }[] = [
+  { mode: "ask", label: "Always ask", hint: "Confirm every tool call" },
+  { mode: "allow_edits", label: "Allow edits", hint: "Free files; confirm code" },
+  { mode: "allow", label: "Always allow", hint: "Run everything without asking" },
+]
+
+/** Derive the active preset from a permission map (for highlighting). */
+function modeFromPerms(perms: ToolPermissions): PermissionMode | null {
+  for (const [mode, preset] of Object.entries(MODE_PRESETS) as [PermissionMode, ToolPermissions][]) {
+    const keys = Object.keys(preset)
+    if (
+      keys.length === Object.keys(perms).length &&
+      keys.every((k) => perms[k] === preset[k])
+    ) {
+      return mode
+    }
+  }
+  return null
+}
+
 interface ConversationSettingsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -123,9 +157,31 @@ export function ConversationSettingsDialog({
 
           <div className="space-y-2">
             <Label>Tool permissions</Label>
+            <div className="grid grid-cols-3 gap-2">
+              {MODE_LABELS.map(({ mode, label, hint }) => {
+                const active = modeFromPerms(perms) === mode
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setPerms({ ...MODE_PRESETS[mode] })}
+                    className={cn(
+                      "rounded-md border px-2 py-1.5 text-left transition-colors",
+                      active
+                        ? "border-primary bg-primary/10"
+                        : "hover:bg-muted"
+                    )}
+                  >
+                    <div className="text-xs font-medium">{label}</div>
+                    <div className="text-[10px] text-muted-foreground">{hint}</div>
+                  </button>
+                )
+              })}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Click a cell to cycle: allow → ask → deny. The “*” row is the
-              default for any tool not listed.
+              Pick a preset, then fine-tune below. Click a cell to cycle:
+              allow → ask → deny. The “*” row is the default for any tool not
+              listed.
             </p>
             <div className="rounded-md border">
               {TOOL_NAMES.map((tool, i) => {

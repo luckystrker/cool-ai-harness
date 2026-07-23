@@ -37,20 +37,25 @@ export async function* streamConversationMessage(
   let buffer = ""
 
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
 
-      // SSE events are separated by a blank line. Parse complete ones.
-      let sepIndex: number
-      while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, sepIndex)
-        buffer = buffer.slice(sepIndex + 2)
-        const parsed = parseSseEvent(rawEvent)
-        if (parsed) yield parsed
+        // SSE events are separated by a blank line. Servers may emit either
+        // CRLF ("\r\n\r\n", e.g. sse-starlette) or LF ("\n\n") line endings —
+        // accept both, preferring CRLF so we don't miss events and have them
+        // pile up in the buffer until the stream closes (which made the
+        // approval dialog never appear).
+        let sepIndex: number
+        while ((sepIndex = findFrameEnd(buffer)) !== -1) {
+          const sepLen = buffer.startsWith("\r\n\r\n", sepIndex) ? 4 : 2
+          const rawEvent = buffer.slice(0, sepIndex)
+          buffer = buffer.slice(sepIndex + sepLen)
+          const parsed = parseSseEvent(rawEvent)
+          if (parsed) yield parsed
+        }
       }
-    }
     // Flush any trailing event.
     if (buffer.trim()) {
       const parsed = parseSseEvent(buffer)
@@ -61,16 +66,32 @@ export async function* streamConversationMessage(
   }
 }
 
+/**
+ * Index of the next SSE frame boundary in `buffer`, or -1 if none yet.
+ * Handles both CRLF ("\r\n\r\n") and LF ("\n\n") frame separators. A bare LF
+ * boundary is also detected even when the server uses CRLF line endings, by
+ * looking for two consecutive newlines regardless of carriage returns.
+ */
+function findFrameEnd(buffer: string): number {
+  const crlf = buffer.indexOf("\r\n\r\n")
+  const lf = buffer.indexOf("\n\n")
+  if (crlf === -1) return lf
+  if (lf === -1) return crlf
+  return Math.min(crlf, lf)
+}
+
 /** Parse one SSE frame ("event: <kind>\ndata: <json>") into an AgentEvent. */
 function parseSseEvent(raw: string): AgentEvent | null {
   let kind = "message"
   const dataLines: string[] = []
 
   for (const line of raw.split("\n")) {
-    if (line.startsWith("event:")) {
-      kind = line.slice(6).trim()
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trim())
+    // Strip a trailing CR so CRLF-delimited frames parse identically to LF.
+    const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line
+    if (trimmed.startsWith("event:")) {
+      kind = trimmed.slice(6).trim()
+    } else if (trimmed.startsWith("data:")) {
+      dataLines.push(trimmed.slice(5).trim())
     }
   }
 
