@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Plus, Settings, Trash2, MessageSquare, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
+import { loadAgentDefaults } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -35,7 +36,15 @@ export function Sidebar() {
     onError: (e) => toast.error("Failed to delete", { description: String(e) }),
   })
 
-  const handleCreate = () => createMutation.mutate({})
+  const handleCreate = () => {
+    // Apply the global agent defaults (Settings → Agent) to new conversations.
+    const defaults = loadAgentDefaults()
+    createMutation.mutate({
+      permissions: defaults.permissions,
+      capability_policy: defaults.capabilityPolicy,
+      breakpoints: defaults.breakpoints,
+    })
+  }
   const handleDelete = (id: number) => deleteMutation.mutate(id)
 
   return (

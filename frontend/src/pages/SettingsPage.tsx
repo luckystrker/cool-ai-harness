@@ -1,9 +1,27 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
-import type { Provider, ProviderCreate, ProviderUpdate } from "@/api/types"
+import type {
+  BreakpointConfig,
+  BreakpointType,
+  CapabilityPolicy,
+  Provider,
+  ProviderCreate,
+  ProviderUpdate,
+  ToolPermission,
+  ToolPermissions,
+} from "@/api/types"
+import {
+  BREAKPOINT_TYPES,
+  CAPABILITY_NAMES,
+  PERMISSIONS,
+  PERM_STYLES,
+  TOOL_NAMES,
+  loadAgentDefaults,
+  saveAgentDefaults,
+} from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -24,6 +42,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import { cn } from "@/lib/utils"
 
 const EMPTY_FORM: ProviderCreate = {
   name: "openai",
@@ -147,6 +166,9 @@ export function SettingsPage() {
             ))}
           </div>
         )}
+
+        {/* Global agent configuration (defaults for new conversations). */}
+        <AgentConfigSection />
       </div>
 
       <EditProviderDialog
@@ -403,5 +425,188 @@ function EditProviderDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// --- Global agent configuration ---
+
+/**
+ * Global agent defaults: tool-permission matrix, capability policy, and
+ * breakpoints. Persisted in localStorage and applied to every newly created
+ * conversation (see Sidebar). Per-conversation overrides set from the chat
+ * composer's mode picker still take precedence.
+ */
+function AgentConfigSection() {
+  const [perms, setPerms] = useState<ToolPermissions>(
+    () => loadAgentDefaults().permissions
+  )
+  const [capPolicy, setCapPolicy] = useState<CapabilityPolicy>(
+    () => loadAgentDefaults().capabilityPolicy
+  )
+  const [bpList, setBpList] = useState<BreakpointConfig[]>(
+    () => loadAgentDefaults().breakpoints
+  )
+
+  const cycle = (tool: string) => {
+    setPerms((cur) => {
+      const current = (cur[tool] ?? "ask") as ToolPermission
+      const nextIdx = (PERMISSIONS.indexOf(current) + 1) % PERMISSIONS.length
+      return { ...cur, [tool]: PERMISSIONS[nextIdx] }
+    })
+  }
+
+  const cycleCap = (cap: string) => {
+    setCapPolicy((cur) => {
+      const current = (cur[cap] ?? "allow") as ToolPermission
+      const nextIdx = (PERMISSIONS.indexOf(current) + 1) % PERMISSIONS.length
+      return { ...cur, [cap]: PERMISSIONS[nextIdx] }
+    })
+  }
+
+  const toggleBreakpoint = (type: BreakpointType) => {
+    setBpList((cur) => {
+      const exists = cur.some((bp) => bp.type === type)
+      if (exists) return cur.filter((bp) => bp.type !== type)
+      return [...cur, { type, fallback: "deny" as const }]
+    })
+  }
+
+  const handleSave = () => {
+    saveAgentDefaults({ permissions: perms, capabilityPolicy: capPolicy, breakpoints: bpList })
+    toast.success("Agent defaults saved", {
+      description: "Applied to newly created conversations.",
+    })
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <ShieldCheck className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-lg">Agent</CardTitle>
+            <CardDescription>
+              Default tool permissions, capability gates, and breakpoints for
+              new conversations.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {/* Tool permissions */}
+        <div className="space-y-2">
+          <Label>Tool permissions</Label>
+          <p className="text-xs text-muted-foreground">
+            Click a cell to cycle: allow → ask → deny. The “*” row is the
+            default for any tool not listed.
+          </p>
+          <div className="rounded-md border">
+            {TOOL_NAMES.map((tool, i) => {
+              const value = (perms[tool] ?? (tool === "*" ? "ask" : "inherit")) as
+                | ToolPermission
+                | "inherit"
+              return (
+                <div
+                  key={tool}
+                  className={cn(
+                    "flex items-center justify-between px-3 py-2",
+                    i > 0 && "border-t"
+                  )}
+                >
+                  <span className="font-mono text-xs">{tool}</span>
+                  <button
+                    type="button"
+                    onClick={() => cycle(tool)}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium capitalize transition-colors",
+                      value === "inherit"
+                        ? "bg-muted text-muted-foreground"
+                        : PERM_STYLES[value]
+                    )}
+                  >
+                    {value}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Capability policy */}
+        <div className="space-y-2">
+          <Label>Capability policy</Label>
+          <p className="text-xs text-muted-foreground">
+            Coarse-grained gates applied before per-tool permissions. The more
+            restrictive of the two layers wins. Click to cycle.
+          </p>
+          <div className="rounded-md border">
+            {CAPABILITY_NAMES.map((cap, i) => {
+              const value = (capPolicy[cap] ?? (cap === "*" ? "allow" : "inherit")) as
+                | ToolPermission
+                | "inherit"
+              return (
+                <div
+                  key={cap}
+                  className={cn(
+                    "flex items-center justify-between px-3 py-2",
+                    i > 0 && "border-t"
+                  )}
+                >
+                  <span className="font-mono text-xs">{cap}</span>
+                  <button
+                    type="button"
+                    onClick={() => cycleCap(cap)}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium capitalize transition-colors",
+                      value === "inherit"
+                        ? "bg-muted text-muted-foreground"
+                        : PERM_STYLES[value]
+                    )}
+                  >
+                    {value}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Breakpoints */}
+        <div className="space-y-2">
+          <Label>Breakpoints</Label>
+          <p className="text-xs text-muted-foreground">
+            Pause the agent at key points for human review. The agent blocks
+            until you approve or the timeout fires.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {BREAKPOINT_TYPES.map(({ type, label, hint }) => {
+              const active = bpList.some((bp) => bp.type === type)
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => toggleBreakpoint(type)}
+                  className={cn(
+                    "rounded-md border px-2 py-1.5 text-left transition-colors",
+                    active
+                      ? "border-primary bg-primary/10"
+                      : "hover:bg-muted"
+                  )}
+                >
+                  <div className="text-xs font-medium">{label}</div>
+                  <div className="text-[10px] text-muted-foreground">{hint}</div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button onClick={handleSave}>Save agent defaults</Button>
+        </div>
+      </CardContent>
+    </Card>
   )
 }

@@ -1,28 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { MessageSquare, Sparkles, ChevronDown, Check, Pencil, Settings2, Paperclip } from "lucide-react"
+import { MessageSquare, Sparkles, Paperclip } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
 import { providersApi } from "@/api/providers"
-import type { BreakpointConfig, Message, ToolPermissions } from "@/api/types"
+import type { Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ApprovalDialog } from "@/components/chat/ApprovalDialog"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
-import { ConversationSettingsDialog } from "@/components/chat/ConversationSettingsDialog"
+import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
 import { useConversationStream } from "@/hooks/useConversationStream"
+import { MODE_PRESETS, modeFromPerms, type PermissionMode } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 
 export function ChatPage() {
@@ -53,7 +45,6 @@ export function ChatPage() {
     respondApproval,
   } = useConversationStream()
 
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
 
@@ -98,9 +89,38 @@ export function ChatPage() {
     onError: (e) => toast.error("Failed to change model", { description: String(e) }),
   })
 
+  const workdirMutation = useMutation({
+    mutationFn: (vars: { id: number; working_directory: string }) =>
+      conversationsApi.update(vars.id, { working_directory: vars.working_directory }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+      queryClient.invalidateQueries({ queryKey: ["workspace-recent"] })
+    },
+    onError: (e) => toast.error("Failed to change working directory", { description: String(e) }),
+  })
+
+  const modeMutation = useMutation({
+    mutationFn: (vars: { id: number; permissions: ToolPermissions }) =>
+      conversationsApi.update(vars.id, { permissions: vars.permissions }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+    },
+    onError: (e) => toast.error("Failed to change agent mode", { description: String(e) }),
+  })
+
   const handleModelChange = (model: string) => {
     if (!convId || !model.trim()) return
     updateMutation.mutate({ id: convId, model: model.trim() })
+  }
+
+  const handleWorkdirChange = (dir: string) => {
+    if (!convId || !dir.trim()) return
+    workdirMutation.mutate({ id: convId, working_directory: dir.trim() })
+  }
+
+  const handleModeChange = (mode: PermissionMode) => {
+    if (!convId) return
+    modeMutation.mutate({ id: convId, permissions: { ...MODE_PRESETS[mode] } })
   }
 
   const handleSend = async (content: string) => {
@@ -148,25 +168,10 @@ export function ChatPage() {
         <span className="truncate font-medium">
           {detail?.title || `Conversation #${convId}`}
         </span>
-        <ModelPicker
-          currentModel={currentModel}
-          suggestedModels={suggestedModels}
-          onChange={handleModelChange}
-          pending={updateMutation.isPending}
-        />
         <Button
           variant="ghost"
           size="sm"
-          className="px-2 text-muted-foreground"
-          title="Conversation settings (working directory & permissions)"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings2 className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn("px-2", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
+          className={cn("ml-auto px-2", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
           title="Toggle attachments panel"
           onClick={() => setArtifactsOpen((v) => !v)}
         >
@@ -207,6 +212,18 @@ export function ChatPage() {
               streaming={isStreaming}
               pendingFiles={pendingFiles}
               onRemoveFile={handleRemoveFile}
+              toolbar={
+                <ComposerToolbar
+                  workingDirectory={detail?.working_directory ?? null}
+                  onWorkingDirectoryChange={handleWorkdirChange}
+                  mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
+                  onModeChange={handleModeChange}
+                  currentModel={currentModel}
+                  suggestedModels={suggestedModels}
+                  onModelChange={handleModelChange}
+                  modelPending={updateMutation.isPending}
+                />
+              }
             />
           </div>
         </div>
@@ -219,150 +236,7 @@ export function ChatPage() {
       </div>
 
       <ApprovalDialog approval={pendingApproval} onRespond={respondApproval} />
-      <ConversationSettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        conversationId={convId}
-        workingDirectory={detail?.working_directory ?? null}
-        permissions={(detail?.permissions as ToolPermissions | null) ?? null}
-        capabilityPolicy={(detail?.capability_policy as ToolPermissions | null) ?? null}
-        breakpoints={(detail?.breakpoints as BreakpointConfig[] | null) ?? null}
-        onSaved={() => {
-          queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
-        }}
-      />
     </div>
-  )
-}
-
-/**
- * Inline model picker for the chat header.
- *
- * Shows the conversation's current model as a button; clicking it opens a
- * dropdown of provider default_model values plus a "Custom…" entry that lets
- * the user type any model identifier.
- */
-function ModelPicker({
-  currentModel,
-  suggestedModels,
-  onChange,
-  pending,
-}: {
-  currentModel: string
-  suggestedModels: string[]
-  onChange: (model: string) => void
-  pending: boolean
-}) {
-  const [customOpen, setCustomOpen] = useState(false)
-  const [customValue, setCustomValue] = useState("")
-
-  const selectModel = (model: string) => {
-    onChange(model)
-  }
-
-  const submitCustom = () => {
-    const v = customValue.trim()
-    if (!v) return
-    onChange(v)
-    setCustomOpen(false)
-    setCustomValue("")
-  }
-
-  return (
-    <DropdownMenu onOpenChange={(open) => { if (!open) setCustomOpen(false) }}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto gap-1.5 px-2 text-xs font-normal text-muted-foreground"
-          title="Change model"
-        >
-          {pending ? (
-            <span className="text-muted-foreground">saving…</span>
-          ) : currentModel ? (
-            <span className="font-mono">{currentModel}</span>
-          ) : (
-            <span>Set model</span>
-          )}
-          <ChevronDown className="h-3 w-3" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        {currentModel && (
-          <>
-            <DropdownMenuLabel className="text-xs text-muted-foreground">
-              Current
-            </DropdownMenuLabel>
-            <DropdownMenuItem
-              className="font-mono text-xs"
-              onSelect={(e) => {
-                e.preventDefault()
-              }}
-            >
-              <Check className="h-3.5 w-3.5" /> {currentModel}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
-        )}
-
-        {suggestedModels.length > 0 && (
-          <>
-            <DropdownMenuLabel className="text-xs text-muted-foreground">
-              Provider models
-            </DropdownMenuLabel>
-            {suggestedModels.map((m) => (
-              <DropdownMenuItem
-                key={m}
-                className="font-mono text-xs"
-                onSelect={(e) => {
-                  e.preventDefault()
-                  selectModel(m)
-                }}
-              >
-                {m === currentModel ? (
-                  <Check className="h-3.5 w-3.5" />
-                ) : (
-                  <span className="inline-block h-3.5 w-3.5" />
-                )}
-                {m}
-              </DropdownMenuItem>
-            ))}
-            <DropdownMenuSeparator />
-          </>
-        )}
-
-        {customOpen ? (
-          <form
-            className="flex items-center gap-1 p-1"
-            onSubmit={(e) => {
-              e.preventDefault()
-              submitCustom()
-            }}
-          >
-            <Input
-              autoFocus
-              placeholder="model name"
-              value={customValue}
-              onChange={(e) => setCustomValue(e.target.value)}
-              className="h-8 font-mono text-xs"
-            />
-            <Button type="submit" size="sm" className="h-8 px-2">
-              Set
-            </Button>
-          </form>
-        ) : (
-          <DropdownMenuItem
-            className={cn("text-xs", !suggestedModels.length && !currentModel && "")}
-            onSelect={(e) => {
-              e.preventDefault()
-              setCustomOpen(true)
-            }}
-          >
-            <Pencil className="h-3.5 w-3.5" /> Custom model…
-          </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
   )
 }
 

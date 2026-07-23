@@ -13,6 +13,7 @@ from app.api.providers import router as providers_router
 from app.api.routes import router as api_router
 from app.api.runs import router as runs_router
 from app.api.websocket import router as ws_router
+from app.api.workspace import router as workspace_router
 from app.core.config import get_settings
 from app.core.db import init_db
 from app.core.logging import configure_logging, get_logger
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(runs_router, prefix="/api")
     app.include_router(providers_router, prefix="/api")
     app.include_router(artifacts_router, prefix="/api")
+    app.include_router(workspace_router, prefix="/api")
     app.include_router(ws_router)  # WebSocket routes live at /ws/...
 
     return app

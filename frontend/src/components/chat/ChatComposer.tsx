@@ -12,6 +12,8 @@ export interface ChatComposerProps {
   /** Files pending upload (shown as chips above the input). */
   pendingFiles?: File[]
   onRemoveFile?: (index: number) => void
+  /** Optional toolbar rendered below the input (workdir, mode, model pickers). */
+  toolbar?: React.ReactNode
 }
 
 /** Auto-growing textarea with send + attach buttons. Enter to send, Shift+Enter for newline. */
@@ -23,6 +25,7 @@ export function ChatComposer({
   disabled,
   pendingFiles = [],
   onRemoveFile,
+  toolbar,
 }: ChatComposerProps) {
   const [value, setValue] = useState("")
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -140,6 +143,8 @@ export function ChatComposer({
             </Button>
           )}
         </div>
+
+        {toolbar}
       </div>
     </div>
   )

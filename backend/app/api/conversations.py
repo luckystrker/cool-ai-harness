@@ -113,11 +113,16 @@ def get_conversation_detail(
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     msgs = list_messages(session, conv_id)
+    meta = conv.metadata_ or {}
     return ConversationDetail(
         id=conv.id,
         user_id=conv.user_id,
         title=conv.title,
         model=conv.model,
+        working_directory=conv.working_directory,
+        permissions=conv.permissions,
+        capability_policy=conv.capability_policy,
+        breakpoints=meta.get("breakpoints"),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         messages=[_msg_to_out(m) for m in msgs],
