@@ -8,10 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from sse_starlette.sse import EventSourceResponse
 
+from app.agent.approvals import approval_registry
+from app.agent.permissions import validate as validate_permissions
 from app.agent.runners import run_conversation_turn
+from app.agent.runs import run_registry
 from app.agent.service import (
     append_message,
     create_conversation,
+    create_run,
     delete_conversation,
     get_conversation,
     get_or_create_default_user,
@@ -28,8 +32,6 @@ from app.api.schemas import (
     SendMessageRequest,
     ToolApprovalRequest,
 )
-from app.agent.approvals import approval_registry
-from app.agent.permissions import validate as validate_permissions
 from app.core.config import get_settings
 from app.core.db import get_session
 from app.providers import get_default_provider
@@ -113,9 +115,7 @@ def get_conversation_detail(
 
 
 @router.delete("/conversations/{conv_id}")
-def delete_conversation_route(
-    conv_id: int, session: Session = Depends(get_session)
-) -> dict:
+def delete_conversation_route(conv_id: int, session: Session = Depends(get_session)) -> dict:
     if not delete_conversation(session, conv_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"deleted": conv_id}
@@ -173,6 +173,10 @@ async def post_message(
     model = body.model or conv.model or settings.default_model
     provider = get_default_provider()
 
+    # Create a durable run row so this turn is observable, resumable-aware, and
+    # cancellable. The run_id flows into the agent loop via the runner.
+    run = create_run(session, conversation_id=conv_id, model=model)
+
     async def event_stream() -> AsyncIterator[dict]:
         try:
             async for event in run_conversation_turn(
@@ -185,12 +189,16 @@ async def post_message(
                 tool_names=body.tool_names,
                 working_directory=conv.working_directory,
                 conversation_permissions=conv.permissions,
+                run_id=run.id,
+                cancellable=True,
             ):
                 yield {"event": event.kind, "data": event.to_dict_json()}
         finally:
-            # If the client disconnects mid-approval (SSE closed), cancel any
-            # pending approval we were waiting on so the loop doesn't hang.
+            # If the client disconnects (SSE closed), cancel any pending
+            # approval and signal the run to stop so the loop doesn't hang or
+            # keep working for a dead client.
             approval_registry.cancel_for_conversation(conv_id)
+            run_registry.cancel_for_conversation(conv_id)
 
     return EventSourceResponse(event_stream())
 

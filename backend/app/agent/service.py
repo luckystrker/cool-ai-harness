@@ -11,8 +11,9 @@ from collections.abc import Sequence
 
 from sqlmodel import Session, select
 
-from app.models import Conversation, User
+from app.models import AgentRun, Conversation, RunEvent, User
 from app.models import Message as MessageRow
+from app.models.run import RUN_STATUS_RUNNING, finish_reason_to_status
 from app.providers import Message
 
 
@@ -112,9 +113,7 @@ def delete_conversation(session: Session, conv_id: int) -> bool:
 def load_history(session: Session, conv_id: int) -> list[Message]:
     """Load a conversation's messages in chronological order as provider Messages."""
     rows = session.exec(
-        select(MessageRow)
-        .where(MessageRow.conversation_id == conv_id)
-        .order_by(MessageRow.id)
+        select(MessageRow).where(MessageRow.conversation_id == conv_id).order_by(MessageRow.id)
     ).all()
     return [
         Message(
@@ -156,7 +155,131 @@ def append_message(
 
 def list_messages(session: Session, conv_id: int) -> Sequence[MessageRow]:
     return session.exec(
-        select(MessageRow)
-        .where(MessageRow.conversation_id == conv_id)
-        .order_by(MessageRow.id)
+        select(MessageRow).where(MessageRow.conversation_id == conv_id).order_by(MessageRow.id)
+    ).all()
+
+
+# --- Agent runs (Фаза 1.5 — durable runs) ---------------------------------
+
+
+def create_run(
+    session: Session,
+    *,
+    conversation_id: int,
+    user_id: int | None = None,
+    model: str | None = None,
+    config: dict | None = None,
+    status: str = RUN_STATUS_RUNNING,
+) -> AgentRun:
+    """Create and persist a new AgentRun row."""
+    run = AgentRun(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        status=status,
+        model=model,
+        config=config,
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def update_run(session: Session, run_id: int, **fields) -> AgentRun | None:
+    """Patch arbitrary columns on a run. Returns the run, or None if not found.
+
+    Callers pass only the fields they want to change (e.g. status=...,
+    iterations=..., usage=...). ``None`` values are written as-is, so use
+    update_run_status/finish_run helpers when a sentinel-free update is needed.
+    """
+    run = session.get(AgentRun, run_id)
+    if run is None:
+        return None
+    for key, value in fields.items():
+        setattr(run, key, value)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def update_run_status(session: Session, run_id: int, status: str) -> AgentRun | None:
+    return update_run(session, run_id, status=status)
+
+
+def finish_run(
+    session: Session,
+    run_id: int,
+    *,
+    finish_reason: str,
+    usage: dict | None = None,
+    iterations: int | None = None,
+    error: str | None = None,
+) -> AgentRun | None:
+    """Mark a run terminal: status derived from the finish reason, timestamps set.
+
+    ``iterations`` is only written when provided (it's NOT NULL); ``usage`` and
+    ``error`` are written as-is (None clears them, which is valid for both).
+    """
+    from app.models.base import _utcnow
+
+    fields: dict = {
+        "status": finish_reason_to_status(finish_reason),
+        "finish_reason": finish_reason,
+        "finished_at": _utcnow(),
+    }
+    if iterations is not None:
+        fields["iterations"] = iterations
+    # usage/error are nullable, so passing None to clear them is fine.
+    fields["usage"] = usage
+    if error is not None:
+        fields["error"] = error
+    return update_run(session, run_id, **fields)
+
+
+def get_run(session: Session, run_id: int) -> AgentRun | None:
+    return session.get(AgentRun, run_id)
+
+
+def list_runs(session: Session, *, conversation_id: int) -> Sequence[AgentRun]:
+    """Runs for a conversation, newest first."""
+    return session.exec(
+        select(AgentRun)
+        .where(AgentRun.conversation_id == conversation_id)
+        .order_by(AgentRun.id.desc())
+    ).all()
+
+
+def append_run_events(
+    session: Session, *, run_id: int, events: list[tuple[str, dict | None]]
+) -> list[RunEvent]:
+    """Append a batch of run-event rows in order.
+
+    Each tuple is (kind, payload). ``seq`` is computed from the run's current
+    max seq so events stay monotonic across batches. Commits once for the batch
+    rather than per-event.
+    """
+    if not events:
+        return []
+    current_max = session.exec(
+        select(RunEvent.seq).where(RunEvent.run_id == run_id).order_by(RunEvent.seq.desc())
+    ).first()
+    # ``current_max`` is None when the run has no events yet, else an int (which
+    # may legitimately be 0 — so use an explicit None check, not ``or``).
+    next_seq = (-1 if current_max is None else current_max) + 1
+    rows: list[RunEvent] = []
+    for offset, (kind, payload) in enumerate(events):
+        row = RunEvent(run_id=run_id, seq=next_seq + offset, kind=kind, payload=payload)
+        session.add(row)
+        rows.append(row)
+    session.commit()
+    for row in rows:
+        session.refresh(row)
+    return rows
+
+
+def list_run_events(session: Session, *, run_id: int) -> Sequence[RunEvent]:
+    """All events for a run, in seq order (the order the loop emitted them)."""
+    return session.exec(
+        select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)
     ).all()

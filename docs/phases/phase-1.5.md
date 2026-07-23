@@ -7,12 +7,36 @@
 
 ---
 
-## 1. Durable agent runs (`app/agent/runs/`)
+## 1. Durable agent runs ✅
+
+**Реализовано:** `AgentRun` + append-only event log (`run_events`), статус запуска
+(running/awaiting_approval/completed/failed/cancelled), кумулятивный usage,
+checkpoint после каждого tool call, отмена через `run_registry` (in-process),
+cost/token budget guards, конфигурируемые лимиты (`agent_max_iterations`,
+`agent_max_total_tokens`, `agent_max_cost_usd`, `agent_run_timeout_s`).
+
+API: `GET /conversations/{id}/runs`, `GET .../runs/{id}` (детали + event log),
+`GET .../runs/{id}/events`, `POST .../runs/{id}/cancel`. Миграции — через
+Alembic (`backend/alembic`), baseline + `agent_runs`/`run_events`.
+
+**Что отложено** (к Разделу 6 — Inspector/Replay): полная реконструкция
+оборванной mid-LLM-stream итерации и рестарт процесса с продолжением;
+idempotency key / retry-policy для фоновых работ (когда появятся cron-задачи,
+Фаза 3b). Текущий checkpoint фиксирует последний завершённый шаг и event log
+сохраняет каждое событие — этого достаточно для replay и будущего resume.
+
+---
+
+<details>
+<summary>Исходная спецификация раздела</summary>
 
 - `AgentRun` + append-only event log: состояние запуска, шаги LLM/tool, стоимость, ошибка и итоговый артефакт
 - Отмена, таймаут, ограничение числа итераций и бюджета; корректная остановка дочерних задач
 - Checkpoint после каждого tool call; reconnect/replay стрима без потери прогресса
 - Для фоновых работ: idempotency key, retry-policy с backoff и защита от повторного выполнения
+
+</details>
+
 
 ## 2. Capability security (`app/security/`, `app/tools/`)
 

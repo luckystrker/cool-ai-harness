@@ -17,7 +17,8 @@ import contextlib
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agent.runners import run_conversation_turn
-from app.agent.service import append_message, get_conversation
+from app.agent.runs import run_registry
+from app.agent.service import append_message, create_run, get_conversation
 from app.api.schemas import SendMessageRequest
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -72,6 +73,9 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                 model = body.model or conv.model or settings.default_model
                 provider = get_default_provider()
 
+                # Durable run: one row per turn, observable + cancellable.
+                run = create_run(session, conversation_id=conv_id, model=model)
+
                 try:
                     async for event in run_conversation_turn(
                         session=session,
@@ -83,16 +87,20 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                         tool_names=body.tool_names,
                         working_directory=conv.working_directory,
                         conversation_permissions=conv.permissions,
+                        run_id=run.id,
+                        cancellable=True,
                     ):
                         await websocket.send_text(event.to_dict_json())
                 except Exception as exc:
                     log.error("ws.turn_failed", conv_id=conv_id, error=str(exc))
                     await _send_error(websocket, f"Turn failed: {exc}")
                 finally:
-                    # Release any pending approvals if the turn ended early.
+                    # Release any pending approvals and signal the run to stop
+                    # if the turn ended early (client gone / error).
                     from app.agent.approvals import approval_registry
 
                     approval_registry.cancel_for_conversation(conv_id)
+                    run_registry.cancel_for_conversation(conv_id)
     except WebSocketDisconnect:
         log.info("ws.disconnected", conv_id=conv_id)
     except Exception as exc:

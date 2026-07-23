@@ -43,6 +43,34 @@ curl -X POST http://localhost:8000/api/chat \
   -d '{"messages":[{"role":"user","content":"Say hello in one short sentence."}]}'
 ```
 
+## Durable runs & migrations
+
+Each agent turn is a **durable run** (Фаза 1.5): an `agent_runs` row tracks its
+status (`running` → `completed`/`failed`/`cancelled`), cumulative token/cost
+usage, iterations, and outcome; an append-only `run_events` log records every
+event for replay/inspection. Interactive runs (SSE/WebSocket) are cancellable
+via the registry and the cancel endpoint.
+
+```bash
+# List/detail a conversation's runs and their event logs
+curl http://localhost:8000/api/conversations/1/runs
+curl http://localhost:8000/api/conversations/1/runs/1
+curl http://localhost:8000/api/conversations/1/runs/1/events
+
+# Signal a running run to stop
+curl -X POST http://localhost:8000/api/conversations/1/runs/1/cancel
+```
+
+Schema changes are managed with **Alembic** (`backend/alembic`). In production
+the app applies `alembic upgrade head` on startup; in development/tests it uses
+`SQLModel.create_all` (models are the source of truth there).
+
+```bash
+cd backend
+alembic upgrade head                          # apply migrations
+alembic revision --autogenerate -m "..."      # create a new migration
+```
+
 ## Project layout
 
 ```
@@ -52,7 +80,7 @@ cool-ai-harness/
 │   │   ├── main.py              # FastAPI entrypoint
 │   │   ├── core/                # config, logging, db, security
 │   │   ├── providers/           # LLM provider abstraction (OpenAI-compatible)
-│   │   ├── agent/               # agent loop + subagents (planned)
+│   │   ├── agent/               # agent loop + durable runs + approvals
 │   │   ├── tools/               # tool registry + builtins (planned)
 │   │   ├── skills/              # skill registry + builtins (planned)
 │   │   ├── mcp/                 # MCP client (planned)
@@ -62,6 +90,7 @@ cool-ai-harness/
 │   │   ├── telegram/            # bot + web app (planned, Фаза 5)
 │   │   ├── models/              # SQLModel tables
 │   │   └── observability/       # analytics (planned, Фаза 3a)
+│   ├── alembic/                 # database migrations (Фаза 1.5)
 │   ├── tests/
 │   └── pyproject.toml
 ├── frontend/                    # React SPA (planned)

@@ -112,3 +112,49 @@ class ToolApprovalRequest(BaseModel):
     """
 
     approved: bool
+
+
+# --- agent runs (Фаза 1.5 — durable runs) ---
+
+
+class RunEventOut(BaseModel):
+    """One row of a run's append-only event log."""
+
+    id: int
+    run_id: int
+    seq: int
+    kind: str
+    payload: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class RunOut(BaseModel):
+    """Summary of a run (list/detail)."""
+
+    id: int
+    conversation_id: int
+    status: str
+    model: str | None = None
+    iterations: int = 0
+    usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunDetail(RunOut):
+    """A run plus its config snapshot, checkpoint, and full event log."""
+
+    config: dict[str, Any] | None = None
+    checkpoint: dict[str, Any] | None = None
+    events: list[RunEventOut] = []
+
+
+class CancelRunResponse(BaseModel):
+    """Result of a cancel request."""
+
+    run_id: int
+    cancelled: bool

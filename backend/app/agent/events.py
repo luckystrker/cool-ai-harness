@@ -15,16 +15,16 @@ from app.providers import Usage
 
 # Event type tags. Keep stable — clients (frontend, telegram) parse them.
 EventKind = Literal[
-    "start",                # loop started
-    "thinking",             # a streamed reasoning / chain-of-thought fragment
-    "token",                # a streamed assistant text token
-    "tool_call_start",      # model requested a tool call (full call info)
-    "tool_call_delta",      # incremental tool-call args fragment (rare; usually we batch)
+    "start",  # loop started
+    "thinking",  # a streamed reasoning / chain-of-thought fragment
+    "token",  # a streamed assistant text token
+    "tool_call_start",  # model requested a tool call (full call info)
+    "tool_call_delta",  # incremental tool-call args fragment (rare; usually we batch)
     "tool_approval_request",  # tool needs human approval before running; client must respond
-    "tool_result",          # tool finished with its ToolResult
-    "message",              # a complete assistant message persisted
-    "finish",               # loop finished (terminal); carries usage + reason
-    "error",                # unrecoverable error
+    "tool_result",  # tool finished with its ToolResult
+    "message",  # a complete assistant message persisted
+    "finish",  # loop finished (terminal); carries usage + reason
+    "error",  # unrecoverable error
 ]
 
 
@@ -32,6 +32,7 @@ EventKind = Literal[
 class AgentEvent:
     kind: EventKind
     # Free-form payload, shape depends on kind:
+    #   start:            {"conversation_id": int | None, "run_id": int | None}
     #   thinking:         {"text": str}
     #   token:            {"text": str}
     #   tool_call_start:  {"id": str, "name": str, "arguments": dict}
@@ -57,8 +58,16 @@ class AgentEvent:
     # --- ergonomic constructors ---
 
     @classmethod
-    def start(cls, *, conversation_id: int | None = None) -> AgentEvent:
-        return cls(kind="start", payload={"conversation_id": conversation_id})
+    def start(
+        cls,
+        *,
+        conversation_id: int | None = None,
+        run_id: int | None = None,
+    ) -> AgentEvent:
+        return cls(
+            kind="start",
+            payload={"conversation_id": conversation_id, "run_id": run_id},
+        )
 
     @classmethod
     def thinking(cls, text: str) -> AgentEvent:

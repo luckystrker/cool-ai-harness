@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     api_token: str = Field(default="", description="Bearer token for API auth (MVP single-user)")
 
     # --- Default LLM provider (MVP) ---
-    default_provider: str = Field(default="openai", description="openai|anthropic|subscription|local")
+    default_provider: str = Field(
+        default="openai", description="openai|anthropic|subscription|local"
+    )
     default_model: str = Field(default="gpt-4o-mini")
     # Default OpenAI-compatible endpoint. Override for OpenRouter/DeepSeek/Groq/Ollama.
     openai_base_url: str = "https://api.openai.com/v1"
@@ -95,6 +97,26 @@ class Settings(BaseSettings):
     approval_timeout_s: float = Field(
         default=30.0,
         description="Seconds to wait for a tool approval before auto-deny",
+    )
+
+    # --- Agent run limits (Фаза 1.5 — durable runs) ---
+    # Defaults applied to every agent run unless the caller overrides them.
+    # All can be unset (None) to disable that particular ceiling.
+    agent_max_iterations: int = Field(
+        default=10,
+        description="Max LLM round-trips per run before stopping",
+    )
+    agent_max_total_tokens: int | None = Field(
+        default=None,
+        description="Token ceiling per run; None = no limit",
+    )
+    agent_max_cost_usd: float | None = Field(
+        default=None,
+        description="Cost (USD) ceiling per run; None = no limit",
+    )
+    agent_run_timeout_s: float | None = Field(
+        default=None,
+        description="Wall-clock timeout per run in seconds; None = no timeout",
     )
 
     def ensure_dirs(self) -> None:

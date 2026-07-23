@@ -12,9 +12,7 @@ from app.core.config import get_settings
 _settings = get_settings()
 
 # check_same_thread=False: FastAPI may use threads; we rely on session-per-request.
-connect_args = (
-    {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
-)
+connect_args = {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
 
 engine = create_engine(
     _settings.database_url,
@@ -37,13 +35,42 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
 def init_db() -> None:
     """Create all tables. Called on startup.
 
-    In production, prefer Alembic migrations; this is convenient for MVP/dev.
+    In production, apply Alembic migrations (the source of truth for the live
+    schema). In development / tests, fall back to ``create_all`` + the
+    lightweight auto-migrate: models are the source of truth there, and this
+    avoids the overhead of the migration runner on every test-bootstrapped DB.
     """
     # Import models so SQLModel.metadata sees them before create_all.
     from app import models  # noqa: F401
 
-    SQLModel.metadata.create_all(engine)
-    _apply_lightweight_migrations()
+    settings = get_settings()
+    if settings.environment == "production":
+        _run_alembic_upgrade()
+    else:
+        SQLModel.metadata.create_all(engine)
+        _apply_lightweight_migrations()
+
+
+def _run_alembic_upgrade() -> None:
+    """Apply Alembic migrations up to head (production schema path).
+
+    Uses the same alembic.ini the CLI uses (``backend/alembic.ini``), so a
+    single set of migrations drives both manual and startup-driven upgrades.
+    Errors are loud: a failed migration should stop startup, not silently run
+    against a half-migrated schema.
+    """
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    from alembic import command
+
+    backend_root = Path(__file__).resolve().parents[2]
+    cfg = Config(str(backend_root / "alembic.ini"))
+    # The DB URL is resolved inside env.py from app settings; we only need to
+    # point alembic at the versions directory it already knows about.
+    cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    command.upgrade(cfg, "head")
 
 
 def _apply_lightweight_migrations() -> None:

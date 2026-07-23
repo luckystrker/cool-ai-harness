@@ -26,6 +26,7 @@ from typing import Any
 from app.agent.approvals import DEFAULT_APPROVAL_TIMEOUT_S, approval_registry
 from app.agent.events import AgentEvent
 from app.agent.permissions import Decision, PermissionsConfig
+from app.agent.runs import run_registry
 from app.core.logging import get_logger
 from app.providers import (
     LLMProvider,
@@ -67,6 +68,14 @@ class AgentConfig:
     # When True, "ask" tools run without prompting (non-interactive runners:
     # cron jobs, subagents). The approval event is never emitted.
     auto_approve: bool = False
+    # Durable-run identity (Фаза 1.5). When set, the start event carries it and
+    # the loop checks the run registry for cancellation. None keeps the legacy
+    # (unmanaged) behavior — used by tests and non-cancellable runners.
+    run_id: int | None = None
+    # When True (and run_id is set), the loop polls run_registry for a cancel
+    # signal each iteration / before each tool call. Interactive runs (SSE/WS)
+    # set this; cron/subagents leave it False.
+    cancellable: bool = False
 
 
 class AgentExecutor:
@@ -130,9 +139,30 @@ class AgentExecutor:
         ctx_token = set_run_context(ctx)
 
         try:
-            yield AgentEvent.start()
+            # Honor a cancel that arrived before the loop even started.
+            if self._is_cancelled():
+                yield AgentEvent.finish(
+                    reason="cancelled",
+                    usage=total_usage,
+                    iterations=0,
+                    elapsed_ms=_elapsed_ms(run_started),
+                )
+                return
+
+            yield AgentEvent.start(run_id=self.config.run_id)
 
             for iteration in range(1, limits.max_iterations + 1):
+                # Check for cancellation at the top of every iteration so a
+                # cancel mid-tool-loop stops before the next LLM round-trip.
+                if self._is_cancelled():
+                    yield AgentEvent.finish(
+                        reason="cancelled",
+                        usage=total_usage,
+                        iterations=iteration - 1,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
+
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
@@ -161,9 +191,7 @@ class AgentExecutor:
                             finish_reason = event.finish_reason or "stop"
                 except Exception as exc:
                     log.error("agent.iteration_failed", iteration=iteration, error=str(exc))
-                    yield AgentEvent.error(
-                        f"LLM error on iteration {iteration}", detail=str(exc)
-                    )
+                    yield AgentEvent.error(f"LLM error on iteration {iteration}", detail=str(exc))
                     return
 
                 if usage:
@@ -202,6 +230,20 @@ class AgentExecutor:
                     )
                     return
 
+                # Cost budget. cost_usd stays None until providers compute it
+                # (Фаза 1.5 §5); until then this guard is inert.
+                if (
+                    limits.max_cost_usd is not None
+                    and (total_usage.cost_usd or 0.0) >= limits.max_cost_usd
+                ):
+                    yield AgentEvent.finish(
+                        reason="cost_limit",
+                        usage=total_usage,
+                        iterations=iteration,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
+
                 if not normalized_calls:
                     yield AgentEvent.finish(
                         reason=finish_reason or "stop",
@@ -212,6 +254,17 @@ class AgentExecutor:
                     return
 
                 # Execute tool calls, append results, continue the loop.
+                # One more cancel check first — a cancel that arrived while we
+                # were streaming shouldn't trigger another tool execution.
+                if self._is_cancelled():
+                    yield AgentEvent.finish(
+                        reason="cancelled",
+                        usage=total_usage,
+                        iterations=iteration,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
+
                 for call in normalized_calls:
                     async for ev in self._run_tool_call(call):
                         yield ev
@@ -226,8 +279,23 @@ class AgentExecutor:
             # Always release the run context, even on early return / exception,
             # so a cancelled turn doesn't leak its workdir into the next one.
             reset_run_context(ctx_token)
+            # Drop the run from the cancellation registry once the loop exits.
+            # After this the run is no longer cancellable, which is correct.
+            if self.config.cancellable and self.config.run_id is not None:
+                run_registry.unregister(self.config.run_id)
 
     # ---- internals ----
+
+    def _is_cancelled(self) -> bool:
+        """True if this run has been signalled to cancel (or isn't cancellable-safe).
+
+        Returns False when the run isn't cancellable (run_id unset or
+        ``cancellable`` False), so non-interactive runners and tests behave
+        exactly as before.
+        """
+        if not self.config.cancellable or self.config.run_id is None:
+            return False
+        return run_registry.is_cancelled(self.config.run_id)
 
     def _build_run_context(self) -> RunContext:
         """Construct the RunContext (workdir + permissions) for this run."""
@@ -287,9 +355,7 @@ class AgentExecutor:
             )
             approved = await self._wait_for_approval(call_id)
             if not approved:
-                result = ToolResult.err(
-                    "Permission denied: the request was rejected or timed out."
-                )
+                result = ToolResult.err("Permission denied: the request was rejected or timed out.")
                 result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
                 await self._finalize_tool_call(call_id, name, result)
                 yield AgentEvent.tool_result(
@@ -358,15 +424,13 @@ class AgentExecutor:
         timeout = get_settings().approval_timeout_s or DEFAULT_APPROVAL_TIMEOUT_S
         try:
             return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Auto-deny on timeout so a forgotten prompt never hangs the turn.
             approval_registry.cancel(call_id)
             log.warning("approval.timeout", call_id=call_id, timeout_s=timeout)
             return False
 
-    async def _finalize_tool_call(
-        self, call_id: str, name: str, result: ToolResult
-    ) -> None:
+    async def _finalize_tool_call(self, call_id: str, name: str, result: ToolResult) -> None:
         """Append the tool message to history (kept as a helper for clarity)."""
         self.history.append(
             Message(
@@ -421,9 +485,7 @@ def _merge_tool_call_deltas(
 def _merge_one_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any]) -> None:
     idx = delta.get("index", 0)
     while len(calls) <= idx:
-        calls.append(
-            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
-        )
+        calls.append({"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
     target = calls[idx]
     if delta.get("id"):
         target["id"] = delta["id"]
