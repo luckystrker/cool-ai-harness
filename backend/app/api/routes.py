@@ -41,13 +41,12 @@ async def health() -> HealthResponse:
 async def chat(req: ChatRequest) -> ChatResponse:
     """Non-streaming chat smoke endpoint. No tool-calling, no persistence yet."""
     provider = get_default_provider()
-    settings = get_settings()
 
     messages = [Message(role=m.role, content=m.content) for m in req.messages]
     try:
         result = await provider.chat_completion(
             messages,
-            model=req.model or settings.default_model,
+            model=req.model,
             temperature=req.temperature,
             max_tokens=req.max_tokens,
         )
@@ -65,7 +64,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     return ChatResponse(
         content=result.content,
-        model=req.model or settings.default_model,
+        model=req.model,
         usage=usage,
         finish_reason=result.finish_reason,
     )

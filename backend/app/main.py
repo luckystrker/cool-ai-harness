@@ -31,8 +31,6 @@ async def lifespan(app: FastAPI):
         app=settings.app_name,
         version=settings.app_version,
         env=settings.environment,
-        default_provider=settings.default_provider,
-        default_model=settings.default_model,
     )
     init_db()
     log.info("app.db_ready", database_url=settings.database_url)

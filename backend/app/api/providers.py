@@ -14,6 +14,7 @@ from app.core.db import get_session
 from app.core.logging import get_logger
 from app.core.security import decrypt, encrypt
 from app.models import Provider
+from app.providers import build_provider_from_form, build_provider_from_row
 
 log = get_logger(__name__)
 
@@ -55,6 +56,28 @@ class ProviderOut(BaseModel):
     api_key_hint: str | None = None
 
 
+class ModelOut(BaseModel):
+    """One model a provider serves, with whatever metadata is available."""
+
+    id: str
+    context_window: int | None = None
+    prompt_price: float | None = None
+    completion_price: float | None = None
+
+
+class ModelsPreviewRequest(BaseModel):
+    """Live model-list probe for an unsaved provider (create form).
+
+    Lets the user pick a model from the provider's real ``/models`` response
+    *before* saving. Carries the plaintext key once, in-memory only — it is
+    never persisted by this path.
+    """
+
+    name: str = Field(..., description="openai | openrouter | deepseek | groq | ollama | anthropic | …")
+    base_url: str | None = None
+    api_key: str
+
+
 def _mask(secret: str) -> str:
     if len(secret) <= 8:
         return "…"
@@ -82,6 +105,57 @@ def _to_out(p: Provider) -> ProviderOut:
 
 
 # --- routes ---
+
+
+async def _models_to_out(provider) -> list[ModelOut]:
+    """Call a provider's list_models() and map to ModelOut, with sane errors."""
+    try:
+        models = await provider.list_models()
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=f"This provider does not expose a model list: {exc}",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface provider errors to the UI
+        log.warning("providers.list_models_failed", error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not list models from provider: {exc}",
+        )
+    return [
+        ModelOut(
+            id=m.id,
+            context_window=m.context_window,
+            prompt_price=m.prompt_price,
+            completion_price=m.completion_price,
+        )
+        for m in models
+    ]
+
+
+@router.post("/providers/models/preview", response_model=list[ModelOut])
+async def preview_provider_models(body: ModelsPreviewRequest) -> list[ModelOut]:
+    """List models from a provider using raw form fields (no DB row yet).
+
+    Used by the create-provider form so the user can select a model from the
+    live list before saving. The submitted API key is used in-memory only.
+    """
+    provider = build_provider_from_form(
+        name=body.name, base_url=body.base_url, api_key=body.api_key
+    )
+    return await _models_to_out(provider)
+
+
+@router.get("/providers/{provider_id}/models", response_model=list[ModelOut])
+async def list_provider_models(
+    provider_id: int, session: Session = Depends(get_session)
+) -> list[ModelOut]:
+    """List models from an already-saved provider (edit form / chat picker)."""
+    p = session.get(Provider, provider_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    provider = build_provider_from_row(p)
+    return await _models_to_out(provider)
 
 
 @router.post("/providers", response_model=ProviderOut)

@@ -29,10 +29,26 @@ export function ChatPage() {
     enabled: convId !== null,
   })
 
-  // Providers feed the "suggested models" list (their default_model values).
+  // Providers feed the "suggested models" list (their default_model values)
+  // and tell us which provider is active (first active, non-fallback row) so we
+  // can load its live /models list for the model picker + context-window badge.
   const { data: providers = [] } = useQuery({
     queryKey: ["providers"],
     queryFn: providersApi.list,
+  })
+
+  const activeProviderId = useMemo(() => {
+    const active = providers.filter((p) => p.is_active && !p.is_fallback)
+    const pool = active.length ? active : providers.filter((p) => p.is_active)
+    return pool[0]?.id ?? null
+  }, [providers])
+
+  const { data: providerModels = [] } = useQuery({
+    queryKey: ["provider-models", activeProviderId],
+    queryFn: () => providersApi.listModels(activeProviderId!),
+    enabled: activeProviderId != null,
+    retry: false,
+    staleTime: 5 * 60_000,
   })
 
   const {
@@ -226,6 +242,7 @@ export function ChatPage() {
                   mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
                   onModeChange={handleModeChange}
                   currentModel={currentModel}
+                  modelOptions={providerModels}
                   suggestedModels={suggestedModels}
                   onModelChange={handleModelChange}
                   modelPending={updateMutation.isPending}

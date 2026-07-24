@@ -33,7 +33,6 @@ from app.api.schemas import (
     SendMessageRequest,
     ToolApprovalRequest,
 )
-from app.core.config import get_settings
 from app.core.db import get_session
 from app.models import ApprovalAudit
 from app.providers import get_default_provider
@@ -84,12 +83,11 @@ def post_conversation(
     if errors := validate_capability_policy(body.capability_policy):
         raise HTTPException(status_code=400, detail="; ".join(errors))
     user = get_or_create_default_user(session)
-    settings = get_settings()
     conv = create_conversation(
         session,
         user_id=user.id,
         title=body.title,
-        model=body.model or settings.default_model,
+        model=body.model,
         working_directory=body.working_directory,
         permissions=body.permissions,
         capability_policy=body.capability_policy,
@@ -188,8 +186,7 @@ async def post_message(
         content=body.content,
     )
 
-    settings = get_settings()
-    model = body.model or conv.model or settings.default_model
+    model = body.model or conv.model
     provider = get_default_provider()
 
     # Create a durable run row so this turn is observable, resumable-aware, and

@@ -161,6 +161,23 @@ export interface ProviderUpdate {
   is_fallback?: boolean
 }
 
+/** One model a provider serves, with whatever metadata the provider returned. */
+export interface ModelInfo {
+  id: string
+  context_window: number | null
+  /** Per-1k-token USD price (prompt). null when unknown. */
+  prompt_price: number | null
+  /** Per-1k-token USD price (completion). null when unknown. */
+  completion_price: number | null
+}
+
+/** Request body for POST /providers/models/preview (unsaved-provider probe). */
+export interface ModelsPreviewRequest {
+  name: string
+  base_url?: string
+  api_key: string
+}
+
 // --- agent events (streamed from SSE / WebSocket) ---
 
 export type AgentEventKind =

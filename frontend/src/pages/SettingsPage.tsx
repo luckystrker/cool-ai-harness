@@ -25,6 +25,7 @@ import {
 } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ModelSelect } from "@/components/settings/ModelSelect"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
@@ -50,7 +51,7 @@ const EMPTY_FORM: ProviderCreate = {
   label: "",
   base_url: "https://api.openai.com/v1",
   api_key: "",
-  default_model: "gpt-4o-mini",
+  default_model: undefined,
   is_subscription: false,
   is_fallback: false,
 }
@@ -312,15 +313,17 @@ function ProviderForm({
           rows={2}
         />
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="p-model">Default model</Label>
-        <Input
-          id="p-model"
-          placeholder="gpt-4o-mini"
-          value={form.default_model ?? ""}
-          onChange={(e) => set({ default_model: e.target.value })}
-        />
-      </div>
+      <ModelSelect
+        id="p-model"
+        mode="preview"
+        value={form.default_model}
+        onChange={(m) => set({ default_model: m })}
+        previewRequest={{
+          name: form.name,
+          base_url: form.base_url ?? undefined,
+          api_key: form.api_key,
+        }}
+      />
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
@@ -409,15 +412,13 @@ function EditProviderDialog({
                 onChange={(e) => setBaseUrl(e.target.value)}
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="e-model">Default model</Label>
-              <Input
-                id="e-model"
-                placeholder="gpt-4o-mini"
-                value={default_model}
-                onChange={(e) => setDefaultModel(e.target.value)}
-              />
-            </div>
+            <ModelSelect
+              id="e-model"
+              mode="saved"
+              providerId={provider.id}
+              value={default_model || null}
+              onChange={setDefaultModel}
+            />
             <div className="space-y-1.5">
               <Label htmlFor="e-key">
                 API key{" "}

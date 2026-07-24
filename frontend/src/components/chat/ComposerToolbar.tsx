@@ -10,10 +10,12 @@ import {
   ShieldCheck,
 } from "lucide-react"
 import { workspaceApi } from "@/api/workspace"
+import type { ModelInfo } from "@/api/types"
 import {
   MODE_LABELS,
   type PermissionMode,
 } from "@/lib/agentConfig"
+import { formatContextWindow, hasModelMeta } from "@/lib/modelFormat"
 import { DirectoryBrowserDialog } from "@/components/chat/DirectoryBrowserDialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -33,6 +35,13 @@ export interface ComposerToolbarProps {
   mode: PermissionMode | null
   onModeChange: (mode: PermissionMode) => void
   currentModel: string
+  /**
+   * Models served by the active provider (live /models response), used both to
+   * populate the picker and to resolve the current model's context window.
+   * Falls back to provider.default_model strings when the live list is empty.
+   */
+  modelOptions: ModelInfo[]
+  /** Additional model id hints (e.g. other providers' defaults) merged in. */
   suggestedModels: string[]
   onModelChange: (model: string) => void
   modelPending?: boolean
@@ -59,12 +68,17 @@ export function ComposerToolbar({
   mode,
   onModeChange,
   currentModel,
+  modelOptions,
   suggestedModels,
   onModelChange,
   modelPending,
   disabled,
 }: ComposerToolbarProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
+
+  // Resolve the active model's context window from the live model list.
+  const currentModelContext =
+    modelOptions.find((m) => m.id === currentModel)?.context_window ?? null
 
   // Recent projects for the working-directory dropdown.
   const { data: recentData } = useQuery({
@@ -191,11 +205,23 @@ export function ComposerToolbar({
         {/* --- Model picker --- */}
         <ModelPickerInline
           currentModel={currentModel}
+          modelOptions={modelOptions}
           suggestedModels={suggestedModels}
           onChange={onModelChange}
           pending={modelPending}
           disabled={disabled}
         />
+
+        {/* --- Context window badge for the current model --- */}
+        {currentModel && (
+          <span
+            className="inline-flex h-7 items-center gap-1 rounded-md bg-muted px-2 text-xs text-muted-foreground"
+            title={`Context window: ${formatContextWindow(currentModelContext)} tokens`}
+          >
+            <Cpu className="h-3 w-3" />
+            ctx {formatContextWindow(currentModelContext)}
+          </span>
+        )}
       </div>
 
       <DirectoryBrowserDialog
@@ -209,17 +235,20 @@ export function ComposerToolbar({
 }
 
 /**
- * Compact model dropdown for the composer toolbar. Shows provider
- * default_model values plus a "Custom…" entry for arbitrary identifiers.
+ * Compact model dropdown for the composer toolbar. Shows models from the
+ * active provider's live /models list (with context window + price) plus
+ * fallback default_model strings, and a "Custom…" entry for arbitrary ids.
  */
 function ModelPickerInline({
   currentModel,
+  modelOptions,
   suggestedModels,
   onChange,
   pending,
   disabled,
 }: {
   currentModel: string
+  modelOptions: ModelInfo[]
   suggestedModels: string[]
   onChange: (model: string) => void
   pending?: boolean
@@ -235,6 +264,12 @@ function ModelPickerInline({
     setCustomOpen(false)
     setCustomValue("")
   }
+
+  // Merge live model options with the plain-id fallbacks. Live entries win
+  // (they carry metadata); fallback ids without metadata are appended.
+  const liveIds = new Set(modelOptions.map((m) => m.id))
+  const extraIds = suggestedModels.filter((id) => !liveIds.has(id))
+  const hasAnyOptions = modelOptions.length > 0 || extraIds.length > 0
 
   return (
     <DropdownMenu onOpenChange={(open) => { if (!open) setCustomOpen(false) }}>
@@ -257,7 +292,7 @@ function ModelPickerInline({
           <ChevronDown className="h-3 w-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
+      <DropdownMenuContent align="end" className="w-72">
         {currentModel && (
           <>
             <DropdownMenuLabel className="text-xs text-muted-foreground">
@@ -273,26 +308,50 @@ function ModelPickerInline({
           </>
         )}
 
-        {suggestedModels.length > 0 && (
+        {hasAnyOptions && (
           <>
             <DropdownMenuLabel className="text-xs text-muted-foreground">
               Provider models
             </DropdownMenuLabel>
-            {suggestedModels.map((m) => (
+            {modelOptions.map((m) => (
               <DropdownMenuItem
-                key={m}
+                key={m.id}
+                className="flex items-start gap-2 py-1.5"
+                onSelect={(e) => {
+                  e.preventDefault()
+                  onChange(m.id)
+                }}
+              >
+                {m.id === currentModel ? (
+                  <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0" />
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-xs">{m.id}</span>
+                  {hasModelMeta(m) && (
+                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                      ctx {formatContextWindow(m.context_window)}
+                    </span>
+                  )}
+                </span>
+              </DropdownMenuItem>
+            ))}
+            {extraIds.map((id) => (
+              <DropdownMenuItem
+                key={id}
                 className="font-mono text-xs"
                 onSelect={(e) => {
                   e.preventDefault()
-                  onChange(m)
+                  onChange(id)
                 }}
               >
-                {m === currentModel ? (
+                {id === currentModel ? (
                   <Check className="h-3.5 w-3.5" />
                 ) : (
-                  <span className="inline-block h-3.5 w-3.5" />
+                  <span className="inline-block h-3.5 w-3.5 shrink-0" />
                 )}
-                {m}
+                {id}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />

@@ -88,6 +88,22 @@ class ChatStreamEvent:
     usage: Usage | None = None
 
 
+@dataclass
+class ModelInfo:
+    """One model offered by a provider, with whatever metadata is available.
+
+    Fields are optional because providers expose them inconsistently: OpenAI's
+    ``/models`` returns only an id, while OpenRouter / Groq / Ollama also
+    include a context length. Prices are filled in from the local pricing table
+    (``app.providers.pricing``) when the id matches a known entry.
+    """
+
+    id: str
+    context_window: int | None = None
+    prompt_price: float | None = None
+    completion_price: float | None = None
+
+
 class LLMProvider(ABC):
     """Abstract base every provider implements.
 
@@ -126,3 +142,13 @@ class LLMProvider(ABC):
     async def embed(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
         """Optional. Providers that don't support embeddings should override."""
         raise NotImplementedError(f"{self.name} does not implement embed()")
+
+    async def list_models(self) -> list[ModelInfo]:
+        """List models the provider serves, with optional metadata.
+
+        Optional. Used by the provider settings UI / model picker. Providers
+        that expose an OpenAI-compatible ``GET /models`` endpoint (most
+        OpenAI-compatible backends + Anthropic) should override this to return
+        real data; the base implementation signals "unsupported".
+        """
+        raise NotImplementedError(f"{self.name} does not implement list_models()")

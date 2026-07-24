@@ -1,5 +1,11 @@
 import { api } from "./client"
-import type { Provider, ProviderCreate, ProviderUpdate } from "./types"
+import type {
+  ModelInfo,
+  ModelsPreviewRequest,
+  Provider,
+  ProviderCreate,
+  ProviderUpdate,
+} from "./types"
 
 export const providersApi = {
   list: () => api.get<Provider[]>("/api/providers"),
@@ -14,4 +20,12 @@ export const providersApi = {
 
   delete: (id: number) =>
     api.delete<{ deleted: number }>(`/api/providers/${id}`),
+
+  /** Models served by an already-saved provider (edit form / chat picker). */
+  listModels: (id: number) =>
+    api.get<ModelInfo[]>(`/api/providers/${id}/models`),
+
+  /** Live model-list probe for an unsaved provider (create form). */
+  previewModels: (body: ModelsPreviewRequest) =>
+    api.post<ModelInfo[]>("/api/providers/models/preview", body),
 }

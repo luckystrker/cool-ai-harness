@@ -93,3 +93,13 @@ def estimate_cost_usd(
 def has_pricing(model: str) -> bool:
     """Whether ``estimate_cost_usd`` will return a non-None value for ``model``."""
     return _lookup(model) is not None
+
+
+def get_model_pricing(model: str) -> dict[str, float] | None:
+    """Return the ``{"prompt": float, "completion": float}`` entry for ``model``.
+
+    Public accessor over the private prefix-matching lookup, used to annotate
+    model lists (e.g. the provider settings UI) with per-1k-token prices.
+    Returns ``None`` for unknown models.
+    """
+    return _lookup(model)

@@ -19,10 +19,11 @@ from app.providers.base import (
     ChatStreamEvent,
     LLMProvider,
     Message,
+    ModelInfo,
     ToolSpec,
     Usage,
 )
-from app.providers.pricing import estimate_cost_usd
+from app.providers.pricing import estimate_cost_usd, get_model_pricing
 
 log = get_logger(__name__)
 
@@ -35,13 +36,17 @@ class OpenAIProvider(LLMProvider):
         *,
         base_url: str,
         api_key: str,
-        default_model: str = "gpt-4o-mini",
+        default_model: str | None = None,
         timeout: float = 120.0,
+        transport: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.default_model = default_model
         self.timeout = timeout
+        # Optional injected httpx transport — used by tests to avoid real
+        # network calls (httpx.MockTransport). None in production.
+        self._transport = transport
 
     # ---- request shaping ----
 
@@ -123,6 +128,47 @@ class OpenAIProvider(LLMProvider):
             total_tokens=total,
             cost_usd=cost,
         )
+
+    # ---- model discovery ----
+
+    async def list_models(self) -> list[ModelInfo]:
+        """List models served by this backend via ``GET {base_url}/models``.
+
+        Most OpenAI-compatible backends answer this; the response is the
+        OpenAI shape ``{"data": [{"id": ...}, ...]}``. Some (OpenRouter, Groq,
+        Ollama, LM Studio) enrich each entry with a context length under
+        ``context_length`` / ``context_window``. Prices are filled in from the
+        local pricing table where the id matches a known entry.
+        """
+        url = f"{self.base_url}/models"
+        async with httpx.AsyncClient(timeout=20.0, transport=self._transport) as client:
+            resp = await client.get(url, headers=self._headers())
+            resp.raise_for_status()
+            payload = resp.json()
+
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            return []
+
+        out: list[ModelInfo] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            ctx = _extract_context_window(item)
+            prices = get_model_pricing(mid) or {}
+            out.append(
+                ModelInfo(
+                    id=mid,
+                    context_window=ctx,
+                    prompt_price=prices.get("prompt"),
+                    completion_price=prices.get("completion"),
+                )
+            )
+        out.sort(key=lambda m: m.id)
+        return out
 
     # ---- non-streaming ----
 
@@ -245,3 +291,23 @@ def _to_openai_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
         "type": tc.get("type", "function"),
         "function": {"name": name, "arguments": args_str},
     }
+
+
+def _extract_context_window(item: dict[str, Any]) -> int | None:
+    """Pull a context length out of a ``/models`` entry, across vendors.
+
+    Field name varies: OpenRouter uses ``context_length``, Ollama ``context_window``
+    (sometimes nested), Groq ``context_window``. Returns None when absent.
+    """
+    for key in ("context_length", "context_window", "max_context", "n_ctx"):
+        val = item.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+    # LM Studio nests it under {"top_provider": {"context_length": ...}}.
+    top = item.get("top_provider")
+    if isinstance(top, dict):
+        for key in ("context_length", "context_window"):
+            val = top.get(key)
+            if isinstance(val, int) and val > 0:
+                return val
+    return None

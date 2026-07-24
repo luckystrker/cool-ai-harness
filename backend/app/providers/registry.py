@@ -31,6 +31,11 @@ from app.providers.resilience import ResilientProvider
 log = get_logger(__name__)
 
 
+def build_provider_from_row(row: ProviderRow) -> LLMProvider:
+    """Public alias for ``_provider_row_to_llm`` (kept private for tests)."""
+    return _provider_row_to_llm(row)
+
+
 def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
     """Build a concrete LLMProvider from a stored Provider row."""
     # Decrypt the stored key. If it fails, fall back to env so the agent still
@@ -44,7 +49,9 @@ def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
 
     # Resolve base_url: explicit row value > provider-class default > settings.
     base_url = row.base_url or _default_base_url_for(row.name)
-    model = row.default_model or get_settings().default_model
+    # Model is optional here — it's chosen per-conversation via the UI; the row
+    # default is just a convenience for new chats. May be None.
+    model = row.default_model
 
     name = (row.name or "").lower()
     if name == "anthropic":
@@ -77,6 +84,26 @@ def _default_base_url_for(name: str) -> str:
         "local": "http://localhost:11434/v1",
     }
     return defaults.get(name.lower(), get_settings().openai_base_url)
+
+
+def build_provider_from_form(
+    *, name: str, base_url: str | None, api_key: str
+) -> LLMProvider:
+    """Construct an ephemeral provider from raw form fields (not a DB row).
+
+    Used by the ``POST /providers/models/preview`` endpoint to list a
+    provider's models *before* it has been saved — so the user can pick a
+    model from the live list during create. ``api_key`` is plaintext here
+    (just submitted by the client); it is never persisted by this path.
+    """
+    resolved_base = (base_url or _default_base_url_for(name)).rstrip("/")
+    norm = (name or "").lower()
+    if norm == "anthropic":
+        return AnthropicProvider(base_url=resolved_base, api_key=api_key)
+    return OpenAIProvider(
+        base_url=resolved_base,
+        api_key=api_key or "ollama",  # ollama ignores the key
+    )
 
 
 def get_provider_from_db(session: Session) -> LLMProvider | None:
@@ -143,37 +170,33 @@ def get_default_provider() -> LLMProvider:
 
 
 def _from_settings() -> LLMProvider:
-    """Env-only provider — the pre-database behavior (tests, dev, no UI setup)."""
+    """Env-only provider — the pre-database behavior (tests, dev, no UI setup).
+
+    No ``DEFAULT_PROVIDER`` knob anymore: the backend is picked by which key is
+    set. ``ANTHROPIC_API_KEY`` selects the native Anthropic Messages API;
+    anything else falls through to the OpenAI-compatible client at
+    ``OPENAI_BASE_URL`` (covering OpenAI / OpenRouter / DeepSeek / Groq /
+    Ollama / local).
+    """
     settings = get_settings()
-    if settings.default_provider == "anthropic":
-        if not settings.anthropic_api_key:
-            log.warning(
-                "providers.no_api_key",
-                provider="anthropic",
-                hint="Set ANTHROPIC_API_KEY in .env",
-            )
+    if settings.anthropic_api_key:
         return AnthropicProvider(
             base_url=settings.anthropic_base_url,
             api_key=settings.anthropic_api_key,
-            default_model=settings.default_model,
+            default_model=None,
         )
 
-    if settings.default_provider in {
-        "openai", "openrouter", "deepseek", "groq", "ollama", "local", "open_router",
-    }:
-        if not settings.openai_api_key and settings.default_provider != "ollama":
-            log.warning(
-                "providers.no_api_key",
-                provider=settings.default_provider,
-                hint="Set OPENAI_API_KEY (or your provider's key) in .env",
-            )
-        return OpenAIProvider(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key or "ollama",
-            default_model=settings.default_model,
+    if not settings.openai_api_key:
+        log.warning(
+            "providers.no_api_key",
+            hint="Set OPENAI_API_KEY (or your provider's key) in .env, "
+                 "or configure a provider in the UI",
         )
-
-    raise ValueError(f"Unknown default_provider: {settings.default_provider!r}")
+    return OpenAIProvider(
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key or "ollama",  # ollama ignores the key
+        default_model=None,
+    )
 
 
 # Keep the old import path working for callers that imported it by that name.

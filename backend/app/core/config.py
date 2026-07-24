@@ -48,15 +48,16 @@ class Settings(BaseSettings):
     # Bearer token for the single-user auth (MVP). Empty disables auth check.
     api_token: str = Field(default="", description="Bearer token for API auth (MVP single-user)")
 
-    # --- Default LLM provider (MVP) ---
-    default_provider: str = Field(
-        default="openai", description="openai|anthropic|subscription|local"
-    )
-    default_model: str = Field(default="gpt-4o-mini")
+    # --- Env-only LLM credentials (dev / test fallback) ---
+    # The user-configured providers in the database are the primary source at
+    # runtime (see app.providers.registry). These env vars are a fallback for
+    # local dev and the test suite when no Provider row exists yet. The active
+    # backend is picked by which key is set (ANTHROPIC_API_KEY => Anthropic,
+    # otherwise OpenAI-compatible at OPENAI_BASE_URL).
     # Default OpenAI-compatible endpoint. Override for OpenRouter/DeepSeek/Groq/Ollama.
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
-    # Native Anthropic Messages API (used when default_provider == "anthropic").
+    # Native Anthropic (Claude) Messages API.
     anthropic_base_url: str = "https://api.anthropic.com"
     anthropic_api_key: str = ""
 

@@ -33,10 +33,11 @@ from app.providers.base import (
     ChatStreamEvent,
     LLMProvider,
     Message,
+    ModelInfo,
     ToolSpec,
     Usage,
 )
-from app.providers.pricing import estimate_cost_usd
+from app.providers.pricing import estimate_cost_usd, get_model_pricing
 
 log = get_logger(__name__)
 
@@ -54,7 +55,7 @@ class AnthropicProvider(LLMProvider):
         *,
         base_url: str,
         api_key: str,
-        default_model: str = "claude-3-5-sonnet-latest",
+        default_model: str | None = None,
         timeout: float = 120.0,
         transport: Any | None = None,
     ) -> None:
@@ -248,6 +249,45 @@ class AnthropicProvider(LLMProvider):
         text = "".join(text_parts) if text_parts else None
         reasoning = "".join(thinking_parts) if thinking_parts else None
         return text, (tool_calls or None), reasoning
+
+    # ---- model discovery ----
+
+    async def list_models(self) -> list[ModelInfo]:
+        """List models via Anthropic's ``GET /v1/models``.
+
+        Anthropic's ``/models`` endpoint returns the OpenAI shape
+        ``{"data": [{"id": ...}]}`` but, unlike OpenRouter/Groq, does not
+        include a context length — so ``context_window`` stays None here and
+        the UI shows "context: ?". Prices come from the local pricing table.
+        """
+        url = f"{self.base_url}/v1/models"
+        async with httpx.AsyncClient(timeout=20.0, transport=self._transport) as client:
+            resp = await client.get(url, headers=self._headers())
+            resp.raise_for_status()
+            payload = resp.json()
+
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            return []
+
+        out: list[ModelInfo] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            prices = get_model_pricing(mid) or {}
+            out.append(
+                ModelInfo(
+                    id=mid,
+                    context_window=None,
+                    prompt_price=prices.get("prompt"),
+                    completion_price=prices.get("completion"),
+                )
+            )
+        out.sort(key=lambda m: m.id)
+        return out
 
     # ---- non-streaming ----
 
