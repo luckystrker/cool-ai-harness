@@ -23,11 +23,21 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlmodel import Session, select
+
 from app.agent.approvals import DEFAULT_APPROVAL_TIMEOUT_S, approval_registry
 from app.agent.events import AgentEvent
 from app.agent.permissions import Decision, PermissionsConfig
 from app.agent.runs import run_registry
+from app.budgets import (
+    budget_evaluation,
+    mark_alert_fired,
+    record_spend_run_scoped,
+    window_start,
+)
+from app.core.db import engine
 from app.core.logging import get_logger
+from app.models import Budget
 from app.providers import (
     LLMProvider,
     Message,
@@ -85,6 +95,12 @@ class AgentConfig:
     # signal each iteration / before each tool call. Interactive runs (SSE/WS)
     # set this; cron/subagents leave it False.
     cancellable: bool = False
+    # --- Cost budgets (Фаза 1.5 §5) ---
+    # Identity used to attribute per-call spend and enforce the user's budget.
+    # When user_id is None, budget enforcement is skipped (tests / non-managed
+    # runners). conversation_id is recorded on each spend row for the UI.
+    user_id: int | None = None
+    conversation_id: int | None = None
 
 
 class AgentExecutor:
@@ -180,6 +196,28 @@ class AgentExecutor:
                 usage: Usage | None = None
                 finish_reason: str | None = None
 
+                # --- Cost budget pre-call gate (Фаза 1.5 §5) ---
+                # Block new LLM calls once the user's budget is exceeded
+                # (unless an explicit override is active). Evaluated each
+                # iteration so a mid-run overrun (e.g. a long tool loop) still
+                # stops before the next charge. Skipped when user_id is unset
+                # (tests / non-managed runners).
+                if self.config.user_id is not None:
+                    try:
+                        with Session(engine) as _budget_session:
+                            _eval = budget_evaluation(_budget_session, user_id=self.config.user_id)
+                    except Exception as exc:  # noqa: BLE001 — never block a turn over a budget hiccup
+                        log.warning("agent.budget_check_failed", error=str(exc))
+                        _eval = None
+                    if _eval is not None and _eval.blocked:
+                        yield AgentEvent.finish(
+                            reason="budget_exceeded",
+                            usage=total_usage,
+                            iterations=iteration - 1,
+                            elapsed_ms=_elapsed_ms(run_started),
+                        )
+                        return
+
                 try:
                     async for event in self.provider.chat_completion_stream(
                         self.history,
@@ -207,6 +245,12 @@ class AgentExecutor:
 
                 if usage:
                     _accumulate(total_usage, usage)
+                    # Record this call's spend and check budget alerts (Фаза 1.5
+                    # §5). Spend is recorded against the per-call delta. Alert
+                    # firing is debounced per period via last_alert_at.
+                    if self.config.user_id is not None:
+                        for ev in self._record_spend_and_maybe_alert(usage):
+                            yield ev
 
                 content = "".join(content_parts) or None
                 thinking = "".join(reasoning_parts) or None
@@ -241,8 +285,9 @@ class AgentExecutor:
                     )
                     return
 
-                # Cost budget. cost_usd stays None until providers compute it
-                # (Фаза 1.5 §5); until then this guard is inert.
+                # Per-run cost ceiling (Фаза 1.5 §1/§5). cost_usd is now
+                # populated by the pricing table (app/providers/pricing.py);
+                # this guard is inert only for unpriced models.
                 if (
                     limits.max_cost_usd is not None
                     and (total_usage.cost_usd or 0.0) >= limits.max_cost_usd
@@ -330,6 +375,54 @@ class AgentExecutor:
         if not self.config.cancellable or self.config.run_id is None:
             return False
         return run_registry.is_cancelled(self.config.run_id)
+
+    def _record_spend_and_maybe_alert(
+        self, call_usage: Usage
+    ) -> list[AgentEvent]:
+        """Persist this LLM call's spend and emit a budget_alert if warranted.
+
+        Returns a (possibly empty) list of events for the loop to yield. Records
+        spend via the run-scoped helper (own session) so the executor never
+        holds a DB session across the loop. Errors are logged and swallowed —
+        spend accounting must not break a turn.
+        """
+        provider_name = getattr(self.provider, "name", "") or ""
+        record_spend_run_scoped(
+            user_id=self.config.user_id or 0,
+            model=self.config.model,
+            provider_name=provider_name,
+            usage=call_usage,
+            run_id=self.config.run_id,
+            conversation_id=self.config.conversation_id,
+        )
+        events: list[AgentEvent] = []
+        try:
+            with Session(engine) as session:
+                evaluation = budget_evaluation(session, user_id=self.config.user_id)
+                for window, ws in evaluation.windows.items():
+                    if not ws.alerted or ws.limit_usd is None:
+                        continue
+                    # Debounce: fire at most once per period per window.
+                    row = session.exec(
+                        select(Budget).where(Budget.user_id == self.config.user_id)
+                    ).first()
+                    last = getattr(row, "last_alert_at", None) if row else None
+                    # Re-fire only if no alert has fired in this window's period.
+                    if last is not None and last >= window_start(window):
+                        continue
+                    events.append(
+                        AgentEvent.budget_alert(
+                            window=window,
+                            spend_usd=ws.spend_usd,
+                            limit_usd=ws.limit_usd,
+                            pct=ws.pct,
+                        )
+                    )
+                    mark_alert_fired(session, user_id=self.config.user_id)
+                    break  # one alert event per call is enough
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent.budget_alert_failed", error=str(exc))
+        return events
 
     def _build_run_context(self) -> RunContext:
         """Construct the RunContext (workdir + permissions + capabilities + breakpoints) for this run."""

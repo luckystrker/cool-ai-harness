@@ -28,3 +28,7 @@ class Provider(TimestampMixin, table=True):
     default_model: str | None = None
     is_active: bool = True
     is_subscription: bool = False
+    # When True, this provider is used as a fallback when the primary (first
+    # active, non-fallback) provider is unhealthy (Фаза 1.5 §5). A single
+    # active fallback row is the expected setup.
+    is_fallback: bool = Field(default=False, index=True)

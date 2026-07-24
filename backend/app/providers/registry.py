@@ -26,6 +26,7 @@ from app.models import Provider as ProviderRow
 from app.providers.anthropic import AnthropicProvider
 from app.providers.base import LLMProvider
 from app.providers.openai import OpenAIProvider
+from app.providers.resilience import ResilientProvider
 
 log = get_logger(__name__)
 
@@ -79,17 +80,48 @@ def _default_base_url_for(name: str) -> str:
 
 
 def get_provider_from_db(session: Session) -> LLMProvider | None:
-    """Return the first active Provider row as a concrete LLMProvider, or None."""
-    row = session.exec(
-        select(ProviderRow)
-        .where(ProviderRow.user_id == 1)
-        .where(ProviderRow.is_active == True)  # noqa: E712
-        .order_by(ProviderRow.id)
-    ).first()
-    if row is None:
+    """Return the resilient provider chain built from active Provider rows.
+
+    Primary = first active, non-fallback row. Fallbacks = active rows marked
+    ``is_fallback`` (in id order). The chain is wrapped in a
+    ``ResilientProvider`` (retry / circuit breaker / fallback, Фаза 1.5 §5).
+    Returns None when no active primary row exists.
+    """
+    rows = list(
+        session.exec(
+            select(ProviderRow)
+            .where(ProviderRow.user_id == 1)
+            .where(ProviderRow.is_active == True)  # noqa: E712
+            .order_by(ProviderRow.id)
+        ).all()
+    )
+    if not rows:
         return None
-    log.debug("providers.selected_from_db", id=row.id, name=row.name, base_url=row.base_url)
-    return _provider_row_to_llm(row)
+    primary_rows = [r for r in rows if not r.is_fallback]
+    fallback_rows = [r for r in rows if r.is_fallback]
+    # If nothing is explicitly non-fallback, treat the first row as primary.
+    if not primary_rows:
+        primary_rows = [fallback_rows[0]]
+        fallback_rows = fallback_rows[1:]
+
+    primary = _provider_row_to_llm(primary_rows[0])
+    log.debug("providers.selected_from_db", id=primary_rows[0].id, name=primary_rows[0].name)
+
+    if not fallback_rows:
+        # Still wrap for retry/backoff/circuit-breaker even without a fallback.
+        return ResilientProvider(primary)
+
+    fallbacks = [_provider_row_to_llm(r) for r in fallback_rows]
+    for r in fallback_rows:
+        log.debug("providers.fallback", id=r.id, name=r.name)
+    return ResilientProvider(primary, fallbacks=fallbacks)
+
+
+def _wrap_resilient(provider: LLMProvider) -> LLMProvider:
+    """Wrap a settings-only provider with retry/circuit-breaker (no fallback)."""
+    if isinstance(provider, ResilientProvider):
+        return provider
+    return ResilientProvider(provider)
 
 
 def get_default_provider() -> LLMProvider:
@@ -107,7 +139,7 @@ def get_default_provider() -> LLMProvider:
     except Exception as exc:
         log.warning("providers.db_lookup_failed", error=str(exc))
 
-    return _from_settings()
+    return _wrap_resilient(_from_settings())
 
 
 def _from_settings() -> LLMProvider:

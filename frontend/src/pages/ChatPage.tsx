@@ -11,6 +11,7 @@ import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageB
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
 import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
+import { BudgetIndicator } from "@/components/chat/BudgetIndicator"
 import { useConversationStream } from "@/hooks/useConversationStream"
 import { MODE_PRESETS, modeFromPerms, type PermissionMode } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
@@ -178,6 +179,7 @@ export function ChatPage() {
         >
           <Paperclip className="h-4 w-4" />
         </Button>
+        <BudgetIndicator />
       </header>
 
       <div className="flex flex-1 overflow-hidden">

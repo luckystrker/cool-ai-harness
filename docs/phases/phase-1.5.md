@@ -84,12 +84,55 @@ API: `POST /conversations/{id}/artifacts` (upload), `GET .../artifacts` (list с
 **Что отложено**: live-провайдер evals (реальные LLM-вызовы для A/B тестирования промптов) — по мере
 подключения Provider Resilience (§5) и Inspector (§6).
 
-## 5. Provider Resilience & Cost Guards (`app/providers/`, `app/security/`)
+## 5. Provider Resilience & Cost Guards (`app/providers/`, `app/security/`) ✅
 
-- **Retry с Backoff** 🆕: автоматический retry LLM-вызовов при rate limit / timeout с exponential backoff, jitter; fallback на резервную модель при недоступности основной
-- **Circuit breaker** для провайдеров: переход на fallback при серии ошибок
-- **Cost Budget Alerts** 🆕: дневные/недельные/месячные бюджеты; алерт при достижении 80 %; блокировка при превышении (с возможностью явного override)
-- UI: страница бюджетов с историей расходов в реальном времени
+**Реализовано:**
+
+- **Pricing table + реальная стоимость** (`app/providers/pricing.py`): таблица
+  цен per-1k-token для известных моделей (OpenAI/Anthropic/DeepSeek/Groq) +
+  `estimate_cost_usd()`. `Usage.cost_usd` теперь populated в обоих провайдерах
+  (`openai.py`/`anthropic.py` `_parse_usage`), и существующий per-run cost guard
+  (`executor.py`) активен. Неизвестные модели → `cost_usd=None` (backwards-
+  compatible).
+- **Retry с Backoff** (`app/providers/resilience.py:ResilientProvider`):
+  декоратор поверх `LLMProvider`; на retriable-ошибках (429/5xx, timeout,
+  network) — retry с exponential backoff + full jitter. Retry применяется только
+  до первого отданного токена (mid-stream retry небезопасен).
+- **Fallback на резервную модель**: `ResilientProvider` хранит цепочку
+  primary→fallbacks; после исчерпания retry переходит к следующему провайдеру.
+  Цепочка собирается из active Provider-рядов (`is_fallback=True` отмечает
+  резервный) в `registry.get_provider_from_db`. Без fallback обёртка всё равно
+  работает (retry/circuit).
+- **Circuit breaker**: процесс-синглтон `CircuitRegistry` (паттерн `run_registry`)
+  per-`provider.name`. Open после `provider_circuit_failure_threshold` последовательных
+  сбоев; half-open после `provider_circuit_reset_s`; probe success → closed.
+- **Cost Budget Alerts** (`app/security/cost.py` + `app/budgets/`):
+  дневные/недельные/месячные бюджеты; алерт при достижении порога
+  (`budget_alert_threshold_pct`, default 80 %) — executor эмитит `budget_alert`
+  event (toast в чате) с debounce per-период; блокировка при превышении
+  (`budget_block_on_exceed`) с явным override (`override_until`) — executor
+  завершает цикл с `reason="budget_exceeded"` перед LLM-вызовом. Учёт через
+  append-only `spend_log` (одна строка на LLM-вызов).
+- **Модели и миграция**: `Budget` + `SpendLog` (`app/models/budget.py`),
+  `Provider.is_fallback`; миграция Alembic `0005_budgets_and_spend`.
+- **API**: `GET/PUT /api/budgets` (статус + лимиты), `POST/DELETE /api/budgets/override`,
+  `GET /api/budgets/spend` (история). Provider-API получил поле `is_fallback`.
+- **UI**: отдельная страница `/budgets` (карточки per-window с прогресс-баром,
+  форма лимитов, override-контролы, таблица истории расходов) + `BudgetIndicator`
+  в шапке чата — popover при hover/click показывает заданные лимиты и текущий
+  расход; подсвечивается жёлтым (alert) / красным (blocked).
+- **Настройки**: `provider_max_retries`, `provider_retry_base_delay_s`,
+  `provider_retry_max_delay_s`, `provider_circuit_failure_threshold`,
+  `provider_circuit_reset_s`, `budget_alert_threshold_pct`,
+  `budget_block_on_exceed` в `config.py` и `.env.example`.
+- **Тесты**: `test_pricing.py`, `test_resilience.py` (retry/fallback/circuit/
+  no-retry-mid-stream), `test_budgets.py` (policy/service/executor-block).
+  Полный набор: 268 тестов зелёные.
+
+**Что отложено**: multi-process circuit-breaker/budget-consistency (нужен Redis
+при горизонтальном масштабировании — noted в коде, как у `run_registry`);
+precise snapshot pricing (auto-fetch из API провайдера) — таблица обновляется
+вручную.
 
 ## 6. Debug / Inspector Mode (`app/observability/inspector/`) 🆕
 

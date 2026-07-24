@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/layout/AppLayout"
 import { ChatPage } from "@/pages/ChatPage"
 import { SettingsPage } from "@/pages/SettingsPage"
+import { BudgetsPage } from "@/pages/BudgetsPage"
 
 function App() {
   return (
@@ -10,6 +11,7 @@ function App() {
         <Route index element={<ChatPage />} />
         <Route path="/chat/:conversationId" element={<ChatPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/budgets" element={<BudgetsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

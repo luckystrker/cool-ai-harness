@@ -36,6 +36,7 @@ from app.providers.base import (
     ToolSpec,
     Usage,
 )
+from app.providers.pricing import estimate_cost_usd
 
 log = get_logger(__name__)
 
@@ -196,15 +197,21 @@ class AnthropicProvider(LLMProvider):
         return payload
 
     @staticmethod
-    def _parse_usage(raw_usage: dict[str, Any] | None) -> Usage | None:
+    def _parse_usage(
+        raw_usage: dict[str, Any] | None, *, model: str | None = None
+    ) -> Usage | None:
         if not raw_usage:
             return None
         prompt = raw_usage.get("input_tokens", 0)
         completion = raw_usage.get("output_tokens", 0)
+        cost = (
+            estimate_cost_usd(model, prompt, completion) if model else None
+        )
         return Usage(
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=prompt + completion,
+            cost_usd=cost,
         )
 
     @staticmethod
@@ -274,7 +281,7 @@ class AnthropicProvider(LLMProvider):
         return ChatResult(
             content=text,
             tool_calls=tool_calls,
-            usage=self._parse_usage(data.get("usage")),
+            usage=self._parse_usage(data.get("usage"), model=model),
             finish_reason=data.get("stop_reason"),
             reasoning=reasoning,
             raw=data,
@@ -368,7 +375,7 @@ class AnthropicProvider(LLMProvider):
                 elif etype == "message_delta":
                     # Carries the final usage + stop_reason on the terminal delta.
                     msg_delta = evt.get("delta", {}) or {}
-                    usage = self._parse_usage(evt.get("usage"))
+                    usage = self._parse_usage(evt.get("usage"), model=model)
                     finish_reason = msg_delta.get("stop_reason")
                     yield ChatStreamEvent(
                         finish=True,

@@ -31,6 +31,10 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
     ("conversations", "permissions", "JSON"),
     ("conversations", "capability_policy", "JSON"),
     ("conversations", "metadata_", "JSON"),
+    # Фаза 1.5 §5 — provider fallback flag (new tables budgets/spend_log are
+    # created by create_all; only the added column on an existing table needs
+    # an explicit ALTER here).
+    ("providers", "is_fallback", "BOOLEAN DEFAULT 0"),
 ]
 
 

@@ -145,6 +145,46 @@ class Settings(BaseSettings):
         description="Wall-clock timeout per run in seconds; None = no timeout",
     )
 
+    # --- Provider resilience (Фаза 1.5 §5) ---
+    # Retries apply to retriable failures (HTTP 429 / 5xx, timeouts, network
+    # errors) with exponential backoff + full jitter. A circuit breaker trips
+    # per provider after ``provider_circuit_failure_threshold`` consecutive
+    # failures and resets after ``provider_circuit_reset_s`` seconds.
+    provider_max_retries: int = Field(
+        default=3,
+        description="Per-provider retry attempts on retriable LLM failures",
+    )
+    provider_retry_base_delay_s: float = Field(
+        default=0.5,
+        description="Base (seconds) for exponential backoff; full jitter applied",
+    )
+    provider_retry_max_delay_s: float = Field(
+        default=30.0,
+        description="Cap (seconds) on a single backoff delay",
+    )
+    provider_circuit_failure_threshold: int = Field(
+        default=5,
+        description="Consecutive failures before a provider's circuit opens",
+    )
+    provider_circuit_reset_s: float = Field(
+        default=60.0,
+        description="Seconds before an open circuit moves to half-open (probe)",
+    )
+
+    # --- Cost budgets (Фаза 1.5 §5) ---
+    # Period budgets (USD). None = no budget for that window. At
+    # ``budget_alert_threshold_pct`` of the most relevant budget an alert fires;
+    # when ``budget_block_on_exceed`` is True, LLM calls are blocked at 100 %
+    # unless the user grants an explicit override (per-user row in `budgets`).
+    budget_alert_threshold_pct: float = Field(
+        default=80.0,
+        description="Spend percentage at which a budget alert fires",
+    )
+    budget_block_on_exceed: bool = Field(
+        default=True,
+        description="Block new LLM calls once a budget is exceeded (until override)",
+    )
+
     # --- Capability security (Фаза 1.5 §2) ---
     # Capability-level policy: maps capability name to allow|ask|deny.
     # Applied as a coarse-grained gate BEFORE the per-tool permission check.

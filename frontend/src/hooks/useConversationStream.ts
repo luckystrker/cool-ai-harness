@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react"
+import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
 import type { AgentEvent, ReActStep, ToolApprovalRequestPayload, UsagePayload } from "@/api/types"
@@ -222,6 +223,17 @@ export function useConversationStream() {
         acc.finishReason = (ev.payload.reason as string) || undefined
         acc.usage = ev.payload.usage as UsagePayload | undefined
         flush(acc)
+        break
+      }
+      case "budget_alert": {
+        // Surface spend crossing the alert threshold (Фаза 1.5 §5). The
+        // BudgetIndicator in the header also reflects the status; this toast
+        // gives immediate, in-conversation feedback.
+        const window = (ev.payload.window as string) || "budget"
+        const pct = Math.round((ev.payload.pct as number) || 0)
+        toast.warning(`Cost budget alert (${window})`, {
+          description: `Spending has reached ${pct}% of the ${window} limit.`,
+        })
         break
       }
       // start / error / tool_call_delta handled by surrounding loop.

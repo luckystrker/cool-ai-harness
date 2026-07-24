@@ -52,6 +52,7 @@ const EMPTY_FORM: ProviderCreate = {
   api_key: "",
   default_model: "gpt-4o-mini",
   is_subscription: false,
+  is_fallback: false,
 }
 
 export function SettingsPage() {
@@ -210,6 +211,7 @@ function ProviderRow({
             <CardTitle className="text-base">{p.label || p.name}</CardTitle>
             <Badge variant="outline" className="font-mono">{p.name}</Badge>
             {p.is_subscription && <Badge variant="secondary">subscription</Badge>}
+            {p.is_fallback && <Badge variant="outline">fallback</Badge>}
             {p.is_active ? (
               <Badge variant="success" className="gap-1">
                 <CheckCircle2 className="h-3 w-3" /> active
@@ -319,6 +321,20 @@ function ProviderForm({
           onChange={(e) => set({ default_model: e.target.value })}
         />
       </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={!!form.is_fallback}
+          onChange={(e) => set({ is_fallback: e.target.checked })}
+          className="h-4 w-4 rounded border-input"
+        />
+        <span>
+          Use as <strong>fallback</strong> provider
+          <span className="block text-xs text-muted-foreground">
+            Activated when the primary provider is unhealthy (retry/circuit-breaker).
+          </span>
+        </span>
+      </label>
     </div>
   )
 }
@@ -347,12 +363,14 @@ function EditProviderDialog({
   const [default_model, setDefaultModel] = useState(provider?.default_model ?? "")
   // Empty api_key means "keep the stored secret unchanged".
   const [api_key, setApiKey] = useState("")
+  const [is_fallback, setIsFallback] = useState(!!provider?.is_fallback)
 
   const handleSubmit = () => {
     const body: ProviderUpdate = {
       label,
       base_url,
       default_model,
+      is_fallback,
       ...(api_key.trim() ? { api_key } : {}),
     }
     onSubmit(body)
@@ -416,6 +434,17 @@ function EditProviderDialog({
                 rows={2}
               />
             </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={is_fallback}
+                onChange={(e) => setIsFallback(e.target.checked)}
+                className="h-4 w-4 rounded border-input"
+              />
+              <span>
+                Use as <strong>fallback</strong> provider
+              </span>
+            </label>
           </div>
         )}
         <DialogFooter>

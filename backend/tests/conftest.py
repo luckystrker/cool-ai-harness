@@ -33,7 +33,6 @@ class ScriptedProvider(LLMProvider):
 
     def set_script(self, turns: list[Any]) -> None:
         self.turns = list(turns)
-
     async def chat_completion(self, messages, *, model, tools=None, **kwargs):  # type: ignore[override]
         raise NotImplementedError("ScriptedProvider only implements streaming")
 

@@ -50,6 +50,7 @@ _FINISH_REASON_TO_STATUS: dict[str, str] = {
     "tool_limit": RUN_STATUS_COMPLETED,
     "token_limit": RUN_STATUS_COMPLETED,
     "cost_limit": RUN_STATUS_COMPLETED,
+    "budget_exceeded": RUN_STATUS_COMPLETED,
     "max_iterations": RUN_STATUS_COMPLETED,
     "cancelled": RUN_STATUS_CANCELLED,
     "error": RUN_STATUS_FAILED,

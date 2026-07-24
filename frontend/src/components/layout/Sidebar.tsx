@@ -1,6 +1,6 @@
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Plus, Settings, Trash2, MessageSquare, Loader2 } from "lucide-react"
+import { Plus, Settings, Trash2, MessageSquare, Loader2, Wallet } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { loadAgentDefaults } from "@/lib/agentConfig"
@@ -121,7 +121,16 @@ export function Sidebar() {
       </ScrollArea>
 
       {/* Footer */}
-      <div className="border-t p-2">
+      <div className="space-y-1 border-t p-2">
+        <Button
+          asChild
+          variant="ghost"
+          className="w-full justify-start gap-2"
+        >
+          <a href="/budgets">
+            <Wallet className="h-4 w-4" /> Budgets
+          </a>
+        </Button>
         <Button
           asChild
           variant="ghost"

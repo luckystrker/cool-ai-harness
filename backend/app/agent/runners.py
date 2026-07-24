@@ -26,6 +26,7 @@ from app.agent.service import (
     append_message,
     append_run_events,
     finish_run,
+    get_or_create_default_user,
     load_history,
     update_run,
 )
@@ -159,6 +160,9 @@ async def run_conversation_turn(
             auto_approve=auto_approve,
             run_id=run_id,
             cancellable=cancellable,
+            # Cost-budget accounting (Фаза 1.5 §5): single-user MVP.
+            user_id=get_or_create_default_user(session).id,
+            conversation_id=conversation_id,
         ),
         history=history,
     )

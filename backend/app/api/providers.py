@@ -30,6 +30,7 @@ class ProviderCreate(BaseModel):
     api_key: str  # plaintext from the client; stored encrypted
     default_model: str | None = None
     is_subscription: bool = False
+    is_fallback: bool = Field(default=False, description="Use as the backup provider when the primary is unhealthy (Фаза 1.5 §5)")
 
 
 class ProviderUpdate(BaseModel):
@@ -38,6 +39,7 @@ class ProviderUpdate(BaseModel):
     api_key: str | None = None  # if provided, replaces the stored secret
     default_model: str | None = None
     is_active: bool | None = None
+    is_fallback: bool | None = None
 
 
 class ProviderOut(BaseModel):
@@ -48,6 +50,7 @@ class ProviderOut(BaseModel):
     default_model: str | None
     is_active: bool
     is_subscription: bool
+    is_fallback: bool = False
     # Masked preview of the stored key, e.g. "sk-…1a2b". Never the full secret.
     api_key_hint: str | None = None
 
@@ -73,6 +76,7 @@ def _to_out(p: Provider) -> ProviderOut:
         default_model=p.default_model,
         is_active=p.is_active,
         is_subscription=p.is_subscription,
+        is_fallback=p.is_fallback,
         api_key_hint=hint,
     )
 
@@ -95,6 +99,7 @@ def create_provider(
         api_key_encrypted=encrypt(body.api_key),
         default_model=body.default_model,
         is_subscription=body.is_subscription,
+        is_fallback=body.is_fallback,
     )
     session.add(provider)
     session.commit()
@@ -136,6 +141,8 @@ def update_provider(
         p.default_model = body.default_model
     if body.is_active is not None:
         p.is_active = body.is_active
+    if body.is_fallback is not None:
+        p.is_fallback = body.is_fallback
     if body.api_key is not None:
         p.api_key_encrypted = encrypt(body.api_key)
     session.add(p)

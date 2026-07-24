@@ -25,6 +25,8 @@ EventKind = Literal[
     "message",  # a complete assistant message persisted
     "finish",  # loop finished (terminal); carries usage + reason
     "error",  # unrecoverable error
+    # --- Cost budgets (Фаза 1.5 §5) ---
+    "budget_alert",  # spend crossed the alert threshold (e.g. 80 %)
     # --- ReAct lifecycle events (Thought → Action → Observation) ---
     "react_thought",  # explicit Thought phase (reasoning before action)
     "react_action",  # explicit Action phase (tool invocation intent)
@@ -161,6 +163,28 @@ class AgentEvent:
     @classmethod
     def error(cls, message: str, detail: str | None = None) -> AgentEvent:
         return cls(kind="error", payload={"message": message, "detail": detail})
+
+    # --- Cost budget constructors (Фаза 1.5 §5) ---
+
+    @classmethod
+    def budget_alert(
+        cls,
+        *,
+        window: str,
+        spend_usd: float,
+        limit_usd: float,
+        pct: float,
+    ) -> AgentEvent:
+        """Emit when spend crosses the alert threshold for a budget window."""
+        return cls(
+            kind="budget_alert",
+            payload={
+                "window": window,
+                "spend_usd": spend_usd,
+                "limit_usd": limit_usd,
+                "pct": pct,
+            },
+        )
 
     # --- ReAct lifecycle constructors ---
 

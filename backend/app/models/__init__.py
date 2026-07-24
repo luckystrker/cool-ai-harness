@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.models.approval import ApprovalAudit
 from app.models.artifact import Artifact
 from app.models.base import TimestampMixin
+from app.models.budget import Budget, SpendLog
 from app.models.conversation import Conversation, Message, ToolCall
 from app.models.provider import Provider
 from app.models.run import AgentRun, RunEvent
@@ -18,10 +19,12 @@ __all__ = [
     "AgentRun",
     "ApprovalAudit",
     "Artifact",
+    "Budget",
     "Conversation",
     "Message",
     "Provider",
     "RunEvent",
+    "SpendLog",
     "TimestampMixin",
     "ToolCall",
     "User",

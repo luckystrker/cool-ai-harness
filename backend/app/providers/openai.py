@@ -22,6 +22,7 @@ from app.providers.base import (
     ToolSpec,
     Usage,
 )
+from app.providers.pricing import estimate_cost_usd
 
 log = get_logger(__name__)
 
@@ -105,13 +106,22 @@ class OpenAIProvider(LLMProvider):
         return payload
 
     @staticmethod
-    def _parse_usage(raw_usage: dict[str, Any] | None) -> Usage | None:
+    def _parse_usage(
+        raw_usage: dict[str, Any] | None, *, model: str | None = None
+    ) -> Usage | None:
         if not raw_usage:
             return None
+        prompt = raw_usage.get("prompt_tokens", 0)
+        completion = raw_usage.get("completion_tokens", 0)
+        total = raw_usage.get("total_tokens", 0)
+        cost = (
+            estimate_cost_usd(model, prompt, completion) if model else None
+        )
         return Usage(
-            prompt_tokens=raw_usage.get("prompt_tokens", 0),
-            completion_tokens=raw_usage.get("completion_tokens", 0),
-            total_tokens=raw_usage.get("total_tokens", 0),
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=total,
+            cost_usd=cost,
         )
 
     # ---- non-streaming ----
@@ -145,7 +155,7 @@ class OpenAIProvider(LLMProvider):
         return ChatResult(
             content=choice.get("content"),
             tool_calls=choice.get("tool_calls"),
-            usage=self._parse_usage(data.get("usage")),
+            usage=self._parse_usage(data.get("usage"), model=model),
             finish_reason=data["choices"][0].get("finish_reason"),
             # Reasoning models (DeepSeek-R1 via OpenRouter, etc.) put the
             # chain-of-thought under `reasoning_content` (DeepSeek) or
@@ -210,7 +220,7 @@ class OpenAIProvider(LLMProvider):
                     finish=finish_reason is not None,
                 )
                 if chunk.get("usage"):
-                    event.usage = self._parse_usage(chunk["usage"])
+                    event.usage = self._parse_usage(chunk["usage"], model=model)
                 yield event
 
 

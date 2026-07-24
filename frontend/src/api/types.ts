@@ -136,6 +136,8 @@ export interface Provider {
   default_model: string | null
   is_active: boolean
   is_subscription: boolean
+  /** Use as the backup provider when the primary is unhealthy (Фаза 1.5 §5). */
+  is_fallback: boolean
   /** Masked preview like "sk-…cdef"; never the full secret. */
   api_key_hint: string | null
 }
@@ -147,6 +149,7 @@ export interface ProviderCreate {
   api_key: string
   default_model?: string
   is_subscription?: boolean
+  is_fallback?: boolean
 }
 
 export interface ProviderUpdate {
@@ -155,6 +158,7 @@ export interface ProviderUpdate {
   api_key?: string
   default_model?: string
   is_active?: boolean
+  is_fallback?: boolean
 }
 
 // --- agent events (streamed from SSE / WebSocket) ---
@@ -170,6 +174,8 @@ export type AgentEventKind =
   | "message"
   | "finish"
   | "error"
+  // Cost budgets (Фаза 1.5 §5)
+  | "budget_alert"
   // ReAct lifecycle events
   | "react_thought"
   | "react_action"
@@ -302,4 +308,58 @@ export interface ArtifactDetail extends Artifact {
 export interface ArtifactUploadResponse {
   artifact: Artifact
   message: string
+}
+
+// --- budgets (Фаза 1.5 §5) ---
+
+export type BudgetStatus = "ok" | "alert" | "blocked"
+export type BudgetWindow = "daily" | "weekly" | "monthly"
+
+export interface BudgetWindowSpend {
+  spend_usd: number
+  limit_usd: number | null
+  pct: number
+}
+
+export interface BudgetStatusResponse {
+  status: BudgetStatus
+  overridden: boolean
+  daily: BudgetWindowSpend
+  weekly: BudgetWindowSpend
+  monthly: BudgetWindowSpend
+  daily_limit_usd: number | null
+  weekly_limit_usd: number | null
+  monthly_limit_usd: number | null
+  alert_threshold_pct: number
+  block_on_exceed: boolean
+  override_until: string | null
+}
+
+export interface BudgetUpdate {
+  daily_limit_usd?: number | null
+  weekly_limit_usd?: number | null
+  monthly_limit_usd?: number | null
+  alert_threshold_pct?: number
+  block_on_exceed?: boolean
+}
+
+export interface SpendRow {
+  id: number
+  run_id: number | null
+  conversation_id: number | null
+  provider_name: string
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cost_usd: number
+  ts: string
+}
+
+/** Payload shape for a budget_alert agent event. */
+export interface BudgetAlertPayload {
+  window: BudgetWindow
+  spend_usd: number
+  limit_usd: number
+  pct: number
 }
