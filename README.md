@@ -174,7 +174,7 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 | **Фаза 2** — Skills + MCP + subagents + planning mode | ⏳ |
 | **Фаза 3a** — Memory + personalities + observability + KB | ⏳ |
 | **Фаза 3b** — Recurring tasks + RSS + webhook | ⏳ |
-| **Фаза 4** — Deep research + D&D + code + multimodal + browser | ⏳ |
+| **Фаза 4** — Deep research + code + multimodal + browser | ⏳ |
 | **Фаза 5** — Telegram + voice interface | ⏳ |
 | **Фаза 6** — Product readiness + backlog | ⏳ |
 | **Фаза 7** — UX polish + DevX | ⏳ |

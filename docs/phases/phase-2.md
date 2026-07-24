@@ -30,7 +30,7 @@
 - Концепция как у ZCode: `Skill` = директория с `SKILL.md` + опц. скрипты/ресурсы
 - `SkillRegistry` загружает из builtin + user + плагинов
 - Автоматическое определение релевантного skill (описание + embedding similarity)
-- Встроенные: `deep-research`, `dnd-story`, `code-task`, `summarize-document`, `translate`, `brainstorm`
+- Встроенные: `deep-research`, `code-task`, `summarize-document`, `translate`, `brainstorm`
 
 ## 4. MCP клиент (`app/mcp/`)
 
