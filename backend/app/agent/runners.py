@@ -36,6 +36,7 @@ from app.models import ApprovalAudit
 from app.models import Message as MessageRow
 from app.models import ToolCall as ToolCallRow
 from app.models.run import RUN_STATUS_RUNNING
+from app.observability import inspector_registry
 from app.providers import LLMProvider
 from app.security.breakpoints import merge_breakpoints
 from app.security.capabilities import merge_policy as merge_capability_policy
@@ -49,7 +50,7 @@ log = get_logger(__name__)
 # a replay and are infrequent enough that batching adds no benefit.
 _STRUCTUREAL_KINDS = frozenset(
     {"start", "message", "tool_call_start", "tool_result", "finish", "error",
-     "react_thought", "react_action", "react_observation"}
+     "react_thought", "react_action", "react_observation", "llm_call_complete"}
 )
 
 
@@ -372,6 +373,10 @@ async def run_conversation_turn(
                         iterations=iteration_count,
                     )
             yield event
+
+            # Inspector live-feed: publish every event to subscribers (Фаза 1.5 §6).
+            if run_id is not None:
+                inspector_registry.publish(run_id, event.to_dict())
     finally:
         # If the loop exited without a terminal event (e.g. an unexpected
         # exception escaped the executor, or the runner was cancelled itself),
@@ -402,6 +407,9 @@ async def run_conversation_turn(
                     "cancelled" if (cancellable and run_registry.is_cancelled(run_id)) else "error"
                 )
                 finish_run(session, run_id, finish_reason=reason, iterations=iteration_count)
+
+            # Notify inspector subscribers that the run has ended.
+            inspector_registry.notify_finished(run_id)
 
 
 def serialize_event(event: AgentEvent) -> str:

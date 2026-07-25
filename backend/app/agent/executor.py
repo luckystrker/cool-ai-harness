@@ -190,6 +190,7 @@ class AgentExecutor:
                     )
                     return
 
+                iter_t0 = time.monotonic()
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
@@ -251,6 +252,14 @@ class AgentExecutor:
                     if self.config.user_id is not None:
                         for ev in self._record_spend_and_maybe_alert(usage):
                             yield ev
+
+                # Inspector: emit per-iteration metrics (Фаза 1.5 §6).
+                yield AgentEvent.llm_call_complete(
+                    iteration=iteration,
+                    model=self.config.model,
+                    usage=vars(usage) if usage else None,
+                    duration_ms=_elapsed_ms(iter_t0),
+                )
 
                 content = "".join(content_parts) or None
                 thinking = "".join(reasoning_parts) or None
