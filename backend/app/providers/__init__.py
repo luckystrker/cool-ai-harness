@@ -17,6 +17,7 @@ from app.providers.registry import (
     build_provider_from_row,
     get_default_provider,
     get_default_provider_cached,
+    get_provider_for_model,
     get_provider_from_db,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "build_provider_from_row",
     "get_default_provider",
     "get_default_provider_cached",
+    "get_provider_for_model",
     "get_provider_from_db",
 ]

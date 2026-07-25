@@ -1,6 +1,6 @@
 """Tests for the WebSocket chat endpoint.
 
-Uses a ScriptedProvider via monkeypatch on ``app.providers.get_default_provider``
+Uses a ScriptedProvider via monkeypatch on ``app.providers.get_provider_for_model``
 so no real network calls are made.
 """
 
@@ -20,11 +20,11 @@ def test_ws_chat_round_trip(monkeypatch) -> None:
     provider = ScriptedProvider()
     provider.set_script(["Hello from the test."])
     # Inject our provider into the module the WS handler imports.
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     # And the symbol already imported into app.api.websocket's namespace.
     import app.api.websocket as ws_module
 
-    monkeypatch.setattr(ws_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(ws_module, "get_provider_for_model", lambda model=None: provider)
 
     with TestClient(app) as c:
         # Create a conversation first via the HTTP API.
@@ -56,10 +56,10 @@ def test_ws_invalid_message_returns_error(monkeypatch) -> None:
     from app.main import app
 
     provider = ScriptedProvider()
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     import app.api.websocket as ws_module
 
-    monkeypatch.setattr(ws_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(ws_module, "get_provider_for_model", lambda model=None: provider)
 
     with TestClient(app) as c:
         conv = c.post("/api/conversations", json={"title": "WS-err"}).json()

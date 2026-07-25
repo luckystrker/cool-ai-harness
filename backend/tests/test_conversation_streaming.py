@@ -15,11 +15,11 @@ from tests.conftest import ScriptedProvider
 
 
 def _patch_provider(monkeypatch, provider: ScriptedProvider) -> None:
-    """Inject a provider into every module that resolves the default provider."""
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    """Inject a provider into every module that resolves the provider."""
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     import app.api.conversations as conv_module
 
-    monkeypatch.setattr(conv_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(conv_module, "get_provider_for_model", lambda model=None: provider)
 
 
 def test_tool_round_trip_persists_both_assistant_messages(monkeypatch) -> None:

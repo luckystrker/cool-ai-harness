@@ -20,7 +20,7 @@ from app.api.schemas import (
 )
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.providers import Message, get_default_provider
+from app.providers import Message, get_provider_for_model
 
 log = get_logger(__name__)
 
@@ -40,7 +40,7 @@ async def health() -> HealthResponse:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """Non-streaming chat smoke endpoint. No tool-calling, no persistence yet."""
-    provider = get_default_provider()
+    provider = get_provider_for_model(req.model)
 
     messages = [Message(role=m.role, content=m.content) for m in req.messages]
     try:

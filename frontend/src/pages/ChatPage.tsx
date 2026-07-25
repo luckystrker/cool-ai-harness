@@ -156,14 +156,15 @@ export function ChatPage() {
     }
     // Pass the conversation's current model as a per-message override so a
     // freshly-picked model applies immediately without a round-trip.
-    await stream(convId, content, detail?.model || undefined)
+    const errored = await stream(convId, content, detail?.model || undefined)
     // Persisted history is now the source of truth — refetch and drop pending
     // only after the fresh data is in the cache (avoids a blank flash between
-    // the stream ending and the history arriving).
+    // the stream ending and the history arriving). On a failed turn, keep the
+    // assistant error bubble so the user sees why there was no reply.
     await queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     queryClient.invalidateQueries({ queryKey: ["conversations"] })
     await queryClient.refetchQueries({ queryKey: ["conversation", convId] })
-    clearPending()
+    if (!errored) clearPending()
   }
 
   const handleAttach = (files: File[]) => {

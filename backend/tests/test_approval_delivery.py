@@ -19,10 +19,10 @@ from tests.conftest import ScriptedProvider
 
 
 def _patch_provider(monkeypatch, provider: ScriptedProvider) -> None:
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     import app.api.conversations as conv_module
 
-    monkeypatch.setattr(conv_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(conv_module, "get_provider_for_model", lambda model=None: provider)
 
 
 def test_approval_request_is_streamed_before_blocking(monkeypatch) -> None:

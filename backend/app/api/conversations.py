@@ -35,7 +35,7 @@ from app.api.schemas import (
 )
 from app.core.db import get_session
 from app.models import ApprovalAudit
-from app.providers import get_default_provider
+from app.providers import get_provider_for_model
 from app.security.capabilities import validate_policy as validate_capability_policy
 
 router = APIRouter()
@@ -219,7 +219,7 @@ async def post_message(
     )
 
     model = body.model or conv.model
-    provider = get_default_provider()
+    provider = get_provider_for_model(model)
 
     # Create a durable run row so this turn is observable, resumable-aware, and
     # cancellable. The run_id flows into the agent loop via the runner.

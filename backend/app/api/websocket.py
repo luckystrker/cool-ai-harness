@@ -21,7 +21,7 @@ from app.agent.runs import run_registry
 from app.agent.service import append_message, create_run, get_conversation
 from app.api.schemas import SendMessageRequest
 from app.core.logging import get_logger
-from app.providers import get_default_provider
+from app.providers import get_provider_for_model
 
 log = get_logger(__name__)
 
@@ -69,7 +69,7 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                 )
 
                 model = body.model or conv.model
-                provider = get_default_provider()
+                provider = get_provider_for_model(model)
 
                 # Durable run: one row per turn, observable + cancellable.
                 run = create_run(session, conversation_id=conv_id, model=model)

@@ -216,11 +216,11 @@ def test_update_run_patches_fields(db_session) -> None:
 
 
 def _patch_provider(monkeypatch, provider: ScriptedProvider) -> None:
-    """Inject a provider into every module that resolves the default provider."""
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    """Inject a provider into every module that resolves the provider."""
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     import app.api.conversations as conv_module
 
-    monkeypatch.setattr(conv_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(conv_module, "get_provider_for_model", lambda model=None: provider)
 
 
 def test_streaming_creates_run_with_event_log(monkeypatch) -> None:

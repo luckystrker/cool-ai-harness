@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from app.providers import ChatStreamEvent, LLMProvider, Message, ToolSpec, Usage
+# Point the app at a throwaway database BEFORE any `app.*` import. The engine
+# is created at module-import time (app.core.db) from DATABASE_URL, and
+# running the suite against data/harness.db pollutes production data with
+# test conversations/providers (this is how the /tmp/agent-x working dirs and
+# gpt-4o provider rows leaked into the real DB and surfaced in the chat UI).
+# Env vars take precedence over the .env file in pydantic-settings.
+_TEST_DB = Path(tempfile.gettempdir()) / "cool_ai_harness_test.db"
+if _TEST_DB.exists():
+    _TEST_DB.unlink()
+os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
+
+from app.providers import ChatStreamEvent, LLMProvider, Message, ToolSpec, Usage  # noqa: E402
 
 
 class ScriptedProvider(LLMProvider):

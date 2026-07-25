@@ -159,6 +159,45 @@ def _wrap_resilient(provider: LLMProvider) -> LLMProvider:
     return ResilientProvider(provider)
 
 
+def get_provider_for_model(model: str | None) -> LLMProvider:
+    """Return the provider that serves *model*, falling back to the default.
+
+    A conversation's model is picked from a specific provider's chat-exposed
+    list (the model picker), so route the turn to *that* provider instead of
+    always using the default — sending an OpenRouter model id to the OpenAI
+    API (or vice versa) fails with 401/400 and the user gets no answer.
+
+    Resolution: the first active provider row whose ``chat_models`` contains
+    the model id (or whose ``default_model`` matches). Otherwise fall back to
+    :func:`get_default_provider`.
+    """
+    if model:
+        try:
+            with Session(engine) as session:
+                rows = list(
+                    session.exec(
+                        select(ProviderRow)
+                        .where(ProviderRow.user_id == 1)
+                        .where(ProviderRow.is_active == True)  # noqa: E712
+                        .order_by(ProviderRow.id)
+                    ).all()
+                )
+                for row in rows:
+                    chat_models = list(row.chat_models or [])
+                    if model in chat_models or row.default_model == model:
+                        log.debug(
+                            "providers.routed_by_model",
+                            model=model,
+                            provider_id=row.id,
+                            name=row.name,
+                        )
+                        return ResilientProvider(_provider_row_to_llm(row))
+        except Exception as exc:
+            log.warning("providers.model_routing_failed", error=str(exc))
+
+    return get_default_provider()
+
+
 def get_default_provider() -> LLMProvider:
     """Return the provider to use for a turn.
 

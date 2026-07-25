@@ -26,10 +26,10 @@ _ALLOW_ALL = {"permissions": {"*": "allow"}}
 
 
 def _patch_provider(monkeypatch, provider: ScriptedProvider) -> None:
-    monkeypatch.setattr("app.providers.get_default_provider", lambda: provider)
+    monkeypatch.setattr("app.providers.get_provider_for_model", lambda model=None: provider)
     import app.api.conversations as conv_module
 
-    monkeypatch.setattr(conv_module, "get_default_provider", lambda: provider)
+    monkeypatch.setattr(conv_module, "get_provider_for_model", lambda model=None: provider)
 
 
 def _drain(resp) -> list[dict]:

@@ -27,6 +27,8 @@ interface Accumulator {
   reactSteps: ReActStep[]
   /** Model id for the current turn (shown on the live assistant message). */
   model?: string
+  /** Set when the backend emitted an `error` event (turn failed). */
+  errored?: boolean
 }
 
 const newAcc = (): Accumulator => ({
@@ -240,7 +242,20 @@ export function useConversationStream() {
         })
         break
       }
-      // start / error / tool_call_delta handled by surrounding loop.
+      case "error": {
+        // Provider / loop failures (e.g. 401 from the LLM backend). Without
+        // this the stream just ends and the user sees their message with no
+        // reply and no explanation.
+        const message = (ev.payload.message as string) || "Unknown error"
+        const detail = (ev.payload.detail as string) || ""
+        acc.content += `\n\n⚠️ **Error:** ${message}${detail ? ` — ${detail}` : ""}`
+        acc.finishReason = acc.finishReason ?? "error"
+        acc.errored = true
+        toast.error(message, { description: detail || undefined })
+        flush(acc)
+        break
+      }
+      // start / tool_call_delta handled by surrounding loop.
     }
   }
 
@@ -274,6 +289,7 @@ export function useConversationStream() {
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
           acc.content += `\n\n⚠️ Stream error: ${String(e)}`
+          acc.errored = true
           flush(acc)
         }
       } finally {
@@ -284,18 +300,26 @@ export function useConversationStream() {
             ? Math.max(0, Math.round(performance.now() - startedAtRef.current))
             : undefined
         startedAtRef.current = null
+        const errored = Boolean(acc.errored)
         setPendingMsgs((cur) =>
-          cur.map((m) =>
-            m.role === "assistant"
-              ? { ...m, streaming: false, elapsedMs: m.elapsedMs ?? elapsedMs }
-              : m
-          )
+          cur
+            // On a failed turn the user message is already persisted (the
+            // backend saves it before the run starts) and the refetched
+            // history shows it — drop the optimistic copy to avoid a
+            // duplicate, keeping only the assistant error bubble.
+            .filter((m) => (errored ? m.role === "assistant" : true))
+            .map((m) =>
+              m.role === "assistant"
+                ? { ...m, streaming: false, elapsedMs: m.elapsedMs ?? elapsedMs }
+                : m
+            )
         )
         setIsStreaming(false)
         abortRef.current = null
         convIdRef.current = null
         accRef.current = null
       }
+      return Boolean(acc.errored)
     },
     []
   )
