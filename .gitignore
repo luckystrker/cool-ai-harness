@@ -84,3 +84,6 @@ frontend/node_modules/
 # --- Editor / agent local state ---
 .zcode/
 .qoder
+
+# --- Stray screenshots ---
+github-actions-*.png
