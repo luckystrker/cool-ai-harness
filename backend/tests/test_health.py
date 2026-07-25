@@ -27,18 +27,15 @@ def test_health_endpoint() -> None:
 
 
 def test_chat_route_registered() -> None:
-    """The /api/chat smoke route should be registered."""
+    """The /api/chat and /api/health routes should respond."""
     from app.main import app
 
-    def _collect_paths(routes: list) -> set[str]:
-        paths: set[str] = set()
-        for r in routes:
-            if hasattr(r, "path"):
-                paths.add(r.path)
-            if hasattr(r, "routes"):
-                paths |= _collect_paths(r.routes)
-        return paths
+    with TestClient(app) as client:
+        # /api/health should return 200.
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
 
-    routes = _collect_paths(app.routes)
-    assert "/api/chat" in routes
-    assert "/api/health" in routes
+        # /api/chat requires a POST body; a bare GET should 405 (method not
+        # allowed), which still proves the route is registered.
+        resp = client.get("/api/chat")
+        assert resp.status_code in (200, 405), f"Unexpected status: {resp.status_code}"
