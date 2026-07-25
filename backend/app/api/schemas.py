@@ -229,3 +229,54 @@ class ArtifactUploadResponse(BaseModel):
 
     artifact: ArtifactOut
     message: str = "uploaded"
+
+
+# --- inspector (Фаза 1.5 §6 — Debug / Inspector Mode) ---
+
+
+class IterationDetail(BaseModel):
+    """Per-iteration detail reconstructed from the event log."""
+
+    iteration: int
+    duration_ms: int | None = None
+    usage: dict[str, Any] | None = None
+    model: str | None = None
+    tool_calls: list[dict[str, Any]] = []
+    finish_reason: str | None = None
+
+
+class RunTimeline(BaseModel):
+    """Full run timeline with per-iteration breakdown."""
+
+    run: RunDetail
+    iterations: list[IterationDetail] = []
+    total_duration_ms: int | None = None
+
+
+class RunComparison(BaseModel):
+    """Side-by-side comparison of two runs."""
+
+    run_a: RunOut
+    run_b: RunOut
+    delta_tokens: int
+    delta_cost_usd: float | None = None
+    delta_iterations: int
+    delta_duration_ms: int | None = None
+    iterations_a: list[IterationDetail] = []
+    iterations_b: list[IterationDetail] = []
+
+
+class ReplayRequest(BaseModel):
+    """Request body for replaying a run with optional overrides."""
+
+    model: str | None = None
+    system_prompt: str | None = None
+    temperature: float | None = None
+
+
+class ReplayResponse(BaseModel):
+    """Result of initiating a replay."""
+
+    new_run_id: int
+    original_run_id: int
+    status: str

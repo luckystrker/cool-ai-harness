@@ -209,6 +209,8 @@ export type AgentEventKind =
   | "react_thought"
   | "react_action"
   | "react_observation"
+  // Inspector per-iteration metrics (Фаза 1.5 §6)
+  | "llm_call_complete"
 
 /** Payload shape for a tool_approval_request event. */
 export interface ToolApprovalRequestPayload {
@@ -393,4 +395,84 @@ export interface BudgetAlertPayload {
   spend_usd: number
   limit_usd: number
   pct: number
+}
+
+// --- agent runs (Фаза 1.5 §1 — durable runs) ---
+
+/** Matches app/api/schemas.RunEventOut. */
+export interface RunEventOut {
+  id: number
+  run_id: number
+  seq: number
+  kind: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+/** Matches app/api/schemas.RunOut. */
+export interface RunOut {
+  id: number
+  conversation_id: number
+  status: string
+  model: string | null
+  iterations: number
+  usage: Record<string, unknown> | null
+  finish_reason: string | null
+  error: string | null
+  started_at: string
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** Matches app/api/schemas.RunDetail. */
+export interface RunDetail extends RunOut {
+  config: Record<string, unknown> | null
+  checkpoint: Record<string, unknown> | null
+  events: RunEventOut[]
+}
+
+// --- inspector (Фаза 1.5 §6 — Debug / Inspector Mode) ---
+
+/** Per-iteration detail reconstructed from the event log. */
+export interface IterationDetail {
+  iteration: number
+  duration_ms: number | null
+  usage: Record<string, unknown> | null
+  model: string | null
+  tool_calls: Record<string, unknown>[]
+  finish_reason: string | null
+}
+
+/** Full run timeline with per-iteration breakdown. */
+export interface RunTimeline {
+  run: RunDetail
+  iterations: IterationDetail[]
+  total_duration_ms: number | null
+}
+
+/** Side-by-side comparison of two runs. */
+export interface RunComparison {
+  run_a: RunOut
+  run_b: RunOut
+  delta_tokens: number
+  delta_cost_usd: number | null
+  delta_iterations: number
+  delta_duration_ms: number | null
+  iterations_a: IterationDetail[]
+  iterations_b: IterationDetail[]
+}
+
+/** Request body for POST .../runs/{id}/replay. */
+export interface ReplayRequest {
+  model?: string
+  system_prompt?: string
+  temperature?: number
+}
+
+/** Response from the replay endpoint. */
+export interface ReplayResponse {
+  new_run_id: number
+  original_run_id: number
+  status: string
 }

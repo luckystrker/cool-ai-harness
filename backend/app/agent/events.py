@@ -31,6 +31,8 @@ EventKind = Literal[
     "react_thought",  # explicit Thought phase (reasoning before action)
     "react_action",  # explicit Action phase (tool invocation intent)
     "react_observation",  # explicit Observation phase (tool result interpretation)
+    # --- Inspector / per-iteration metrics (Фаза 1.5 §6) ---
+    "llm_call_complete",  # one LLM round-trip finished; carries timing + usage
 ]
 
 
@@ -207,4 +209,26 @@ class AgentEvent:
         return cls(
             kind="react_observation",
             payload={"step": step, "tool_name": tool_name, "result_summary": result_summary, "is_error": is_error},
+        )
+
+    # --- Inspector constructors (Фаза 1.5 §6) ---
+
+    @classmethod
+    def llm_call_complete(
+        cls,
+        *,
+        iteration: int,
+        model: str,
+        usage: dict[str, Any] | None,
+        duration_ms: int,
+    ) -> AgentEvent:
+        """One LLM round-trip completed. Carries per-iteration timing and usage."""
+        return cls(
+            kind="llm_call_complete",
+            payload={
+                "iteration": iteration,
+                "model": model,
+                "usage": usage,
+                "duration_ms": duration_ms,
+            },
         )
