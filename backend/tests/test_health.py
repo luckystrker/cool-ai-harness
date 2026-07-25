@@ -30,6 +30,15 @@ def test_chat_route_registered() -> None:
     """The /api/chat smoke route should be registered."""
     from app.main import app
 
-    routes = {r.path for r in app.routes if hasattr(r, "path")}
+    def _collect_paths(routes: list) -> set[str]:
+        paths: set[str] = set()
+        for r in routes:
+            if hasattr(r, "path"):
+                paths.add(r.path)
+            if hasattr(r, "routes"):
+                paths |= _collect_paths(r.routes)
+        return paths
+
+    routes = _collect_paths(app.routes)
     assert "/api/chat" in routes
     assert "/api/health" in routes
