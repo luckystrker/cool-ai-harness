@@ -1,11 +1,12 @@
 import { User, Sparkles, Terminal } from "lucide-react"
 import { cn, formatDuration, formatMessageTime } from "@/lib/utils"
-import type { ReActStep, UsagePayload } from "@/api/types"
+import type { Plan, ReActStep, UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
 import { ThinkingBlock } from "./ThinkingBlock"
 import { ReActTrace } from "./ReActTrace"
 import { ApprovalCard, type InlineApproval } from "./ApprovalCard"
+import { PlanCard } from "./PlanCard"
 
 export interface MessageViewModel {
   id: string
@@ -31,6 +32,8 @@ export interface MessageViewModel {
   model?: string | null
   /** When the message was sent (ISO string). */
   createdAt?: string | null
+  /** Plan generated during this turn (Фаза 2 §1 Planning Mode). */
+  plan?: Plan
 }
 
 const ROLE_META = {
@@ -43,10 +46,16 @@ const ROLE_META = {
 export function MessageBubble({
   msg,
   onRespondApproval,
+  onPlanApprove,
+  onPlanExecute,
 }: {
   msg: MessageViewModel
   /** Callback to resolve an inline approval (approve/deny). */
   onRespondApproval?: (approved: boolean) => void
+  /** Callback to approve/reject a plan (Фаза 2 §1). */
+  onPlanApprove?: (approved: boolean) => void
+  /** Callback to execute an approved plan. */
+  onPlanExecute?: () => void
 }) {
   if (msg.role === "tool") return null // tool results render inside the assistant message that called them
   const meta = ROLE_META[msg.role]
@@ -143,6 +152,15 @@ export function MessageBubble({
           <ApprovalCard
             approval={msg.approval}
             onRespond={onRespondApproval ?? (() => {})}
+          />
+        )}
+
+        {/* Plan card — shows generated plan with approve/execute actions (Фаза 2 §1). */}
+        {isAssistant && msg.plan && (
+          <PlanCard
+            plan={msg.plan}
+            onApprove={onPlanApprove}
+            onExecute={onPlanExecute}
           />
         )}
 

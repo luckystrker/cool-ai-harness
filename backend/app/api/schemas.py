@@ -114,6 +114,9 @@ class SendMessageRequest(BaseModel):
     model: str | None = None
     system_prompt: str | None = None
     tool_names: list[str] | None = None
+    # When True, the agent generates a structured plan instead of executing
+    # directly (Фаза 2 §1 Planning Mode).
+    plan_mode: bool = False
 
 
 class ToolApprovalRequest(BaseModel):
@@ -280,3 +283,74 @@ class ReplayResponse(BaseModel):
     new_run_id: int
     original_run_id: int
     status: str
+
+
+# --- planning mode (Фаза 2 §1) ---
+
+
+class PlanStepOut(BaseModel):
+    """One step within a plan."""
+
+    position: int
+    title: str
+    description: str | None = None
+    status: str = "pending"
+    depends_on: list[int] | None = None
+    tools: list[str] | None = None
+    result_summary: str | None = None
+
+
+class PlanOut(BaseModel):
+    """Summary of a plan."""
+
+    id: int
+    conversation_id: int
+    run_id: int | None = None
+    title: str | None = None
+    status: str
+    steps: list[PlanStepOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlanStepUpdate(BaseModel):
+    """Editable step fields (for plan editing before approval)."""
+
+    position: int
+    title: str
+    description: str | None = None
+    depends_on: list[int] | None = None
+    tools: list[str] | None = None
+
+
+class PlanUpdate(BaseModel):
+    """Edit a draft plan's title and/or steps."""
+
+    title: str | None = None
+    steps: list[PlanStepUpdate] | None = None
+
+
+class PlanApproveRequest(BaseModel):
+    """Approve or reject a draft plan."""
+
+    approved: bool = True
+
+
+class PlanTemplateOut(BaseModel):
+    """A reusable plan template."""
+
+    id: int
+    name: str
+    description: str | None = None
+    steps: list[dict[str, Any]] = []
+    is_builtin: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlanTemplateCreate(BaseModel):
+    """Create a new plan template."""
+
+    name: str
+    description: str | None = None
+    steps: list[dict[str, Any]] = []

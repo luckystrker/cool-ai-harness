@@ -33,6 +33,11 @@ EventKind = Literal[
     "react_observation",  # explicit Observation phase (tool result interpretation)
     # --- Inspector / per-iteration metrics (Фаза 1.5 §6) ---
     "llm_call_complete",  # one LLM round-trip finished; carries timing + usage
+    # --- Planning Mode (Фаза 2 §1) ---
+    "plan_generated",  # LLM produced a structured plan; carries full plan JSON
+    "plan_step_start",  # a plan step began execution
+    "plan_step_complete",  # a plan step finished (success/failure/skipped)
+    "plan_progress",  # overall plan progress update
 ]
 
 
@@ -231,4 +236,37 @@ class AgentEvent:
                 "usage": usage,
                 "duration_ms": duration_ms,
             },
+        )
+
+    # --- Planning Mode constructors (Фаза 2 §1) ---
+
+    @classmethod
+    def plan_generated(cls, *, plan_id: int, title: str | None, steps: list[dict[str, Any]]) -> AgentEvent:
+        """LLM produced a structured plan awaiting user review."""
+        return cls(
+            kind="plan_generated",
+            payload={"plan_id": plan_id, "title": title, "steps": steps},
+        )
+
+    @classmethod
+    def plan_step_start(cls, *, position: int, title: str) -> AgentEvent:
+        """A plan step began execution."""
+        return cls(kind="plan_step_start", payload={"position": position, "title": title})
+
+    @classmethod
+    def plan_step_complete(
+        cls, *, position: int, status: str, result_summary: str | None = None
+    ) -> AgentEvent:
+        """A plan step finished execution."""
+        return cls(
+            kind="plan_step_complete",
+            payload={"position": position, "status": status, "result_summary": result_summary},
+        )
+
+    @classmethod
+    def plan_progress(cls, *, completed: int, total: int, current_step: int | None = None) -> AgentEvent:
+        """Overall plan progress update."""
+        return cls(
+            kind="plan_progress",
+            payload={"completed": completed, "total": total, "current_step": current_step},
         )
