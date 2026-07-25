@@ -6,6 +6,8 @@ column is encrypted at rest via app.core.security (Fernet).
 
 from __future__ import annotations
 
+from sqlalchemy import Column
+from sqlalchemy.types import JSON
 from sqlmodel import Field
 
 from app.models.base import TimestampMixin
@@ -32,3 +34,13 @@ class Provider(TimestampMixin, table=True):
     # active, non-fallback) provider is unhealthy (Фаза 1.5 §5). A single
     # active fallback row is the expected setup.
     is_fallback: bool = Field(default=False, index=True)
+    # When True, this is the default provider for new conversations (its first
+    # chat-exposed model becomes the default model, and it's the primary in the
+    # resilience chain). Mutually exclusive: at most one row per user.
+    is_default: bool = Field(default=False, index=True)
+    # JSON list of model ids the user has marked as available in the chat
+    # model picker (selected from the provider's live /models list). The first
+    # entry is used as the effective default when none is named per-conversation.
+    chat_models: list[str] | None = Field(
+        default=None, sa_column=Column("chat_models", JSON)
+    )

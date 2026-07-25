@@ -25,6 +25,8 @@ interface Accumulator {
   approval?: InlineApproval
   /** ReAct trace steps (Thought → Action → Observation). */
   reactSteps: ReActStep[]
+  /** Model id for the current turn (shown on the live assistant message). */
+  model?: string
 }
 
 const newAcc = (): Accumulator => ({
@@ -71,6 +73,8 @@ export function useConversationStream() {
       toolCalls: tcs.length ? tcs : undefined,
       approval: acc.approval,
       reactSteps: acc.reactSteps.length ? acc.reactSteps : undefined,
+      model: acc.model,
+      createdAt: acc.user?.createdAt,
     }
     const msgs = acc.user ? [acc.user, assistant] : [assistant]
     setPendingMsgs(msgs)
@@ -250,10 +254,12 @@ export function useConversationStream() {
 
       const acc = newAcc()
       accRef.current = acc
+      acc.model = model
       acc.user = {
         id: `local-user-${Date.now()}`,
         role: "user",
         content,
+        createdAt: new Date().toISOString(),
       }
       flush(acc)
 

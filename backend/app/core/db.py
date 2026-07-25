@@ -35,6 +35,13 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
     # created by create_all; only the added column on an existing table needs
     # an explicit ALTER here).
     ("providers", "is_fallback", "BOOLEAN DEFAULT 0"),
+    # 0006 — JSON list of model ids exposed in the chat picker.
+    ("providers", "chat_models", "JSON"),
+    # 0007 — explicit default-provider flag.
+    ("providers", "is_default", "BOOLEAN DEFAULT 0"),
+    # 0008 — per-message model + turn duration.
+    ("messages", "model", "TEXT"),
+    ("messages", "duration_ms", "INTEGER"),
 ]
 
 

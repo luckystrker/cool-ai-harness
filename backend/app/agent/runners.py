@@ -199,6 +199,10 @@ async def run_conversation_turn(
     # Count of completed LLM iterations for the run row.
     iteration_count = 0
     terminal_reason: str | None = None
+    # Wall-clock start of the turn, used to stamp the duration on the final
+    # assistant message(s). Captured here (not at run creation) so it reflects
+    # the actual loop time, independent of pre-loop setup.
+    turn_t0 = time.monotonic()
 
     try:
         async for event in executor.stream(user_input):
@@ -333,11 +337,17 @@ async def run_conversation_turn(
             elif event.kind == "finish":
                 terminal_reason = event.payload.get("reason")
                 usage = event.payload.get("usage")
-                # Attach the aggregated usage to the most recent assistant message.
-                if usage and persisted_last_assistant_id is not None:
+                # Stamp the most recent assistant message with the turn's
+                # aggregated usage (when reported) plus the model id and the
+                # whole-turn wall-clock duration, so reloaded history can show
+                # "which model / how long" without joining agent_runs.
+                if persisted_last_assistant_id is not None:
                     row = session.get(MessageRow, persisted_last_assistant_id)
                     if row is not None:
-                        row.usage = usage
+                        if usage:
+                            row.usage = usage
+                        row.model = model
+                        row.duration_ms = int((time.monotonic() - turn_t0) * 1000)
                         session.add(row)
                         session.commit()
                 if run_id is not None:

@@ -1,5 +1,5 @@
 import { User, Sparkles, Terminal } from "lucide-react"
-import { cn, formatDuration } from "@/lib/utils"
+import { cn, formatDuration, formatMessageTime } from "@/lib/utils"
 import type { ReActStep, UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
@@ -15,7 +15,7 @@ export interface MessageViewModel {
   toolCalls?: (ToolCallBlockProps & { key: string })[]
   /** Reasoning / chain-of-thought text, when the provider exposes one. */
   thinking?: string
-  /** Total elapsed time for the assistant turn, when known (live stream). */
+  /** Total elapsed time for the assistant turn (live or from history). */
   elapsedMs?: number
   /** Token usage from the terminal finish event, when reported. */
   usage?: UsagePayload
@@ -27,6 +27,10 @@ export interface MessageViewModel {
   approval?: InlineApproval
   /** ReAct trace steps (Thought → Action → Observation). */
   reactSteps?: ReActStep[]
+  /** Which model produced this assistant message (history). */
+  model?: string | null
+  /** When the message was sent (ISO string). */
+  createdAt?: string | null
 }
 
 const ROLE_META = {
@@ -76,7 +80,19 @@ export function MessageBubble({
           msg.role === "user" && "items-end"
         )}
       >
-        <div className="text-xs font-medium text-muted-foreground">{meta.label}</div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span className="font-medium">{meta.label}</span>
+          {isAssistant && msg.model && (
+            <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">
+              {msg.model}
+            </span>
+          )}
+          {msg.createdAt && (
+            <span className="text-[10px] text-muted-foreground/70">
+              {formatMessageTime(msg.createdAt)}
+            </span>
+          )}
+        </div>
 
         {/* Reasoning trace sits above the answer, collapsed by default. */}
         {isAssistant && msg.thinking && (

@@ -68,7 +68,36 @@ def _msg_to_out(m) -> MessageOut:
         thinking=m.thinking,
         tool_result=m.tool_result,
         created_at=m.created_at,
+        model=m.model,
+        duration_ms=m.duration_ms,
     )
+
+
+def _resolve_default_model(session: Session) -> str | None:
+    """Default model for a new conversation: the default provider's first chat
+    model (falling back to its legacy default_model column).
+
+    Picks the row marked ``is_default``; if none, the first active non-fallback
+    row. Returns None when no provider / no models are configured.
+    """
+    from sqlmodel import select
+
+    from app.models import Provider as ProviderRow
+
+    rows = session.exec(
+        select(ProviderRow)
+        .where(ProviderRow.user_id == 1)
+        .where(ProviderRow.is_active == True)  # noqa: E712
+        .order_by(ProviderRow.id)
+    ).all()
+    pool = [r for r in rows if r.is_default and not r.is_fallback] or [
+        r for r in rows if not r.is_fallback
+    ]
+    if not pool:
+        return None
+    row = pool[0]
+    chat_models = list(row.chat_models or [])
+    return (chat_models[0] if chat_models else None) or row.default_model
 
 
 # --- CRUD ---
@@ -83,11 +112,14 @@ def post_conversation(
     if errors := validate_capability_policy(body.capability_policy):
         raise HTTPException(status_code=400, detail="; ".join(errors))
     user = get_or_create_default_user(session)
+    # Seed the conversation's model from the default provider when the caller
+    # didn't name one, so a freshly created chat already has a working model.
+    model = body.model or _resolve_default_model(session)
     conv = create_conversation(
         session,
         user_id=user.id,
         title=body.title,
-        model=body.model,
+        model=model,
         working_directory=body.working_directory,
         permissions=body.permissions,
         capability_policy=body.capability_policy,

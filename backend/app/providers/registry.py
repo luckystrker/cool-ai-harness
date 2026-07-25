@@ -49,9 +49,11 @@ def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
 
     # Resolve base_url: explicit row value > provider-class default > settings.
     base_url = row.base_url or _default_base_url_for(row.name)
-    # Model is optional here — it's chosen per-conversation via the UI; the row
-    # default is just a convenience for new chats. May be None.
-    model = row.default_model
+    # Effective default model: the first chat-exposed model (the new path),
+    # falling back to the legacy default_model column. None is fine — the model
+    # is named per-conversation via the UI.
+    chat_models = list(row.chat_models or [])
+    model = (chat_models[0] if chat_models else None) or row.default_model
 
     name = (row.name or "").lower()
     if name == "anthropic":
@@ -109,8 +111,9 @@ def build_provider_from_form(
 def get_provider_from_db(session: Session) -> LLMProvider | None:
     """Return the resilient provider chain built from active Provider rows.
 
-    Primary = first active, non-fallback row. Fallbacks = active rows marked
-    ``is_fallback`` (in id order). The chain is wrapped in a
+    Primary = the row explicitly marked ``is_default`` if one is active;
+    otherwise the first active, non-fallback row. Fallbacks = active rows
+    marked ``is_fallback`` (in id order). The chain is wrapped in a
     ``ResilientProvider`` (retry / circuit breaker / fallback, Фаза 1.5 §5).
     Returns None when no active primary row exists.
     """
@@ -124,8 +127,13 @@ def get_provider_from_db(session: Session) -> LLMProvider | None:
     )
     if not rows:
         return None
-    primary_rows = [r for r in rows if not r.is_fallback]
+
+    # Prefer the explicitly-marked default provider (if still active).
+    default_rows = [r for r in rows if r.is_default and not r.is_fallback]
+    non_fallback = [r for r in rows if not r.is_fallback]
     fallback_rows = [r for r in rows if r.is_fallback]
+
+    primary_rows = default_rows or non_fallback
     # If nothing is explicitly non-fallback, treat the first row as primary.
     if not primary_rows:
         primary_rows = [fallback_rows[0]]

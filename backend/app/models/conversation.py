@@ -60,6 +60,12 @@ class Message(TimestampMixin, table=True):
     # when the provider exposes one. Kept so reloaded history can show the
     # thinking block that led to an answer.
     thinking: str | None = Field(default=None, sa_column=Column(Text))
+    # Which model produced this assistant message (snapshot at turn time).
+    # NULL on user/system/tool rows and on history recorded before this column.
+    model: str | None = None
+    # Wall-clock duration of the agent turn that produced this message, in ms.
+    # Whole-turn granularity (a turn may span several loop iterations).
+    duration_ms: int | None = None
 
 
 class ToolCall(TimestampMixin, table=True):

@@ -32,6 +32,10 @@ class ProviderCreate(BaseModel):
     default_model: str | None = None
     is_subscription: bool = False
     is_fallback: bool = Field(default=False, description="Use as the backup provider when the primary is unhealthy (Фаза 1.5 §5)")
+    # Model ids exposed in the chat model picker (selected from the provider's
+    # live /models list). The first entry is the effective default.
+    chat_models: list[str] | None = None
+    is_default: bool = Field(default=False, description="Mark as the default provider for new conversations (mutually exclusive)")
 
 
 class ProviderUpdate(BaseModel):
@@ -41,6 +45,8 @@ class ProviderUpdate(BaseModel):
     default_model: str | None = None
     is_active: bool | None = None
     is_fallback: bool | None = None
+    chat_models: list[str] | None = None
+    is_default: bool | None = None
 
 
 class ProviderOut(BaseModel):
@@ -52,6 +58,9 @@ class ProviderOut(BaseModel):
     is_active: bool
     is_subscription: bool
     is_fallback: bool = False
+    is_default: bool = False
+    # Model ids exposed in the chat model picker.
+    chat_models: list[str] = Field(default_factory=list)
     # Masked preview of the stored key, e.g. "sk-…1a2b". Never the full secret.
     api_key_hint: str | None = None
 
@@ -100,8 +109,24 @@ def _to_out(p: Provider) -> ProviderOut:
         is_active=p.is_active,
         is_subscription=p.is_subscription,
         is_fallback=p.is_fallback,
+        is_default=p.is_default,
+        chat_models=list(p.chat_models or []),
         api_key_hint=hint,
     )
+
+
+def _clear_default_flag(session: Session, except_id: int | None = None) -> None:
+    """Clear ``is_default`` on every other provider for the MVP single user.
+
+    Keeps the flag mutually exclusive: at most one row per user carries it.
+    """
+    user_id = 1  # MVP single-user.
+    stmt = select(Provider).where(Provider.user_id == user_id).where(Provider.is_default == True)  # noqa: E712
+    if except_id is not None:
+        stmt = stmt.where(Provider.id != except_id)
+    for other in session.exec(stmt).all():
+        other.is_default = False
+        session.add(other)
 
 
 # --- routes ---
@@ -165,6 +190,8 @@ def create_provider(
 ) -> ProviderOut:
     # MVP single-user: everything belongs to user_id=1.
     user_id = 1
+    if body.is_default:
+        _clear_default_flag(session)
     provider = Provider(
         user_id=user_id,
         name=body.name,
@@ -174,6 +201,8 @@ def create_provider(
         default_model=body.default_model,
         is_subscription=body.is_subscription,
         is_fallback=body.is_fallback,
+        chat_models=body.chat_models,
+        is_default=body.is_default,
     )
     session.add(provider)
     session.commit()
@@ -217,6 +246,14 @@ def update_provider(
         p.is_active = body.is_active
     if body.is_fallback is not None:
         p.is_fallback = body.is_fallback
+    if body.chat_models is not None:
+        p.chat_models = body.chat_models
+    if body.is_default is True:
+        # Mutually exclusive: clear the flag on every other provider first.
+        _clear_default_flag(session, except_id=provider_id)
+        p.is_default = True
+    elif body.is_default is False:
+        p.is_default = False
     if body.api_key is not None:
         p.api_key_encrypted = encrypt(body.api_key)
     session.add(p)

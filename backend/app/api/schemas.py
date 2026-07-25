@@ -98,6 +98,9 @@ class MessageOut(BaseModel):
     usage: dict[str, Any] | None = None
     thinking: str | None = None
     tool_result: dict[str, Any] | None = None
+    # Which model produced this assistant message + how long the turn took.
+    model: str | None = None
+    duration_ms: int | None = None
     created_at: datetime
 
 

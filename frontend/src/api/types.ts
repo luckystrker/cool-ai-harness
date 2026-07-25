@@ -97,6 +97,10 @@ export interface Message {
   thinking?: string | null
   /** Structured tool result (role="tool" messages). */
   tool_result?: { tool_call_id?: string | null; name?: string | null; result?: ToolResultPayload } | null
+  /** Which model produced this assistant message (snapshot at turn time). */
+  model?: string | null
+  /** Wall-clock duration of the agent turn that produced this message (ms). */
+  duration_ms?: number | null
   created_at: string
 }
 
@@ -138,6 +142,10 @@ export interface Provider {
   is_subscription: boolean
   /** Use as the backup provider when the primary is unhealthy (Фаза 1.5 §5). */
   is_fallback: boolean
+  /** Marked as the default provider for new conversations (mutually exclusive). */
+  is_default: boolean
+  /** Model ids exposed in the chat model picker (selected in provider settings). */
+  chat_models: string[]
   /** Masked preview like "sk-…cdef"; never the full secret. */
   api_key_hint: string | null
 }
@@ -150,6 +158,8 @@ export interface ProviderCreate {
   default_model?: string
   is_subscription?: boolean
   is_fallback?: boolean
+  chat_models?: string[]
+  is_default?: boolean
 }
 
 export interface ProviderUpdate {
@@ -159,6 +169,8 @@ export interface ProviderUpdate {
   default_model?: string
   is_active?: boolean
   is_fallback?: boolean
+  chat_models?: string[]
+  is_default?: boolean
 }
 
 /** One model a provider serves, with whatever metadata the provider returned. */

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import {
   Check,
@@ -15,7 +15,7 @@ import {
   MODE_LABELS,
   type PermissionMode,
 } from "@/lib/agentConfig"
-import { formatContextWindow, hasModelMeta } from "@/lib/modelFormat"
+import { formatContextWindow, hasModelMeta, contextUsagePct } from "@/lib/modelFormat"
 import { DirectoryBrowserDialog } from "@/components/chat/DirectoryBrowserDialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -43,6 +43,8 @@ export interface ComposerToolbarProps {
   modelOptions: ModelInfo[]
   /** Additional model id hints (e.g. other providers' defaults) merged in. */
   suggestedModels: string[]
+  /** Tokens of conversation context already consumed (last assistant prompt_tokens). */
+  usedContextTokens?: number | null
   onModelChange: (model: string) => void
   modelPending?: boolean
   disabled?: boolean
@@ -70,6 +72,7 @@ export function ComposerToolbar({
   currentModel,
   modelOptions,
   suggestedModels,
+  usedContextTokens,
   onModelChange,
   modelPending,
   disabled,
@@ -79,6 +82,7 @@ export function ComposerToolbar({
   // Resolve the active model's context window from the live model list.
   const currentModelContext =
     modelOptions.find((m) => m.id === currentModel)?.context_window ?? null
+  const usedPct = contextUsagePct(usedContextTokens, currentModelContext)
 
   // Recent projects for the working-directory dropdown.
   const { data: recentData } = useQuery({
@@ -215,11 +219,37 @@ export function ComposerToolbar({
         {/* --- Context window badge for the current model --- */}
         {currentModel && (
           <span
-            className="inline-flex h-7 items-center gap-1 rounded-md bg-muted px-2 text-xs text-muted-foreground"
-            title={`Context window: ${formatContextWindow(currentModelContext)} tokens`}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground",
+              usedPct >= 80 ? "bg-destructive/10 text-destructive" : "bg-muted"
+            )}
+            title={
+              usedContextTokens != null && currentModelContext
+                ? `Context: ${usedContextTokens.toLocaleString()} / ${currentModelContext.toLocaleString()} tokens (${usedPct}%)`
+                : `Context window: ${formatContextWindow(currentModelContext)} tokens`
+            }
           >
-            <Cpu className="h-3 w-3" />
-            ctx {formatContextWindow(currentModelContext)}
+            <Cpu className="h-3 w-3 shrink-0" />
+            {usedContextTokens != null && currentModelContext ? (
+              <span className="flex items-center gap-1">
+                <span>
+                  {formatContextWindow(usedContextTokens)} / {formatContextWindow(currentModelContext)}
+                </span>
+                <span className="relative h-1.5 w-10 overflow-hidden rounded-full bg-background/60">
+                  <span
+                    className={cn(
+                      "absolute inset-y-0 left-0 rounded-full",
+                      usedPct >= 80 ? "bg-destructive" : "bg-primary"
+                    )}
+                    style={{ width: `${usedPct}%` }}
+                  />
+                </span>
+              </span>
+            ) : usedContextTokens != null ? (
+              <span>{formatContextWindow(usedContextTokens)} used</span>
+            ) : (
+              <span>ctx {formatContextWindow(currentModelContext)}</span>
+            )}
           </span>
         )}
       </div>
@@ -265,11 +295,17 @@ function ModelPickerInline({
     setCustomValue("")
   }
 
-  // Merge live model options with the plain-id fallbacks. Live entries win
-  // (they carry metadata); fallback ids without metadata are appended.
-  const liveIds = new Set(modelOptions.map((m) => m.id))
-  const extraIds = suggestedModels.filter((id) => !liveIds.has(id))
-  const hasAnyOptions = modelOptions.length > 0 || extraIds.length > 0
+  // The picker shows ONLY the models the user marked as available in chat
+  // (suggestedModels = union of providers' chat_models). Live model metadata
+  // (context window / price) from /models is resolved by id lookup and shown
+  // where present; the full live list is never rendered directly.
+  const metaById = useMemo(() => {
+    const m = new Map<string, ModelInfo>()
+    for (const opt of modelOptions) m.set(opt.id, opt)
+    return m
+  }, [modelOptions])
+
+  const hasAnyOptions = suggestedModels.length > 0
 
   return (
     <DropdownMenu onOpenChange={(open) => { if (!open) setCustomOpen(false) }}>
@@ -293,7 +329,7 @@ function ModelPickerInline({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-72">
-        {currentModel && (
+        {currentModel && !suggestedModels.includes(currentModel) && (
           <>
             <DropdownMenuLabel className="text-xs text-muted-foreground">
               Current
@@ -311,49 +347,35 @@ function ModelPickerInline({
         {hasAnyOptions && (
           <>
             <DropdownMenuLabel className="text-xs text-muted-foreground">
-              Provider models
+              Available models
             </DropdownMenuLabel>
-            {modelOptions.map((m) => (
-              <DropdownMenuItem
-                key={m.id}
-                className="flex items-start gap-2 py-1.5"
-                onSelect={(e) => {
-                  e.preventDefault()
-                  onChange(m.id)
-                }}
-              >
-                {m.id === currentModel ? (
-                  <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0" />
-                )}
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-mono text-xs">{m.id}</span>
-                  {hasModelMeta(m) && (
-                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                      ctx {formatContextWindow(m.context_window)}
-                    </span>
+            {suggestedModels.map((id) => {
+              const meta = metaById.get(id)
+              return (
+                <DropdownMenuItem
+                  key={id}
+                  className="flex items-start gap-2 py-1.5"
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    onChange(id)
+                  }}
+                >
+                  {id === currentModel ? (
+                    <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0" />
                   )}
-                </span>
-              </DropdownMenuItem>
-            ))}
-            {extraIds.map((id) => (
-              <DropdownMenuItem
-                key={id}
-                className="font-mono text-xs"
-                onSelect={(e) => {
-                  e.preventDefault()
-                  onChange(id)
-                }}
-              >
-                {id === currentModel ? (
-                  <Check className="h-3.5 w-3.5" />
-                ) : (
-                  <span className="inline-block h-3.5 w-3.5 shrink-0" />
-                )}
-                {id}
-              </DropdownMenuItem>
-            ))}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-xs">{id}</span>
+                    {meta && hasModelMeta(meta) && (
+                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                        ctx {formatContextWindow(meta.context_window)}
+                      </span>
+                    )}
+                  </span>
+                </DropdownMenuItem>
+              )
+            })}
             <DropdownMenuSeparator />
           </>
         )}

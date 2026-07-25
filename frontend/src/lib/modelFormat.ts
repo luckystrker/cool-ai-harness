@@ -41,3 +41,9 @@ export function hasModelMeta(m: Pick<ModelInfo, "context_window" | "prompt_price
     m.completion_price != null
   )
 }
+
+/** Percentage of the context window used, 0-100 (clamped). 0 when max unknown. */
+export function contextUsagePct(used: number | null | undefined, max: number | null | undefined): number {
+  if (!max || max <= 0 || used == null || used <= 0) return 0
+  return Math.min(100, Math.round((used / max) * 100))
+}

@@ -73,16 +73,17 @@ export function ChatPage() {
     return stitchHistory(detail.messages)
   }, [detail])
 
-  // Provider default_model values, deduped, feed the model picker's
-  // "suggested" list. Declared above the early return so the hook order
-  // is stable regardless of whether convId is set.
+  // The chat model picker shows every model the user marked as available in
+  // provider settings (provider.chat_models), deduped across providers.
+  // Declared above the early return so the hook order is stable regardless of
+  // whether convId is set.
   const suggestedModels = useMemo(
     () =>
       Array.from(
         new Set(
-          providers
-            .map((p) => p.default_model)
-            .filter((m): m is string => Boolean(m && m.trim()))
+          providers.flatMap((p) => p.chat_models ?? []).filter((m): m is string =>
+            Boolean(m && m.trim())
+          )
         )
       ),
     [providers]
@@ -175,6 +176,24 @@ export function ChatPage() {
     setPendingFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
+  // Conversation context usage = the prompt_tokens of the most recent assistant
+  // turn. That usage is cumulative for the whole run, so its prompt_tokens
+  // already reflect the full conversation context sent to the model — no need
+  // (and no correctness) in summing across messages. Declared above the early
+  // return so the hook order is stable regardless of whether convId is set.
+  const usedContextTokens = useMemo(() => {
+    const msgs = detail?.messages
+    if (!msgs) return null
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]
+      if (m.role === "assistant" && m.usage) {
+        const pt = (m.usage as { prompt_tokens?: number }).prompt_tokens
+        if (typeof pt === "number" && pt > 0) return pt
+      }
+    }
+    return null
+  }, [detail])
+
   if (!convId) return <EmptyState />
 
   const currentModel = detail?.model || ""
@@ -244,6 +263,7 @@ export function ChatPage() {
                   currentModel={currentModel}
                   modelOptions={providerModels}
                   suggestedModels={suggestedModels}
+                  usedContextTokens={usedContextTokens}
                   onModelChange={handleModelChange}
                   modelPending={updateMutation.isPending}
                 />
@@ -312,6 +332,11 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
       toolCalls,
       thinking: m.thinking ?? undefined,
       usage: (m.usage as MessageViewModel["usage"]) ?? undefined,
+      model: m.model ?? undefined,
+      createdAt: m.created_at,
+      // Persisted turn duration becomes elapsedMs so the footnote (and the
+      // thinking block) render the same way for history as for the live stream.
+      elapsedMs: m.duration_ms ?? undefined,
     })
   }
   return out

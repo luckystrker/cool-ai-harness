@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
@@ -25,7 +25,7 @@ import {
 } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { ModelSelect } from "@/components/settings/ModelSelect"
+import { ChatModelsPicker } from "@/components/settings/ChatModelsPicker"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
@@ -54,6 +54,7 @@ const EMPTY_FORM: ProviderCreate = {
   default_model: undefined,
   is_subscription: false,
   is_fallback: false,
+  chat_models: [],
 }
 
 export function SettingsPage() {
@@ -165,6 +166,13 @@ export function SettingsPage() {
                 onEdit={() => setEditing(p)}
                 onDelete={() => deleteMutation.mutate(p.id)}
                 deleting={deleteMutation.isPending}
+                onSetDefault={() =>
+                  updateMutation.mutate({ id: p.id, body: { is_default: true } })
+                }
+                settingDefault={
+                  updateMutation.isPending &&
+                  updateMutation.variables?.id === p.id
+                }
               />
             ))}
           </div>
@@ -198,11 +206,15 @@ function ProviderRow({
   onEdit,
   onDelete,
   deleting,
+  onSetDefault,
+  settingDefault,
 }: {
   provider: Provider
   onEdit: () => void
   onDelete: () => void
   deleting: boolean
+  onSetDefault: () => void
+  settingDefault: boolean
 }) {
   return (
     <Card>
@@ -213,6 +225,11 @@ function ProviderRow({
             <Badge variant="outline" className="font-mono">{p.name}</Badge>
             {p.is_subscription && <Badge variant="secondary">subscription</Badge>}
             {p.is_fallback && <Badge variant="outline">fallback</Badge>}
+            {p.is_default && (
+              <Badge variant="default" className="gap-1">
+                <Star className="h-3 w-3" /> default
+              </Badge>
+            )}
             {p.is_active ? (
               <Badge variant="success" className="gap-1">
                 <CheckCircle2 className="h-3 w-3" /> active
@@ -221,7 +238,25 @@ function ProviderRow({
               <Badge variant="warning">disabled</Badge>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            <label
+              className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"
+              title="Use as the default provider for new conversations"
+            >
+              <input
+                type="radio"
+                name="default-provider"
+                checked={p.is_default}
+                onChange={onSetDefault}
+                disabled={settingDefault || !p.is_active}
+                className="h-3.5 w-3.5"
+              />
+              {settingDefault ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <span>Default</span>
+              )}
+            </label>
             <Button
               variant="ghost"
               size="icon"
@@ -244,7 +279,10 @@ function ProviderRow({
           </div>
         </div>
         <CardDescription>
-          {p.base_url || "(default endpoint)"} · {p.default_model || "(default model)"}
+          {p.base_url || "(default endpoint)"} ·{" "}
+          {p.chat_models.length
+            ? `${p.chat_models.length} chat model${p.chat_models.length === 1 ? "" : "s"}`
+            : "no chat models"}
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
@@ -313,11 +351,11 @@ function ProviderForm({
           rows={2}
         />
       </div>
-      <ModelSelect
-        id="p-model"
+      <ChatModelsPicker
+        id="p-chat-models"
         mode="preview"
-        value={form.default_model}
-        onChange={(m) => set({ default_model: m })}
+        value={form.chat_models ?? []}
+        onChange={(models) => set({ chat_models: models })}
         previewRequest={{
           name: form.name,
           base_url: form.base_url ?? undefined,
@@ -363,7 +401,7 @@ function EditProviderDialog({
 }) {
   const [label, setLabel] = useState(provider?.label ?? "")
   const [base_url, setBaseUrl] = useState(provider?.base_url ?? "")
-  const [default_model, setDefaultModel] = useState(provider?.default_model ?? "")
+  const [chat_models, setChatModels] = useState<string[]>(provider?.chat_models ?? [])
   // Empty api_key means "keep the stored secret unchanged".
   const [api_key, setApiKey] = useState("")
   const [is_fallback, setIsFallback] = useState(!!provider?.is_fallback)
@@ -372,7 +410,7 @@ function EditProviderDialog({
     const body: ProviderUpdate = {
       label,
       base_url,
-      default_model,
+      chat_models,
       is_fallback,
       ...(api_key.trim() ? { api_key } : {}),
     }
@@ -412,12 +450,12 @@ function EditProviderDialog({
                 onChange={(e) => setBaseUrl(e.target.value)}
               />
             </div>
-            <ModelSelect
-              id="e-model"
+            <ChatModelsPicker
+              id="e-chat-models"
               mode="saved"
               providerId={provider.id}
-              value={default_model || null}
-              onChange={setDefaultModel}
+              value={chat_models}
+              onChange={setChatModels}
             />
             <div className="space-y-1.5">
               <Label htmlFor="e-key">
