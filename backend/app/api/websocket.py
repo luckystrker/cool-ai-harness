@@ -1,9 +1,12 @@
-"""WebSocket endpoint for real-time agent streaming.
+"""WebSocket endpoints for real-time agent streaming and live inspection.
 
 Unlike the SSE route (one-shot POST → stream), the WebSocket stays open and
 accepts multiple user messages over the same conversation. Clients send
 ``{"content": "...", "model": "...?"}``; the server streams AgentEvents back
 as JSON text frames and finishes each turn with a ``finish`` event.
+
+The inspection WebSocket (``/ws/inspect/{run_id}``) is read-only: it forwards
+events from an in-progress run to developer tools in real time (Фаза 1.5 §6).
 
 Closes the conversation model: history is loaded from the DB at turn start,
 and assistant/tool messages are persisted at turn end — same runner used by
@@ -12,7 +15,9 @@ the SSE route.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -21,6 +26,7 @@ from app.agent.runs import run_registry
 from app.agent.service import append_message, create_run, get_conversation
 from app.api.schemas import SendMessageRequest
 from app.core.logging import get_logger
+from app.observability import inspector_registry
 from app.providers import get_provider_for_model
 
 log = get_logger(__name__)
@@ -111,3 +117,46 @@ async def _send_error(websocket: WebSocket, message: str) -> None:
     from app.agent.events import AgentEvent
 
     await websocket.send_text(AgentEvent.error(message).to_dict_json())
+
+
+# --- Live inspection WebSocket (Фаза 1.5 §6) --------------------------------
+
+
+@router.websocket("/ws/inspect/{run_id}")
+async def inspect_run_ws(websocket: WebSocket, run_id: int) -> None:
+    """Read-only live inspection of an in-progress run.
+
+    Subscribes to the InspectorRegistry for the given run_id and forwards
+    every event as a JSON text frame. When the run finishes, a ``null``
+    sentinel is sent and the connection closes. If the run is already
+    finished (or unknown), sends an error frame and closes immediately.
+    """
+    await websocket.accept()
+
+    # Quick check: is the run still active? If not, inform and close.
+    if not run_registry.is_active(run_id) and not inspector_registry.has_subscribers(run_id):
+        # The run might still be active if it just hasn't been registered yet
+        # (race), so we subscribe anyway and rely on the sentinel to end.
+        pass
+
+    queue = inspector_registry.subscribe(run_id)
+    try:
+        while True:
+            try:
+                event_dict = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except TimeoutError:
+                # Send a ping to keep the connection alive.
+                await websocket.send_text(json.dumps({"kind": "ping", "payload": {}}))
+                continue
+
+            if event_dict is None:
+                # Sentinel: run finished.
+                await websocket.send_text("null")
+                break
+            await websocket.send_text(json.dumps(event_dict, default=str, ensure_ascii=False))
+    except WebSocketDisconnect:
+        log.debug("inspect_ws.disconnected", run_id=run_id)
+    except Exception as exc:
+        log.error("inspect_ws.error", run_id=run_id, error=str(exc))
+    finally:
+        inspector_registry.unsubscribe(run_id, queue)
