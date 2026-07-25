@@ -39,3 +39,8 @@ def test_chat_route_registered() -> None:
         # allowed), which still proves the route is registered.
         resp = client.get("/api/chat")
         assert resp.status_code in (200, 405), f"Unexpected status: {resp.status_code}"
+
+
+def test_deliberate_failure() -> None:
+    """This test deliberately fails to verify CI blocks merge."""
+    assert False, "Deliberate failure to test branch protection"
