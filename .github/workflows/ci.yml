@@ -33,7 +33,7 @@ jobs:
 
       - name: Pytest
         working-directory: backend
-        run: pytest --tb=short -q
+        run: pytest --tb=long -v -x
 
   frontend:
     name: Frontend (oxlint + build)
