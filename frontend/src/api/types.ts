@@ -223,6 +223,8 @@ export interface ToolApprovalRequestPayload {
   breakpoint_type?: BreakpointType
   /** Result preview (for after_tool_result breakpoints). */
   result_preview?: string
+  /** Current file content before the write (for diff/preview in write tools). */
+  current_content?: string
 }
 
 export interface AgentEvent {

@@ -194,6 +194,7 @@ export function useConversationStream() {
           isBreakpoint: p.is_breakpoint,
           breakpointType: p.breakpoint_type,
           resultPreview: p.result_preview,
+          currentContent: p.current_content,
           status: "pending",
         }
         flush(acc)

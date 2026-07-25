@@ -534,11 +534,23 @@ class AgentExecutor:
         decision = self._resolve_decision(name, dangerous=bool(tool and tool.dangerous))
 
         if decision == "ask":
-            yield AgentEvent.tool_approval_request(
-                call_id=call_id,
-                name=name,
-                arguments=args,
-                reason=f"Tool {name!r} requires approval",
+            # For write tools, include the current file content so the UI can
+            # render a diff/preview before the user decides (Фаза 1.5 §2).
+            extra: dict[str, Any] = {}
+            if is_write_tool(name):
+                current = self._read_file_for_preview(args)
+                if current is not None:
+                    extra["current_content"] = current
+            yield AgentEvent(
+                kind="tool_approval_request",
+                payload={
+                    "id": call_id,
+                    "name": name,
+                    "arguments": args,
+                    "reason": f"Tool {name!r} requires approval",
+                    "requires_decision": True,
+                    **extra,
+                },
             )
             approved = await self._wait_for_approval(call_id)
             if not approved:
@@ -589,6 +601,32 @@ class AgentExecutor:
             return False
         return self.config.breakpoints.should_break(bp_type, tool_name=tool_name) is not None
 
+    def _read_file_for_preview(self, args: dict[str, Any]) -> str | None:
+        """Read the current content of a file targeted by a write tool.
+
+        Returns the existing content (for diff/preview in the approval UI),
+        or None if the file doesn't exist or can't be read. Caps at 50 KB
+        to avoid shipping huge payloads in the event stream.
+        """
+        rel_path = args.get("path")
+        if not rel_path or not isinstance(rel_path, str):
+            return None
+        try:
+            ctx = self._build_run_context()
+            full = (ctx.workdir / rel_path).resolve()
+            # Confinement: only read within the workspace.
+            if not str(full).startswith(str(ctx.workdir.resolve())):
+                return None
+            if not full.is_file():
+                return None
+            content = full.read_text(encoding="utf-8", errors="replace")
+            # Cap to avoid bloating the event payload.
+            if len(content) > 50_000:
+                content = content[:50_000] + "\n… (truncated)"
+            return content
+        except Exception:
+            return None
+
     def _breakpoint_event(
         self,
         call_id: str,
@@ -608,6 +646,11 @@ class AgentExecutor:
             "is_breakpoint": True,
             "breakpoint_type": bp_type.value,
         }
+        # For write-tool breakpoints, include current file content for diff preview.
+        if is_write_tool(name):
+            current = self._read_file_for_preview(args)
+            if current is not None:
+                payload["current_content"] = current
         if extra_context:
             payload.update(extra_context)
         return AgentEvent(kind="tool_approval_request", payload=payload)
