@@ -140,13 +140,13 @@ async def _models_to_out(provider) -> list[ModelOut]:
         raise HTTPException(
             status_code=501,
             detail=f"This provider does not expose a model list: {exc}",
-        )
-    except Exception as exc:  # noqa: BLE001 — surface provider errors to the UI
+        ) from None
+    except Exception as exc:
         log.warning("providers.list_models_failed", error=str(exc))
         raise HTTPException(
             status_code=502,
             detail=f"Could not list models from provider: {exc}",
-        )
+        ) from exc
     return [
         ModelOut(
             id=m.id,

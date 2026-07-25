@@ -26,7 +26,7 @@ class Budget(TimestampMixin, table=True):
     daily_limit_usd: float | None = None
     weekly_limit_usd: float | None = None
     monthly_limit_usd: float | None = None
-    # Spend percentage (0–100) at which an alert fires. Copied from settings on
+    # Spend percentage (0-100) at which an alert fires. Copied from settings on
     # create so each user can later tune it independently.
     alert_threshold_pct: float = Field(default=80.0)
     # When True, new LLM calls are blocked once a budget is exceeded (until the

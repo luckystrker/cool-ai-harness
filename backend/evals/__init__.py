@@ -14,8 +14,8 @@ Usage (CLI):
     python -m evals --update-baseline   # save current results as new baseline
 """
 
-from evals.scenario import EvalScenario, ScenarioAssertion, ScenarioResult
 from evals.runner import EvalRunner
+from evals.scenario import EvalScenario, ScenarioAssertion, ScenarioResult
 
 __all__ = [
     "EvalRunner",

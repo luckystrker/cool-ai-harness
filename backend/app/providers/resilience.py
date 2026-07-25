@@ -245,7 +245,7 @@ class ResilientProvider(LLMProvider):
                     )
                     self._circuit.record_success(provider.name)
                     return result
-                except Exception as exc:  # noqa: BLE001 — classify below
+                except Exception as exc:
                     if not _is_retriable(exc):
                         self._circuit.record_success(provider.name)
                         raise
@@ -304,7 +304,7 @@ class ResilientProvider(LLMProvider):
                         yield event
                     self._circuit.record_success(provider.name)
                     return
-                except Exception as exc:  # noqa: BLE001 — classify below
+                except Exception as exc:
                     if not _is_retriable(exc):
                         # Non-retriable: record success (no provider outage) and
                         # propagate — e.g. a 400 bad request is a caller bug.

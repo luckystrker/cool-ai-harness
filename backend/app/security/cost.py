@@ -14,13 +14,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from app.core.config import get_settings
 
 
-class BudgetStatus(str, Enum):
+class BudgetStatus(StrEnum):
     """Outcome of evaluating spend against the budget config."""
 
     OK = "ok"

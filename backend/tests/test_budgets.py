@@ -11,7 +11,6 @@ from app.budgets import service as budgets
 from app.providers import Usage
 from app.security.cost import BudgetConfig, BudgetStatus, evaluate_budget
 
-
 # --- policy: evaluate_budget ------------------------------------------------
 
 
@@ -177,12 +176,12 @@ def test_list_spend_newest_first(db_session) -> None:
 async def test_executor_blocks_when_budget_exceeded(db_session, scripted_provider) -> None:
     """When the budget is exceeded, the loop finishes with reason=budget_exceeded
     before any LLM call."""
-    from app.agent import AgentConfig, AgentExecutor
-    from app.core.db import engine as real_engine
-
     # Seed the real engine's DB with an exceeded budget. The executor opens its
     # own session against the configured engine, so we must write there.
     from sqlmodel import Session as _S
+
+    from app.agent import AgentConfig, AgentExecutor
+    from app.core.db import engine as real_engine
 
     with _S(real_engine) as s:
         budgets.upsert_budget(s, daily_limit_usd=1.0, block_on_exceed=True)

@@ -183,8 +183,7 @@ def _run_subprocess_sync(
     try:
         completed = subprocess.run(
             argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
             check=False,
             cwd=str(cwd) if cwd is not None else None,

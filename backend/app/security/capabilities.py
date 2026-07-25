@@ -25,7 +25,7 @@ at all, not *what specific resources* within it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from app.core.logging import get_logger
@@ -40,7 +40,7 @@ _VALID_DECISIONS: frozenset[str] = frozenset({"allow", "ask", "deny"})
 _DECISION_RANK: dict[str, int] = {"allow": 0, "ask": 1, "deny": 2}
 
 
-class Capability(str, Enum):
+class Capability(StrEnum):
     """Coarse-grained capability categories."""
 
     READ = "read"

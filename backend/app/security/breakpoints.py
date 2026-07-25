@@ -24,7 +24,7 @@ Configuration:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from app.core.logging import get_logger
@@ -32,7 +32,7 @@ from app.core.logging import get_logger
 log = get_logger(__name__)
 
 
-class BreakpointType(str, Enum):
+class BreakpointType(StrEnum):
     """When in the tool-call chain a breakpoint fires."""
 
     BEFORE_TOOL = "before_tool"
@@ -88,9 +88,8 @@ class BreakpointsConfig:
         for bp in self.breakpoints:
             if bp.bp_type != bp_type:
                 continue
-            if bp.tool_name is not None and tool_name is not None:
-                if bp.tool_name != tool_name:
-                    continue
+            if bp.tool_name is not None and tool_name is not None and bp.tool_name != tool_name:
+                continue
             return bp
         return None
 

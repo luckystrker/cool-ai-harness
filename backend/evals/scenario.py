@@ -13,11 +13,11 @@ replay provider) so results are reproducible without real LLM calls.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """How critical a scenario is for the CI gate.
 
     CRITICAL: must pass or the gate fails (blocks merge).

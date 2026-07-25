@@ -204,10 +204,7 @@ async def test_tool_call_deltas_as_list(workspace) -> None:
 
         async def chat_completion_stream(self, messages, *, model, tools=None, **kw):
             self.calls.append(list(messages))
-            if self.turns:
-                turn = self.turns.pop(0)
-            else:
-                turn = "Done."
+            turn = self.turns.pop(0) if self.turns else "Done."
             # A plain text turn.
             if isinstance(turn, str):
                 for w in turn.split(" "):

@@ -37,7 +37,7 @@ async def git_info(path: str = Query(..., description="Directory to inspect")) -
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-    except (OSError, asyncio.TimeoutError):
+    except (TimeoutError, OSError):
         return {"path": str(target), "is_git": False, "branch": None}
 
     if proc.returncode != 0:
@@ -52,10 +52,7 @@ async def list_directories(
 ) -> dict:
     """List sub-directories of *path* for the folder browser dialog."""
     settings = get_settings()
-    if not path:
-        target = Path.home()
-    else:
-        target = Path(path)
+    target = Path.home() if not path else Path(path)
 
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
@@ -66,7 +63,7 @@ async def list_directories(
             if entry.is_dir() and not entry.name.startswith("."):
                 dirs.append(entry.name)
     except PermissionError:
-        raise HTTPException(status_code=403, detail="Permission denied")
+        raise HTTPException(status_code=403, detail="Permission denied") from None
 
     return {
         "current": str(target),

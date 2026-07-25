@@ -206,7 +206,7 @@ class AgentExecutor:
                     try:
                         with Session(engine) as _budget_session:
                             _eval = budget_evaluation(_budget_session, user_id=self.config.user_id)
-                    except Exception as exc:  # noqa: BLE001 — never block a turn over a budget hiccup
+                    except Exception as exc:
                         log.warning("agent.budget_check_failed", error=str(exc))
                         _eval = None
                     if _eval is not None and _eval.blocked:
@@ -432,7 +432,7 @@ class AgentExecutor:
                     )
                     mark_alert_fired(session, user_id=self.config.user_id)
                     break  # one alert event per call is enough
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("agent.budget_alert_failed", error=str(exc))
         return events
 

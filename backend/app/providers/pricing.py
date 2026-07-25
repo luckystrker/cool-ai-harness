@@ -68,9 +68,10 @@ def _lookup(model: str) -> dict[str, float] | None:
     # Prefer the longest matching prefix (so "gpt-4o-mini" beats "gpt-4o").
     best_key: str | None = None
     for key in _PRICING:
-        if norm == key or norm.startswith(key + "-") or key.startswith(norm + "-"):
-            if best_key is None or len(key) > len(best_key):
-                best_key = key
+        if (norm == key or norm.startswith(key + "-") or key.startswith(norm + "-")) and (
+            best_key is None or len(key) > len(best_key)
+        ):
+            best_key = key
     return _PRICING[best_key] if best_key else None
 
 

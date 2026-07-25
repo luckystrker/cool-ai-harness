@@ -21,7 +21,6 @@ from app.agent.executor import AgentConfig, AgentExecutor, AgentLimits
 from app.agent.permissions import PermissionsConfig
 from app.providers import ChatStreamEvent, LLMProvider, Message, ToolSpec, Usage
 from app.security.capabilities import CapabilityPolicy
-
 from evals.scenario import (
     AssertionResult,
     EvalScenario,

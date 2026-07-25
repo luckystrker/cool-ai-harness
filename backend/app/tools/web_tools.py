@@ -149,29 +149,29 @@ async def web_fetch(*, url: str, max_chars: int = 20_000) -> ToolResult:
         )
 
     max_bytes = settings.network_max_response_bytes
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with (
+        httpx.AsyncClient(timeout=30, follow_redirects=True) as client,
         # Stream the response so we can enforce a size limit without downloading
         # an arbitrarily large body.
-        async with client.stream(
-            "GET", url, headers={"User-Agent": "CoolAIHarness/0.1"}
-        ) as resp:
-            resp.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            size_truncated = False
-            async for chunk in resp.aiter_bytes(chunk_size=8192):
-                total += len(chunk)
-                if max_bytes and total > max_bytes:
-                    size_truncated = True
-                    # Keep only up to the limit.
-                    remaining = max_bytes - (total - len(chunk))
-                    if remaining > 0:
-                        chunks.append(chunk[:remaining])
-                    break
-                chunks.append(chunk)
-            body = b"".join(chunks)
-            status_code = resp.status_code
-            final_url = str(resp.url)
+        client.stream("GET", url, headers={"User-Agent": "CoolAIHarness/0.1"}) as resp,
+    ):
+        resp.raise_for_status()
+        chunks: list[bytes] = []
+        total = 0
+        size_truncated = False
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            total += len(chunk)
+            if max_bytes and total > max_bytes:
+                size_truncated = True
+                # Keep only up to the limit.
+                remaining = max_bytes - (total - len(chunk))
+                if remaining > 0:
+                    chunks.append(chunk[:remaining])
+                break
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        status_code = resp.status_code
+        final_url = str(resp.url)
 
     body = _TAG_SCRIPT.sub(b" ", body)
     body = _TAG.sub(b" ", body)

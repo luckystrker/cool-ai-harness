@@ -17,7 +17,6 @@ from app.providers.resilience import (
     reset_circuit_registry,
 )
 
-
 # --- helpers -----------------------------------------------------------------
 
 

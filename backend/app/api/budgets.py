@@ -19,7 +19,6 @@ from sqlmodel import Session
 from app.budgets import service as budgets
 from app.core.db import get_session
 from app.core.logging import get_logger
-from app.security.cost import BudgetStatus
 
 log = get_logger(__name__)
 

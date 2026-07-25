@@ -81,10 +81,7 @@ _SAFE_ENV_PREFIXES = (
 
 def _looks_secret(name: str) -> bool:
     """True if the env var name matches a secret pattern."""
-    for pattern in _SECRET_ENV_PATTERNS:
-        if pattern.search(name):
-            return True
-    return False
+    return any(pattern.search(name) for pattern in _SECRET_ENV_PATTERNS)
 
 
 def build_sandbox_env(

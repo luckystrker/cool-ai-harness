@@ -224,7 +224,7 @@ def record_spend_run_scoped(
                 run_id=run_id,
                 conversation_id=conversation_id,
             )
-    except Exception as exc:  # noqa: BLE001 — never break a turn over spend logging
+    except Exception as exc:
         log.warning("budgets.record_spend_failed", error=str(exc))
 
 

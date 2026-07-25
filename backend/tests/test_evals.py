@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from evals.replay import ComparisonReport, TraceStore, compare_runs
-from evals.runner import EvalRunner, ScriptedEvalProvider
+from evals.replay import TraceStore, compare_runs
+from evals.runner import EvalRunner
 from evals.scenario import (
     AssertionResult,
     EvalScenario,
@@ -20,8 +20,12 @@ from evals.scenario import (
     ScenarioResult,
     Severity,
 )
-from evals.scenarios import ALL_SCENARIOS, COST_LIMIT_SCENARIOS, SAFETY_SCENARIOS, TOOL_SELECTION_SCENARIOS
-
+from evals.scenarios import (
+    ALL_SCENARIOS,
+    COST_LIMIT_SCENARIOS,
+    SAFETY_SCENARIOS,
+    TOOL_SELECTION_SCENARIOS,
+)
 
 # --- EvalRunner unit tests ---
 
