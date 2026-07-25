@@ -378,6 +378,15 @@ async def run_conversation_turn(
         # make sure the run row doesn't stay "running" forever.
         if event_log is not None:
             event_log.flush()
+
+        # History consistency: if the last assistant message requested tool_calls
+        # but the run ended before all tool results were persisted (cancel/error
+        # mid-batch), append placeholder tool results for the missing ones.
+        # Without this, the next turn sees an assistant message with N tool_calls
+        # but fewer than N tool responses, which confuses the LLM provider.
+        if persisted_last_assistant_id is not None:
+            _backfill_missing_tool_results(session, conversation_id, persisted_last_assistant_id)
+
         if run_id is not None:
             from app.agent.service import get_run
 
@@ -417,3 +426,55 @@ def _limits_to_config(limits: AgentLimits, tool_names: list[str] | None) -> dict
         "max_cost_usd": limits.max_cost_usd,
         "tool_names": tool_names,
     }
+
+
+def _backfill_missing_tool_results(
+    session: Session, conversation_id: int, assistant_msg_id: int
+) -> None:
+    """Persist placeholder tool results for any tool_calls that never completed.
+
+    When a run is cancelled or errors mid-tool-batch, the assistant message
+    already references N tool_calls but only M < N tool result rows exist.
+    LLM providers require a tool response for every tool_call in the preceding
+    assistant message; without this the next turn's API call fails or the model
+    produces garbled output. This helper fills the gaps with a clear
+    "cancelled" indicator so the history stays well-formed.
+    """
+    from sqlmodel import select
+
+    assistant_row = session.get(MessageRow, assistant_msg_id)
+    if assistant_row is None or not assistant_row.tool_calls:
+        return
+
+    # Find tool result messages that follow this assistant message.
+    subsequent_tool_rows = session.exec(
+        select(MessageRow)
+        .where(MessageRow.conversation_id == conversation_id)
+        .where(MessageRow.id > assistant_msg_id)
+        .where(MessageRow.role == "tool")
+    ).all()
+    answered_call_ids: set[str] = set()
+    for row in subsequent_tool_rows:
+        if row.tool_result and row.tool_result.get("tool_call_id"):
+            answered_call_ids.add(row.tool_result["tool_call_id"])
+
+    # Persist a placeholder for each unanswered tool call.
+    for tc in assistant_row.tool_calls:
+        call_id = tc.get("id") or ""
+        if call_id and call_id not in answered_call_ids:
+            append_message(
+                session,
+                conversation_id=conversation_id,
+                role="tool",
+                content=f"[Cancelled] Tool '{tc.get('name', 'unknown')}' did not complete.",
+                tool_result={
+                    "tool_call_id": call_id,
+                    "name": tc.get("name", ""),
+                    "result": {
+                        "output": f"[Cancelled] Tool '{tc.get('name', 'unknown')}' did not complete.",
+                        "is_error": True,
+                        "error": "Run cancelled before tool execution completed.",
+                    },
+                },
+            )
+            answered_call_ids.add(call_id)

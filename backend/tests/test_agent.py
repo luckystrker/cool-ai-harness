@@ -396,6 +396,97 @@ async def test_allow_policy_runs_without_approval(scripted_provider, workspace) 
 
 
 @pytest.mark.asyncio
+async def test_react_steps_sequential_per_tool_call(scripted_provider, workspace) -> None:
+    """Multiple tool calls in one LLM response must each get their own ReAct step.
+
+    The ReAct pattern requires: Thought(1)→Action(1)→Observation(1)→
+    Thought(2)→Action(2)→Observation(2)→…  NOT a single step with N actions.
+    """
+    scripted_provider.set_script(
+        [
+            # First LLM turn: model requests 3 tool calls at once.
+            [
+                {"id": "c1", "name": "write_file", "arguments": {"path": "a.txt", "content": "1"}},
+                {"id": "c2", "name": "write_file", "arguments": {"path": "b.txt", "content": "2"}},
+                {"id": "c3", "name": "write_file", "arguments": {"path": "c.txt", "content": "3"}},
+            ],
+            # Second LLM turn: final answer.
+            "All files written.",
+        ]
+    )
+    ex = AgentExecutor(provider=scripted_provider, config=AgentConfig(model="m"))
+    events = [e async for e in ex.stream("write three files")]
+
+    # Collect ReAct events.
+    thoughts = [e for e in events if e.kind == "react_thought"]
+    actions = [e for e in events if e.kind == "react_action"]
+    observations = [e for e in events if e.kind == "react_observation"]
+
+    # Each tool call gets its own step: 3 thoughts, 3 actions, 3 observations.
+    assert len(thoughts) == 3, f"Expected 3 thoughts, got {len(thoughts)}"
+    assert len(actions) == 3, f"Expected 3 actions, got {len(actions)}"
+    assert len(observations) == 3, f"Expected 3 observations, got {len(observations)}"
+
+    # Step numbers must be sequential: 1, 2, 3.
+    thought_steps = [e.payload["step"] for e in thoughts]
+    action_steps = [e.payload["step"] for e in actions]
+    obs_steps = [e.payload["step"] for e in observations]
+    assert thought_steps == [1, 2, 3]
+    assert action_steps == [1, 2, 3]
+    assert obs_steps == [1, 2, 3]
+
+    # Each action references the correct tool call.
+    assert actions[0].payload["call_id"] == "c1"
+    assert actions[1].payload["call_id"] == "c2"
+    assert actions[2].payload["call_id"] == "c3"
+
+    # The first thought carries the LLM reasoning; subsequent are continuations.
+    assert "Continuing" not in thoughts[0].payload["text"]
+    assert "Continuing" in thoughts[1].payload["text"]
+    assert "Continuing" in thoughts[2].payload["text"]
+
+    # Event ordering: thought(N) before action(N) before observation(N).
+    react_events = [e for e in events if e.kind.startswith("react_")]
+    for i in range(0, len(react_events), 3):
+        assert react_events[i].kind == "react_thought"
+        assert react_events[i + 1].kind == "react_action"
+        assert react_events[i + 2].kind == "react_observation"
+        # All three share the same step number.
+        assert react_events[i].payload["step"] == react_events[i + 1].payload["step"] == react_events[i + 2].payload["step"]
+
+
+@pytest.mark.asyncio
+async def test_react_step_counter_continues_across_iterations(scripted_provider, workspace) -> None:
+    """ReAct step counter continues incrementing across LLM iterations.
+
+    If iteration 1 has 2 tool calls (steps 1,2) and iteration 2 has 1 tool call,
+    the third tool call should be step 3 (not reset to 1).
+    """
+    scripted_provider.set_script(
+        [
+            # Iteration 1: two tool calls.
+            [
+                {"id": "c1", "name": "write_file", "arguments": {"path": "x.txt", "content": "a"}},
+                {"id": "c2", "name": "write_file", "arguments": {"path": "y.txt", "content": "b"}},
+            ],
+            # Iteration 2: one more tool call.
+            [
+                {"id": "c3", "name": "write_file", "arguments": {"path": "z.txt", "content": "c"}},
+            ],
+            # Iteration 3: final answer.
+            "Done.",
+        ]
+    )
+    ex = AgentExecutor(provider=scripted_provider, config=AgentConfig(model="m"))
+    events = [e async for e in ex.stream("write files")]
+
+    actions = [e for e in events if e.kind == "react_action"]
+    assert len(actions) == 3
+    # Steps should be 1, 2, 3 across iterations (not 1, 2, 1).
+    assert [a.payload["step"] for a in actions] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
 async def test_wildcard_deny_blocks_all(scripted_provider) -> None:
     """A '*' deny blocks every tool (including dangerous ones)."""
     from app.agent.permissions import PermissionsConfig

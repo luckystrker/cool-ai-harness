@@ -309,10 +309,13 @@ class AgentExecutor:
                     )
                     return
 
-                # --- ReAct: emit Thought phase ---
-                react_step += 1
-                thought_text = thinking or content or f"Deciding to use tool(s) to proceed."
-                yield AgentEvent.react_thought(step=react_step, text=thought_text)
+                # --- ReAct: emit Thought → Action → Observation per tool call ---
+                # Each tool call gets its own ReAct step so the trace follows
+                # the proper cyclical pattern: Thought(1)→Action(1)→Observation(1)
+                # → Thought(2)→Action(2)→Observation(2) → …
+                # The first step carries the LLM's original reasoning; subsequent
+                # steps (from the same LLM response) get a brief continuation note.
+                thought_text = thinking or content or "Deciding to use tool(s) to proceed."
 
                 # Execute tool calls, append results, continue the loop.
                 # One more cancel check first — a cancel that arrived while we
@@ -326,7 +329,16 @@ class AgentExecutor:
                     )
                     return
 
-                for call in normalized_calls:
+                for call_idx, call in enumerate(normalized_calls):
+                    react_step += 1
+                    # --- ReAct: emit Thought phase for this step ---
+                    if call_idx == 0:
+                        yield AgentEvent.react_thought(step=react_step, text=thought_text)
+                    else:
+                        yield AgentEvent.react_thought(
+                            step=react_step,
+                            text=f"Continuing with next tool call ({call_idx + 1}/{len(normalized_calls)}).",
+                        )
                     # --- ReAct: emit Action phase ---
                     yield AgentEvent.react_action(
                         step=react_step,
