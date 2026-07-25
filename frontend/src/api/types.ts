@@ -128,6 +128,8 @@ export interface SendMessageRequest {
   model?: string
   system_prompt?: string
   tool_names?: string[]
+  /** When true, the agent generates a structured plan instead of executing directly (Фаза 2 §1). */
+  plan_mode?: boolean
 }
 
 // --- providers ---
@@ -211,6 +213,11 @@ export type AgentEventKind =
   | "react_observation"
   // Inspector per-iteration metrics (Фаза 1.5 §6)
   | "llm_call_complete"
+  // Planning Mode (Фаза 2 §1)
+  | "plan_generated"
+  | "plan_step_start"
+  | "plan_step_complete"
+  | "plan_progress"
 
 /** Payload shape for a tool_approval_request event. */
 export interface ToolApprovalRequestPayload {
@@ -475,4 +482,69 @@ export interface ReplayResponse {
   new_run_id: number
   original_run_id: number
   status: string
+}
+
+// --- planning mode (Фаза 2 §1) ---
+
+export type PlanStatus =
+  | "draft"
+  | "approved"
+  | "executing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+export type PlanStepStatus = "pending" | "running" | "completed" | "failed" | "skipped"
+
+export interface PlanStep {
+  position: number
+  title: string
+  description?: string | null
+  status: PlanStepStatus
+  depends_on?: number[] | null
+  tools?: string[] | null
+  result_summary?: string | null
+}
+
+export interface Plan {
+  id: number
+  conversation_id: number
+  run_id: number | null
+  title: string | null
+  status: PlanStatus
+  steps: PlanStep[]
+  created_at: string
+  updated_at: string
+}
+
+export interface PlanTemplate {
+  id: number
+  name: string
+  description: string | null
+  steps: PlanStep[]
+  is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** Payload shape for a plan_generated agent event. */
+export interface PlanGeneratedPayload {
+  plan_id: number
+  title: string | null
+  steps: PlanStep[]
+}
+
+/** Payload shape for plan_step_start / plan_step_complete events. */
+export interface PlanStepEventPayload {
+  position: number
+  title?: string
+  status?: PlanStepStatus
+  result_summary?: string | null
+}
+
+/** Payload shape for a plan_progress event. */
+export interface PlanProgressPayload {
+  completed: number
+  total: number
+  current_step: number | null
 }

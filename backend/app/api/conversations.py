@@ -10,6 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.approvals import approval_registry
 from app.agent.permissions import validate as validate_permissions
+from app.agent.planning import PLANNING_SYSTEM_PROMPT, create_plan, extract_plan_from_response
 from app.agent.runners import run_conversation_turn
 from app.agent.runs import run_registry
 from app.agent.service import (
@@ -205,6 +206,8 @@ async def post_message(
     """Append a user message and stream the agent's response as SSE events.
 
     SSE event payloads are JSON-encoded AgentEvent.to_dict() objects.
+    When ``plan_mode`` is True, the agent generates a structured plan instead
+    of executing directly (Фаза 2 §1 Planning Mode).
     """
     conv = get_conversation(session, conv_id)
     if conv is None:
@@ -224,6 +227,12 @@ async def post_message(
     # Create a durable run row so this turn is observable, resumable-aware, and
     # cancellable. The run_id flows into the agent loop via the runner.
     run = create_run(session, conversation_id=conv_id, model=model)
+
+    # --- Planning Mode (Фаза 2 §1) ---
+    if body.plan_mode:
+        return EventSourceResponse(
+            _plan_generation_stream(session, conv_id, run.id, provider, model or "", body.content, conv)  # type: ignore[arg-type]
+        )
 
     async def event_stream() -> AsyncIterator[dict]:
         try:
@@ -251,6 +260,64 @@ async def post_message(
             run_registry.cancel_for_conversation(conv_id)
 
     return EventSourceResponse(event_stream())
+
+
+async def _plan_generation_stream(
+    session, conv_id: int, run_id: int, provider, model: str, user_input: str, conv
+) -> AsyncIterator[dict]:
+    """SSE stream for plan generation: runs the full agent loop with planning prompt.
+
+    The agent researches using tools, then outputs a ```plan ... ``` block.
+    After the loop finishes, the plan is extracted, persisted, and emitted.
+    """
+    from app.agent.events import AgentEvent
+    from app.agent.service import update_run
+    from app.models.run import RUN_STATUS_AWAITING_APPROVAL
+
+    last_content = ""
+
+    try:
+        async for event in run_conversation_turn(
+            session=session,
+            conversation_id=conv_id,
+            provider=provider,
+            model=model,
+            user_input=None,  # already persisted above
+            system_prompt=PLANNING_SYSTEM_PROMPT,
+            working_directory=conv.working_directory,
+            conversation_permissions=conv.permissions,
+            conversation_capability_policy=conv.capability_policy,
+            conversation_breakpoints=(conv.metadata_ or {}).get("breakpoints"),
+            run_id=run_id,
+            cancellable=True,
+        ):
+            # Capture the last assistant message content for plan extraction.
+            if event.kind == "message":
+                last_content = event.payload.get("content") or ""
+            yield {"event": event.kind, "data": event.to_dict_json()}
+
+        # After the loop finishes, try to extract a plan from the final response.
+        plan_data = extract_plan_from_response(last_content)
+        if plan_data:
+            plan = create_plan(
+                session,
+                conversation_id=conv_id,
+                run_id=run_id,
+                title=plan_data.get("title"),
+                steps=plan_data["steps"],
+            )
+            # Emit the plan_generated event so the frontend shows the PlanCard.
+            plan_event = AgentEvent.plan_generated(
+                plan_id=plan.id,  # type: ignore[arg-type]
+                title=plan.title,
+                steps=plan_data["steps"],
+            )
+            yield {"event": plan_event.kind, "data": plan_event.to_dict_json()}
+            # Mark the run as awaiting approval (user must approve the plan).
+            update_run(session, run_id, status=RUN_STATUS_AWAITING_APPROVAL)
+    finally:
+        approval_registry.cancel_for_conversation(conv_id)
+        run_registry.cancel_for_conversation(conv_id)
 
 
 @router.post("/conversations/{conv_id}/tool_calls/{call_id}/approval")

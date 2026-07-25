@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { MessageSquare, Sparkles, Paperclip } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
+import { plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import type { Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
@@ -53,6 +54,7 @@ export function ChatPage() {
 
   const {
     pendingMsgs,
+    setPendingMsgs,
     isStreaming,
     stream,
     cancel,
@@ -62,6 +64,7 @@ export function ChatPage() {
 
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [planMode, setPlanMode] = useState(false)
 
   // When a different conversation is selected, drop any pending bubbles.
   useEffect(() => {
@@ -156,15 +159,20 @@ export function ChatPage() {
     }
     // Pass the conversation's current model as a per-message override so a
     // freshly-picked model applies immediately without a round-trip.
-    const errored = await stream(convId, content, detail?.model || undefined)
+    const errored = await stream(convId, content, detail?.model || undefined, planMode)
+    // Reset plan mode after sending (one-shot toggle).
+    const wasPlanMode = planMode
+    setPlanMode(false)
     // Persisted history is now the source of truth — refetch and drop pending
     // only after the fresh data is in the cache (avoids a blank flash between
     // the stream ending and the history arriving). On a failed turn, keep the
     // assistant error bubble so the user sees why there was no reply.
+    // When plan mode was active, keep the pending PlanCard visible so the user
+    // can approve/reject the plan.
     await queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     queryClient.invalidateQueries({ queryKey: ["conversations"] })
     await queryClient.refetchQueries({ queryKey: ["conversation", convId] })
-    if (!errored) clearPending()
+    if (!errored && !wasPlanMode) clearPending()
   }
 
   const handleAttach = (files: File[]) => {
@@ -176,6 +184,98 @@ export function ChatPage() {
   const handleRemoveFile = (index: number) => {
     setPendingFiles((prev) => prev.filter((_, i) => i !== index))
   }
+
+  // --- Plan Mode handlers (Фаза 2 §1) ---
+
+  const handlePlanExecute = useCallback(async () => {
+    if (!convId) return
+    const planMsg = pendingMsgs.find((m) => m.plan)
+    if (!planMsg?.plan) return
+    const planId = planMsg.plan.id
+    try {
+      // Stream the plan execution via SSE.
+      const resp = await fetch(plansApi.executeUrl(convId, planId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      })
+      if (!resp.ok || !resp.body) {
+        throw new Error(`Execution failed (${resp.status})`)
+      }
+      // Read the SSE stream and update the plan card in pending messages.
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // Parse SSE frames.
+        let sepIdx: number
+        while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sepIdx)
+          buffer = buffer.slice(sepIdx + 2)
+          const dataLine = frame.split("\n").find((l) => l.startsWith("data:"))
+          if (!dataLine) continue
+          try {
+            const parsed = JSON.parse(dataLine.slice(5).trim())
+            const payload = parsed?.payload ?? parsed
+            const kind = parsed?.kind ?? ""
+            // Update the plan in pending messages based on events.
+            if (kind === "plan_step_start" || kind === "plan_step_complete" || kind === "plan_progress") {
+              setPendingMsgs((cur) =>
+                cur.map((m) => {
+                  if (!m.plan) return m
+                  const steps = m.plan.steps.map((s) => {
+                    if (kind === "plan_step_start" && s.position === payload.position) {
+                      return { ...s, status: "running" as const }
+                    }
+                    if (kind === "plan_step_complete" && s.position === payload.position) {
+                      return { ...s, status: (payload.status ?? "completed") as typeof s.status, result_summary: payload.result_summary ?? s.result_summary }
+                    }
+                    return s
+                  })
+                  const allDone = steps.every((s) => ["completed", "failed", "skipped"].includes(s.status))
+                  const hasFailed = steps.some((s) => s.status === "failed")
+                  return {
+                    ...m,
+                    plan: { ...m.plan, steps, status: allDone ? (hasFailed ? "failed" as const : "completed" as const) : "executing" as const },
+                  }
+                })
+              )
+            }
+          } catch { /* skip malformed frames */ }
+        }
+      }
+      // Mark execution done.
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+    } catch (e) {
+      toast.error("Plan execution failed", { description: String(e) })
+    }
+  }, [convId, pendingMsgs, queryClient, setPendingMsgs])
+
+  const handlePlanApprove = useCallback(
+    async (approved: boolean) => {
+      if (!convId) return
+      // Find the plan from the pending messages.
+      const planMsg = pendingMsgs.find((m) => m.plan)
+      if (!planMsg?.plan) return
+      const planId = planMsg.plan.id
+      try {
+        await plansApi.approve(convId, planId, approved)
+        if (approved) {
+          toast.success("Plan approved — starting execution…")
+          // Auto-execute after approval.
+          await handlePlanExecute()
+        } else {
+          toast.info("Plan rejected")
+          clearPending()
+        }
+      } catch (e) {
+        toast.error("Plan action failed", { description: String(e) })
+      }
+    },
+    [convId, pendingMsgs, clearPending, handlePlanExecute]
+  )
 
   // Conversation context usage = the prompt_tokens of the most recent assistant
   // turn. That usage is cumulative for the whole run, so its prompt_tokens
@@ -240,6 +340,8 @@ export function ChatPage() {
                       key={m.id}
                       msg={m}
                       onRespondApproval={respondApproval}
+                      onPlanApprove={handlePlanApprove}
+                      onPlanExecute={handlePlanExecute}
                     />
                   ))}
                 </>
@@ -267,6 +369,8 @@ export function ChatPage() {
                   usedContextTokens={usedContextTokens}
                   onModelChange={handleModelChange}
                   modelPending={updateMutation.isPending}
+                  planMode={planMode}
+                  onPlanModeChange={setPlanMode}
                 />
               }
             />

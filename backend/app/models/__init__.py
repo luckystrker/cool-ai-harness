@@ -11,6 +11,7 @@ from app.models.artifact import Artifact
 from app.models.base import TimestampMixin
 from app.models.budget import Budget, SpendLog
 from app.models.conversation import Conversation, Message, ToolCall
+from app.models.plan import Plan, PlanStep, PlanTemplate
 from app.models.provider import Provider
 from app.models.run import AgentRun, RunEvent
 from app.models.user import User
@@ -22,6 +23,9 @@ __all__ = [
     "Budget",
     "Conversation",
     "Message",
+    "Plan",
+    "PlanStep",
+    "PlanTemplate",
     "Provider",
     "RunEvent",
     "SpendLog",

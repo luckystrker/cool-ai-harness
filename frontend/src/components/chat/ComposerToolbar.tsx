@@ -48,6 +48,9 @@ export interface ComposerToolbarProps {
   onModelChange: (model: string) => void
   modelPending?: boolean
   disabled?: boolean
+  /** Plan Mode toggle (Фаза 2 §1). */
+  planMode?: boolean
+  onPlanModeChange?: (enabled: boolean) => void
 }
 
 /** Last path segment — used as the compact display name for a directory. */
@@ -76,6 +79,8 @@ export function ComposerToolbar({
   onModelChange,
   modelPending,
   disabled,
+  planMode,
+  onPlanModeChange,
 }: ComposerToolbarProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
 
@@ -163,6 +168,38 @@ export function ComposerToolbar({
             <GitBranch className="h-3 w-3" />
             {gitInfo.branch}
           </span>
+        )}
+
+        {/* --- Agent mode: Build / Plan (Фаза 2 §1) --- */}
+        {onPlanModeChange && (
+          <div className="flex h-7 items-center rounded-md border text-xs">
+            <button
+              disabled={disabled}
+              className={cn(
+                "h-full rounded-l-md px-2 transition-colors",
+                !planMode
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title="Build mode: agent executes tasks directly"
+              onClick={() => onPlanModeChange(false)}
+            >
+              Build
+            </button>
+            <button
+              disabled={disabled}
+              className={cn(
+                "h-full rounded-r-md px-2 transition-colors",
+                planMode
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title="Plan mode: agent researches first, then produces a structured plan"
+              onClick={() => onPlanModeChange(true)}
+            >
+              Plan
+            </button>
+          </div>
         )}
 
         <div className="flex-1" />

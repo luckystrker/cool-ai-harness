@@ -136,6 +136,16 @@ async def run_conversation_turn(
     # Resolve the effective system prompt: per-request > settings default > built-in file.
     effective_system_prompt = system_prompt or get_default_system_prompt() or None
 
+    # Inject active plan context (Фаза 2 §1) so the agent knows which plan
+    # steps to execute and can mark them via plan_step_update.
+    from app.agent.planning import build_plan_context
+
+    plan_ctx = build_plan_context(session, conversation_id)
+    if plan_ctx and effective_system_prompt:
+        effective_system_prompt = f"{effective_system_prompt}\n\n{plan_ctx}"
+    elif plan_ctx:
+        effective_system_prompt = plan_ctx
+
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )

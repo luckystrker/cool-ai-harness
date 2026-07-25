@@ -2,7 +2,16 @@ import { useCallback, useRef, useState } from "react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
-import type { AgentEvent, ReActStep, ToolApprovalRequestPayload, UsagePayload } from "@/api/types"
+import type {
+  AgentEvent,
+  Plan,
+  PlanGeneratedPayload,
+  PlanProgressPayload,
+  PlanStepEventPayload,
+  ReActStep,
+  ToolApprovalRequestPayload,
+  UsagePayload,
+} from "@/api/types"
 import type { ToolCallBlockProps } from "@/components/chat/ToolCallBlock"
 import type { MessageViewModel } from "@/components/chat/MessageBubble"
 import type { InlineApproval } from "@/components/chat/ApprovalCard"
@@ -29,6 +38,8 @@ interface Accumulator {
   model?: string
   /** Set when the backend emitted an `error` event (turn failed). */
   errored?: boolean
+  /** Plan generated during this turn (Фаза 2 §1 Planning Mode). */
+  plan?: Plan
 }
 
 const newAcc = (): Accumulator => ({
@@ -77,6 +88,7 @@ export function useConversationStream() {
       reactSteps: acc.reactSteps.length ? acc.reactSteps : undefined,
       model: acc.model,
       createdAt: acc.user?.createdAt,
+      plan: acc.plan,
     }
     const msgs = acc.user ? [acc.user, assistant] : [assistant]
     setPendingMsgs(msgs)
@@ -243,6 +255,54 @@ export function useConversationStream() {
         })
         break
       }
+      // --- Planning Mode events (Фаза 2 §1) ---
+      case "plan_generated": {
+        const p = ev.payload as unknown as PlanGeneratedPayload
+        acc.plan = {
+          id: p.plan_id,
+          conversation_id: convIdRef.current ?? 0,
+          run_id: null,
+          title: p.title,
+          status: "draft",
+          steps: p.steps,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
+        flush(acc)
+        break
+      }
+      case "plan_step_start": {
+        const p = ev.payload as unknown as PlanStepEventPayload
+        if (acc.plan) {
+          const step = acc.plan.steps.find((s) => s.position === p.position)
+          if (step) step.status = "running"
+          acc.plan = { ...acc.plan, status: "executing" }
+          flush(acc)
+        }
+        break
+      }
+      case "plan_step_complete": {
+        const p = ev.payload as unknown as PlanStepEventPayload
+        if (acc.plan) {
+          const step = acc.plan.steps.find((s) => s.position === p.position)
+          if (step) {
+            step.status = p.status ?? "completed"
+            step.result_summary = p.result_summary ?? null
+          }
+          flush(acc)
+        }
+        break
+      }
+      case "plan_progress": {
+        const p = ev.payload as unknown as PlanProgressPayload
+        if (acc.plan && p.completed === p.total) {
+          // All steps done — mark plan completed (or failed if any step failed).
+          const hasFailed = acc.plan.steps.some((s) => s.status === "failed")
+          acc.plan = { ...acc.plan, status: hasFailed ? "failed" : "completed" }
+          flush(acc)
+        }
+        break
+      }
       case "error": {
         // Provider / loop failures (e.g. 401 from the LLM backend). Without
         // this the stream just ends and the user sees their message with no
@@ -261,7 +321,7 @@ export function useConversationStream() {
   }
 
   const stream = useCallback(
-    async (conversationId: number, content: string, model?: string) => {
+    async (conversationId: number, content: string, model?: string, planMode?: boolean) => {
       setIsStreaming(true)
       const controller = new AbortController()
       abortRef.current = controller
@@ -282,7 +342,7 @@ export function useConversationStream() {
       try {
         for await (const ev of streamConversationMessage(
           conversationId,
-          { content, ...(model ? { model } : {}) },
+          { content, ...(model ? { model } : {}), ...(planMode ? { plan_mode: true } : {}) },
           controller.signal
         )) {
           applyEvent(ev, acc)
@@ -363,6 +423,7 @@ export function useConversationStream() {
 
   return {
     pendingMsgs,
+    setPendingMsgs,
     isStreaming,
     stream,
     cancel,
