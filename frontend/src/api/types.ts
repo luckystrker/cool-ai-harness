@@ -218,6 +218,11 @@ export type AgentEventKind =
   | "plan_step_start"
   | "plan_step_complete"
   | "plan_progress"
+  // Subagents (Фаза 2 §5)
+  | "subagent_started"
+  | "subagent_progress"
+  | "subagent_completed"
+  | "subagent_failed"
 
 /** Payload shape for a tool_approval_request event. */
 export interface ToolApprovalRequestPayload {
@@ -684,4 +689,109 @@ export interface MCPStoreInstallResponse {
   status: string
   tools_count: number
   error: string | null
+}
+
+// --- subagents (Фаза 2 §5) ---
+
+export type SubagentRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled"
+
+export interface SubagentRole {
+  id: number
+  name: string
+  description: string | null
+  system_prompt: string | null
+  model: string | null
+  tool_names: string[] | null
+  capability_policy: Record<string, string> | null
+  max_iterations: number
+  max_cost_usd: number | null
+  is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface SubagentRoleCreate {
+  name: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tool_names?: string[]
+  capability_policy?: Record<string, string>
+  max_iterations?: number
+  max_cost_usd?: number | null
+}
+
+export interface SubagentRoleUpdate {
+  name?: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tool_names?: string[]
+  capability_policy?: Record<string, string>
+  max_iterations?: number
+  max_cost_usd?: number | null
+}
+
+export interface SubagentRun {
+  id: number
+  role_id: number | null
+  parent_conversation_id: number
+  parent_run_id: number | null
+  conversation_id: number
+  run_id: number | null
+  name: string | null
+  prompt: string
+  status: SubagentRunStatus
+  result_summary: string | null
+  usage: Record<string, unknown> | null
+  error: string | null
+  started_at: string
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SubagentRunDetail extends SubagentRun {
+  messages: Message[]
+}
+
+export interface SubagentLaunchRequest {
+  prompt: string
+  role_id?: number
+  parent_conversation_id: number
+  name?: string
+  model?: string
+}
+
+export interface SubagentLaunchBatchItem {
+  prompt: string
+  role_id?: number
+  name?: string
+  model?: string
+}
+
+export interface SubagentLaunchBatchRequest {
+  parent_conversation_id: number
+  items: SubagentLaunchBatchItem[]
+}
+
+/** Payload shape for subagent_started events. */
+export interface SubagentStartedPayload {
+  subagent_run_id: number
+  name: string | null
+  role: string | null
+  prompt: string
+}
+
+/** Payload shape for subagent_completed events. */
+export interface SubagentCompletedPayload {
+  subagent_run_id: number
+  result_summary: string | null
+  usage: Record<string, unknown> | null
+}
+
+/** Payload shape for subagent_failed events. */
+export interface SubagentFailedPayload {
+  subagent_run_id: number
+  error: string
 }

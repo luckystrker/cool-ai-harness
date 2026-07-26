@@ -354,3 +354,102 @@ class PlanTemplateCreate(BaseModel):
     name: str
     description: str | None = None
     steps: list[dict[str, Any]] = []
+
+
+# --- subagents (Фаза 2 §5) ---
+
+
+class SubagentRoleCreate(BaseModel):
+    """Create a new subagent role definition."""
+
+    name: str
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    capability_policy: dict[str, str] | None = None
+    max_iterations: int = 10
+    max_cost_usd: float | None = None
+
+
+class SubagentRoleUpdate(BaseModel):
+    """Update an existing subagent role."""
+
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    capability_policy: dict[str, str] | None = None
+    max_iterations: int | None = None
+    max_cost_usd: float | None = None
+
+
+class SubagentRoleOut(BaseModel):
+    """A subagent role definition."""
+
+    id: int
+    name: str
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    capability_policy: dict[str, str] | None = None
+    max_iterations: int = 10
+    max_cost_usd: float | None = None
+    is_builtin: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubagentLaunchRequest(BaseModel):
+    """Launch a single subagent run."""
+
+    prompt: str
+    role_id: int | None = None
+    parent_conversation_id: int
+    name: str | None = None
+    model: str | None = None
+
+
+class SubagentLaunchBatchItem(BaseModel):
+    """One item in a batch launch."""
+
+    prompt: str
+    role_id: int | None = None
+    name: str | None = None
+    model: str | None = None
+
+
+class SubagentLaunchBatchRequest(BaseModel):
+    """Launch multiple subagents simultaneously."""
+
+    parent_conversation_id: int
+    items: list[SubagentLaunchBatchItem]
+
+
+class SubagentRunOut(BaseModel):
+    """Summary of a subagent run."""
+
+    id: int
+    role_id: int | None = None
+    parent_conversation_id: int
+    parent_run_id: int | None = None
+    conversation_id: int
+    run_id: int | None = None
+    name: str | None = None
+    prompt: str
+    status: str
+    result_summary: str | None = None
+    usage: dict[str, Any] | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubagentRunDetail(SubagentRunOut):
+    """A subagent run with its conversation messages."""
+
+    messages: list[MessageOut] = []

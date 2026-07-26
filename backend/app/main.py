@@ -17,6 +17,7 @@ from app.api.providers import router as providers_router
 from app.api.routes import router as api_router
 from app.api.runs import router as runs_router
 from app.api.skills import router as skills_router
+from app.api.subagents import router as subagents_router
 from app.api.websocket import router as ws_router
 from app.api.workspace import router as workspace_router
 from app.core.config import get_settings
@@ -38,6 +39,16 @@ async def lifespan(app: FastAPI):
     )
     init_db()
     log.info("app.db_ready", database_url=settings.database_url)
+
+    # Seed built-in subagent roles (Фаза 2 §5).
+    from sqlmodel import Session
+
+    from app.agent.subagents import ensure_builtin_roles
+    from app.core.db import engine
+
+    with Session(engine) as session:
+        ensure_builtin_roles(session)
+    log.info("app.subagent_roles_ready")
 
     # Load MCP server configs and connect (Фаза 2 §4).
     from app.mcp import get_mcp_registry, load_mcp_configs, register_mcp_tools
@@ -85,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(artifacts_router, prefix="/api")
     app.include_router(skills_router, prefix="/api")
     app.include_router(mcp_router, prefix="/api")
+    app.include_router(subagents_router, prefix="/api")
     app.include_router(workspace_router, prefix="/api")
     app.include_router(ws_router)  # WebSocket routes live at /ws/...
 

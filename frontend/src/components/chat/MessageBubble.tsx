@@ -16,6 +16,7 @@ import { PlanCard } from "./PlanCard"
 export type AssistantStreamBlock =
   | { type: "thinking"; text: string }
   | { type: "tools"; calls: (ToolCallBlockProps & { key: string })[] }
+  | { type: "text"; text: string }
 
 export interface MessageViewModel {
   id: string
@@ -112,10 +113,10 @@ export function MessageBubble({
           )}
         </div>
 
-        {/* Reasoning + tool blocks. While streaming, `blocks` preserves the
-            real interleaved order (think → tool → think → tool). Persisted
-            history falls back to the flat thinking-then-tools layout because
-            each loop iteration is already its own message row. */}
+        {/* Reasoning + tool + text blocks. While streaming, `blocks` preserves
+            the real interleaved order (think → tool → text → think → tool → text).
+            Persisted history falls back to the flat thinking-then-tools layout
+            because each loop iteration is already its own message row. */}
         {isAssistant && msg.blocks && msg.blocks.length > 0 ? (
           <InterleavedBlocks
             blocks={msg.blocks}
@@ -144,7 +145,9 @@ export function MessageBubble({
           </>
         )}
 
-        {msg.content && (
+        {/* Main content: only render separately when blocks are NOT present
+            (blocks already include text inline). For user messages always render. */}
+        {msg.content && (msg.role !== "assistant" || !msg.blocks?.some((b) => b.type === "text")) && (
           <div
             className={cn(
               "rounded-lg px-3 py-2",
@@ -224,6 +227,7 @@ function InterleavedBlocks({
   elapsedMs?: number
 }) {
   const lastThinkingIdx = blocks.map((b) => b.type).lastIndexOf("thinking")
+  const lastTextIdx = blocks.map((b) => b.type).lastIndexOf("text")
   return (
     <>
       {blocks.map((block, i) =>
@@ -234,6 +238,13 @@ function InterleavedBlocks({
             streaming={streaming && i === lastThinkingIdx}
             durationMs={i === lastThinkingIdx ? elapsedMs : undefined}
           />
+        ) : block.type === "text" ? (
+          <div key={`text-${i}`} className="rounded-lg bg-muted/50 px-3 py-2">
+            <Markdown content={block.text} />
+            {streaming && i === lastTextIdx && (
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground/70 align-text-bottom" />
+            )}
+          </div>
         ) : (
           <div key={`tools-${i}`} className="flex w-full flex-col gap-1.5">
             {block.calls.map(({ key, ...blockProps }) => (

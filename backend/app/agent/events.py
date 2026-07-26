@@ -38,6 +38,11 @@ EventKind = Literal[
     "plan_step_start",  # a plan step began execution
     "plan_step_complete",  # a plan step finished (success/failure/skipped)
     "plan_progress",  # overall plan progress update
+    # --- Subagents (Фаза 2 §5) ---
+    "subagent_started",  # a subagent was launched
+    "subagent_progress",  # subagent iteration/content update
+    "subagent_completed",  # subagent finished successfully
+    "subagent_failed",  # subagent failed
 ]
 
 
@@ -269,4 +274,57 @@ class AgentEvent:
         return cls(
             kind="plan_progress",
             payload={"completed": completed, "total": total, "current_step": current_step},
+        )
+
+    # --- Subagent constructors (Фаза 2 §5) ---
+
+    @classmethod
+    def subagent_started(
+        cls, *, subagent_run_id: int, name: str | None, role: str | None, prompt: str
+    ) -> AgentEvent:
+        """A subagent was launched."""
+        return cls(
+            kind="subagent_started",
+            payload={
+                "subagent_run_id": subagent_run_id,
+                "name": name,
+                "role": role,
+                "prompt": prompt,
+            },
+        )
+
+    @classmethod
+    def subagent_progress(
+        cls, *, subagent_run_id: int, iteration: int, content_delta: str | None = None
+    ) -> AgentEvent:
+        """Subagent iteration/content update."""
+        return cls(
+            kind="subagent_progress",
+            payload={
+                "subagent_run_id": subagent_run_id,
+                "iteration": iteration,
+                "content_delta": content_delta,
+            },
+        )
+
+    @classmethod
+    def subagent_completed(
+        cls, *, subagent_run_id: int, result_summary: str | None, usage: dict | None = None
+    ) -> AgentEvent:
+        """Subagent finished successfully."""
+        return cls(
+            kind="subagent_completed",
+            payload={
+                "subagent_run_id": subagent_run_id,
+                "result_summary": result_summary,
+                "usage": usage,
+            },
+        )
+
+    @classmethod
+    def subagent_failed(cls, *, subagent_run_id: int, error: str) -> AgentEvent:
+        """Subagent failed."""
+        return cls(
+            kind="subagent_failed",
+            payload={"subagent_run_id": subagent_run_id, "error": error},
         )

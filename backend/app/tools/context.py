@@ -51,6 +51,11 @@ class RunContext:
     permissions: PermissionsMap = field(default_factory=dict)
     capability_policy: CapabilityPolicy | None = None
     breakpoints: BreakpointsConfig | None = None
+    # Identity of the owning run/conversation (Фаза 2 §5). Lets tools such as
+    # spawn_subagent attribute child work to the correct parent. None for
+    # ad-hoc / test contexts.
+    conversation_id: int | None = None
+    run_id: int | None = None
 
     def resolve_workdir(self) -> Path:
         """Return workdir, ensuring it exists."""
