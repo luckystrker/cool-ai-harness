@@ -8,7 +8,6 @@ import type {
   PlanGeneratedPayload,
   PlanProgressPayload,
   PlanStepEventPayload,
-  ReActStep,
   ToolApprovalRequestPayload,
   UsagePayload,
 } from "@/api/types"
@@ -32,8 +31,6 @@ interface Accumulator {
   finishReason?: string
   /** Inline approval request currently shown in the chat flow. */
   approval?: InlineApproval
-  /** ReAct trace steps (Thought → Action → Observation). */
-  reactSteps: ReActStep[]
   /** Model id for the current turn (shown on the live assistant message). */
   model?: string
   /** Set when the backend emitted an `error` event (turn failed). */
@@ -46,7 +43,6 @@ const newAcc = (): Accumulator => ({
   toolCalls: new Map(),
   content: "",
   thinking: "",
-  reactSteps: [],
 })
 
 /**
@@ -85,7 +81,6 @@ export function useConversationStream() {
       finishReason: acc.finishReason,
       toolCalls: tcs.length ? tcs : undefined,
       approval: acc.approval,
-      reactSteps: acc.reactSteps.length ? acc.reactSteps : undefined,
       model: acc.model,
       createdAt: acc.user?.createdAt,
       plan: acc.plan,
@@ -105,50 +100,20 @@ export function useConversationStream() {
         flush(acc)
         break
       case "react_thought": {
-        const step = (ev.payload.step as number) || 1
+        // Route ReAct thoughts into the reasoning block so chain-of-thought
+        // stays visible without the structured trace timeline.
         const text = (ev.payload.text as string) || ""
-        // Find or create the ReAct step entry.
-        let entry = acc.reactSteps.find((s) => s.step === step)
-        if (!entry) {
-          entry = { step, actions: [], observations: [] }
-          acc.reactSteps.push(entry)
+        if (text) {
+          acc.thinking += (acc.thinking ? "\n\n" : "") + text
+          flush(acc)
         }
-        entry.thought = text
-        flush(acc)
         break
       }
-      case "react_action": {
-        const step = (ev.payload.step as number) || 1
-        let entry = acc.reactSteps.find((s) => s.step === step)
-        if (!entry) {
-          entry = { step, actions: [], observations: [] }
-          acc.reactSteps.push(entry)
-        }
-        entry.actions.push({
-          step,
-          tool_name: (ev.payload.tool_name as string) || "",
-          arguments: (ev.payload.arguments as Record<string, unknown>) || {},
-          call_id: (ev.payload.call_id as string) || "",
-        })
-        flush(acc)
+      case "react_action":
+      case "react_observation":
+        // Tool execution is surfaced via tool_call_start / tool_result blocks;
+        // the structured ReAct timeline is no longer rendered.
         break
-      }
-      case "react_observation": {
-        const step = (ev.payload.step as number) || 1
-        let entry = acc.reactSteps.find((s) => s.step === step)
-        if (!entry) {
-          entry = { step, actions: [], observations: [] }
-          acc.reactSteps.push(entry)
-        }
-        entry.observations.push({
-          step,
-          tool_name: (ev.payload.tool_name as string) || "",
-          result_summary: (ev.payload.result_summary as string) || "",
-          is_error: Boolean(ev.payload.is_error),
-        })
-        flush(acc)
-        break
-      }
       case "tool_call_start": {
         const id = (ev.payload.id as string) || `tc-${acc.toolCalls.size}`
         const name = (ev.payload.name as string) || "unknown"

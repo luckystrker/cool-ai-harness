@@ -1,10 +1,9 @@
 import { User, Sparkles, Terminal } from "lucide-react"
 import { cn, formatDuration, formatMessageTime } from "@/lib/utils"
-import type { Plan, ReActStep, UsagePayload } from "@/api/types"
+import type { Plan, UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
 import { ThinkingBlock } from "./ThinkingBlock"
-import { ReActTrace } from "./ReActTrace"
 import { ApprovalCard, type InlineApproval } from "./ApprovalCard"
 import { PlanCard } from "./PlanCard"
 
@@ -26,8 +25,6 @@ export interface MessageViewModel {
   streaming?: boolean
   /** Inline approval request rendered in the chat flow (approve/deny). */
   approval?: InlineApproval
-  /** ReAct trace steps (Thought → Action → Observation). */
-  reactSteps?: ReActStep[]
   /** Which model produced this assistant message (history). */
   model?: string | null
   /** When the message was sent (ISO string). */
@@ -112,9 +109,13 @@ export function MessageBubble({
           />
         )}
 
-        {/* ReAct trace (Thought → Action → Observation) rendered as a structured timeline. */}
-        {isAssistant && msg.reactSteps && msg.reactSteps.length > 0 && (
-          <ReActTrace steps={msg.reactSteps} streaming={msg.streaming} />
+        {/* Tool execution blocks sit between reasoning and the final response. */}
+        {msg.toolCalls && msg.toolCalls.length > 0 && (
+          <div className="flex w-full flex-col gap-1.5">
+            {msg.toolCalls.map(({ key, ...blockProps }) => (
+              <ToolCallBlock key={key} {...blockProps} />
+            ))}
+          </div>
         )}
 
         {msg.content && (
@@ -136,14 +137,6 @@ export function MessageBubble({
                 )}
               </>
             )}
-          </div>
-        )}
-
-        {msg.toolCalls && msg.toolCalls.length > 0 && (
-          <div className="flex w-full flex-col gap-1.5">
-            {msg.toolCalls.map(({ key, ...blockProps }) => (
-              <ToolCallBlock key={key} {...blockProps} />
-            ))}
           </div>
         )}
 
