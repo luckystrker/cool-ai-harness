@@ -548,3 +548,34 @@ export interface PlanProgressPayload {
   total: number
   current_step: number | null
 }
+
+// --- skills ---
+
+export interface SkillInfo {
+  name: string
+  description: string
+  source: "builtin" | "user" | "plugin"
+  tags: string[]
+  tools: string[]
+  version: string
+  body: string
+}
+
+export interface SkillListResponse {
+  skills: SkillInfo[]
+}
+
+export interface SkillCreateRequest {
+  name: string
+  description?: string
+  tags?: string[]
+  tools?: string[]
+  body: string
+  scope?: "global" | "user"
+}
+
+export interface SkillCreateResponse {
+  name: string
+  path: string
+  scope: string
+}

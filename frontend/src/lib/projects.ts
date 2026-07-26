@@ -20,6 +20,8 @@ export interface Project {
   description?: string
   /** Extra system instructions prepended to every turn in this project's chats. */
   systemInstructions?: string
+  /** Global skill names disabled for this project. */
+  disabledSkills?: string[]
   createdAt: string
 }
 
@@ -79,7 +81,7 @@ export function getProject(id: string): Project | undefined {
  */
 export function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "name" | "description" | "systemInstructions">>
+  patch: Partial<Pick<Project, "name" | "description" | "systemInstructions" | "disabledSkills">>
 ): Project[] {
   const projects = loadProjects().map((p) =>
     p.id === id ? { ...p, ...patch } : p
