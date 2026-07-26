@@ -122,3 +122,24 @@ export function loadAgentDefaults(): AgentDefaults {
 export function saveAgentDefaults(defaults: AgentDefaults): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(defaults))
 }
+
+// --- Last-selected model (persisted so new chats reuse it) ---
+
+const LAST_MODEL_KEY = "harness.lastModel"
+
+/** The model the user last picked in the composer, or null if never chosen. */
+export function loadLastModel(): string | null {
+  try {
+    return localStorage.getItem(LAST_MODEL_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function saveLastModel(model: string): void {
+  try {
+    if (model.trim()) localStorage.setItem(LAST_MODEL_KEY, model.trim())
+  } catch {
+    /* localStorage unavailable — non-fatal */
+  }
+}

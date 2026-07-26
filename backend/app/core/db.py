@@ -62,6 +62,7 @@ def init_db() -> None:
     else:
         SQLModel.metadata.create_all(engine)
         _apply_lightweight_migrations()
+        _hide_legacy_test_conversations()
 
 
 def _run_alembic_upgrade() -> None:
@@ -105,6 +106,67 @@ def _apply_lightweight_migrations() -> None:
     # Refresh the inspector cache so later introspection in the same process
     # sees the new columns.
     insp = inspect(engine)
+
+
+# Conversation titles the backend test suite historically used when it created
+# rows directly in the real database (before the isolated test DB existed).
+# Their high repeat counts make them unambiguous test artifacts; a real user
+# doesn't end up with dozens of identically-named chats. Flagging them (rather
+# than deleting) keeps the data intact while removing the clutter from the UI.
+_LEGACY_TEST_CONVERSATION_TITLES = (
+    "art test",
+    "WS",
+    "ws",
+    "WS-err",
+    "Renamed",
+    "tool-rt",
+    "gated",
+    "thinking",
+    "log",
+    "approval",
+    "plain",
+    "link",
+    "fail",
+    "r",
+    "capability-test",
+    "audit-test",
+    "audit-denied",
+    "audit-allowed",
+    "tool-test",
+    "UI smoke",
+    "Smoke test",
+    "My chat",
+)
+
+
+def _hide_legacy_test_conversations() -> None:
+    """Flag conversations left behind by old (pre-isolation) test runs.
+
+    Sets ``metadata_.is_test`` so the conversations list endpoint hides them.
+    Idempotent and non-destructive: already-flagged rows are skipped and
+    nothing is deleted.
+    """
+    from sqlmodel import select
+
+    from app.models import Conversation
+
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Conversation).where(
+                Conversation.title.in_(_LEGACY_TEST_CONVERSATION_TITLES)  # type: ignore[union-attr]
+            )
+        ).all()
+        changed = False
+        for row in rows:
+            meta = dict(row.metadata_ or {})
+            if meta.get("is_test"):
+                continue
+            meta["is_test"] = True
+            row.metadata_ = meta
+            session.add(row)
+            changed = True
+        if changed:
+            session.commit()
 
 
 def get_session() -> Generator[Session, None, None]:

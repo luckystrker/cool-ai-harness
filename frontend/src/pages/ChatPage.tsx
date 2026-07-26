@@ -7,6 +7,7 @@ import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
 import { plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
+import { settingsApi } from "@/api/settings"
 import type { Message, ToolPermissions } from "@/api/types"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
@@ -14,7 +15,13 @@ import { ChatComposer } from "@/components/chat/ChatComposer"
 import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
 import { BudgetIndicator } from "@/components/chat/BudgetIndicator"
 import { useConversationStream } from "@/hooks/useConversationStream"
-import { MODE_PRESETS, modeFromPerms, type PermissionMode } from "@/lib/agentConfig"
+import {
+  MODE_PRESETS,
+  modeFromPerms,
+  saveLastModel,
+  type PermissionMode,
+} from "@/lib/agentConfig"
+import { getProjectForConversation } from "@/lib/projects"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -50,6 +57,14 @@ export function ChatPage() {
     enabled: activeProviderId != null,
     retry: false,
     staleTime: 5 * 60_000,
+  })
+
+  // The default system prompt, fetched once so project-specific instructions
+  // can be appended to it (rather than replacing it) on each outgoing message.
+  const { data: systemPromptData } = useQuery({
+    queryKey: ["system-prompt"],
+    queryFn: settingsApi.getSystemPrompt,
+    staleTime: 10 * 60_000,
   })
 
   const {
@@ -129,6 +144,8 @@ export function ChatPage() {
 
   const handleModelChange = (model: string) => {
     if (!convId || !model.trim()) return
+    // Remember the choice so the next chat the user creates starts on it too.
+    saveLastModel(model)
     updateMutation.mutate({ id: convId, model: model.trim() })
   }
 
@@ -159,7 +176,23 @@ export function ChatPage() {
     }
     // Pass the conversation's current model as a per-message override so a
     // freshly-picked model applies immediately without a round-trip.
-    const errored = await stream(convId, content, detail?.model || undefined, planMode)
+    // If this chat belongs to a project with extra instructions, append them
+    // to the default system prompt so the agent carries the project context.
+    const project = getProjectForConversation(convId)
+    let systemPrompt: string | undefined
+    if (project?.systemInstructions) {
+      const base = systemPromptData?.prompt ?? ""
+      systemPrompt = base
+        ? `${base}\n\n# Project instructions\n${project.systemInstructions}`
+        : project.systemInstructions
+    }
+    const errored = await stream(
+      convId,
+      content,
+      detail?.model || undefined,
+      planMode,
+      systemPrompt
+    )
     // Reset plan mode after sending (one-shot toggle).
     const wasPlanMode = planMode
     setPlanMode(false)

@@ -369,6 +369,15 @@ class AgentExecutor:
                             )
                         yield ev
 
+            # The model spent every allowed iteration calling tools. Instead of
+            # stopping silently mid-task (leaving a bare tool result as the last
+            # word), give it one final tool-less turn so it summarizes what it
+            # accomplished and what remains. The run still finishes with
+            # reason="max_iterations" so the UI can flag the ceiling.
+            if not self._is_cancelled():
+                async for ev in self._max_iterations_summary(total_usage):
+                    yield ev
+
             yield AgentEvent.finish(
                 reason="max_iterations",
                 usage=total_usage,
@@ -385,6 +394,61 @@ class AgentExecutor:
                 run_registry.unregister(self.config.run_id)
 
     # ---- internals ----
+
+    async def _max_iterations_summary(self, total_usage: Usage) -> AsyncIterator[AgentEvent]:
+        """One final tool-less LLM turn after the iteration ceiling is hit.
+
+        Nudges the model to wrap up with a short summary instead of ending the
+        turn on a bare tool result. The nudge lives only in the in-memory
+        history (persistence is event-driven, so it is never stored as a user
+        row); the summary itself is emitted as a ``message`` event so the runner
+        persists it like any other assistant turn.
+        """
+        # Respect the cost budget: skip the wrap-up call if it would be blocked.
+        if self.config.user_id is not None:
+            try:
+                with Session(engine) as _budget_session:
+                    _eval = budget_evaluation(_budget_session, user_id=self.config.user_id)
+                if _eval is not None and _eval.blocked:
+                    return
+            except Exception as exc:  # a failed check must not block the summary
+                log.warning("agent.summary_budget_check_failed", error=str(exc))
+
+        self.history.append(
+            Message(
+                role="user",
+                content=(
+                    "[System] You have reached the maximum number of tool-call "
+                    "iterations for this turn and can no longer use tools. Do not "
+                    "attempt any more tool calls. Briefly summarize what you "
+                    "accomplished so far and what remains to be done."
+                ),
+            )
+        )
+        parts: list[str] = []
+        usage: Usage | None = None
+        try:
+            async for event in self.provider.chat_completion_stream(
+                self.history,
+                model=self.config.model,
+                tools=None,  # force a text-only wrap-up
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            ):
+                if event.delta:
+                    parts.append(event.delta)
+                    yield AgentEvent.token(event.delta)
+                if event.usage:
+                    usage = event.usage
+        except Exception as exc:
+            log.warning("agent.max_iterations_summary_failed", error=str(exc))
+            return
+        if usage:
+            _accumulate(total_usage, usage)
+        content = "".join(parts) or None
+        if content:
+            self.history.append(Message(role="assistant", content=content))
+            yield AgentEvent.message(content=content, tool_calls=None)
 
     def _is_cancelled(self) -> bool:
         """True if this run has been signalled to cancel (or isn't cancellable-safe).

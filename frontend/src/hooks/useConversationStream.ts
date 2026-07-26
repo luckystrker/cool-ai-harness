@@ -12,8 +12,20 @@ import type {
   UsagePayload,
 } from "@/api/types"
 import type { ToolCallBlockProps } from "@/components/chat/ToolCallBlock"
-import type { MessageViewModel } from "@/components/chat/MessageBubble"
+import type {
+  AssistantStreamBlock,
+  MessageViewModel,
+} from "@/components/chat/MessageBubble"
 import type { InlineApproval } from "@/components/chat/ApprovalCard"
+
+/**
+ * Internal ordered block used while accumulating a live turn. Thinking blocks
+ * hold raw text; tool blocks reference tool-call ids (resolved against the
+ * accumulator's toolCalls map at flush time so result updates are reflected).
+ */
+type AccBlock =
+  | { type: "thinking"; text: string }
+  | { type: "tools"; ids: string[] }
 
 interface Accumulator {
   /** Pending user message (sent but not yet persisted). */
@@ -23,8 +35,13 @@ interface Accumulator {
   /** tool_call_id → tool-call block props, kept in insertion order. */
   toolCalls: Map<string, ToolCallBlockProps & { key: string }>
   content: string
-  /** Accumulated reasoning / chain-of-thought text. */
+  /** Accumulated reasoning / chain-of-thought text (flat, for the hint). */
   thinking: string
+  /** Ordered interleaved blocks (thinking/tools) for live rendering. */
+  blocks: AccBlock[]
+  /** True once the model streamed reasoning deltas this run. Used to skip
+      redundant react_thought events (they repeat the same reasoning text). */
+  thinkingStreamed: boolean
   /** Usage reported by the terminal `finish` event, if any. */
   usage?: UsagePayload
   /** Reason from the terminal `finish` event, if any. */
@@ -43,7 +60,36 @@ const newAcc = (): Accumulator => ({
   toolCalls: new Map(),
   content: "",
   thinking: "",
+  blocks: [],
+  thinkingStreamed: false,
 })
+
+/** Append a streamed reasoning delta to the current (or a new) thinking block. */
+function pushThinkingDelta(acc: Accumulator, text: string) {
+  const last = acc.blocks[acc.blocks.length - 1]
+  if (last && last.type === "thinking") {
+    last.text += text
+  } else {
+    acc.blocks.push({ type: "thinking", text })
+  }
+  acc.thinking += text
+}
+
+/** Append a discrete ReAct thought as its own (separated) thinking block. */
+function pushThoughtBlock(acc: Accumulator, text: string) {
+  acc.blocks.push({ type: "thinking", text })
+  acc.thinking += (acc.thinking ? "\n\n" : "") + text
+}
+
+/** Add a tool-call id to the current (or a new) tools block. */
+function pushToolCall(acc: Accumulator, id: string) {
+  const last = acc.blocks[acc.blocks.length - 1]
+  if (last && last.type === "tools") {
+    last.ids.push(id)
+  } else {
+    acc.blocks.push({ type: "tools", ids: [id] })
+  }
+}
 
 /**
  * Drives a single agent turn over the SSE stream and produces the two
@@ -70,6 +116,20 @@ export function useConversationStream() {
       startedAtRef.current != null
         ? Math.max(0, Math.round(performance.now() - startedAtRef.current))
         : undefined
+    // Resolve the ordered accumulator blocks into renderable view blocks,
+    // mapping tool ids back to their (live-updating) tool-call props.
+    const blocks: AssistantStreamBlock[] = acc.blocks
+      .map((b) =>
+        b.type === "thinking"
+          ? { type: "thinking" as const, text: b.text }
+          : {
+              type: "tools" as const,
+              calls: b.ids
+                .map((id) => acc.toolCalls.get(id))
+                .filter((c): c is ToolCallBlockProps & { key: string } => c != null),
+            }
+      )
+      .filter((b) => (b.type === "thinking" ? b.text.length > 0 : b.calls.length > 0))
     const assistant: MessageViewModel = {
       id: "stream-assistant",
       role: "assistant",
@@ -80,6 +140,7 @@ export function useConversationStream() {
       usage: acc.usage,
       finishReason: acc.finishReason,
       toolCalls: tcs.length ? tcs : undefined,
+      blocks: blocks.length ? blocks : undefined,
       approval: acc.approval,
       model: acc.model,
       createdAt: acc.user?.createdAt,
@@ -91,20 +152,27 @@ export function useConversationStream() {
 
   const applyEvent = (ev: AgentEvent, acc: Accumulator) => {
     switch (ev.kind) {
-      case "thinking":
-        acc.thinking += (ev.payload.text as string) || ""
-        flush(acc)
+      case "thinking": {
+        const text = (ev.payload.text as string) || ""
+        if (text) {
+          acc.thinkingStreamed = true
+          pushThinkingDelta(acc, text)
+          flush(acc)
+        }
         break
+      }
       case "token":
         acc.content += (ev.payload.text as string) || ""
         flush(acc)
         break
       case "react_thought": {
-        // Route ReAct thoughts into the reasoning block so chain-of-thought
-        // stays visible without the structured trace timeline.
+        // Route ReAct thoughts into the reasoning blocks so chain-of-thought
+        // stays visible without the structured trace timeline. For reasoning
+        // models the same text was already streamed via `thinking` events, so
+        // skip it there to avoid duplicating the block content.
         const text = (ev.payload.text as string) || ""
-        if (text) {
-          acc.thinking += (acc.thinking ? "\n\n" : "") + text
+        if (text && !acc.thinkingStreamed) {
+          pushThoughtBlock(acc, text)
           flush(acc)
         }
         break
@@ -123,6 +191,7 @@ export function useConversationStream() {
           call: { id, name, arguments: args },
           pending: true,
         })
+        pushToolCall(acc, id)
         flush(acc)
         break
       }
@@ -160,6 +229,7 @@ export function useConversationStream() {
             pending: true,
             awaitingApproval: true,
           })
+          pushToolCall(acc, id)
         }
         // Inline approval: attach the request to the assistant message so the
         // card renders directly in the chat flow (no modal popup).
@@ -286,7 +356,13 @@ export function useConversationStream() {
   }
 
   const stream = useCallback(
-    async (conversationId: number, content: string, model?: string, planMode?: boolean) => {
+    async (
+      conversationId: number,
+      content: string,
+      model?: string,
+      planMode?: boolean,
+      systemPrompt?: string
+    ) => {
       setIsStreaming(true)
       const controller = new AbortController()
       abortRef.current = controller
@@ -307,7 +383,12 @@ export function useConversationStream() {
       try {
         for await (const ev of streamConversationMessage(
           conversationId,
-          { content, ...(model ? { model } : {}), ...(planMode ? { plan_mode: true } : {}) },
+          {
+            content,
+            ...(model ? { model } : {}),
+            ...(planMode ? { plan_mode: true } : {}),
+            ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
+          },
           controller.signal
         )) {
           applyEvent(ev, acc)

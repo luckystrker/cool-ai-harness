@@ -7,6 +7,16 @@ import { ThinkingBlock } from "./ThinkingBlock"
 import { ApprovalCard, type InlineApproval } from "./ApprovalCard"
 import { PlanCard } from "./PlanCard"
 
+/**
+ * One visual block in an assistant turn's interleaved stream. While the agent
+ * runs it alternates "think → call tool → think → call tool …"; preserving
+ * that order lets the live bubble render the blocks interleaved instead of
+ * merging every thought into a single block at the top.
+ */
+export type AssistantStreamBlock =
+  | { type: "thinking"; text: string }
+  | { type: "tools"; calls: (ToolCallBlockProps & { key: string })[] }
+
 export interface MessageViewModel {
   id: string
   role: "user" | "assistant" | "system" | "tool"
@@ -15,6 +25,8 @@ export interface MessageViewModel {
   toolCalls?: (ToolCallBlockProps & { key: string })[]
   /** Reasoning / chain-of-thought text, when the provider exposes one. */
   thinking?: string
+  /** Ordered thinking/tool blocks for interleaved live-stream rendering. */
+  blocks?: AssistantStreamBlock[]
   /** Total elapsed time for the assistant turn (live or from history). */
   elapsedMs?: number
   /** Token usage from the terminal finish event, when reported. */
@@ -100,22 +112,36 @@ export function MessageBubble({
           )}
         </div>
 
-        {/* Reasoning trace sits above the answer, collapsed by default. */}
-        {isAssistant && msg.thinking && (
-          <ThinkingBlock
-            content={msg.thinking}
-            durationMs={msg.elapsedMs}
+        {/* Reasoning + tool blocks. While streaming, `blocks` preserves the
+            real interleaved order (think → tool → think → tool). Persisted
+            history falls back to the flat thinking-then-tools layout because
+            each loop iteration is already its own message row. */}
+        {isAssistant && msg.blocks && msg.blocks.length > 0 ? (
+          <InterleavedBlocks
+            blocks={msg.blocks}
             streaming={msg.streaming}
+            elapsedMs={msg.elapsedMs}
           />
-        )}
+        ) : (
+          <>
+            {/* Reasoning trace sits above the answer, collapsed by default. */}
+            {isAssistant && msg.thinking && (
+              <ThinkingBlock
+                content={msg.thinking}
+                durationMs={msg.elapsedMs}
+                streaming={msg.streaming}
+              />
+            )}
 
-        {/* Tool execution blocks sit between reasoning and the final response. */}
-        {msg.toolCalls && msg.toolCalls.length > 0 && (
-          <div className="flex w-full flex-col gap-1.5">
-            {msg.toolCalls.map(({ key, ...blockProps }) => (
-              <ToolCallBlock key={key} {...blockProps} />
-            ))}
-          </div>
+            {/* Tool execution blocks sit between reasoning and the final response. */}
+            {msg.toolCalls && msg.toolCalls.length > 0 && (
+              <div className="flex w-full flex-col gap-1.5">
+                {msg.toolCalls.map(({ key, ...blockProps }) => (
+                  <ToolCallBlock key={key} {...blockProps} />
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         {msg.content && (
@@ -172,7 +198,7 @@ export function MessageBubble({
             {msg.finishReason && msg.finishReason !== "stop" && (
               <>
                 <span>·</span>
-                <span>{msg.finishReason}</span>
+                <span>{finishReasonLabel(msg.finishReason)}</span>
               </>
             )}
           </div>
@@ -180,4 +206,62 @@ export function MessageBubble({
       </div>
     </div>
   )
+}
+
+/**
+ * Render the ordered thinking/tool blocks of a live assistant turn so they
+ * alternate exactly as the agent produced them (think → tool → think → tool).
+ * Only the most recent thinking block is treated as "live" (auto-expanded);
+ * earlier ones collapse so the focus stays on the current step.
+ */
+function InterleavedBlocks({
+  blocks,
+  streaming,
+  elapsedMs,
+}: {
+  blocks: AssistantStreamBlock[]
+  streaming?: boolean
+  elapsedMs?: number
+}) {
+  const lastThinkingIdx = blocks.map((b) => b.type).lastIndexOf("thinking")
+  return (
+    <>
+      {blocks.map((block, i) =>
+        block.type === "thinking" ? (
+          <ThinkingBlock
+            key={`thinking-${i}`}
+            content={block.text}
+            streaming={streaming && i === lastThinkingIdx}
+            durationMs={i === lastThinkingIdx ? elapsedMs : undefined}
+          />
+        ) : (
+          <div key={`tools-${i}`} className="flex w-full flex-col gap-1.5">
+            {block.calls.map(({ key, ...blockProps }) => (
+              <ToolCallBlock key={key} {...blockProps} />
+            ))}
+          </div>
+        )
+      )}
+    </>
+  )
+}
+
+/** Human-friendly labels for non-"stop" finish reasons shown in the footnote. */
+function finishReasonLabel(reason: string): string {
+  switch (reason) {
+    case "max_iterations":
+      return "tool limit reached"
+    case "token_limit":
+      return "token limit reached"
+    case "cost_limit":
+      return "cost limit reached"
+    case "budget_exceeded":
+      return "budget exceeded"
+    case "cancelled":
+      return "cancelled"
+    case "error":
+      return "error"
+    default:
+      return reason
+  }
 }
