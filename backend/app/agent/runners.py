@@ -146,6 +146,18 @@ async def run_conversation_turn(
     elif plan_ctx:
         effective_system_prompt = plan_ctx
 
+    # Inject relevant skills context (Фаза 2 §3) based on the user's input.
+    # Auto-detects which skills are relevant and appends a brief catalog so
+    # the agent knows skills exist and can activate them via use_skill tool.
+    if user_input:
+        from app.skills.context import build_skills_context
+
+        skills_ctx = build_skills_context(user_input)
+        if skills_ctx and effective_system_prompt:
+            effective_system_prompt = f"{effective_system_prompt}\n\n{skills_ctx}"
+        elif skills_ctx:
+            effective_system_prompt = skills_ctx
+
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )

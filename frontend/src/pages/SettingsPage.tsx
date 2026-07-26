@@ -1,9 +1,10 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
+import { skillsApi } from "@/api/skills"
 import type {
   BreakpointConfig,
   BreakpointType,
@@ -11,6 +12,7 @@ import type {
   Provider,
   ProviderCreate,
   ProviderUpdate,
+  SkillInfo,
   ToolPermission,
   ToolPermissions,
 } from "@/api/types"
@@ -180,6 +182,9 @@ export function SettingsPage() {
 
         {/* Global agent configuration (defaults for new conversations). */}
         <AgentConfigSection />
+
+        {/* Skills management */}
+        <SkillsSection />
 
         {/* System prompt editor */}
         <SystemPromptSection />
@@ -678,6 +683,120 @@ function AgentConfigSection() {
         <div className="flex justify-end">
           <Button onClick={handleSave}>Save agent defaults</Button>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Skills management ---
+
+/**
+ * Global skills section: displays all available skills (builtin + user) and
+ * allows deleting user-created skills. These skills are enabled for all
+ * projects by default; per-project disabling is done in ProjectSettingsDialog.
+ */
+function SkillsSection() {
+  const queryClient = useQueryClient()
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["skills"],
+    queryFn: () => skillsApi.list(),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: skillsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["skills"] })
+      toast.success("Skill deleted")
+    },
+    onError: (e) => toast.error("Failed to delete skill", { description: String(e) }),
+  })
+
+  const skills: SkillInfo[] = data?.skills ?? []
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <Sparkles className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-lg">Skills</CardTitle>
+            <CardDescription>
+              Reusable AI capability modules. Global skills are enabled for all
+              projects by default.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading ? (
+          <div className="flex justify-center py-6">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : skills.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            No skills available.
+          </p>
+        ) : (
+          <div className="rounded-md border">
+            {skills.map((skill, i) => (
+              <div
+                key={skill.name}
+                className={cn(
+                  "flex items-center justify-between px-3 py-2.5",
+                  i > 0 && "border-t"
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-medium">{skill.name}</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {skill.source}
+                    </Badge>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {skill.description || "No description"}
+                  </p>
+                  {skill.tags.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {skill.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {skill.source !== "builtin" && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="ml-2 shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => deleteMutation.mutate(skill.name)}
+                    disabled={deleteMutation.isPending}
+                    title="Delete skill"
+                  >
+                    {deleteMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Builtin skills cannot be deleted. Create new skills via the agent
+          using the <code className="rounded bg-muted px-1">create_skill</code> tool
+          or the <code className="rounded bg-muted px-1">skill-creation</code> skill.
+        </p>
       </CardContent>
     </Card>
   )

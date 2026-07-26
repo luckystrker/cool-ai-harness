@@ -24,12 +24,14 @@ def register_builtins() -> None:
     from app.tools.code_tools import register_code_tools
     from app.tools.file_tools import register_file_tools
     from app.tools.plan_tools import register_plan_tools
+    from app.tools.skill_tools import register_skill_tools
     from app.tools.web_tools import register_web_tools
 
     register_file_tools()
     register_code_tools()
     register_web_tools()
     register_plan_tools()
+    register_skill_tools()
 
 
 # Auto-register on import so the agent loop sees them out of the box.
