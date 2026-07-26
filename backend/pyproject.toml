@@ -31,6 +31,8 @@ dependencies = [
     "cryptography>=43",
     # Structured logging
     "structlog>=24.4",
+    # YAML config parsing (MCP servers)
+    "pyyaml>=6.0",
     # Web utilities
     "python-multipart>=0.0.12",
     "sse-starlette>=2.1",

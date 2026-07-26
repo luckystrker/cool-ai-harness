@@ -579,3 +579,109 @@ export interface SkillCreateResponse {
   path: string
   scope: string
 }
+
+// --- MCP servers (Фаза 2 §4) ---
+
+export type MCPTransportType = "stdio" | "http"
+
+export type MCPServerStatusType = "disconnected" | "connecting" | "connected" | "error"
+
+export interface MCPToolInfo {
+  name: string
+  qualified_name: string
+  description: string
+  server_name: string
+  input_schema: Record<string, unknown>
+}
+
+export interface MCPServer {
+  name: string
+  transport: MCPTransportType
+  status: MCPServerStatusType
+  enabled: boolean
+  description: string
+  command: string
+  args: string[]
+  url: string
+  capabilities: string[]
+  timeout_s: number
+  error: string | null
+  tools: MCPToolInfo[]
+  server_info: Record<string, unknown>
+}
+
+export interface MCPServerListResponse {
+  servers: MCPServer[]
+}
+
+export interface MCPServerCreate {
+  name: string
+  transport?: MCPTransportType
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabled?: boolean
+  description?: string
+  capabilities?: string[]
+  timeout_s?: number
+}
+
+export interface MCPServerUpdate {
+  transport?: MCPTransportType
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabled?: boolean
+  description?: string
+  capabilities?: string[]
+  timeout_s?: number
+}
+
+export interface MCPConnectResponse {
+  name: string
+  status: string
+  tools_count: number
+  error: string | null
+}
+
+export interface MCPHealthResponse {
+  name: string
+  healthy: boolean
+}
+
+export interface MCPToolListResponse {
+  tools: MCPToolInfo[]
+}
+
+// --- MCP Store / Marketplace ---
+
+export interface MCPStoreItem {
+  name: string
+  description: string
+  version: string
+  repository_url: string
+  install_command: string
+  transport: string
+  packages_count: number
+}
+
+export interface MCPStoreSearchResponse {
+  results: MCPStoreItem[]
+  query: string
+}
+
+export interface MCPStoreInstallRequest {
+  registry_name: string
+  local_name?: string
+}
+
+export interface MCPStoreInstallResponse {
+  name: string
+  status: string
+  tools_count: number
+  error: string | null
+}
