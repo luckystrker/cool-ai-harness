@@ -59,6 +59,7 @@ data/
 workspaces/
 evals_data/
 evals_data_test/
+config.yaml
 *.db
 *.db-journal
 *.sqlite

@@ -1,14 +1,18 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
 import { skillsApi } from "@/api/skills"
+import { mcpApi } from "@/api/mcp"
 import type {
   BreakpointConfig,
   BreakpointType,
   CapabilityPolicy,
+  MCPServer,
+  MCPServerCreate,
+  MCPStoreItem,
   Provider,
   ProviderCreate,
   ProviderUpdate,
@@ -185,6 +189,12 @@ export function SettingsPage() {
 
         {/* Skills management */}
         <SkillsSection />
+
+        {/* MCP servers management */}
+        <MCPServersSection />
+
+        {/* MCP Store */}
+        <MCPStoreSection />
 
         {/* System prompt editor */}
         <SystemPromptSection />
@@ -797,6 +807,485 @@ function SkillsSection() {
           using the <code className="rounded bg-muted px-1">create_skill</code> tool
           or the <code className="rounded bg-muted px-1">skill-creation</code> skill.
         </p>
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- MCP servers management ---
+
+const EMPTY_MCP_FORM: MCPServerCreate = {
+  name: "",
+  transport: "stdio",
+  command: "",
+  args: [],
+  url: "",
+  description: "",
+  enabled: true,
+}
+
+/**
+ * MCP servers section: displays configured MCP servers, their connection
+ * status, discovered tools, and allows adding/removing/connecting servers.
+ */
+function MCPServersSection() {
+  const queryClient = useQueryClient()
+  const [addOpen, setAddOpen] = useState(false)
+  const [form, setForm] = useState<MCPServerCreate>(EMPTY_MCP_FORM)
+  const [argsText, setArgsText] = useState("")
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["mcp-servers"],
+    queryFn: () => mcpApi.listServers(),
+  })
+
+  const addMutation = useMutation({
+    mutationFn: mcpApi.addServer,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      toast.success("MCP server added")
+      setAddOpen(false)
+      setForm(EMPTY_MCP_FORM)
+      setArgsText("")
+    },
+    onError: (e) => toast.error("Failed to add MCP server", { description: String(e) }),
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: mcpApi.removeServer,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      toast.success("MCP server removed")
+    },
+    onError: (e) => toast.error("Failed to remove server", { description: String(e) }),
+  })
+
+  const connectMutation = useMutation({
+    mutationFn: mcpApi.connect,
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      if (res.status === "connected") {
+        toast.success(`Connected to ${res.name}`, { description: `${res.tools_count} tools discovered` })
+      } else {
+        toast.error(`Failed to connect ${res.name}`, { description: res.error ?? undefined })
+      }
+    },
+    onError: (e) => toast.error("Connection failed", { description: String(e) }),
+  })
+
+  const disconnectMutation = useMutation({
+    mutationFn: mcpApi.disconnect,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      toast.success("Server disconnected")
+    },
+    onError: (e) => toast.error("Disconnect failed", { description: String(e) }),
+  })
+
+  const reconnectAllMutation = useMutation({
+    mutationFn: mcpApi.reconnectAll,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      toast.success("All servers reconnected")
+    },
+    onError: (e) => toast.error("Reconnect failed", { description: String(e) }),
+  })
+
+  const handleAdd = () => {
+    if (!form.name.trim()) {
+      toast.error("Server name is required")
+      return
+    }
+    const body = {
+      ...form,
+      args: argsText.split(/\s+/).filter(Boolean),
+    }
+    addMutation.mutate(body)
+  }
+
+  const servers: MCPServer[] = data?.servers ?? []
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+              <Server className="h-4 w-4" />
+            </div>
+            <div>
+              <CardTitle className="text-lg">MCP Servers</CardTitle>
+              <CardDescription>
+                Model Context Protocol servers extend the agent with external
+                tools. Configure stdio or HTTP connections.
+              </CardDescription>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => reconnectAllMutation.mutate()}
+              disabled={reconnectAllMutation.isPending || servers.length === 0}
+            >
+              {reconnectAllMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Reconnect all
+            </Button>
+            <Dialog open={addOpen} onOpenChange={setAddOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm" className="gap-1.5">
+                  <Plus className="h-3.5 w-3.5" /> Add server
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add MCP server</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mcp-name">Name</Label>
+                      <Input
+                        id="mcp-name"
+                        placeholder="my-server"
+                        value={form.name}
+                        onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mcp-transport">Transport</Label>
+                      <select
+                        id="mcp-transport"
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={form.transport}
+                        onChange={(e) => setForm({ ...form, transport: e.target.value as "stdio" | "http" })}
+                      >
+                        <option value="stdio">stdio (subprocess)</option>
+                        <option value="http">HTTP</option>
+                      </select>
+                    </div>
+                  </div>
+                  {form.transport === "stdio" ? (
+                    <>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="mcp-cmd">Command</Label>
+                        <Input
+                          id="mcp-cmd"
+                          placeholder="npx"
+                          value={form.command}
+                          onChange={(e) => setForm({ ...form, command: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="mcp-args">Arguments (space-separated)</Label>
+                        <Input
+                          id="mcp-args"
+                          placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
+                          value={argsText}
+                          onChange={(e) => setArgsText(e.target.value)}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mcp-url">URL</Label>
+                      <Input
+                        id="mcp-url"
+                        placeholder="http://localhost:8080/mcp"
+                        value={form.url}
+                        onChange={(e) => setForm({ ...form, url: e.target.value })}
+                      />
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <Label htmlFor="mcp-desc">Description</Label>
+                    <Input
+                      id="mcp-desc"
+                      placeholder="Filesystem access tools"
+                      value={form.description}
+                      onChange={(e) => setForm({ ...form, description: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setAddOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button onClick={handleAdd} disabled={addMutation.isPending}>
+                    {addMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                    Add server
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading ? (
+          <div className="flex justify-center py-6">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : servers.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            No MCP servers configured. Add one to extend the agent with external tools.
+          </p>
+        ) : (
+          <div className="rounded-md border">
+            {servers.map((server, i) => (
+              <div
+                key={server.name}
+                className={cn(
+                  "px-3 py-2.5",
+                  i > 0 && "border-t"
+                )}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-medium">{server.name}</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {server.transport}
+                    </Badge>
+                    {server.status === "connected" ? (
+                      <Badge variant="success" className="gap-1">
+                        <CheckCircle2 className="h-3 w-3" /> connected
+                      </Badge>
+                    ) : server.status === "error" ? (
+                      <Badge variant="destructive">error</Badge>
+                    ) : server.status === "connecting" ? (
+                      <Badge variant="secondary" className="gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin" /> connecting
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline">disconnected</Badge>
+                    )}
+                    {!server.enabled && <Badge variant="warning">disabled</Badge>}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {server.status === "connected" ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={() => disconnectMutation.mutate(server.name)}
+                        disabled={disconnectMutation.isPending}
+                        title="Disconnect"
+                      >
+                        <Unplug className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={() => connectMutation.mutate(server.name)}
+                        disabled={connectMutation.isPending}
+                        title="Connect"
+                      >
+                        <Plug className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      onClick={() => removeMutation.mutate(server.name)}
+                      disabled={removeMutation.isPending}
+                      title="Remove"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                {server.description && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">{server.description}</p>
+                )}
+                {server.error && (
+                  <p className="mt-0.5 text-xs text-destructive">{server.error}</p>
+                )}
+                {server.tools.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {server.tools.map((tool) => (
+                      <span
+                        key={tool.qualified_name}
+                        className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
+                        title={tool.description}
+                      >
+                        {tool.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Configure servers via the UI or <code className="rounded bg-muted px-1">config.yaml</code> at
+          the project root. Tools from connected servers are automatically available to the agent.
+        </p>
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- MCP Store ---
+
+/**
+ * MCP Store section: browse and install MCP servers from the official
+ * MCP Registry (registry.modelcontextprotocol.io).
+ */
+function MCPStoreSection() {
+  const queryClient = useQueryClient()
+  const [searchQuery, setSearchQuery] = useState("")
+  const [submittedQuery, setSubmittedQuery] = useState("")
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["mcp-store", submittedQuery],
+    queryFn: () =>
+      submittedQuery
+        ? mcpApi.storeSearch(submittedQuery, 10)
+        : mcpApi.storePopular(10),
+  })
+
+  const installMutation = useMutation({
+    mutationFn: mcpApi.storeInstall,
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      if (res.status === "connected") {
+        toast.success(`Installed ${res.name}`, {
+          description: `${res.tools_count} tools available`,
+        })
+      } else {
+        toast.success(`Installed ${res.name}`, {
+          description: res.error ?? "Server configured (not connected)",
+        })
+      }
+    },
+    onError: (e) => toast.error("Install failed", { description: String(e) }),
+  })
+
+  const results: MCPStoreItem[] = data?.results ?? []
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <Store className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-lg">MCP Store</CardTitle>
+            <CardDescription>
+              Browse and install MCP servers from the official{" "}
+              <a
+                href="https://registry.modelcontextprotocol.io"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                MCP Registry
+              </a>
+              .
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Search bar */}
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            setSubmittedQuery(searchQuery)
+          }}
+        >
+          <div className="relative flex-1">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search MCP servers (e.g. filesystem, github, sql…)"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-8"
+            />
+          </div>
+          <Button type="submit" variant="outline" size="sm" className="shrink-0">
+            Search
+          </Button>
+        </form>
+
+        {/* Results */}
+        {isLoading || isFetching ? (
+          <div className="flex justify-center py-6">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : results.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            {submittedQuery
+              ? `No servers found for “${submittedQuery}”.`
+              : "No servers available from the registry."}
+          </p>
+        ) : (
+          <div className="rounded-md border">
+            {results.map((item, i) => (
+              <div
+                key={item.name}
+                className={cn(
+                  "flex items-center justify-between px-3 py-2.5",
+                  i > 0 && "border-t"
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono text-xs font-medium">
+                      {item.name.split("/").pop() ?? item.name}
+                    </span>
+                    {item.version && (
+                      <Badge variant="outline" className="text-[10px]">
+                        v{item.version}
+                      </Badge>
+                    )}
+                    {item.transport && (
+                      <Badge variant="secondary" className="text-[10px]">
+                        {item.transport}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {item.description || "No description"}
+                  </p>
+                  {item.install_command && (
+                    <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+                      {item.install_command}
+                    </p>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-2 shrink-0 gap-1.5"
+                  onClick={() =>
+                    installMutation.mutate({ registry_name: item.name })
+                  }
+                  disabled={installMutation.isPending}
+                >
+                  {installMutation.isPending &&
+                  installMutation.variables?.registry_name === item.name ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  Install
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
