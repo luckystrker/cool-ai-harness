@@ -133,7 +133,14 @@ def post_conversation(
 def get_conversations(session: Session = Depends(get_session)) -> list[ConversationOut]:
     user = get_or_create_default_user(session)
     convs = list_conversations(session, user_id=user.id)
-    return [_conv_to_out(c) for c in convs]
+    # Hide conversations flagged as test artifacts (metadata_.is_test). These
+    # are rows left behind by old test runs that pre-date the isolated test
+    # database; they should never clutter the real chat list.
+    return [
+        _conv_to_out(c)
+        for c in convs
+        if not (c.metadata_ or {}).get("is_test")
+    ]
 
 
 @router.get("/conversations/{conv_id}", response_model=ConversationDetail)
