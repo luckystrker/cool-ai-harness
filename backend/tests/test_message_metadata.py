@@ -70,7 +70,10 @@ def test_user_and_tool_messages_have_no_model(monkeypatch) -> None:
     _patch_provider(monkeypatch, provider)
 
     with TestClient(app) as c:
-        conv = c.post("/api/conversations", json={"model": "m"}).json()
+        conv = c.post(
+            "/api/conversations",
+            json={"model": "m", "permissions": {"*": "allow"}},
+        ).json()
         conv_id = conv["id"]
         with c.stream(
             "POST",

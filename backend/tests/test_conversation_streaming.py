@@ -51,7 +51,10 @@ def test_tool_round_trip_persists_both_assistant_messages(monkeypatch) -> None:
     _patch_provider(monkeypatch, provider)
 
     with TestClient(app) as c:
-        conv = c.post("/api/conversations", json={"title": "tool-rt"}).json()
+        conv = c.post(
+            "/api/conversations",
+            json={"title": "tool-rt", "permissions": {"*": "allow"}},
+        ).json()
         conv_id = conv["id"]
 
         # Drive the turn over the SSE endpoint.

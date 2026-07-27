@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
+import socket
+
+import pytest
+
 from app.security.ssrf import check_url_safety, is_private_ip, is_safe_url
+
+
+@pytest.fixture(autouse=True)
+def _mock_dns(monkeypatch):
+    """Avoid real DNS resolution in unit tests — return a public IP instantly."""
+    def _fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
 
 
 class TestIsPrivateIp:

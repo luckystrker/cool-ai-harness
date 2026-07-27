@@ -339,11 +339,11 @@ async def test_ask_with_auto_approve_runs_tool(scripted_provider, workspace) -> 
 @pytest.mark.asyncio
 async def test_ask_times_out_into_deny(scripted_provider, monkeypatch) -> None:
     """When nobody resolves the approval, the loop auto-denies after a timeout."""
-    import app.agent.executor as executor_module
     from app.agent.permissions import PermissionsConfig
+    from app.core import config as config_module
 
-    # Shrink the timeout so the test doesn't wait 5 minutes.
-    monkeypatch.setattr(executor_module, "DEFAULT_APPROVAL_TIMEOUT_S", 0.1)
+    # Shrink the timeout so the test doesn't wait 30 seconds.
+    monkeypatch.setattr(config_module.get_settings(), "approval_timeout_s", 0.1)
 
     scripted_provider.set_script(
         [
