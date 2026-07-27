@@ -795,3 +795,84 @@ export interface SubagentFailedPayload {
   subagent_run_id: number
   error: string
 }
+
+// --- memory (Фаза 3a) ---
+
+export type MemoryType = "semantic" | "episodic" | "procedural" | "preference"
+export type MemoryScope = "global" | "agent" | "conversation"
+export type MemoryStatus = "active" | "archived" | "superseded" | "deleted"
+
+export interface MemoryItem {
+  id: number
+  user_id: number
+  scope: MemoryScope
+  agent_id: number | null
+  conversation_id: number | null
+  memory_type: MemoryType
+  content: string
+  structured: Record<string, unknown> | null
+  tags: string[] | null
+  importance: number
+  confidence: number
+  source: string
+  status: MemoryStatus
+  access_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface MemoryCreate {
+  content: string
+  memory_type?: MemoryType
+  scope?: MemoryScope
+  agent_id?: number
+  importance?: number
+  confidence?: number
+  tags?: string[]
+  structured?: Record<string, unknown>
+  ttl_days?: number
+}
+
+export interface MemoryUpdate {
+  content?: string
+  memory_type?: MemoryType
+  scope?: MemoryScope
+  importance?: number
+  confidence?: number
+  status?: MemoryStatus
+  tags?: string[]
+  structured?: Record<string, unknown>
+  ttl_days?: number
+  valid_to?: string
+}
+
+export interface Episode {
+  id: number
+  user_id: number
+  agent_id: number | null
+  conversation_id: number | null
+  title: string
+  summary: string
+  outcome: string
+  importance: number
+  tags: string[] | null
+  created_at: string
+}
+
+export interface MemoryStats {
+  total_active: number
+  by_type: Record<string, number>
+  by_scope: Record<string, number>
+  total_episodes: number
+  total_archived: number
+}
+
+export interface MemoryExtractRequest {
+  conversation_id: number
+}
+
+export interface MemoryExtractResponse {
+  status: string
+  stored_count: number
+  detail: string | null
+}

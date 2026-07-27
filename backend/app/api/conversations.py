@@ -200,6 +200,92 @@ def patch_conversation(
     return _conv_to_out(conv)
 
 
+@router.post("/conversations/{conv_id}/compact")
+async def compact_conversation(
+    conv_id: int, session: Session = Depends(get_session)
+) -> dict:
+    """Compact the conversation context by summarizing older messages.
+
+    Triggers the working memory summarization: older messages are compressed
+    into a rolling summary stored in WorkingMemory, reducing the context size
+    for future turns.
+    """
+    from app.core.config import get_settings
+    from app.memory.service import update_working_memory_summary
+    from app.providers import Message as ProviderMessage
+
+    conv = get_conversation(session, conv_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    settings = get_settings()
+    msgs = list_messages(session, conv_id)
+
+    # Only compact if there are enough messages.
+    threshold = settings.memory_summary_threshold_messages
+    if len(msgs) < threshold:
+        return {
+            "status": "skipped",
+            "reason": f"Too few messages ({len(msgs)} < {threshold})",
+            "message_count": len(msgs),
+        }
+
+    # Build transcript of older messages (all but the last 10).
+    keep_recent = 10
+    older_msgs = msgs[:-keep_recent] if len(msgs) > keep_recent else []
+    if not older_msgs:
+        return {"status": "skipped", "reason": "No messages to compact"}
+
+    # Build a transcript for summarization.
+    transcript_lines = []
+    for m in older_msgs:
+        role = m.role
+        content = m.content or ""
+        if len(content) > 300:
+            content = content[:300] + "..."
+        transcript_lines.append(f"{role}: {content}")
+    transcript = "\n".join(transcript_lines)
+
+    # Summarize using the LLM.
+    model = conv.model or _resolve_default_model(session)
+    if model is None:
+        raise HTTPException(status_code=400, detail="No model configured")
+
+    provider = get_provider_for_model(model)
+    summary_model = settings.memory_summary_model or model
+
+    summarization_prompt = (
+        "Summarize the following conversation transcript into a concise summary "
+        "that preserves key decisions, facts, and context. Focus on information "
+        "that would be useful for continuing the conversation. Keep it under 500 words.\n\n"
+        f"Transcript:\n{transcript}"
+    )
+
+    try:
+        result = await provider.chat_completion(
+            [ProviderMessage(role="user", content=summarization_prompt)],
+            model=summary_model,
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        summary = result.content or ""
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Summarization failed: {exc}") from exc
+
+    # Store the summary in working memory.
+    last_compacted_msg_id = older_msgs[-1].id if older_msgs else None
+    update_working_memory_summary(
+        session, conv_id, summary, up_to_message_id=last_compacted_msg_id
+    )
+
+    return {
+        "status": "compacted",
+        "messages_compacted": len(older_msgs),
+        "messages_kept": keep_recent,
+        "summary_length": len(summary),
+    }
+
+
 # --- streaming chat ---
 
 

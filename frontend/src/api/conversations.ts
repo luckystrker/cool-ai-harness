@@ -7,6 +7,15 @@ import type {
   ConversationUpdate,
 } from "./types"
 
+export interface CompactResponse {
+  status: string
+  reason?: string
+  message_count?: number
+  messages_compacted?: number
+  messages_kept?: number
+  summary_length?: number
+}
+
 export const conversationsApi = {
   list: () => api.get<Conversation[]>("/api/conversations"),
 
@@ -21,6 +30,10 @@ export const conversationsApi = {
 
   delete: (id: number) =>
     api.delete<{ deleted: number }>(`/api/conversations/${id}`),
+
+  /** Compact the conversation context by summarizing older messages. */
+  compact: (convId: number) =>
+    api.post<CompactResponse>(`/api/conversations/${convId}/compact`),
 
   /** Resolve a pending tool-call approval (gated behind an "ask" permission). */
   approveToolCall: (convId: number, callId: string, approved: boolean) =>

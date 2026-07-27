@@ -21,6 +21,7 @@ from app.tools.base import (
 
 def register_builtins() -> None:
     """Register all bundled tools. Idempotent — last registration wins."""
+    from app.memory.tools import register_memory_tools
     from app.tools.code_tools import register_code_tools
     from app.tools.file_tools import register_file_tools
     from app.tools.mcp_tools import register_mcp_management_tools
@@ -36,6 +37,7 @@ def register_builtins() -> None:
     register_skill_tools()
     register_mcp_management_tools()
     register_subagent_tools()
+    register_memory_tools()
 
 
 # Auto-register on import so the agent loop sees them out of the box.

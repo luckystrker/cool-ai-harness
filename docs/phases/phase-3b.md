@@ -48,7 +48,6 @@
 ## 5. Template-based recurring workflows
 
 - **Daily news/research digest**
-- **Weekly D&D prep** (на основе campaign state из memory)
 - **Code review / cleanup**
 - **Memory review** (периодический пересмотр long-term memory)
 - **Health check / monitoring**

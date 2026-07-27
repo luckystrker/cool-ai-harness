@@ -56,6 +56,9 @@ def init_db() -> None:
     # Import models so SQLModel.metadata sees them before create_all.
     from app import models  # noqa: F401
 
+    # Memory models are imported separately to avoid circular imports.
+    from app.memory import models as memory_models  # noqa: F401
+
     settings = get_settings()
     if settings.environment == "production":
         _run_alembic_upgrade()
