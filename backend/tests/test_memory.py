@@ -232,8 +232,8 @@ class TestScopeVisibility:
         retrievable from another conversation that shares the same working
         directory (project), but not from a conversation in a different project.
         """
-        from app.models.conversation import Conversation
         from app.memory.service import recall, remember
+        from app.models.conversation import Conversation
 
         # Create two conversations in the same project + one in a different project.
         conv_a = Conversation(user_id=user_id, working_directory="/proj/alpha")
