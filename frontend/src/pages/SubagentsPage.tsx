@@ -39,8 +39,10 @@ export function SubagentsPage() {
     onError: (e) => toast.error("Failed to delete role", { description: String(e) }),
   })
 
-  const activeRuns = runs.filter((r) => r.status === "queued" || r.status === "running")
-  const pastRuns = runs.filter((r) => ["completed", "failed", "cancelled"].includes(r.status))
+  // Only show standalone launches (not chat-spawned subagents with parent_run_id).
+  const standaloneRuns = runs.filter((r) => r.parent_run_id == null)
+  const activeRuns = standaloneRuns.filter((r) => r.status === "queued" || r.status === "running")
+  const pastRuns = standaloneRuns.filter((r) => ["completed", "failed", "cancelled"].includes(r.status))
 
   // Use conversation_id=1 as the default parent for standalone launches.
   const parentConvId = runs[0]?.parent_conversation_id ?? 1
@@ -143,10 +145,10 @@ export function SubagentsPage() {
             </span>
           </div>
           <div className="space-y-1.5 p-2">
-            {runs.slice(0, 20).map((run) => (
+            {standaloneRuns.slice(0, 20).map((run) => (
               <RunCard key={run.id} run={run} />
             ))}
-            {runs.length === 0 && (
+            {standaloneRuns.length === 0 && (
               <p className="px-2 py-3 text-center text-xs text-muted-foreground">
                 No runs yet.
               </p>
@@ -208,6 +210,7 @@ export function SubagentsPage() {
 
           {tab === "roles" && showEditor && (
             <RoleEditor
+              key={editingRole?.id ?? "new"}
               role={editingRole}
               onSaved={() => {
                 setShowEditor(false)

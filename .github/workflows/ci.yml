@@ -35,7 +35,7 @@ jobs:
 
       - name: Pytest
         working-directory: backend
-        run: pytest --tb=short -q
+        run: pytest --tb=short -q -n auto --dist=loadfile
 
   frontend:
     name: Frontend (oxlint + build)

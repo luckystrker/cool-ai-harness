@@ -1,8 +1,10 @@
 import { useState } from "react"
-import { ChevronRight, Wrench, CheckCircle2, AlertCircle, Clock } from "lucide-react"
+import { ChevronRight, Wrench, CheckCircle2, AlertCircle, Clock, Bot } from "lucide-react"
 import type { ToolCall } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { cn, formatDuration } from "@/lib/utils"
+import { SubagentOutputDialog } from "@/components/subagents/SubagentOutputDialog"
 
 export interface ToolCallBlockProps {
   call: ToolCall
@@ -22,6 +24,12 @@ export interface ToolCallBlockProps {
 /** Collapsible block showing a single tool invocation + its result. */
 export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolCallBlockProps) {
   const [open, setOpen] = useState(awaitingApproval)
+  const [showSubagentDialog, setShowSubagentDialog] = useState(false)
+
+  const isSubagentTool = call.name === "spawn_subagent"
+  const subagentRunId = isSubagentTool
+    ? (result?.metadata?.subagent_run_id as number | undefined)
+    : undefined
 
   const errored = result?.is_error === true
   const durationMs = result?.metadata?.duration_ms
@@ -102,7 +110,28 @@ export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolC
               </pre>
             </div>
           )}
+          {/* Subagent output viewer button */}
+          {isSubagentTool && subagentRunId && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={() => setShowSubagentDialog(true)}
+            >
+              <Bot className="h-3.5 w-3.5" />
+              View Subagent Output
+            </Button>
+          )}
         </div>
+      )}
+
+      {/* Subagent output dialog */}
+      {isSubagentTool && subagentRunId && (
+        <SubagentOutputDialog
+          open={showSubagentDialog}
+          onOpenChange={setShowSubagentDialog}
+          subagentRunId={subagentRunId}
+        />
       )}
     </div>
   )

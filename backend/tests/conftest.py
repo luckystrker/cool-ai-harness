@@ -16,7 +16,11 @@ import pytest
 # test conversations/providers (this is how the /tmp/agent-x working dirs and
 # gpt-4o provider rows leaked into the real DB and surfaced in the chat UI).
 # Env vars take precedence over the .env file in pydantic-settings.
-_TEST_DB = Path(tempfile.gettempdir()) / "cool_ai_harness_test.db"
+# When running under pytest-xdist, each worker gets its own DB file to avoid
+# SQLite locking contention between parallel processes.
+_worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+_db_suffix = f"_{_worker_id}" if _worker_id else ""
+_TEST_DB = Path(tempfile.gettempdir()) / f"cool_ai_harness_test{_db_suffix}.db"
 if _TEST_DB.exists():
     _TEST_DB.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"

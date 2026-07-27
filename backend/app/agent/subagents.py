@@ -296,13 +296,15 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
         working_directory = sa_conv.working_directory if sa_conv else None
 
         result_summary: str | None = None
+        token_parts: list[str] = []  # Accumulate tokens as fallback.
+        error_message: str | None = None  # Captured from "error" events.
         try:
             async for event in run_conversation_turn(
                 session=session,
                 conversation_id=sa_run.conversation_id,
                 provider=provider,
                 model=effective_model,
-                user_input=sa_run.prompt,
+                user_input=None,  # Prompt already persisted in create_subagent_run.
                 system_prompt=system_prompt,
                 tool_names=tool_names,
                 working_directory=working_directory,
@@ -313,16 +315,46 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
                 cancellable=True,
             ):
                 # Capture the final assistant content as the result summary.
-                if event.kind == "message":
+                if event.kind == "token":
+                    token_parts.append(event.payload.get("text", ""))
+                elif event.kind == "message":
                     content = event.payload.get("content")
                     if content:
                         result_summary = content
+                    # Reset token buffer for the next iteration.
+                    token_parts.clear()
+                elif event.kind == "error":
+                    # The executor reports unrecoverable LLM failures as events
+                    # (not exceptions). Capture so the run is marked failed and
+                    # the parent agent gets a real error instead of empty output.
+                    error_message = (
+                        event.payload.get("detail")
+                        or event.payload.get("message")
+                        or "Unknown subagent error"
+                    )
                 elif event.kind == "finish":
                     usage = event.payload.get("usage")
                     if usage:
                         sa_run.usage = usage
                         session.add(sa_run)
                         session.commit()
+
+            # Fallback: if no "message" event carried content, use accumulated tokens.
+            if result_summary is None and token_parts:
+                result_summary = "".join(token_parts).strip() or None
+
+            # If the loop surfaced an error event, mark the run failed (not
+            # completed) so the failure is visible instead of a silent no-output.
+            if error_message is not None:
+                sa_run.status = SUBAGENT_STATUS_FAILED
+                sa_run.error = error_message
+                sa_run.finished_at = datetime.now(UTC)
+                session.add(sa_run)
+                session.commit()
+                log.error(
+                    "subagent.failed", subagent_run_id=subagent_run_id, error=error_message
+                )
+                return None
 
             # Mark completed.
             sa_run.status = SUBAGENT_STATUS_COMPLETED
