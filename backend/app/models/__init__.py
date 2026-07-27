@@ -2,6 +2,10 @@
 
 Importing this package registers every table on SQLModel.metadata so that
 `init_db()` / `create_all()` and Alembic autogenerate can see them.
+
+NOTE: Memory models (app.memory.models) are NOT imported here to avoid a
+circular import (memory.models -> models.base -> models.__init__ -> memory.models).
+They are imported separately in init_db() and the Alembic env.
 """
 
 from __future__ import annotations

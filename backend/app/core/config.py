@@ -236,6 +236,52 @@ class Settings(BaseSettings):
         description='Breakpoint timeout fallback: "deny" or "skip"',
     )
 
+    # --- Memory (Фаза 3a) ---
+    # Master switch for the memory subsystem.
+    memory_enabled: bool = Field(
+        default=True,
+        description="Enable the memory subsystem (long-term + working memory)",
+    )
+    # Post-session LLM extraction of memories from conversation.
+    memory_extraction_enabled: bool = Field(
+        default=True,
+        description="Enable automatic post-session memory extraction",
+    )
+    # Max memories returned by a single recall query.
+    memory_max_recall_limit: int = Field(
+        default=10,
+        description="Max memories returned per recall query",
+    )
+    # BM25 rank threshold for FTS5 search (lower = stricter).
+    memory_fts_min_rank: float = Field(
+        default=-10.0,
+        description="BM25 rank threshold for FTS5 memory search",
+    )
+    # Periodic decay of unused memories.
+    memory_decay_enabled: bool = Field(
+        default=True,
+        description="Enable periodic decay of unused memories",
+    )
+    memory_decay_interval_days: int = Field(
+        default=7,
+        description="Days between decay sweeps",
+    )
+    # Min similar memories to trigger consolidation.
+    memory_consolidation_threshold: int = Field(
+        default=3,
+        description="Min similar memories to trigger consolidation merge",
+    )
+    # Trigger auto-summarization after this many messages.
+    memory_summary_threshold_messages: int = Field(
+        default=30,
+        description="Message count threshold for working memory auto-summarization",
+    )
+    # Model used for summarization/extraction (None = use conversation model).
+    memory_summary_model: str | None = Field(
+        default=None,
+        description="Model for memory summarization/extraction; None = conversation model",
+    )
+
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
         for path in (self.data_dir, self.workspaces_dir, self.skills_dir, self.artifacts_dir):

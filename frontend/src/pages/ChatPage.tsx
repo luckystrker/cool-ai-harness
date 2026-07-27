@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { MessageSquare, Sparkles, Paperclip } from "lucide-react"
+import { Archive, Loader2, MessageSquare, Sparkles, Paperclip } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
@@ -339,6 +339,7 @@ export function ChatPage() {
         <span className="truncate font-medium">
           {detail?.title || `Conversation #${convId}`}
         </span>
+        <CompactButton convId={convId} disabled={isStreaming} />
         <Button
           variant="ghost"
           size="sm"
@@ -493,5 +494,40 @@ function EmptyState() {
         </p>
       </div>
     </div>
+  )
+}
+
+/** Compact button — summarizes older messages to reduce context size. */
+function CompactButton({ convId, disabled }: { convId: number; disabled?: boolean }) {
+  const compactMutation = useMutation({
+    mutationFn: () => conversationsApi.compact(convId),
+    onSuccess: (data) => {
+      if (data.status === "compacted") {
+        toast.success(
+          `Compacted ${data.messages_compacted} messages (${data.summary_length} chars summary)`
+        )
+      } else {
+        toast.info(data.reason || "Nothing to compact")
+      }
+    },
+    onError: (e) => toast.error("Compact failed", { description: String(e) }),
+  })
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="px-2 text-muted-foreground"
+      title="Compact context: summarize older messages to reduce token usage"
+      disabled={disabled || compactMutation.isPending}
+      onClick={() => compactMutation.mutate()}
+    >
+      {compactMutation.isPending ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <Archive className="h-4 w-4" />
+      )}
+      <span className="ml-1.5 hidden sm:inline">Compact</span>
+    </Button>
   )
 }

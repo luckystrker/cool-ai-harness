@@ -158,6 +158,24 @@ async def run_conversation_turn(
         elif skills_ctx:
             effective_system_prompt = skills_ctx
 
+    # Inject memory context (Фаза 3a) — user preferences, relevant long-term
+    # memories, conversation summary, and working memory state.
+    if settings.memory_enabled:
+        from app.memory.context_builder import build_memory_context
+
+        _mem_user = get_or_create_default_user(session)
+        assert _mem_user.id is not None
+        memory_ctx = build_memory_context(
+            session,
+            user_id=_mem_user.id,
+            conversation_id=conversation_id,
+            query=user_input,
+        )
+        if memory_ctx and effective_system_prompt:
+            effective_system_prompt = f"{effective_system_prompt}\n\n{memory_ctx}"
+        elif memory_ctx:
+            effective_system_prompt = memory_ctx
+
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )
