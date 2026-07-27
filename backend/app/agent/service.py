@@ -31,6 +31,31 @@ def get_or_create_default_user(session: Session) -> User:
     return user
 
 
+def resolve_default_model(session: Session) -> str | None:
+    """Default model: the default provider's first chat model (falling back to
+    its legacy default_model column).
+
+    Picks the row marked ``is_default``; if none, the first active non-fallback
+    row. Returns None when no provider / no models are configured.
+    """
+    from app.models import Provider as ProviderRow
+
+    rows = session.exec(
+        select(ProviderRow)
+        .where(ProviderRow.user_id == 1)
+        .where(ProviderRow.is_active == True)  # noqa: E712
+        .order_by(ProviderRow.id)
+    ).all()
+    pool = [r for r in rows if r.is_default and not r.is_fallback] or [
+        r for r in rows if not r.is_fallback
+    ]
+    if not pool:
+        return None
+    row = pool[0]
+    chat_models = list(row.chat_models or [])
+    return (chat_models[0] if chat_models else None) or row.default_model
+
+
 def create_conversation(
     session: Session,
     *,
@@ -61,11 +86,13 @@ def create_conversation(
 
 
 def list_conversations(session: Session, *, user_id: int) -> Sequence[Conversation]:
-    return session.exec(
+    rows = session.exec(
         select(Conversation)
         .where(Conversation.user_id == user_id)
         .order_by(Conversation.updated_at.desc())
     ).all()
+    # Hide subagent-owned conversations from the regular chat list.
+    return [r for r in rows if not (r.metadata_ or {}).get("is_subagent")]
 
 
 def get_conversation(session: Session, conv_id: int) -> Conversation | None:

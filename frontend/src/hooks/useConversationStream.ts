@@ -26,6 +26,7 @@ import type { InlineApproval } from "@/components/chat/ApprovalCard"
 type AccBlock =
   | { type: "thinking"; text: string }
   | { type: "tools"; ids: string[] }
+  | { type: "text"; text: string }
 
 interface Accumulator {
   /** Pending user message (sent but not yet persisted). */
@@ -91,6 +92,16 @@ function pushToolCall(acc: Accumulator, id: string) {
   }
 }
 
+/** Append streamed text content to the current (or a new) text block. */
+function pushTextDelta(acc: Accumulator, text: string) {
+  const last = acc.blocks[acc.blocks.length - 1]
+  if (last && last.type === "text") {
+    last.text += text
+  } else {
+    acc.blocks.push({ type: "text", text })
+  }
+}
+
 /**
  * Drives a single agent turn over the SSE stream and produces the two
  * optimistic messages (user + in-flight assistant) that the UI renders
@@ -122,14 +133,20 @@ export function useConversationStream() {
       .map((b) =>
         b.type === "thinking"
           ? { type: "thinking" as const, text: b.text }
-          : {
-              type: "tools" as const,
-              calls: b.ids
-                .map((id) => acc.toolCalls.get(id))
-                .filter((c): c is ToolCallBlockProps & { key: string } => c != null),
-            }
+          : b.type === "text"
+            ? { type: "text" as const, text: b.text }
+            : {
+                type: "tools" as const,
+                calls: b.ids
+                  .map((id) => acc.toolCalls.get(id))
+                  .filter((c): c is ToolCallBlockProps & { key: string } => c != null),
+              }
       )
-      .filter((b) => (b.type === "thinking" ? b.text.length > 0 : b.calls.length > 0))
+      .filter((b) =>
+        b.type === "thinking" ? b.text.length > 0
+        : b.type === "text" ? b.text.length > 0
+        : b.calls.length > 0
+      )
     const assistant: MessageViewModel = {
       id: "stream-assistant",
       role: "assistant",
@@ -161,10 +178,13 @@ export function useConversationStream() {
         }
         break
       }
-      case "token":
-        acc.content += (ev.payload.text as string) || ""
+      case "token": {
+        const text = (ev.payload.text as string) || ""
+        acc.content += text
+        pushTextDelta(acc, text)
         flush(acc)
         break
+      }
       case "react_thought": {
         // Route ReAct thoughts into the reasoning blocks so chain-of-thought
         // stays visible without the structured trace timeline. For reasoning
@@ -338,6 +358,29 @@ export function useConversationStream() {
         }
         break
       }
+      // --- Subagent events (Фаза 2 §5) ---
+      case "subagent_started": {
+        const name = (ev.payload.name as string) || "subagent"
+        const role = (ev.payload.role as string) || ""
+        acc.content += `\n\n> 🤖 **Subagent launched:** ${name}${role ? ` (${role})` : ""}\n`
+        flush(acc)
+        break
+      }
+      case "subagent_completed": {
+        const summary = (ev.payload.result_summary as string) || "Done"
+        acc.content += `> ✅ **Subagent completed:** ${summary.slice(0, 200)}\n`
+        flush(acc)
+        break
+      }
+      case "subagent_failed": {
+        const error = (ev.payload.error as string) || "Unknown error"
+        acc.content += `> ❌ **Subagent failed:** ${error}\n`
+        flush(acc)
+        break
+      }
+      case "subagent_progress":
+        // Progress updates are too frequent to render inline; skip.
+        break
       case "error": {
         // Provider / loop failures (e.g. 401 from the LLM backend). Without
         // this the stream just ends and the user sees their message with no
@@ -441,6 +484,8 @@ export function useConversationStream() {
     const pending = acc?.approval
     if (!pending || pending.status !== "pending") return
 
+    const resolvedCallId = pending.callId
+
     // Optimistically flip the card to "resolving".
     acc!.approval = { ...pending, status: "resolving" }
     flush(acc!)
@@ -448,15 +493,23 @@ export function useConversationStream() {
     try {
       await conversationsApi.approveToolCall(
         convIdRef.current!,
-        pending.callId,
+        resolvedCallId,
         approved
       )
-      acc!.approval = { ...pending, status: approved ? "approved" : "denied" }
+      // Only update if the current approval still refers to the same call.
+      // A newer tool_approval_request may have arrived while we awaited the
+      // API response (multiple tool calls in one batch); overwriting it would
+      // hide the new approval card from the user.
+      if (accRef.current?.approval?.callId === resolvedCallId) {
+        accRef.current.approval = { ...pending, status: approved ? "approved" : "denied" }
+      }
     } catch {
       // If the resolve fails (e.g. 404 — already timed out), the server-side
       // timeout/auto-deny handles the loop. Show denied so the card doesn't
-      // stay stuck in "resolving".
-      acc!.approval = { ...pending, status: "denied" }
+      // stay stuck in "resolving" — but only if still current.
+      if (accRef.current?.approval?.callId === resolvedCallId) {
+        accRef.current.approval = { ...pending, status: "denied" }
+      }
     }
     if (accRef.current) flush(accRef.current)
   }, [])

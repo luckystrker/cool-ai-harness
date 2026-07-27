@@ -3,6 +3,7 @@ import { AppLayout } from "@/components/layout/AppLayout"
 import { ChatPage } from "@/pages/ChatPage"
 import { SettingsPage } from "@/pages/SettingsPage"
 import { BudgetsPage } from "@/pages/BudgetsPage"
+import { SubagentsPage } from "@/pages/SubagentsPage"
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         <Route path="/chat/:conversationId" element={<ChatPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/budgets" element={<BudgetsPage />} />
+        <Route path="/subagents" element={<SubagentsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

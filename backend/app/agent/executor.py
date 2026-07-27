@@ -528,6 +528,8 @@ class AgentExecutor:
             permissions=dict(perms),
             capability_policy=self.config.capability_policy,
             breakpoints=self.config.breakpoints,
+            conversation_id=self.config.conversation_id,
+            run_id=self.config.run_id,
         )
 
     def _resolve_decision(self, name: str, dangerous: bool) -> Decision:

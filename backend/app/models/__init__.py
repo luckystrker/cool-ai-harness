@@ -14,6 +14,7 @@ from app.models.conversation import Conversation, Message, ToolCall
 from app.models.plan import Plan, PlanStep, PlanTemplate
 from app.models.provider import Provider
 from app.models.run import AgentRun, RunEvent
+from app.models.subagent import SubagentRole, SubagentRun
 from app.models.user import User
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "Provider",
     "RunEvent",
     "SpendLog",
+    "SubagentRole",
+    "SubagentRun",
     "TimestampMixin",
     "ToolCall",
     "User",
