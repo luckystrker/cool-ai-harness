@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     workspaces_dir: Path = REPO_ROOT / "workspaces"
     skills_dir: Path = REPO_ROOT / "skills"
     artifacts_dir: Path = REPO_ROOT / "data" / "artifacts"
+    # Path to the built frontend (vite build output). Served by FastAPI in
+    # production so a single process handles both API and UI.
+    frontend_dist: Path = REPO_ROOT / "frontend" / "dist"
 
     # --- Artifacts (Фаза 1.5 §3) ---
     # Max upload size per artifact file (bytes). 0 = no limit.
