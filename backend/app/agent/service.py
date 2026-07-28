@@ -66,6 +66,7 @@ def create_conversation(
     permissions: dict | None = None,
     capability_policy: dict | None = None,
     breakpoints: list[dict] | None = None,
+    profile_id: int | None = None,
 ) -> Conversation:
     metadata: dict | None = None
     if breakpoints is not None:
@@ -77,6 +78,7 @@ def create_conversation(
         working_directory=working_directory,
         permissions=permissions,
         capability_policy=capability_policy,
+        profile_id=profile_id,
         metadata_=metadata,
     )
     session.add(conv)
@@ -109,6 +111,7 @@ def update_conversation(
     permissions: dict | None = None,
     capability_policy: dict | None = None,
     breakpoints: list[dict] | None = None,
+    profile_id: int | None = None,
 ) -> Conversation | None:
     """Patch updatable fields on a conversation.
 
@@ -116,6 +119,7 @@ def update_conversation(
     "leave unchanged". To explicitly clear ``working_directory`` or
     ``permissions``, pass an empty value (``""`` / ``{}`` respectively).
     ``capability_policy`` and ``breakpoints`` follow the same convention.
+    ``profile_id`` uses a special sentinel: pass ``-1`` to clear it.
     """
     conv = session.get(Conversation, conv_id)
     if conv is None:
@@ -137,6 +141,8 @@ def update_conversation(
         else:
             meta.pop("breakpoints", None)
         conv.metadata_ = meta or None
+    if profile_id is not None:
+        conv.profile_id = profile_id if profile_id != -1 else None
     session.add(conv)
     session.commit()
     session.refresh(conv)

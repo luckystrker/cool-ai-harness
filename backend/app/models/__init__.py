@@ -16,12 +16,14 @@ from app.models.base import TimestampMixin
 from app.models.budget import Budget, SpendLog
 from app.models.conversation import Conversation, Message, ToolCall
 from app.models.plan import Plan, PlanStep, PlanTemplate
+from app.models.profile import AgentProfile
 from app.models.provider import Provider
 from app.models.run import AgentRun, RunEvent
 from app.models.subagent import SubagentRole, SubagentRun
 from app.models.user import User
 
 __all__ = [
+    "AgentProfile",
     "AgentRun",
     "ApprovalAudit",
     "Artifact",

@@ -14,6 +14,7 @@ import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
 import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
 import { BudgetIndicator } from "@/components/chat/BudgetIndicator"
+import { ProfileSwitcher } from "@/components/chat/ProfileSwitcher"
 import { useConversationStream } from "@/hooks/useConversationStream"
 import {
   MODE_PRESETS,
@@ -340,6 +341,7 @@ export function ChatPage() {
           {detail?.title || `Conversation #${convId}`}
         </span>
         <CompactButton convId={convId} disabled={isStreaming} />
+        <ProfileSwitcher conversation={detail ?? null} />
         <Button
           variant="ghost"
           size="sm"

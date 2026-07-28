@@ -101,6 +101,7 @@ async def run_conversation_turn(
     limits: AgentLimits | None = None,
     run_id: int | None = None,
     cancellable: bool = False,
+    profile_id: int | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run one agent turn against a conversation, persisting messages along the way.
 
@@ -133,8 +134,27 @@ async def run_conversation_turn(
 
     settings = get_settings()
 
-    # Resolve the effective system prompt: per-request > settings default > built-in file.
-    effective_system_prompt = system_prompt or get_default_system_prompt() or None
+    # Resolve agent profile (Фаза 3a §2) — provides base system prompt, tool
+    # whitelist, and memory namespace. Per-request overrides still take priority.
+    _profile = None
+    if profile_id is not None:
+        from app.agent.personalities.service import get_profile
+
+        _profile = get_profile(session, profile_id)
+
+    # Resolve the effective system prompt:
+    # per-request > profile > settings default > built-in file.
+    if system_prompt:
+        effective_system_prompt = system_prompt
+    elif _profile and _profile.system_prompt:
+        effective_system_prompt = _profile.system_prompt
+    else:
+        effective_system_prompt = get_default_system_prompt() or None
+
+    # Resolve effective tool names: per-request > profile > all.
+    effective_tool_names = tool_names
+    if effective_tool_names is None and _profile and _profile.tool_names:
+        effective_tool_names = _profile.tool_names
 
     # Inject active plan context (Фаза 2 §1) so the agent knows which plan
     # steps to execute and can mark them via plan_step_update.
@@ -160,6 +180,7 @@ async def run_conversation_turn(
 
     # Inject memory context (Фаза 3a) — user preferences, relevant long-term
     # memories, conversation summary, and working memory state.
+    # When a profile is active, pass its id as agent_id for memory namespacing.
     if settings.memory_enabled:
         from app.memory.context_builder import build_memory_context
 
@@ -168,6 +189,7 @@ async def run_conversation_turn(
         memory_ctx = build_memory_context(
             session,
             user_id=_mem_user.id,
+            agent_id=_profile.id if _profile else None,
             conversation_id=conversation_id,
             query=user_input,
         )
@@ -179,8 +201,15 @@ async def run_conversation_turn(
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
     )
+    # Merge capability policy: global < profile < conversation.
+    _profile_cap_policy = None
+    if _profile and _profile.settings and isinstance(_profile.settings, dict):
+        _profile_cap_policy = _profile.settings.get("capability_policy")
     effective_capability_policy = merge_capability_policy(
-        dict(settings.capability_policy), conversation_capability_policy
+        dict(settings.capability_policy), _profile_cap_policy
+    )
+    effective_capability_policy = merge_capability_policy(
+        effective_capability_policy, conversation_capability_policy
     )
     effective_breakpoints = merge_breakpoints(
         None, conversation_breakpoints  # Global breakpoints from settings (future)
@@ -192,7 +221,7 @@ async def run_conversation_turn(
         config=AgentConfig(
             model=model,
             system_prompt=effective_system_prompt,
-            tool_names=tool_names,
+            tool_names=effective_tool_names,
             limits=effective_limits,
             working_directory=working_directory,
             permissions=effective_permissions,

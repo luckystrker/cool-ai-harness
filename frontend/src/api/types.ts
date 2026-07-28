@@ -60,6 +60,8 @@ export interface Conversation {
   capability_policy: CapabilityPolicy | null
   /** Per-conversation breakpoints (stored in metadata). */
   breakpoints: BreakpointConfig[] | null
+  /** Active agent profile (Фаза 3a §2). Null = default system prompt. */
+  profile_id: number | null
   created_at: string
   updated_at: string
 }
@@ -73,6 +75,7 @@ export interface ConversationCreate {
   permissions?: ToolPermissions
   capability_policy?: CapabilityPolicy
   breakpoints?: BreakpointConfig[]
+  profile_id?: number
 }
 
 /** PATCH /api/conversations/{id} — only provided fields are applied. */
@@ -83,6 +86,7 @@ export interface ConversationUpdate {
   permissions?: ToolPermissions
   capability_policy?: CapabilityPolicy
   breakpoints?: BreakpointConfig[]
+  profile_id?: number
 }
 
 /** One row of a stored message. Matches app/api/schemas.MessageOut. */
@@ -1008,4 +1012,48 @@ export interface MemoryActivityPoint {
   period: string
   created: number
   by_type: Record<string, number>
+}
+
+// --- agent profiles (Фаза 3a §2) ---
+
+export interface AgentProfile {
+  id: number
+  name: string
+  slug: string
+  description: string | null
+  system_prompt: string | null
+  model: string | null
+  tool_names: string[] | null
+  skill_names: string[] | null
+  settings: Record<string, unknown> | null
+  avatar_color: string | null
+  is_builtin: boolean
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ProfileCreate {
+  name: string
+  slug: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tool_names?: string[]
+  skill_names?: string[]
+  settings?: Record<string, unknown>
+  avatar_color?: string
+}
+
+export interface ProfileUpdate {
+  name?: string
+  slug?: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tool_names?: string[]
+  skill_names?: string[]
+  settings?: Record<string, unknown>
+  avatar_color?: string
+  is_active?: boolean
 }

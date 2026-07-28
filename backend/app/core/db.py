@@ -42,6 +42,9 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
     # 0008 — per-message model + turn duration.
     ("messages", "model", "TEXT"),
     ("messages", "duration_ms", "INTEGER"),
+    # 0013 — agent profiles (Фаза 3a §2).
+    ("conversations", "profile_id", "INTEGER"),
+    ("subagent_runs", "profile_id", "INTEGER"),
 ]
 
 
@@ -66,6 +69,7 @@ def init_db() -> None:
         SQLModel.metadata.create_all(engine)
         _apply_lightweight_migrations()
         _hide_legacy_test_conversations()
+    _seed_profiles()
 
 
 def _run_alembic_upgrade() -> None:
@@ -176,3 +180,11 @@ def get_session() -> Generator[Session, None, None]:
     """FastAPI dependency: yield a per-request DB session."""
     with Session(engine) as session:
         yield session
+
+
+def _seed_profiles() -> None:
+    """Seed built-in agent profiles (Фаза 3a §2). Idempotent."""
+    from app.agent.personalities.seeding import seed_builtin_profiles
+
+    with Session(engine) as session:
+        seed_builtin_profiles(session)

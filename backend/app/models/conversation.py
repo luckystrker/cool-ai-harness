@@ -35,7 +35,9 @@ class Conversation(TimestampMixin, table=True):
     capability_policy: dict[str, Any] | None = Field(
         default=None, sa_column=Column("capability_policy", JSON)
     )
-    # Free-form metadata (e.g. agent_profile_id once Фаза 3a lands).
+    # Active agent profile (Фаза 3a §2). None = default system prompt.
+    profile_id: int | None = Field(default=None, foreign_key="agent_profiles.id", index=True)
+    # Free-form metadata (e.g. breakpoints, is_subagent flag).
     metadata_: dict[str, Any] | None = Field(
         default=None, sa_column=Column("metadata_", JSON)
     )

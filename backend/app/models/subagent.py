@@ -76,6 +76,8 @@ class SubagentRun(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     # Which role definition was used (None = ad-hoc with inline config).
     role_id: int | None = Field(default=None, foreign_key="subagent_roles.id", index=True)
+    # Which agent profile was used (Фаза 3a §2, alternative to role_id).
+    profile_id: int | None = Field(default=None, foreign_key="agent_profiles.id", index=True)
     # The parent conversation that spawned this subagent.
     parent_conversation_id: int = Field(foreign_key="conversations.id", index=True)
     # The parent run that spawned this subagent (if spawned by the agent loop).

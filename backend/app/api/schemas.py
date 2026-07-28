@@ -64,6 +64,8 @@ class ConversationCreate(BaseModel):
     # Per-conversation breakpoints: [{"type": "before_write", "tool": "write_file"}, ...]
     # Stored in conversation metadata. See app/security/breakpoints.py.
     breakpoints: list[dict[str, Any]] | None = None
+    # Agent profile (Фаза 3a §2). None = default system prompt.
+    profile_id: int | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -74,6 +76,7 @@ class ConversationUpdate(BaseModel):
     permissions: dict[str, str] | None = None
     capability_policy: dict[str, str] | None = None
     breakpoints: list[dict[str, Any]] | None = None
+    profile_id: int | None = None
 
 
 class ConversationOut(BaseModel):
@@ -85,6 +88,7 @@ class ConversationOut(BaseModel):
     permissions: dict[str, str] | None = None
     capability_policy: dict[str, str] | None = None
     breakpoints: list[dict[str, Any]] | None = None
+    profile_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -453,3 +457,48 @@ class SubagentRunDetail(SubagentRunOut):
     """A subagent run with its conversation messages."""
 
     messages: list[MessageOut] = []
+
+
+# --- agent profiles (Фаза 3a §2 — Multi-personality agents) ---
+
+
+class ProfileCreate(BaseModel):
+    name: str
+    slug: str
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    skill_names: list[str] | None = None
+    settings: dict[str, Any] | None = None
+    avatar_color: str | None = None
+
+
+class ProfileUpdate(BaseModel):
+    name: str | None = None
+    slug: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    skill_names: list[str] | None = None
+    settings: dict[str, Any] | None = None
+    avatar_color: str | None = None
+    is_active: bool | None = None
+
+
+class ProfileOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tool_names: list[str] | None = None
+    skill_names: list[str] | None = None
+    settings: dict[str, Any] | None = None
+    avatar_color: str | None = None
+    is_builtin: bool = False
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime

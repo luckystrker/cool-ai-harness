@@ -171,6 +171,7 @@ def create_subagent_run(
     parent_run_id: int | None = None,
     name: str | None = None,
     model_override: str | None = None,
+    profile_id: int | None = None,
 ) -> SubagentRun:
     """Create an isolated conversation + durable run + SubagentRun row.
 
@@ -179,9 +180,17 @@ def create_subagent_run(
     """
     user = get_or_create_default_user(session)
 
-    # Determine effective model (explicit override > role > configured default).
+    # Resolve profile config if profile_id is set (Фаза 3a §2).
+    _profile = None
+    if profile_id is not None:
+        from app.agent.personalities.service import get_profile
+
+        _profile = get_profile(session, profile_id)
+
+    # Determine effective model (explicit override > profile > role > configured default).
     effective_model = (
         model_override
+        or (_profile.model if _profile else None)
         or (role.model if role else None)
         or resolve_default_model(session)
     )
@@ -192,16 +201,27 @@ def create_subagent_run(
     parent_conv = session.get(Conversation, parent_conversation_id)
     working_directory = parent_conv.working_directory if parent_conv else None
 
+    # Resolve capability policy: profile settings > role > None.
+    _cap_policy = None
+    if _profile and _profile.settings and isinstance(_profile.settings, dict):
+        _cap_policy = _profile.settings.get("capability_policy")
+    elif role:
+        _cap_policy = role.capability_policy
+
     # Create isolated conversation for the subagent. Marked with is_subagent
     # metadata so it is hidden from the regular conversation list.
-    display_name = name or (f"subagent:{role.name}" if role else "subagent:adhoc")
+    display_name = name or (
+        f"subagent:{_profile.name}" if _profile
+        else f"subagent:{role.name}" if role
+        else "subagent:adhoc"
+    )
     conv = create_conversation(
         session,
         user_id=user.id,
         title=f"[Subagent] {display_name}",
         model=effective_model,
         working_directory=working_directory,
-        capability_policy=role.capability_policy if role else None,
+        capability_policy=_cap_policy,
     )
     conv.metadata_ = {**(conv.metadata_ or {}), "is_subagent": True}
     session.add(conv)
@@ -223,6 +243,7 @@ def create_subagent_run(
     # Create the SubagentRun tracking row.
     subagent_run = SubagentRun(
         role_id=role.id if role else None,
+        profile_id=profile_id,
         parent_conversation_id=parent_conversation_id,
         parent_run_id=parent_run_id,
         conversation_id=conv.id,
@@ -255,8 +276,18 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
         # Resolve role config.
         role = session.get(SubagentRole, sa_run.role_id) if sa_run.role_id else None
 
-        # Effective settings from role (or defaults).
-        system_prompt = role.system_prompt if role else None
+        # Resolve profile config (Фаза 3a §2 — cross-profile invocation).
+        _profile = None
+        if sa_run.profile_id:
+            from app.agent.personalities.service import get_profile
+
+            _profile = get_profile(session, sa_run.profile_id)
+
+        # Effective settings from profile > role > defaults.
+        if _profile and _profile.system_prompt:
+            system_prompt = _profile.system_prompt
+        else:
+            system_prompt = role.system_prompt if role else None
         # Get model from the run row.
         from app.agent.service import get_run
 
@@ -269,12 +300,19 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
         if effective_model is None:
             effective_model = "gpt-4o"
 
-        tool_names = role.tool_names if role else None
+        tool_names = (
+            (_profile.tool_names if _profile else None)
+            or (role.tool_names if role else None)
+        )
         max_iterations = role.max_iterations if role else 10
         max_cost_usd = role.max_cost_usd if role else None
 
-        # Capability policy: role's policy (already set on conversation).
-        cap_policy = role.capability_policy if role else None
+        # Capability policy: profile settings > role's policy (already set on conversation).
+        cap_policy = None
+        if _profile and _profile.settings and isinstance(_profile.settings, dict):
+            cap_policy = _profile.settings.get("capability_policy")
+        if cap_policy is None:
+            cap_policy = role.capability_policy if role else None
 
         limits = AgentLimits(
             max_iterations=max_iterations,

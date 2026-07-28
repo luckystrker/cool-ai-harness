@@ -20,13 +20,19 @@ class SpawnSubagentArgs(ToolArgs):
         default=None,
         description="Name of a predefined subagent role (e.g. 'researcher', 'code-reviewer', 'summarizer'). If omitted, a generic subagent is used.",
     )
+    profile: str | None = Field(
+        default=None,
+        description="Slug of an agent profile to use (e.g. 'coder', 'researcher', 'writer', 'dm'). Alternative to 'role'. If both are given, profile takes priority.",
+    )
     model: str | None = Field(
         default=None,
         description="Override model for the subagent. If omitted, uses the role's model or the system default.",
     )
 
 
-async def _spawn_subagent(prompt: str, role: str | None = None, model: str | None = None) -> ToolResult:
+async def _spawn_subagent(
+    prompt: str, role: str | None = None, profile: str | None = None, model: str | None = None
+) -> ToolResult:
     """Spawn a subagent to handle a sub-task and return its result."""
     from sqlmodel import Session
 
@@ -42,9 +48,21 @@ async def _spawn_subagent(prompt: str, role: str | None = None, model: str | Non
     ctx = get_run_context()
 
     with Session(engine) as session:
-        # Resolve role by name if provided.
+        # Resolve profile by slug if provided (Фаза 3a §2 — cross-profile invocation).
+        profile_id: int | None = None
+        if profile:
+            from app.agent.personalities.service import get_profile_by_slug
+
+            profile_obj = get_profile_by_slug(session, profile)
+            if profile_obj is None:
+                return ToolResult.err(
+                    f"Unknown agent profile: '{profile}'. Available profiles can be listed via the API."
+                )
+            profile_id = profile_obj.id
+
+        # Resolve role by name if provided (and no profile override).
         role_obj = None
-        if role:
+        if role and profile_id is None:
             role_obj = get_role_by_name(session, role)
             if role_obj is None:
                 return ToolResult.err(
@@ -66,6 +84,7 @@ async def _spawn_subagent(prompt: str, role: str | None = None, model: str | Non
             role=role_obj,
             parent_run_id=parent_run_id,
             model_override=model,
+            profile_id=profile_id,
         )
 
         import asyncio
@@ -102,7 +121,9 @@ def register_subagent_tools() -> None:
             "Spawn a specialized subagent to handle a sub-task. The subagent runs "
             "independently with its own context and tools, then returns its result. "
             "Use this for delegating research, code review, summarization, or other "
-            "specialized tasks. Available roles: researcher, code-reviewer, summarizer."
+            "specialized tasks. Available roles: researcher, code-reviewer, summarizer. "
+            "You can also specify an agent profile slug (e.g. 'coder', 'writer', 'dm') "
+            "to invoke another personality as a subagent."
         ),
         args_model=SpawnSubagentArgs,
         func=_spawn_subagent,

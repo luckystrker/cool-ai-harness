@@ -53,6 +53,7 @@ def _conv_to_out(conv) -> ConversationOut:
         permissions=conv.permissions,
         capability_policy=conv.capability_policy,
         breakpoints=meta.get("breakpoints"),
+        profile_id=conv.profile_id,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -125,6 +126,7 @@ def post_conversation(
         permissions=body.permissions,
         capability_policy=body.capability_policy,
         breakpoints=body.breakpoints,
+        profile_id=body.profile_id,
     )
     return _conv_to_out(conv)
 
@@ -194,6 +196,7 @@ def patch_conversation(
         permissions=body.permissions,
         capability_policy=body.capability_policy,
         breakpoints=body.breakpoints,
+        profile_id=body.profile_id,
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -343,6 +346,7 @@ async def post_message(
                 conversation_breakpoints=(conv.metadata_ or {}).get("breakpoints"),
                 run_id=run.id,
                 cancellable=True,
+                profile_id=conv.profile_id,
             ):
                 yield {"event": event.kind, "data": event.to_dict_json()}
         finally:

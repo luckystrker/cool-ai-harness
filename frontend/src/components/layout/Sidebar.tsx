@@ -314,6 +314,11 @@ export function Sidebar() {
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/profiles">
+            <Settings2 className="h-4 w-4" /> Profiles
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/analytics">
             <BarChart3 className="h-4 w-4" /> Analytics
           </a>
