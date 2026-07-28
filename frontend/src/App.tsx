@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/layout/AppLayout"
+import { AnalyticsPage } from "@/pages/AnalyticsPage"
 import { ChatPage } from "@/pages/ChatPage"
 import { MemoryPage } from "@/pages/MemoryPage"
 import { SettingsPage } from "@/pages/SettingsPage"
@@ -13,6 +14,7 @@ function App() {
         <Route index element={<ChatPage />} />
         <Route path="/chat/:conversationId" element={<ChatPage />} />
         <Route path="/memory" element={<MemoryPage />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/budgets" element={<BudgetsPage />} />
         <Route path="/subagents" element={<SubagentsPage />} />

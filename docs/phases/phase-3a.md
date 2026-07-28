@@ -1,6 +1,6 @@
 # Фаза 3a: Memory + Personalities + Observability + Knowledge Management
 
-> **Статус:** 🔄 В работе (раздел 1 «Long-term memory» завершён; раздел 5 «Observability» — следующий)
+> **Статус:** 🔄 В работе (раздел 1 «Long-term memory» завершён; раздел 5 «Observability» завершён)
 > **Длительность:** 2 недели
 
 Цель: долговременная память между сессиями, разные "личности" агента, полная аналитика и система знаний.
@@ -71,9 +71,14 @@
 > **Текущий статус (аудит):**
 > - ✅ Live tail (InspectorRegistry), timeline, compare, replay
 > - ✅ Tool-call лог (`ToolCall` таблица: name/args/result/duration/success)
-> - ✅ LLM-call цена/токены/модель/provider (`SpendLog`) + latency (`llm_call_complete` events) — но разнесены по двум хранилищам
+> - ✅ LLM-call цена/токены/модель/provider (`SpendLog`) + latency (`llm_call_complete` events)
 > - ✅ Дашборд памяти: факт-каунт + by_type (endpoint `/memory/stats`, теперь с `total_pending`/`total_entities`)
-> - ⏳ **Осталось:** агрегирующие дашборды (spend-over-time, spend-by-model, top-tools, latency, глобальная call-history); объединённый LLM-call лог; "активность" памяти (timeseries); OTel-экспорт и/или LangSmith; тесты на ToolCall/SpendLog/аналитику. Данные для дашбордов уже собираются — нужен агрегирующий сервис + frontend.
+> - ✅ Агрегирующие дашборды: spend-over-time, spend-by-model, top-tools, latency, глобальная call-history (`/api/analytics/*`)
+> - ✅ Объединённый LLM-call лог (`/api/analytics/call-history` с пагинацией и фильтрами)
+> - ✅ "Активность" памяти — timeseries (`/api/analytics/memory-activity`)
+> - ✅ OTel-экспорт (опц., `app/observability/otel.py`, env-gated через `OTEL_EXPORTER_ENDPOINT`)
+> - ✅ Тесты на ToolCall/SpendLog/аналитику (`tests/test_analytics.py`, 21 тест)
+> - ✅ Frontend: AnalyticsPage с дашбордами (`/analytics`)
 
 ## Деливерабл
 
@@ -89,5 +94,5 @@
 | 2. Multi-personality agents | ⏳ Ожидает |
 | 3. Knowledge Base / Wiki | ⏳ Ожидает |
 | 4. Conversation Organization | ⏳ Ожидает |
-| 5. Observability / Analytics | 🔄 Частично (см. выше) — следующий приоритет |
+| 5. Observability / Analytics | ✅ Завершено |
 

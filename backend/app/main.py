@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.analytics import router as analytics_router
 from app.api.artifacts import router as artifacts_router
 from app.api.budgets import router as budgets_router
 from app.api.conversations import router as conversations_router
@@ -135,6 +136,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router, prefix="/api")
     app.include_router(entities_router, prefix="/api")
     app.include_router(workspace_router, prefix="/api")
+    app.include_router(analytics_router, prefix="/api")
     app.include_router(ws_router)  # WebSocket routes live at /ws/...
 
     # --- Serve built frontend (SPA) if dist/ exists ---

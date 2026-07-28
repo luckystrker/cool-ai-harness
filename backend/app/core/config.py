@@ -291,6 +291,19 @@ class Settings(BaseSettings):
         description="Auto-reject unconfirmed memories after N days (0 = disabled)",
     )
 
+    # --- Observability / OTel export (Фаза 3a §5) ---
+    # When set, LLM calls and tool invocations are exported as OTel spans to
+    # the configured OTLP endpoint (e.g. http://localhost:4318). Empty = disabled.
+    otel_exporter_endpoint: str = Field(
+        default="",
+        description="OTLP HTTP endpoint for OpenTelemetry span export; empty = disabled",
+    )
+    # Service name reported to the OTel collector.
+    otel_service_name: str = Field(
+        default="cool-ai-harness",
+        description="OTel service.name resource attribute",
+    )
+
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
         for path in (self.data_dir, self.workspaces_dir, self.skills_dir, self.artifacts_dir):

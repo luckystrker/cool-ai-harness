@@ -2,6 +2,7 @@ import { useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
+  BarChart3,
   Bot,
   Brain,
   ChevronRight,
@@ -310,6 +311,11 @@ export function Sidebar() {
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/memory">
             <Brain className="h-4 w-4" /> Memory
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/analytics">
+            <BarChart3 className="h-4 w-4" /> Analytics
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">

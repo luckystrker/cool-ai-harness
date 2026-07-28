@@ -1,0 +1,382 @@
+import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { BarChart3, Loader2 } from "lucide-react"
+import { analyticsApi } from "@/api/analytics"
+import type {
+  AnalyticsSummary,
+  CallHistoryRow,
+  LatencyPoint,
+  MemoryActivityPoint,
+  ModelSpend,
+  SpendTimeSeriesPoint,
+  TopTool,
+} from "@/api/types"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { cn } from "@/lib/utils"
+
+const fmtUsd = (n: number) =>
+  n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 })
+
+const DAYS_OPTIONS = [7, 14, 30, 90] as const
+
+export function AnalyticsPage() {
+  const [days, setDays] = useState<number>(30)
+
+  const { data: summary, isLoading } = useQuery({
+    queryKey: ["analytics", "summary", days],
+    queryFn: () => analyticsApi.summary(days),
+  })
+
+  const { data: spendTime = [] } = useQuery({
+    queryKey: ["analytics", "spend-over-time", days],
+    queryFn: () => analyticsApi.spendOverTime(days),
+  })
+
+  const { data: spendModel = [] } = useQuery({
+    queryKey: ["analytics", "spend-by-model", days],
+    queryFn: () => analyticsApi.spendByModel(days),
+  })
+
+  const { data: tools = [] } = useQuery({
+    queryKey: ["analytics", "top-tools", days],
+    queryFn: () => analyticsApi.topTools(days),
+  })
+
+  const { data: latency = [] } = useQuery({
+    queryKey: ["analytics", "latency", days],
+    queryFn: () => analyticsApi.latency(days),
+  })
+
+  const { data: callHist } = useQuery({
+    queryKey: ["analytics", "call-history"],
+    queryFn: () => analyticsApi.callHistory({ limit: 50 }),
+  })
+
+  const { data: memActivity = [] } = useQuery({
+    queryKey: ["analytics", "memory-activity", days],
+    queryFn: () => analyticsApi.memoryActivity(days),
+  })
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-5xl space-y-6 p-6">
+        {/* Header */}
+        <header className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+              <BarChart3 className="h-4 w-4" />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold">Analytics</h1>
+              <p className="text-sm text-muted-foreground">
+                Spend, tool usage, latency, and memory activity.
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-1">
+            {DAYS_OPTIONS.map((d) => (
+              <button
+                key={d}
+                onClick={() => setDays(d)}
+                className={cn(
+                  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  days === d
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-accent"
+                )}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
+        </header>
+
+        {isLoading || !summary ? (
+          <div className="flex justify-center py-12">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <>
+            <SummaryCards summary={summary} />
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <SpendOverTimeCard data={spendTime} />
+              <SpendByModelCard data={spendModel} />
+              <LatencyCard data={latency} />
+              <MemoryActivityCard data={memActivity} />
+            </div>
+            <TopToolsCard data={tools} />
+            <CallHistoryCard data={callHist?.rows ?? []} total={callHist?.total ?? 0} />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// --- Summary cards ---
+
+function SummaryCards({ summary }: { summary: AnalyticsSummary }) {
+  const cards = [
+    { label: "Total spend", value: fmtUsd(summary.total_spend_usd) },
+    { label: "LLM calls", value: String(summary.total_llm_calls) },
+    { label: "Tokens", value: summary.total_tokens.toLocaleString() },
+    { label: "Tool calls", value: String(summary.total_tool_calls) },
+    { label: "Tool success", value: `${(summary.tool_success_rate * 100).toFixed(1)}%` },
+  ]
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+      {cards.map((c) => (
+        <Card key={c.label}>
+          <CardContent className="py-3">
+            <p className="text-xs text-muted-foreground">{c.label}</p>
+            <p className="text-lg font-semibold tabular-nums">{c.value}</p>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
+// --- Spend over time (bar chart) ---
+
+function SpendOverTimeCard({ data }: { data: SpendTimeSeriesPoint[] }) {
+  const max = Math.max(...data.map((d) => d.cost_usd), 0.001)
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Spend over time</CardTitle>
+        <CardDescription>Daily USD cost</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        ) : (
+          <div className="flex h-32 items-end gap-0.5">
+            {data.map((d) => (
+              <div
+                key={d.period}
+                className="group relative flex-1"
+                title={`${d.period}: ${fmtUsd(d.cost_usd)} (${d.calls} calls)`}
+              >
+                <div
+                  className="w-full rounded-t bg-primary/70 transition-colors group-hover:bg-primary"
+                  style={{ height: `${Math.max(2, (d.cost_usd / max) * 100)}%` }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Spend by model ---
+
+function SpendByModelCard({ data }: { data: ModelSpend[] }) {
+  const max = Math.max(...data.map((d) => d.cost_usd), 0.001)
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Spend by model</CardTitle>
+        <CardDescription>Cost distribution across models</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        ) : (
+          data.map((d) => (
+            <div key={d.model} className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-mono">{d.model}</span>
+                <span className="tabular-nums text-muted-foreground">
+                  {fmtUsd(d.cost_usd)} · {d.calls} calls
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-primary/70"
+                  style={{ width: `${(d.cost_usd / max) * 100}%` }}
+                />
+              </div>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Latency ---
+
+function LatencyCard({ data }: { data: LatencyPoint[] }) {
+  const max = Math.max(...data.map((d) => d.max_ms), 1)
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">LLM latency</CardTitle>
+        <CardDescription>Average response time per day (ms)</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        ) : (
+          <div className="flex h-32 items-end gap-0.5">
+            {data.map((d) => (
+              <div
+                key={d.period}
+                className="group relative flex-1"
+                title={`${d.period}: avg ${d.avg_ms.toFixed(0)}ms (min ${d.min_ms}, max ${d.max_ms})`}
+              >
+                <div
+                  className="w-full rounded-t bg-blue-500/70 transition-colors group-hover:bg-blue-500"
+                  style={{ height: `${Math.max(2, (d.avg_ms / max) * 100)}%` }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Memory activity ---
+
+function MemoryActivityCard({ data }: { data: MemoryActivityPoint[] }) {
+  const max = Math.max(...data.map((d) => d.created), 1)
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Memory activity</CardTitle>
+        <CardDescription>New memories created per day</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        ) : (
+          <div className="flex h-32 items-end gap-0.5">
+            {data.map((d) => (
+              <div
+                key={d.period}
+                className="group relative flex-1"
+                title={`${d.period}: ${d.created} memories (${Object.entries(d.by_type).map(([k, v]) => `${k}:${v}`).join(", ")})`}
+              >
+                <div
+                  className="w-full rounded-t bg-emerald-500/70 transition-colors group-hover:bg-emerald-500"
+                  style={{ height: `${Math.max(2, (d.created / max) * 100)}%` }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Top tools table ---
+
+function TopToolsCard({ data }: { data: TopTool[] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Top tools</CardTitle>
+        <CardDescription>Most-invoked tools with success rate and latency</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No tool calls recorded</p>
+        ) : (
+          <div className="overflow-x-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/50 text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-1.5 text-left font-medium">Tool</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Calls</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Avg ms</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Success</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Errors</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((t) => (
+                  <tr key={t.name} className="border-t">
+                    <td className="px-3 py-1.5 font-mono">{t.name}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{t.calls}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{t.avg_duration_ms.toFixed(0)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      <span className={cn(t.success_rate < 0.9 && "text-destructive")}>
+                        {(t.success_rate * 100).toFixed(0)}%
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {t.error_count > 0 ? (
+                        <span className="text-destructive">{t.error_count}</span>
+                      ) : (
+                        "0"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Call history table ---
+
+function CallHistoryCard({ data, total }: { data: CallHistoryRow[]; total: number }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">LLM call history</CardTitle>
+        <CardDescription>
+          Unified log of all LLM calls ({total} total, showing latest {data.length})
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No calls recorded</p>
+        ) : (
+          <div className="max-h-72 overflow-y-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-muted/50 text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1.5 text-left font-medium">When</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Model</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Provider</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Tokens</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((r) => (
+                  <tr key={r.id} className="border-t">
+                    <td className="px-2 py-1.5 text-muted-foreground">
+                      {r.ts ? new Date(r.ts).toLocaleString() : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono">{r.model || "—"}</td>
+                    <td className="px-2 py-1.5">{r.provider_name || "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.total_tokens}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtUsd(r.cost_usd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}

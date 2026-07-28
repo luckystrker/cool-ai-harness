@@ -943,3 +943,69 @@ export interface EntityUpdate {
   attributes?: Record<string, unknown> | null
   description?: string | null
 }
+
+// --- Analytics dashboard (Фаза 3a §5) ---
+
+export interface AnalyticsSummary {
+  total_spend_usd: number
+  total_llm_calls: number
+  total_tokens: number
+  total_tool_calls: number
+  tool_error_count: number
+  tool_success_rate: number
+  days: number
+}
+
+export interface SpendTimeSeriesPoint {
+  period: string
+  cost_usd: number
+  total_tokens: number
+  calls: number
+}
+
+export interface ModelSpend {
+  model: string
+  cost_usd: number
+  total_tokens: number
+  calls: number
+}
+
+export interface TopTool {
+  name: string
+  calls: number
+  avg_duration_ms: number
+  success_rate: number
+  error_count: number
+}
+
+export interface LatencyPoint {
+  period: string
+  avg_ms: number
+  min_ms: number
+  max_ms: number
+  calls: number
+}
+
+export interface CallHistoryRow {
+  id: number
+  ts: string | null
+  model: string
+  provider_name: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cost_usd: number
+  run_id: number | null
+  conversation_id: number | null
+}
+
+export interface CallHistoryResponse {
+  rows: CallHistoryRow[]
+  total: number
+}
+
+export interface MemoryActivityPoint {
+  period: string
+  created: number
+  by_type: Record<string, number>
+}
