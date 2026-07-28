@@ -193,12 +193,31 @@ async def extract_memories_from_conversation(
             importance=episode_data.get("importance", 0.5),
         )
 
+    # Entity extraction: pull named entities out of the transcript and link them
+    # to the most recently stored memory. Failures here are non-fatal.
+    entities_count = 0
+    try:
+        from app.memory.entities import extract_entities_from_text
+
+        created_entities = await extract_entities_from_text(
+            session,
+            provider=provider,
+            model=extraction_model,
+            user_id=user_id,
+            text=transcript,
+            link_memory_id=None,
+        )
+        entities_count = len(created_entities)
+    except Exception as exc:  # extraction is best-effort
+        log.warning("memory.entity_extraction_skipped", error=str(exc))
+
     log.info(
         "memory.extraction_complete",
         conversation_id=conversation_id,
         stored_count=stored_count,
+        entities_count=entities_count,
     )
-    return {"stored_count": stored_count, "extracted": extracted}
+    return {"stored_count": stored_count, "extracted": extracted, "entities_count": entities_count}
 
 
 def should_extract(message_count: int, tool_call_count: int) -> bool:

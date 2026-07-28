@@ -32,6 +32,10 @@ coverage.xml
 .tox/
 .nox/
 cache/
+# Local test-run / scratch artifacts (never commit)
+_pytest_out.txt
+_pytest_full.txt
+_tmp_*.db
 
 # --- Tooling ---
 .mypy_cache/

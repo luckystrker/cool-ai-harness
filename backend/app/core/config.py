@@ -284,6 +284,12 @@ class Settings(BaseSettings):
         default=None,
         description="Model for memory summarization/extraction; None = conversation model",
     )
+    # Auto-reject (archive) unconfirmed agent-extracted memories older than N days.
+    # 0 = disabled (pending memories persist until manually reviewed).
+    memory_auto_reject_unconfirmed_days: int = Field(
+        default=14,
+        description="Auto-reject unconfirmed memories after N days (0 = disabled)",
+    )
 
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""

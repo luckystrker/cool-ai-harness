@@ -76,6 +76,12 @@ def build_memory_context(
         if wm_block:
             sections.append(wm_block)
 
+    # 5. Relevant named entities mentioned in the user's input.
+    if query:
+        entities_block = _get_entities_block(session, user_id=user_id, query=query)
+        if entities_block:
+            sections.append(entities_block)
+
     if not sections:
         return None
 
@@ -207,5 +213,41 @@ def _get_working_memory_block(session: Session, *, conversation_id: int) -> str 
     # Only return if we have more than just the header.
     if len(lines) <= 1:
         return None
+
+    return "\n".join(lines)
+
+
+def _get_entities_block(session: Session, *, user_id: int, query: str) -> str | None:
+    """Build the relevant named-entities section.
+
+    Looks up entities whose canonical name appears as a substring in the user's
+    input (cheap, no LLM call). Returns None if nothing matches.
+    """
+    from app.memory.entities import list_entities
+
+    # Try each significant word in the query as an entity-name hint.
+    words = [w.strip(".,;:!?()[]\"'") for w in query.split() if len(w.strip()) > 2]
+    if not words:
+        return None
+
+    found: dict[int, tuple[str, str, str]] = {}  # entity_id -> (name, type, description)
+    for word in words[:8]:  # cap lookups
+        matches = list_entities(session, user_id=user_id, query=word, limit=3)
+        for e in matches:
+            if e.id is not None and e.id not in found:
+                desc = e.description or ""
+                if len(desc) > MAX_MEMORY_CONTENT_CHARS:
+                    desc = desc[:MAX_MEMORY_CONTENT_CHARS] + "…"
+                found[e.id] = (e.name, e.entity_type, desc)
+
+    if not found:
+        return None
+
+    lines = ["[RELEVANT ENTITIES]"]
+    for name, etype, desc in list(found.values())[:6]:
+        line = f"- {name} ({etype})"
+        if desc:
+            line += f": {desc}"
+        lines.append(line)
 
     return "\n".join(lines)

@@ -51,6 +51,7 @@ class TestMemoryService:
             content="User prefers Python over JavaScript",
             memory_type=MEMORY_TYPE_PREFERENCE,
             importance=0.8,
+            source="user_explicit",
         )
         assert memory.id is not None
         assert memory.content == "User prefers Python over JavaScript"
@@ -140,9 +141,15 @@ class TestMemoryService:
     def test_list_memories(self, memory_session: Session, user_id: int):
         from app.memory.service import list_memories, remember
 
-        remember(memory_session, user_id=user_id, content="Memory 1", importance=0.5)
-        remember(memory_session, user_id=user_id, content="Memory 2", importance=0.9)
-        remember(memory_session, user_id=user_id, content="Memory 3", importance=0.3)
+        remember(
+            memory_session, user_id=user_id, content="Memory 1", importance=0.5, source="user_explicit"
+        )
+        remember(
+            memory_session, user_id=user_id, content="Memory 2", importance=0.9, source="user_explicit"
+        )
+        remember(
+            memory_session, user_id=user_id, content="Memory 3", importance=0.3, source="user_explicit"
+        )
 
         memories = list_memories(memory_session, user_id=user_id)
         assert len(memories) == 3
@@ -152,9 +159,19 @@ class TestMemoryService:
     def test_list_memories_filter_by_type(self, memory_session: Session, user_id: int):
         from app.memory.service import list_memories, remember
 
-        remember(memory_session, user_id=user_id, content="Fact", memory_type=MEMORY_TYPE_SEMANTIC)
         remember(
-            memory_session, user_id=user_id, content="Pref", memory_type=MEMORY_TYPE_PREFERENCE
+            memory_session,
+            user_id=user_id,
+            content="Fact",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            source="user_explicit",
+        )
+        remember(
+            memory_session,
+            user_id=user_id,
+            content="Pref",
+            memory_type=MEMORY_TYPE_PREFERENCE,
+            source="user_explicit",
         )
 
         semantics = list_memories(
@@ -171,12 +188,14 @@ class TestMemoryService:
             user_id=user_id,
             content="Answer in Russian",
             memory_type=MEMORY_TYPE_PREFERENCE,
+            source="user_explicit",
         )
         remember(
             memory_session,
             user_id=user_id,
             content="Project uses pytest",
             memory_type=MEMORY_TYPE_SEMANTIC,
+            source="user_explicit",
         )
 
         prefs = get_preferences(memory_session, user_id=user_id)
@@ -196,6 +215,7 @@ class TestScopeVisibility:
             user_id=user_id,
             content="Global fact",
             scope=SCOPE_GLOBAL,
+            source="user_explicit",
         )
         # Should be visible without agent_id.
         results = recall(memory_session, user_id=user_id, query="Global fact")
@@ -210,6 +230,7 @@ class TestScopeVisibility:
             content="Agent-specific knowledge",
             scope=SCOPE_AGENT,
             agent_id=42,
+            source="user_explicit",
         )
         # Should NOT be visible without matching agent_id.
         results = recall(memory_session, user_id=user_id, query="Agent-specific")
@@ -252,6 +273,7 @@ class TestScopeVisibility:
             content="This project uses FastAPI and pytest",
             scope="conversation",
             conversation_id=conv_a.id,
+            source="user_explicit",
         )
 
         # Visible from conversation B (same project / working directory).
@@ -357,6 +379,7 @@ class TestLifecycle:
             user_id=user_id,
             content="Temporary fact",
             ttl_days=1,
+            source="user_explicit",
         )
         # Manually set valid_from to 2 days ago (naive datetime for SQLite).
         memory.valid_from = datetime.now() - timedelta(days=2)
@@ -381,6 +404,7 @@ class TestLifecycle:
             content="Old unimportant fact",
             importance=0.15,
             confidence=0.5,
+            source="user_explicit",
         )
         # Set created_at to 100 days ago (well past decay threshold).
         memory.created_at = datetime.now(UTC) - timedelta(days=100)
@@ -404,6 +428,7 @@ class TestLifecycle:
             content="User prefers concise answers",
             memory_type=MEMORY_TYPE_PREFERENCE,
             importance=0.1,
+            source="user_explicit",
         )
         memory.created_at = datetime.now(UTC) - timedelta(days=100)
         memory_session.add(memory)
@@ -430,6 +455,7 @@ class TestContextBuilder:
             content="Answer in Russian",
             memory_type=MEMORY_TYPE_PREFERENCE,
             importance=0.9,
+            source="user_explicit",
         )
 
         context = build_memory_context(
@@ -547,3 +573,484 @@ class TestMemoryAPI:
     def test_invalid_memory_type(self, client):
         resp = client.post("/api/memory", json={"content": "Bad", "memory_type": "invalid"})
         assert resp.status_code == 422
+
+
+# --- Фаза 3a gap-closing: confirmation workflow, pin, export, explain, entities ---
+
+
+class TestConfirmationWorkflow:
+    """Agent-extracted memories land in pending_confirmation until reviewed."""
+
+    def test_agent_source_is_pending(self, memory_session: Session, user_id: int):
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="User likes dark mode",
+            source="agent_extraction",
+        )
+        assert memory.status == "pending_confirmation"
+
+    def test_user_explicit_is_active(self, memory_session: Session, user_id: int):
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="User likes dark mode",
+            source="user_explicit",
+        )
+        assert memory.status == "active"
+
+    def test_confirmed_flag_forces_active(self, memory_session: Session, user_id: int):
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="User likes dark mode",
+            source="agent",
+            confirmed=True,
+        )
+        assert memory.status == "active"
+
+    def test_pending_excluded_from_recall(self, memory_session: Session, user_id: int):
+        from app.memory.service import recall, remember
+
+        # An agent-extracted fact lands pending; a user-confirmed fact is active.
+        remember(
+            memory_session,
+            user_id=user_id,
+            content="The deploy token is abc",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            source="agent_extraction",
+        )
+        results = recall(memory_session, user_id=user_id, query="deploy token")
+        contents = [m.content for m in results]
+        assert "The deploy token is abc" not in contents
+
+    def test_confirm_promotes_to_active_and_recallable(
+        self, memory_session: Session, user_id: int
+    ):
+        from app.memory.service import confirm_memory, recall, remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Project uses FastAPI",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            source="agent_extraction",
+        )
+        confirmed = confirm_memory(memory_session, memory.id)
+        assert confirmed.status == "active"
+
+        results = recall(memory_session, user_id=user_id, query="FastAPI")
+        contents = [m.content for m in results]
+        assert "Project uses FastAPI" in contents
+
+    def test_reject_archives(self, memory_session: Session, user_id: int):
+        from app.memory.service import reject_memory, remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Wrong guess",
+            source="agent",
+        )
+        assert reject_memory(memory_session, memory.id) is True
+        from app.memory.service import get_memory
+
+        assert get_memory(memory_session, memory.id).status == "archived"
+
+    def test_dedup_does_not_overwrite_confirmed(self, memory_session: Session, user_id: int):
+        """A pending write must not overwrite a confirmed (active) fact."""
+        from app.memory.service import get_memory, remember
+
+        # Confirmed fact.
+        confirmed = remember(
+            memory_session,
+            user_id=user_id,
+            content="Project uses FastAPI",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            source="user_explicit",
+        )
+        # Pending near-duplicate from the agent.
+        remember(
+            memory_session,
+            user_id=user_id,
+            content="Project uses FastAPI",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            source="agent",
+        )
+        # The confirmed fact's content must be unchanged and still active.
+        reloaded = get_memory(memory_session, confirmed.id)
+        assert reloaded.status == "active"
+
+    def test_list_pending(self, memory_session: Session, user_id: int):
+        from app.memory.service import list_pending, remember
+
+        remember(memory_session, user_id=user_id, content="Pending 1", source="agent")
+        remember(memory_session, user_id=user_id, content="Pending 2", source="agent")
+        pending = list_pending(memory_session, user_id=user_id)
+        assert len(pending) == 2
+        assert all(m.status == "pending_confirmation" for m in pending)
+
+
+class TestPinAndExport:
+    def test_pin_protects_from_decay(self, memory_session: Session, user_id: int):
+        from app.memory.lifecycle import run_decay_sweep
+        from app.memory.service import pin_memory, remember
+
+        # A low-importance memory that WOULD be decayed.
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Ephemeral note",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            importance=0.05,
+            confidence=0.3,
+            source="user_explicit",
+        )
+        pin_memory(memory_session, memory.id, pinned=True)
+        # Even after a decay sweep, the pinned memory stays active.
+        archived = run_decay_sweep(memory_session, user_id=user_id)
+        assert archived == 0
+        from app.memory.service import get_memory
+
+        assert get_memory(memory_session, memory.id).status == "active"
+
+    def test_unpin_allows_decay(self, memory_session: Session, user_id: int):
+        from app.memory.lifecycle import run_decay_sweep
+        from app.memory.service import get_memory, pin_memory, remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Ephemeral note",
+            memory_type=MEMORY_TYPE_SEMANTIC,
+            importance=0.05,
+            confidence=0.3,
+            source="user_explicit",
+        )
+        pin_memory(memory_session, memory.id, pinned=True)
+        pin_memory(memory_session, memory.id, pinned=False)
+        archived = run_decay_sweep(memory_session, user_id=user_id)
+        assert archived == 1
+        assert get_memory(memory_session, memory.id).status == "archived"
+
+    def test_export_json(self, memory_session: Session, user_id: int):
+        import json
+
+        from app.memory.service import export_memories, remember
+
+        remember(
+            memory_session,
+            user_id=user_id,
+            content="Fact for export",
+            source="user_explicit",
+        )
+        data = export_memories(memory_session, user_id=user_id, fmt="json")
+        payload = json.loads(data)
+        assert payload["count"] >= 1
+        assert any(m["content"] == "Fact for export" for m in payload["memories"])
+        assert "pinned" in payload["memories"][0]
+
+    def test_export_markdown(self, memory_session: Session, user_id: int):
+        from app.memory.service import export_memories, remember
+
+        remember(
+            memory_session,
+            user_id=user_id,
+            content="Fact for export",
+            source="user_explicit",
+        )
+        data = export_memories(memory_session, user_id=user_id, fmt="markdown")
+        text = data.decode("utf-8")
+        assert "# Memory export" in text
+        assert "Fact for export" in text
+
+
+class TestExplainability:
+    def test_explain_returns_breakdown(self, memory_session: Session, user_id: int):
+        from app.memory.service import explain_memory, remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Explainable fact",
+            source="user_explicit",
+        )
+        explanation = explain_memory(memory_session, memory.id)
+        assert explanation is not None
+        assert explanation["memory_id"] == memory.id
+        score = explanation["score"]
+        assert "total" in score
+        assert "importance" in score
+        assert "recency" in score
+        assert "confidence" in score
+        assert "type_priority" in score
+        # Total equals the sum of the weighted components.
+        assert abs(
+            score["total"]
+            - (score["importance"] + score["recency"] + score["confidence"] + score["type_priority"])
+        ) < 1e-9
+
+    def test_explain_returns_none_for_missing(self, memory_session: Session):
+        from app.memory.service import explain_memory
+
+        assert explain_memory(memory_session, 999999) is None
+
+    def test_score_memory_consistent_with_legacy(
+        self, memory_session: Session, user_id: int
+    ):
+        """The refactored score_memory yields the same total as ranking."""
+        from datetime import UTC, datetime
+
+        from app.memory.retrieval import _score_memory, score_memory
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="Scored fact",
+            source="user_explicit",
+        )
+        now = datetime.now(UTC)
+        assert score_memory(memory, now)["total"] == _score_memory(memory, now)
+
+
+class TestEntities:
+    def test_upsert_creates_then_merges(self, memory_session: Session, user_id: int):
+        from app.memory.entities import upsert_entity
+
+        e1 = upsert_entity(
+            memory_session,
+            user_id=user_id,
+            name="FastAPI",
+            entity_type="tool",
+            aliases=["fast api"],
+            attributes={"language": "python"},
+        )
+        e2 = upsert_entity(
+            memory_session,
+            user_id=user_id,
+            name="FastAPI",
+            entity_type="tool",
+            aliases=["FastAPI framework"],
+            description="Web framework",
+        )
+        assert e1.id == e2.id  # merged, not duplicated
+        assert "fast api" in (e2.aliases or [])
+        assert "FastAPI framework" in (e2.aliases or [])
+        assert e2.description == "Web framework"
+
+    def test_list_and_filter_by_query(self, memory_session: Session, user_id: int):
+        from app.memory.entities import list_entities, upsert_entity
+
+        upsert_entity(memory_session, user_id=user_id, name="Alice", entity_type="person")
+        upsert_entity(
+            memory_session, user_id=user_id, name="Postgres", entity_type="service"
+        )
+        # Query by name.
+        people = list_entities(memory_session, user_id=user_id, query="Alice")
+        assert len(people) == 1
+        assert people[0].name == "Alice"
+        # Query by alias.
+        upsert_entity(
+            memory_session, user_id=user_id, name="Bob", entity_type="person", aliases=["Robert"]
+        )
+        bob = list_entities(memory_session, user_id=user_id, query="Robert")
+        assert len(bob) == 1
+        assert bob[0].name == "Bob"
+
+    def test_link_memory_to_entity_and_query_back(
+        self, memory_session: Session, user_id: int
+    ):
+        from app.memory.entities import link_memory_to_entity, memories_for_entity, upsert_entity
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session,
+            user_id=user_id,
+            content="FastAPI is used for the API",
+            source="user_explicit",
+        )
+        entity = upsert_entity(memory_session, user_id=user_id, name="FastAPI", entity_type="tool")
+        assert link_memory_to_entity(
+            memory_session, memory_id=memory.id, entity_id=entity.id
+        ) is True
+        # Idempotent.
+        assert link_memory_to_entity(
+            memory_session, memory_id=memory.id, entity_id=entity.id
+        ) is False
+        linked = memories_for_entity(memory_session, entity.id)
+        assert len(linked) == 1
+        assert linked[0].content == "FastAPI is used for the API"
+
+    def test_delete_entity_cascades_links(self, memory_session: Session, user_id: int):
+        from app.memory.entities import (
+            delete_entity,
+            get_entity,
+            link_memory_to_entity,
+            upsert_entity,
+        )
+        from app.memory.service import remember
+
+        memory = remember(
+            memory_session, user_id=user_id, content="Note about X", source="user_explicit"
+        )
+        entity = upsert_entity(memory_session, user_id=user_id, name="X", entity_type="concept")
+        link_memory_to_entity(memory_session, memory_id=memory.id, entity_id=entity.id)
+        assert delete_entity(memory_session, entity.id) is True
+        assert get_entity(memory_session, entity.id) is None
+
+    def test_extract_entities_from_text_upserts(self, memory_session: Session, user_id: int):
+        from app.memory.entities import extract_entities_from_text, list_entities
+
+        provider = _FakeProvider(
+            '{"entities": [{"name": "Redis", "entity_type": "service", '
+            '"aliases": ["redis-server"], "description": "cache"}]}'
+        )
+        import asyncio
+
+        created = asyncio.run(
+            extract_entities_from_text(
+                memory_session,
+                provider=provider,
+                model="test",
+                user_id=user_id,
+                text="We deployed Redis for caching.",
+            )
+        )
+        assert len(created) == 1
+        assert created[0].name == "Redis"
+        # Persisted.
+        found = list_entities(memory_session, user_id=user_id, query="Redis")
+        assert len(found) == 1
+
+
+class TestMemoryAPIExtended:
+    """New endpoints: confirm/reject/pin/explain/export + entities CRUD."""
+
+    @pytest.fixture(autouse=True)
+    def setup_db(self):
+        from app.core.db import engine
+
+        SQLModel.metadata.create_all(engine)
+        yield
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        return TestClient(app)
+
+    def test_pending_confirm_reject_flow(self, client):
+        # An agent-sourced memory via the API would need source override; the API
+        # always stores user_explicit (active). So simulate pending by creating
+        # through the service directly, then exercising the endpoints.
+        from sqlmodel import Session
+
+        from app.core.db import engine
+        from app.memory.service import remember
+
+        with Session(engine) as session:
+            memory = remember(
+                session, user_id=1, content="Pending API fact", source="agent"
+            )
+            mem_id = memory.id
+
+        # Confirm endpoint.
+        resp = client.post(f"/api/memory/{mem_id}/confirm")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "active"
+
+        # A second pending one to reject.
+        with Session(engine) as session:
+            mem2 = remember(session, user_id=1, content="Pending API fact 2", source="agent")
+            mem2_id = mem2.id
+        resp = client.post(f"/api/memory/{mem2_id}/reject")
+        assert resp.status_code == 204
+
+    def test_pin_endpoint(self, client):
+        create = client.post("/api/memory", json={"content": "Pin me"})
+        mem_id = create.json()["id"]
+        resp = client.post(f"/api/memory/{mem_id}/pin", json={"pinned": True})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is True
+        resp = client.post(f"/api/memory/{mem_id}/pin", json={"pinned": False})
+        assert resp.json()["pinned"] is False
+
+    def test_explain_endpoint(self, client):
+        create = client.post("/api/memory", json={"content": "Explain me"})
+        mem_id = create.json()["id"]
+        resp = client.get(f"/api/memory/{mem_id}/explain")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["memory_id"] == mem_id
+        assert "total" in body["score"]
+
+    def test_export_json_endpoint(self, client):
+        client.post("/api/memory", json={"content": "Exportable fact"})
+        resp = client.get("/api/memory/export", params={"format": "json"})
+        assert resp.status_code == 200
+        assert "memories" in resp.json()
+
+    def test_export_markdown_endpoint(self, client):
+        resp = client.get("/api/memory/export", params={"format": "markdown"})
+        assert resp.status_code == 200
+        assert "# Memory export" in resp.text
+
+    def test_stats_include_pending_and_entities(self, client):
+        resp = client.get("/api/memory/stats")
+        body = resp.json()
+        assert "total_pending" in body
+        assert "total_entities" in body
+
+    def test_entities_crud(self, client):
+        # Create.
+        resp = client.post(
+            "/api/entities",
+            json={"name": "MyService", "entity_type": "service", "aliases": ["svc"]},
+        )
+        assert resp.status_code == 201
+        entity_id = resp.json()["id"]
+        # List.
+        resp = client.get("/api/entities", params={"query": "MyService"})
+        assert resp.status_code == 200
+        assert any(e["id"] == entity_id for e in resp.json())
+        # Update.
+        resp = client.patch(
+            f"/api/entities/{entity_id}", json={"description": "Updated desc"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "Updated desc"
+        # Delete.
+        resp = client.delete(f"/api/entities/{entity_id}")
+        assert resp.status_code == 204
+        # Get -> 404.
+        resp = client.get(f"/api/entities/{entity_id}")
+        assert resp.status_code == 404
+
+
+# --- Test helpers ---
+
+
+class _FakeProvider:
+    """Minimal provider stub returning a fixed chat_completion content.
+
+    Used only for entity-extraction unit tests (the real test suite uses
+    ScriptedProvider for streaming agent tests).
+    """
+
+    def __init__(self, content: str):
+        self._content = content
+
+    async def chat_completion(self, messages, *, model, **kwargs):  # type: ignore[no-untyped-def]
+        from app.providers.base import ChatResult
+
+        return ChatResult(content=self._content)
+

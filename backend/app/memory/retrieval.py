@@ -64,6 +64,10 @@ def retrieve_memories(
 ) -> list[MemoryItem]:
     """Retrieve memories visible to the given context, ranked by relevance.
 
+    Only ``active`` memories are returned. ``pending_confirmation`` memories
+    (agent-extracted, not yet user-reviewed) are excluded by every fetch path —
+    they never reach the agent's context until the user confirms them.
+
     Pipeline:
     1. Always include active preferences (high priority, always in context).
     2. If query is provided, run FTS5 full-text search.
@@ -306,11 +310,40 @@ def _is_visible(
     return False
 
 
-def _score_memory(item: MemoryItem, now: datetime) -> float:
-    """Composite relevance score for reranking.
+# Weighting for the composite relevance score. Exposed here so the breakdown
+# returned to callers ("why remembered") uses the same constants as ranking.
+_W_IMPORTANCE = 0.25
+_W_RECENCY = 0.25
+_W_CONFIDENCE = 0.15
+_W_TYPE = 0.35
 
-    score = 0.25 * importance + 0.25 * recency + 0.15 * confidence + 0.35 * type_priority
+# type_priority lookup shared by ranking and explanation.
+TYPE_PRIORITY = {
+    "preference": 1.0,
+    "procedural": 0.8,
+    "semantic": 0.6,
+    "episodic": 0.4,
+}
+
+
+def score_memory(item: MemoryItem, now: datetime | None = None) -> dict[str, float]:
+    """Compute the composite relevance score AND its component breakdown.
+
+    Used both for reranking (``total``) and for the "why is this remembered"
+    explanation surfaced to the agent/UI. Returns a dict::
+
+        {
+            "total": float,            # weighted composite
+            "importance": float,       # contribution from importance
+            "recency": float,          # contribution from recency
+            "confidence": float,       # contribution from confidence
+            "type_priority": float,    # contribution from memory type
+            "age_days": float,         # how stale the memory is
+        }
     """
+    if now is None:
+        now = datetime.now(UTC)
+
     # Recency: exponential decay over 30 days.
     # Handle naive datetimes from SQLite (strip tzinfo for comparison).
     updated = item.updated_at
@@ -323,20 +356,26 @@ def _score_memory(item: MemoryItem, now: datetime) -> float:
         age_days = 30.0
     recency = 1.0 / (1.0 + age_days / 30.0)
 
-    # Type priority: preferences and procedural are more actionable.
-    type_priority = {
-        "preference": 1.0,
-        "procedural": 0.8,
-        "semantic": 0.6,
-        "episodic": 0.4,
-    }.get(item.memory_type, 0.5)
+    type_priority = TYPE_PRIORITY.get(item.memory_type, 0.5)
 
-    return (
-        0.25 * item.importance
-        + 0.25 * recency
-        + 0.15 * item.confidence
-        + 0.35 * type_priority
-    )
+    return {
+        "importance": _W_IMPORTANCE * item.importance,
+        "recency": _W_RECENCY * recency,
+        "confidence": _W_CONFIDENCE * item.confidence,
+        "type_priority": _W_TYPE * type_priority,
+        "age_days": age_days,
+        "total": (
+            _W_IMPORTANCE * item.importance
+            + _W_RECENCY * recency
+            + _W_CONFIDENCE * item.confidence
+            + _W_TYPE * type_priority
+        ),
+    }
+
+
+def _score_memory(item: MemoryItem, now: datetime) -> float:
+    """Composite relevance score for reranking (scalar, for sort key)."""
+    return score_memory(item, now)["total"]
 
 
 def _touch_access(session: Session, items: list[MemoryItem], now: datetime) -> None:
