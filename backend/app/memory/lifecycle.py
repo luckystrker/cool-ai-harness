@@ -18,6 +18,7 @@ from app.core.logging import get_logger
 from app.memory.models import (
     MEMORY_STATUS_ACTIVE,
     MEMORY_STATUS_ARCHIVED,
+    MEMORY_STATUS_PENDING_CONFIRMATION,
     MemoryItem,
 )
 
@@ -57,6 +58,12 @@ def run_decay_sweep(session: Session, *, user_id: int | None = None) -> int:
     archived_count = 0
 
     for memory in memories:
+        # Pinned and pending-confirmation memories are never decay-archived:
+        # pinned items are user-protected; pending items await explicit review
+        # (and are cleaned by the auto-reject sweep instead).
+        if memory.pinned or memory.status == MEMORY_STATUS_PENDING_CONFIRMATION:
+            continue
+
         # Calculate days since last access (or creation if never accessed).
         reference_date = memory.last_accessed_at or memory.created_at
         days_since = _days_between(now, reference_date)
@@ -101,6 +108,9 @@ def run_ttl_sweep(session: Session, *, user_id: int | None = None) -> int:
     archived_count = 0
 
     for memory in memories:
+        # Pinned memories never expire via TTL (user-protected).
+        if memory.pinned:
+            continue
         if memory.ttl_days is None:
             continue
         # Check if TTL has expired.
@@ -138,6 +148,9 @@ def run_validity_sweep(session: Session, *, user_id: int | None = None) -> int:
     archived_count = 0
 
     for memory in memories:
+        # Pinned memories never expire via validity window (user-protected).
+        if memory.pinned:
+            continue
         memory.status = MEMORY_STATUS_ARCHIVED
         memory.updated_at = now
         session.add(memory)
@@ -241,12 +254,51 @@ def consolidate_group(
     return consolidated
 
 
+def run_pending_expiry_sweep(session: Session, *, user_id: int | None = None) -> int:
+    """Auto-reject (archive) pending-confirmation memories older than the configured window.
+
+    Unconfirmed agent-extracted memories should not linger forever; after
+    ``memory_auto_reject_unconfirmed_days`` days they are archived (still
+    recoverable). A window of 0 disables this sweep.
+
+    Returns the number of memories auto-rejected.
+    """
+    settings = get_settings()
+    window_days = settings.memory_auto_reject_unconfirmed_days
+    if window_days <= 0:
+        return 0
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=window_days)
+    stmt = (
+        select(MemoryItem)
+        .where(MemoryItem.status == MEMORY_STATUS_PENDING_CONFIRMATION)
+        .where(MemoryItem.created_at < cutoff)
+    )
+    if user_id is not None:
+        stmt = stmt.where(MemoryItem.user_id == user_id)
+
+    memories = session.exec(stmt).all()
+    rejected = 0
+    for memory in memories:
+        memory.status = MEMORY_STATUS_ARCHIVED
+        memory.updated_at = now
+        session.add(memory)
+        rejected += 1
+
+    if rejected > 0:
+        session.commit()
+        log.info("memory.pending_expiry_sweep", rejected=rejected)
+    return rejected
+
+
 def run_full_maintenance(session: Session, *, user_id: int | None = None) -> dict[str, int]:
     """Run all maintenance sweeps. Returns counts of affected memories."""
     results = {
         "decayed": run_decay_sweep(session, user_id=user_id),
         "ttl_expired": run_ttl_sweep(session, user_id=user_id),
         "validity_expired": run_validity_sweep(session, user_id=user_id),
+        "pending_expired": run_pending_expiry_sweep(session, user_id=user_id),
     }
     log.info("memory.maintenance_complete", **results)
     return results

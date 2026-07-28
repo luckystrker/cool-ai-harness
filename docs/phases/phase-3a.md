@@ -1,6 +1,6 @@
 # Фаза 3a: Memory + Personalities + Observability + Knowledge Management
 
-> **Статус:** ⏳ Ожидает
+> **Статус:** 🔄 В работе (раздел 1 «Long-term memory» завершён; раздел 5 «Observability» — следующий)
 > **Длительность:** 2 недели
 
 Цель: долговременная память между сессиями, разные "личности" агента, полная аналитика и система знаний.
@@ -9,20 +9,34 @@
 
 ## Сквозные требования к памяти и аналитике
 
-- Каждая запись памяти имеет source/provenance, дату, confidence, namespace, TTL и статус подтверждения пользователем
-- В UI: «почему это запомнено?», редактирование, закрепление, forget, экспорт и удаление всех данных пользователя
-- Извлечение памяти дедуплицируется и не перезаписывает подтверждённые пользователем факты без явного согласия
+- Каждая запись памяти имеет source/provenance, дату, confidence, namespace, TTL и статус подтверждения пользователем ✅
+- В UI: «почему это запомнено?», редактирование, закрепление, forget, экспорт и удаление всех данных пользователя ✅
+- Извлечение памяти дедуплицируется и не перезаписывает подтверждённые пользователем факты без явного согласия ✅
 - Трасса run связывает LLM-вызовы, tool calls, subagents, approvals и артефакты в единое дерево; её можно открыть и воспроизвести
 
-## 1. Long-term memory (`app/memory/`)
+## 1. Long-term memory (`app/memory/`) — ✅ завершено
 
 - **Working memory** — контекст беседы (auto-summarization при превышении лимита)
 - **Episodic memory** — все значимые взаимодействия с embeddings, semantic search
 - **Semantic memory** — факты о пользователе (авто-извлечение)
-- **Entity memory** — именованные сущности с атрибутами и связями
-- Хранилище: SQLite + sqlite-vec (позже Qdrant)
-- Memory tool для явного поиска/обновления
-- UI: просмотр и редактирование памяти
+- **Entity memory** — именованные сущности с атрибутами, алиасами и связями
+  (`entities`, `entity_relations`, `memory_item_entities` таблицы; LLM-извлечение
+  в `memory/entities.py`; tool `entity_lookup`; секция `[RELEVANT ENTITIES]` в
+  контексте)
+- Хранилище: SQLite + FTS5 (позже embeddings/Qdrant)
+- Memory tools для явного поиска/обновления (`memory_remember`, `memory_recall`,
+  `memory_forget`, `memory_update`, `memory_list`, `set_working_memory`,
+  `get_working_memory`, `entity_lookup`)
+- **User-confirmation workflow**: agent-extracted памяти попадают в статус
+  `pending_confirmation` и исключаются из recall/context до подтверждения
+  (`confirm`/`reject`); авто-reject устаревших по TTL
+- **Pin**: закрепление памяти защищает её от decay/TTL
+- **Export**: JSON и Markdown выгрузка всех памятей
+- **«Why remembered»**: explainability — breakdown score (importance/recency/
+  confidence/type_priority), provenance и lifecycle в `memory_recall` tool и
+  endpoint `GET /memory/{id}/explain`
+- UI: вкладки System/Agent/**Review** (очередь подтверждения)/**Entities**,
+  pin/permanent-delete, expand «why remembered», кнопка Export
 
 ## 2. Multi-personality agents (`app/agent/personalities/`)
 
@@ -54,6 +68,26 @@
 - Дашборд "Память": сколько фактов, типы, активность
 - Использовать для этого LangSmith
 
+> **Текущий статус (аудит):**
+> - ✅ Live tail (InspectorRegistry), timeline, compare, replay
+> - ✅ Tool-call лог (`ToolCall` таблица: name/args/result/duration/success)
+> - ✅ LLM-call цена/токены/модель/provider (`SpendLog`) + latency (`llm_call_complete` events) — но разнесены по двум хранилищам
+> - ✅ Дашборд памяти: факт-каунт + by_type (endpoint `/memory/stats`, теперь с `total_pending`/`total_entities`)
+> - ⏳ **Осталось:** агрегирующие дашборды (spend-over-time, spend-by-model, top-tools, latency, глобальная call-history); объединённый LLM-call лог; "активность" памяти (timeseries); OTel-экспорт и/или LangSmith; тесты на ToolCall/SpendLog/аналитику. Данные для дашбордов уже собираются — нужен агрегирующий сервис + frontend.
+
 ## Деливерабл
 
 Память между сессиями, разные "личности", полная аналитика, **Wiki/KB**, **организация диалогов**.
+
+---
+
+## Прогресс фазы 3a
+
+| Раздел | Статус |
+|--------|--------|
+| 1. Long-term memory (incl. entity, confirmation, pin, export, explainability) | ✅ Завершено |
+| 2. Multi-personality agents | ⏳ Ожидает |
+| 3. Knowledge Base / Wiki | ⏳ Ожидает |
+| 4. Conversation Organization | ⏳ Ожидает |
+| 5. Observability / Analytics | 🔄 Частично (см. выше) — следующий приоритет |
+

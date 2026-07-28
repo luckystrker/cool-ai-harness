@@ -1,14 +1,23 @@
 """Memory models (Фаза 3a — Long-term + Working memory).
 
-Three tables:
+Tables:
 - ``MemoryItem``: core long-term memory record (semantic, episodic, procedural, preference).
 - ``Episode``: episodic memory — session/run summaries with outcome tracking.
 - ``WorkingMemory``: per-conversation session state (scratchpad, rolling summary).
+- ``Entity``: named entity with attributes and aliases (entity memory).
+- ``EntityRelation``: directed relationship between two entities.
+- ``MemoryItemEntity``: link table — which memories reference which entities.
 
 Scope model (multi-agent ready):
 - ``global``: visible to all agents/conversations for a user.
 - ``agent``: visible only when the active role/personality matches ``agent_id``.
 - ``conversation``: visible only within the originating conversation.
+
+Confirmation model:
+- Memories created by the agent / agent-extraction land in ``pending_confirmation``
+  status and are excluded from recall/context until the user confirms them
+  (status → ``active``) or rejects them (status → ``archived``).
+- ``user_explicit`` and ``system`` sources are stored directly as ``active``.
 """
 
 from __future__ import annotations
@@ -16,9 +25,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, Text
+from sqlalchemy import Column, Text, UniqueConstraint
 from sqlalchemy.types import JSON
-from sqlmodel import Field
+from sqlmodel import Field, SQLModel
 
 from app.models.base import TimestampMixin, _utcnow
 
@@ -46,9 +55,18 @@ MEMORY_STATUS_ACTIVE = "active"
 MEMORY_STATUS_ARCHIVED = "archived"
 MEMORY_STATUS_SUPERSEDED = "superseded"
 MEMORY_STATUS_DELETED = "deleted"
+# Memories created by agent/agent_extraction sources land here first; they are
+# excluded from recall/context until the user confirms (→ active) or rejects (→ archived).
+MEMORY_STATUS_PENDING_CONFIRMATION = "pending_confirmation"
 
 MEMORY_STATUSES = frozenset(
-    {MEMORY_STATUS_ACTIVE, MEMORY_STATUS_ARCHIVED, MEMORY_STATUS_SUPERSEDED, MEMORY_STATUS_DELETED}
+    {
+        MEMORY_STATUS_ACTIVE,
+        MEMORY_STATUS_ARCHIVED,
+        MEMORY_STATUS_SUPERSEDED,
+        MEMORY_STATUS_DELETED,
+        MEMORY_STATUS_PENDING_CONFIRMATION,
+    }
 )
 
 # Memory sources.
@@ -107,6 +125,8 @@ class MemoryItem(TimestampMixin, table=True):
     ttl_days: int | None = None  # NULL = no expiry
     valid_from: datetime | None = Field(default_factory=_utcnow)
     valid_to: datetime | None = None  # for facts that can become stale
+    # User-pinned memories are protected from decay/TTL sweeps.
+    pinned: bool = Field(default=False, index=True)
 
 
 class Episode(TimestampMixin, table=True):
@@ -157,3 +177,60 @@ class WorkingMemory(TimestampMixin, table=True):
     summary_up_to_message_id: int | None = None
     # Token count estimate of the current context.
     token_estimate: int | None = None
+
+
+# --- Entity memory (named entities with attributes, aliases, and relations) ---
+
+
+class Entity(TimestampMixin, table=True):
+    """Named entity memory — people, projects, services, concepts, etc.
+
+    Entities are normalized records with attributes and aliases. They link to
+    memories (and indirectly to episodes) so the agent can resolve "X" to a
+    structured record instead of relying on free-text recall.
+    """
+
+    __tablename__ = "entities"
+    # Canonical name is unique per user (upsert merges on this pair).
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_entities_user_id_name"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # Canonical name (unique per user).
+    name: str = Field(index=True)
+    # e.g. "person", "project", "service", "tool", "concept", "file".
+    entity_type: str = Field(default="concept", index=True)
+    # Alternate names / spellings used to refer to this entity.
+    aliases: list[str] | None = Field(default=None, sa_column=Column("aliases", JSON))
+    # Free-form structured attributes {key: value}.
+    attributes: dict[str, Any] | None = Field(default=None, sa_column=Column("attributes", JSON))
+    description: str | None = Field(default=None, sa_column=Column(Text))
+
+
+class EntityRelation(TimestampMixin, table=True):
+    """Directed relationship between two entities.
+
+    e.g. (User, "works_on", Project), (Service, "depends_on", Service).
+    """
+
+    __tablename__ = "entity_relations"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    source_entity_id: int = Field(foreign_key="entities.id", index=True)
+    target_entity_id: int = Field(foreign_key="entities.id", index=True)
+    relation_type: str = Field(default="related_to")
+    attributes: dict[str, Any] | None = Field(default=None, sa_column=Column("attributes", JSON))
+
+
+class MemoryItemEntity(SQLModel, table=True):
+    """Link table — which memories reference which entities.
+
+    A memory may mention several entities; an entity may be referenced by many
+    memories. Many-to-many without timestamps (pure join).
+    """
+
+    __tablename__ = "memory_item_entities"
+
+    memory_id: int = Field(foreign_key="memory_items.id", primary_key=True)
+    entity_id: int = Field(foreign_key="entities.id", primary_key=True)

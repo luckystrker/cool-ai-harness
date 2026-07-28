@@ -8,6 +8,7 @@ Tools the agent can call to interact with long-term and working memory:
 - memory_list: list recent memories
 - set_working_memory: update the scratchpad
 - get_working_memory: read from the scratchpad
+- entity_lookup: resolve a named entity (people, projects, services, tools)
 """
 
 from __future__ import annotations
@@ -81,6 +82,16 @@ class GetWorkingMemoryArgs(ToolArgs):
     key: str | None = Field(default=None, description="Key to read; None = entire state")
 
 
+class EntityLookupArgs(ToolArgs):
+    query: str = Field(
+        description="Entity name or alias to look up (substring match on name/aliases)"
+    )
+    entity_type: str | None = Field(
+        default=None, description="Filter by type: person, project, service, tool, concept, file"
+    )
+    limit: int = Field(default=5, ge=1, le=20, description="Max results to return")
+
+
 # --- Tool implementations ---
 
 
@@ -130,11 +141,19 @@ async def _memory_recall(
     memory_type: str | None = None,
     limit: int = 5,
 ) -> ToolResult:
-    """Search memories by query."""
+    """Search memories by query.
+
+    Each result includes provenance (source, confidence, scope) so the agent
+    can judge how much to trust a memory and where it came from.
+    """
+    from app.memory.retrieval import score_memory
     from app.memory.service import recall
 
     ctx = get_run_context()
+    now = None
     with Session(engine) as session:
+        from datetime import UTC, datetime
+
         from app.agent.service import get_or_create_default_user
 
         user = get_or_create_default_user(session)
@@ -147,16 +166,20 @@ async def _memory_recall(
             memory_type=memory_type,
             limit=limit,
         )
-    results = [
-        {
-            "id": m.id,
-            "content": m.content,
-            "type": m.memory_type,
-            "importance": m.importance,
-            "scope": m.scope,
-        }
-        for m in memories
-    ]
+        now = datetime.now(UTC)
+        results = [
+            {
+                "id": m.id,
+                "content": m.content,
+                "type": m.memory_type,
+                "importance": m.importance,
+                "confidence": m.confidence,
+                "source": m.source,
+                "scope": m.scope,
+                "score": score_memory(m, now)["total"],
+            }
+            for m in memories
+        ]
     return ToolResult.ok(json.dumps(results, ensure_ascii=False))
 
 
@@ -270,6 +293,44 @@ async def _get_working_memory(key: str | None = None) -> ToolResult:
     return ToolResult.ok(json.dumps(state, ensure_ascii=False, default=str))
 
 
+async def _entity_lookup(
+    query: str,
+    entity_type: str | None = None,
+    limit: int = 5,
+) -> ToolResult:
+    """Look up named entities (people, projects, services, tools, concepts).
+
+    Searches canonical names and aliases. Returns structured records so the
+    agent can resolve a reference to a concrete entity with attributes.
+    """
+    from app.memory.entities import list_entities
+
+    with Session(engine) as session:
+        from app.agent.service import get_or_create_default_user
+
+        user = get_or_create_default_user(session)
+        assert user.id is not None
+        entities = list_entities(
+            session,
+            user_id=user.id,
+            entity_type=entity_type,
+            query=query,
+            limit=limit,
+        )
+    results = [
+        {
+            "id": e.id,
+            "name": e.name,
+            "type": e.entity_type,
+            "aliases": e.aliases or [],
+            "attributes": e.attributes or {},
+            "description": e.description,
+        }
+        for e in entities
+    ]
+    return ToolResult.ok(json.dumps(results, ensure_ascii=False, default=str))
+
+
 # --- Registration ---
 
 
@@ -328,4 +389,15 @@ def register_memory_tools() -> None:
         ),
         args_model=GetWorkingMemoryArgs,
         func=_get_working_memory,
+    )
+    register_tool(
+        name="entity_lookup",
+        description=(
+            "Look up a named entity (person, project, service, tool, concept) by name "
+            "or alias. Returns structured records with attributes so you can resolve a "
+            "reference to a concrete entity. Use this when a user mentions a specific "
+            "thing that may have been recorded before."
+        ),
+        args_model=EntityLookupArgs,
+        func=_entity_lookup,
     )

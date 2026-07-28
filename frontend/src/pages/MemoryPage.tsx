@@ -2,10 +2,17 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Brain,
+  Box,
+  ChevronDown,
+  ChevronRight,
+  Clock,
   Database,
+  Download,
   Globe,
   Loader2,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Save,
   Trash2,
@@ -14,6 +21,9 @@ import {
 import { toast } from "sonner"
 import { memoryApi } from "@/api/memory"
 import type { MemoryItem, MemoryScope, MemoryType } from "@/api/types"
+import { EntitiesPanel } from "@/components/memory/EntitiesPanel"
+import { ExplainPanel } from "@/components/memory/ExplainPanel"
+import { ReviewQueue } from "@/components/memory/ReviewQueue"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -30,6 +40,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
+type TabKey = "global" | "agent" | "review" | "entities"
+
 const TYPE_COLORS: Record<MemoryType, string> = {
   semantic: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   episodic: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
@@ -45,7 +57,7 @@ const SCOPE_LABELS: Record<MemoryScope, string> = {
 
 export function MemoryPage() {
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState<"global" | "agent">("global")
+  const [activeTab, setActiveTab] = useState<TabKey>("global")
   const [editingMemory, setEditingMemory] = useState<MemoryItem | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
 
@@ -75,8 +87,14 @@ export function MemoryPage() {
     onError: (e) => toast.error("Failed to delete", { description: String(e) }),
   })
 
-  const memories = activeTab === "global" ? globalMemories : agentMemories
-  const isLoading = activeTab === "global" ? globalLoading : agentLoading
+  const handleExport = (format: "json" | "markdown") => {
+    memoryApi.exportMemories(format).catch((e) =>
+      toast.error("Export failed", { description: String(e) })
+    )
+  }
+
+  const scopeLoading = activeTab === "global" ? globalLoading : agentLoading
+  const scopeMemories = activeTab === "global" ? globalMemories : agentMemories
 
   return (
     <div className="flex h-full flex-col">
@@ -91,21 +109,34 @@ export function MemoryPage() {
             </p>
           </div>
         </div>
-        <Button onClick={() => setCreateOpen(true)} className="gap-2">
-          <Plus className="h-4 w-4" />
-          Add memory
-        </Button>
+        <div className="flex items-center gap-2">
+          <ExportMenu onExport={handleExport} />
+          {activeTab !== "entities" && activeTab !== "review" && (
+            <Button onClick={() => setCreateOpen(true)} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add memory
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Stats bar */}
       {stats && (
-        <div className="flex gap-4 border-b px-6 py-3 text-sm">
+        <div className="flex flex-wrap gap-4 border-b px-6 py-3 text-sm">
           <span className="text-muted-foreground">
             Active: <strong className="text-foreground">{stats.total_active}</strong>
           </span>
           <span className="text-muted-foreground">
             Episodes: <strong className="text-foreground">{stats.total_episodes}</strong>
           </span>
+          <span className="text-muted-foreground">
+            Entities: <strong className="text-foreground">{stats.total_entities}</strong>
+          </span>
+          {stats.total_pending > 0 && (
+            <span className="text-amber-600 dark:text-amber-400">
+              Pending review: <strong>{stats.total_pending}</strong>
+            </span>
+          )}
           <span className="text-muted-foreground">
             Archived: <strong className="text-foreground">{stats.total_archived}</strong>
           </span>
@@ -133,35 +164,36 @@ export function MemoryPage() {
           label="Agent (Project)"
           count={agentMemories.length}
         />
+        <TabButton
+          active={activeTab === "review"}
+          onClick={() => setActiveTab("review")}
+          icon={<Clock className="h-4 w-4" />}
+          label="Review"
+          count={stats?.total_pending ?? 0}
+          highlight={(stats?.total_pending ?? 0) > 0}
+        />
+        <TabButton
+          active={activeTab === "entities"}
+          onClick={() => setActiveTab("entities")}
+          icon={<Box className="h-4 w-4" />}
+          label="Entities"
+          count={stats?.total_entities ?? 0}
+        />
       </div>
 
-      {/* Memory list */}
-      <ScrollArea className="flex-1">
-        <div className="space-y-2 p-6">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-12 text-muted-foreground">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-          ) : memories.length === 0 ? (
-            <div className="py-12 text-center text-muted-foreground">
-              <Brain className="mx-auto mb-3 h-10 w-10 opacity-30" />
-              <p>No memories in this scope yet.</p>
-              <p className="text-sm">
-                Memories are created automatically during conversations or manually.
-              </p>
-            </div>
-          ) : (
-            memories.map((memory) => (
-              <MemoryCard
-                key={memory.id}
-                memory={memory}
-                onEdit={() => setEditingMemory(memory)}
-                onDelete={() => deleteMutation.mutate(memory.id)}
-              />
-            ))
-          )}
-        </div>
-      </ScrollArea>
+      {/* Tab content */}
+      {activeTab === "review" ? (
+        <ReviewQueue />
+      ) : activeTab === "entities" ? (
+        <EntitiesPanel />
+      ) : (
+        <MemoryList
+          memories={scopeMemories}
+          isLoading={scopeLoading}
+          onEdit={(m) => setEditingMemory(m)}
+          onDelete={(id) => deleteMutation.mutate(id)}
+        />
+      )}
 
       {/* Edit dialog */}
       <MemoryEditDialog
@@ -172,9 +204,46 @@ export function MemoryPage() {
       {/* Create dialog */}
       <MemoryCreateDialog
         open={createOpen}
-        defaultScope={activeTab}
+        defaultScope={activeTab === "agent" ? "agent" : "global"}
         onClose={() => setCreateOpen(false)}
       />
+    </div>
+  )
+}
+
+function ExportMenu({ onExport }: { onExport: (format: "json" | "markdown") => void }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative">
+      <Button variant="outline" className="gap-2" onClick={() => setOpen((o) => !o)}>
+        <Download className="h-4 w-4" />
+        Export
+      </Button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border bg-popover p-1 shadow-md">
+            <button
+              className="block w-full rounded-sm px-3 py-1.5 text-left text-sm hover:bg-accent"
+              onClick={() => {
+                onExport("json")
+                setOpen(false)
+              }}
+            >
+              JSON
+            </button>
+            <button
+              className="block w-full rounded-sm px-3 py-1.5 text-left text-sm hover:bg-accent"
+              onClick={() => {
+                onExport("markdown")
+                setOpen(false)
+              }}
+            >
+              Markdown
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -185,12 +254,14 @@ function TabButton({
   icon,
   label,
   count,
+  highlight,
 }: {
   active: boolean
   onClick: () => void
   icon: React.ReactNode
   label: string
   count: number
+  highlight?: boolean
 }) {
   return (
     <button
@@ -204,8 +275,62 @@ function TabButton({
     >
       {icon}
       {label}
-      <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs">{count}</span>
+      <span
+        className={cn(
+          "rounded-full px-1.5 py-0.5 text-xs",
+          highlight
+            ? "bg-amber-500/20 text-amber-700 dark:text-amber-300"
+            : "bg-muted"
+        )}
+      >
+        {count}
+      </span>
     </button>
+  )
+}
+
+function MemoryList({
+  memories,
+  isLoading,
+  onEdit,
+  onDelete,
+}: {
+  memories: MemoryItem[]
+  isLoading: boolean
+  onEdit: (m: MemoryItem) => void
+  onDelete: (id: number) => void
+}) {
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin" />
+      </div>
+    )
+  }
+  if (memories.length === 0) {
+    return (
+      <div className="py-12 text-center text-muted-foreground">
+        <Brain className="mx-auto mb-3 h-10 w-10 opacity-30" />
+        <p>No memories in this scope yet.</p>
+        <p className="text-sm">
+          Memories are created automatically during conversations or manually.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <ScrollArea className="flex-1">
+      <div className="space-y-2 p-6">
+        {memories.map((memory) => (
+          <MemoryCard
+            key={memory.id}
+            memory={memory}
+            onEdit={() => onEdit(memory)}
+            onDelete={() => onDelete(memory.id)}
+          />
+        ))}
+      </div>
+    </ScrollArea>
   )
 }
 
@@ -218,9 +343,32 @@ function MemoryCard({
   onEdit: () => void
   onDelete: () => void
 }) {
+  const queryClient = useQueryClient()
+  const [expanded, setExpanded] = useState(false)
+
+  const pinMutation = useMutation({
+    mutationFn: (pinned: boolean) => memoryApi.pin(memory.id, pinned),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["memories"] })
+      toast.success(memory.pinned ? "Unpinned" : "Pinned")
+    },
+    onError: (e) => toast.error("Failed to toggle pin", { description: String(e) }),
+  })
+
   return (
     <Card className="group">
       <CardContent className="flex items-start gap-4 p-4">
+        <button
+          className="mt-0.5 text-muted-foreground hover:text-foreground"
+          onClick={() => setExpanded((e) => !e)}
+          aria-label={expanded ? "Collapse" : "Expand why remembered"}
+        >
+          {expanded ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+        </button>
         <div className="flex-1 space-y-2">
           <div className="flex items-center gap-2">
             <Badge className={cn("capitalize", TYPE_COLORS[memory.memory_type])}>
@@ -229,6 +377,11 @@ function MemoryCard({
             <Badge variant="outline" className="text-xs">
               {SCOPE_LABELS[memory.scope]}
             </Badge>
+            {memory.pinned && (
+              <Badge variant="outline" className="gap-1 text-xs">
+                <Pin className="h-3 w-3" /> pinned
+              </Badge>
+            )}
             {memory.tags?.map((tag) => (
               <Badge key={tag} variant="secondary" className="text-xs">
                 {tag}
@@ -242,8 +395,22 @@ function MemoryCard({
             <span>Accessed: {memory.access_count}x</span>
             <span>Source: {memory.source}</span>
           </div>
+          {expanded && <ExplainPanel memoryId={memory.id} />}
         </div>
         <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={() => pinMutation.mutate(!memory.pinned)}
+            title={memory.pinned ? "Unpin" : "Pin (protect from decay)"}
+          >
+            {memory.pinned ? (
+              <PinOff className="h-4 w-4" />
+            ) : (
+              <Pin className="h-4 w-4" />
+            )}
+          </Button>
           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={onEdit}>
             <Pencil className="h-4 w-4" />
           </Button>
@@ -252,6 +419,7 @@ function MemoryCard({
             variant="ghost"
             className="h-8 w-8 text-destructive hover:text-destructive"
             onClick={onDelete}
+            title="Archive"
           >
             <Trash2 className="h-4 w-4" />
           </Button>

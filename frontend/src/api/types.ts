@@ -800,7 +800,12 @@ export interface SubagentFailedPayload {
 
 export type MemoryType = "semantic" | "episodic" | "procedural" | "preference"
 export type MemoryScope = "global" | "agent" | "conversation"
-export type MemoryStatus = "active" | "archived" | "superseded" | "deleted"
+export type MemoryStatus =
+  | "active"
+  | "archived"
+  | "superseded"
+  | "deleted"
+  | "pending_confirmation"
 
 export interface MemoryItem {
   id: number
@@ -816,6 +821,7 @@ export interface MemoryItem {
   confidence: number
   source: string
   status: MemoryStatus
+  pinned: boolean
   access_count: number
   created_at: string
   updated_at: string
@@ -844,6 +850,7 @@ export interface MemoryUpdate {
   structured?: Record<string, unknown>
   ttl_days?: number
   valid_to?: string
+  pinned?: boolean
 }
 
 export interface Episode {
@@ -865,6 +872,8 @@ export interface MemoryStats {
   by_scope: Record<string, number>
   total_episodes: number
   total_archived: number
+  total_pending: number
+  total_entities: number
 }
 
 export interface MemoryExtractRequest {
@@ -875,4 +884,62 @@ export interface MemoryExtractResponse {
   status: string
   stored_count: number
   detail: string | null
+}
+
+// "Why is this remembered" explanation (score breakdown + provenance).
+export interface MemoryScoreBreakdown {
+  importance: number
+  recency: number
+  confidence: number
+  type_priority: number
+  age_days: number
+  total: number
+}
+
+export interface MemoryExplain {
+  memory_id: number
+  source: string
+  scope: MemoryScope
+  status: MemoryStatus
+  pinned: boolean
+  confidence: number
+  importance: number
+  memory_type: MemoryType
+  conversation_id: number | null
+  agent_id: number | null
+  created_at: string
+  updated_at: string
+  last_accessed_at: string | null
+  access_count: number
+  score: MemoryScoreBreakdown
+}
+
+// --- Entity memory ---
+
+export interface Entity {
+  id: number
+  user_id: number
+  name: string
+  entity_type: string
+  aliases: string[] | null
+  attributes: Record<string, unknown> | null
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EntityCreate {
+  name: string
+  entity_type?: string
+  aliases?: string[] | null
+  attributes?: Record<string, unknown> | null
+  description?: string | null
+}
+
+export interface EntityUpdate {
+  name?: string
+  entity_type?: string
+  aliases?: string[] | null
+  attributes?: Record<string, unknown> | null
+  description?: string | null
 }

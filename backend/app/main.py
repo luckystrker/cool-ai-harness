@@ -15,6 +15,7 @@ from app.api.budgets import router as budgets_router
 from app.api.conversations import router as conversations_router
 from app.api.inspector import router as inspector_router
 from app.api.mcp import router as mcp_router
+from app.api.memory import entities_router
 from app.api.memory import router as memory_router
 from app.api.plans import router as plans_router
 from app.api.providers import router as providers_router
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router, prefix="/api")
     app.include_router(subagents_router, prefix="/api")
     app.include_router(memory_router, prefix="/api")
+    app.include_router(entities_router, prefix="/api")
     app.include_router(workspace_router, prefix="/api")
     app.include_router(ws_router)  # WebSocket routes live at /ws/...
 

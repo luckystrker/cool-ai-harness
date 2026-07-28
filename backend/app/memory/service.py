@@ -16,8 +16,11 @@ from sqlmodel import Session, col, select
 
 from app.core.logging import get_logger
 from app.memory.models import (
+    MEMORY_SOURCE_SYSTEM,
+    MEMORY_SOURCE_USER_EXPLICIT,
     MEMORY_STATUS_ACTIVE,
     MEMORY_STATUS_ARCHIVED,
+    MEMORY_STATUS_PENDING_CONFIRMATION,
     MEMORY_TYPE_PREFERENCE,
     SCOPE_CONVERSATION,
     SCOPE_GLOBAL,
@@ -30,6 +33,20 @@ log = get_logger(__name__)
 
 # Maximum importance an agent can set without user confirmation.
 MAX_AGENT_IMPORTANCE = 0.9
+# Sources that skip the pending_confirmation gate (trusted to be accurate).
+_TRUSTED_SOURCES = frozenset({MEMORY_SOURCE_USER_EXPLICIT, MEMORY_SOURCE_SYSTEM})
+
+
+def _default_status(source: str, confirmed: bool) -> str:
+    """Determine the initial status for a new memory.
+
+    Trusted sources (user_explicit, system) and explicitly confirmed writes are
+    stored directly as ``active``. Agent / agent_extraction sources land in
+    ``pending_confirmation`` for user review.
+    """
+    if confirmed or source in _TRUSTED_SOURCES:
+        return MEMORY_STATUS_ACTIVE
+    return MEMORY_STATUS_PENDING_CONFIRMATION
 
 
 def remember(
@@ -47,11 +64,22 @@ def remember(
     tags: list[str] | None = None,
     structured: dict | None = None,
     ttl_days: int | None = None,
+    confirmed: bool = False,
 ) -> MemoryItem:
     """Store a new memory, with deduplication and validation.
 
-    If a highly similar active memory already exists (same type + overlapping
-    content), it is updated instead of creating a duplicate.
+    If a highly similar memory already exists (same type + overlapping content),
+    it is updated instead of creating a duplicate.
+
+    Confirmation model:
+    - Trusted sources (``user_explicit``, ``system``) and ``confirmed=True`` →
+      stored as ``active`` and immediately eligible for recall.
+    - Agent / ``agent_extraction`` sources → stored as ``pending_confirmation``
+      and excluded from recall until the user confirms (``confirm_memory``) or
+      rejects (``reject_memory``) them.
+
+    Dedup respects confirmation: a pending duplicate never overwrites a
+    confirmed (active) fact's content, and vice versa.
     """
     # Cap importance for non-user sources.
     if source != "user_explicit" and importance > MAX_AGENT_IMPORTANCE:
@@ -61,6 +89,8 @@ def remember(
     importance = max(0.0, min(1.0, importance))
     confidence = max(0.0, min(1.0, confidence))
 
+    new_status = _default_status(source, confirmed)
+
     # For conversation-scoped memories, capture the conversation's working
     # directory as a "project key" so the memory is visible across all
     # conversations in the same project (same working directory), not just
@@ -68,8 +98,16 @@ def remember(
     if scope == SCOPE_CONVERSATION and conversation_id is not None:
         structured = _attach_project_key(session, conversation_id, structured)
 
-    # Deduplication: check for existing active memory with same type and similar content.
-    existing = _find_duplicate(session, user_id=user_id, content=content, memory_type=memory_type)
+    # Deduplication: check for an existing memory with the same type, similar
+    # content, AND a matching status tier (confirmed vs pending). A pending
+    # write never overwrites a confirmed fact.
+    existing = _find_duplicate(
+        session,
+        user_id=user_id,
+        content=content,
+        memory_type=memory_type,
+        status=new_status,
+    )
     if existing is not None:
         # Update the existing memory rather than creating a duplicate.
         existing.content = content
@@ -98,12 +136,19 @@ def remember(
         importance=importance,
         confidence=confidence,
         source=source,
+        status=new_status,
         ttl_days=ttl_days,
     )
     session.add(memory)
     session.commit()
     session.refresh(memory)
-    log.info("memory.created", memory_id=memory.id, memory_type=memory_type, scope=scope)
+    log.info(
+        "memory.created",
+        memory_id=memory.id,
+        memory_type=memory_type,
+        scope=scope,
+        status=new_status,
+    )
     return memory
 
 
@@ -144,6 +189,42 @@ def get_memory(session: Session, memory_id: int) -> MemoryItem | None:
     return session.get(MemoryItem, memory_id)
 
 
+def explain_memory(session: Session, memory_id: int) -> dict | None:
+    """Build the "why is this remembered" explanation for a memory.
+
+    Returns provenance (source, scope, originating conversation), lifecycle
+    metadata (when stored, last accessed, access count), confirmation status,
+    and the composite score breakdown so the UI/agent can show *why* a memory
+    ranked where it did. Returns None if the memory is not found.
+    """
+    memory = session.get(MemoryItem, memory_id)
+    if memory is None:
+        return None
+
+    from app.memory.retrieval import score_memory
+
+    now = datetime.now(UTC)
+    breakdown = score_memory(memory, now)
+
+    return {
+        "memory_id": memory.id,
+        "source": memory.source,
+        "scope": memory.scope,
+        "status": memory.status,
+        "pinned": memory.pinned,
+        "confidence": memory.confidence,
+        "importance": memory.importance,
+        "memory_type": memory.memory_type,
+        "conversation_id": memory.conversation_id,
+        "agent_id": memory.agent_id,
+        "created_at": memory.created_at,
+        "updated_at": memory.updated_at,
+        "last_accessed_at": memory.last_accessed_at,
+        "access_count": memory.access_count,
+        "score": breakdown,
+    }
+
+
 def update_memory(
     session: Session,
     memory_id: int,
@@ -156,6 +237,7 @@ def update_memory(
     allowed_fields = {
         "content", "memory_type", "scope", "agent_id", "importance",
         "confidence", "status", "tags", "structured", "ttl_days", "valid_to",
+        "pinned",
     }
     for key, value in fields.items():
         if key in allowed_fields:
@@ -226,6 +308,92 @@ def get_preferences(session: Session, *, user_id: int) -> list[MemoryItem]:
             .order_by(col(MemoryItem.importance).desc())
         ).all()
     )
+
+
+def export_memories(
+    session: Session,
+    *,
+    user_id: int,
+    fmt: str = "json",
+    include_archived: bool = False,
+) -> bytes:
+    """Export a user's memories.
+
+    ``fmt="json"`` returns a complete structured dump (UTF-8 bytes).
+    ``fmt="markdown"`` returns a human-readable grouped list.
+
+    Only active memories are exported by default; set ``include_archived`` to
+    also include archived/superseded records (useful for backups).
+    """
+    from datetime import UTC, datetime
+
+    stmt = select(MemoryItem).where(MemoryItem.user_id == user_id)
+    if not include_archived:
+        stmt = stmt.where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
+    stmt = stmt.order_by(
+        col(MemoryItem.memory_type).asc(), col(MemoryItem.importance).desc()
+    )
+    memories = list(session.exec(stmt).all())
+
+    if fmt == "markdown":
+        return _memories_to_markdown(memories).encode("utf-8")
+
+    # JSON — full structured dump.
+    import json
+
+    payload = {
+        "exported_at": datetime.now(UTC).isoformat(),
+        "user_id": user_id,
+        "count": len(memories),
+        "memories": [
+            {
+                "id": m.id,
+                "type": m.memory_type,
+                "scope": m.scope,
+                "content": m.content,
+                "tags": m.tags or [],
+                "structured": m.structured,
+                "importance": m.importance,
+                "confidence": m.confidence,
+                "source": m.source,
+                "status": m.status,
+                "pinned": m.pinned,
+                "conversation_id": m.conversation_id,
+                "agent_id": m.agent_id,
+                "ttl_days": m.ttl_days,
+                "valid_from": m.valid_from.isoformat() if m.valid_from else None,
+                "valid_to": m.valid_to.isoformat() if m.valid_to else None,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+            }
+            for m in memories
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _memories_to_markdown(memories: Sequence[MemoryItem]) -> str:
+    """Render memories as a grouped Markdown document."""
+    from collections import defaultdict
+
+    by_type: dict[str, list[MemoryItem]] = defaultdict(list)
+    for m in memories:
+        by_type[m.memory_type].append(m)
+
+    lines = ["# Memory export", ""]
+    for mtype, items in by_type.items():
+        lines.append(f"## {mtype.capitalize()} ({len(items)})")
+        lines.append("")
+        for m in items:
+            tags = f" `{'`,`'.join(m.tags or [])}`" if m.tags else ""
+            pinned = " 📌" if m.pinned else ""
+            lines.append(
+                f"- **{m.content}**{tags}{pinned}  \n"
+                f"  _importance {m.importance:.2f} · confidence {m.confidence:.2f} · "
+                f"source `{m.source}` · status `{m.status}`_"
+            )
+        lines.append("")
+    return "\n".join(lines)
 
 
 # --- Episodes ---
@@ -367,18 +535,21 @@ def _find_duplicate(
     user_id: int,
     content: str,
     memory_type: str,
+    status: str = MEMORY_STATUS_ACTIVE,
 ) -> MemoryItem | None:
-    """Find an existing active memory that is likely a duplicate.
+    """Find an existing memory of the given status tier that is likely a duplicate.
 
     Uses exact content match first (fast path), then falls back to FTS5
-    similarity for near-duplicates.
+    similarity for near-duplicates. Dedup is scoped to a single status tier so
+    a ``pending_confirmation`` write never merges into (and thus overwrites) a
+    confirmed ``active`` fact, and vice versa.
     """
-    # Fast path: exact content match.
+    # Fast path: exact content match within the same status tier.
     existing = session.exec(
         select(MemoryItem)
         .where(MemoryItem.user_id == user_id)
         .where(MemoryItem.memory_type == memory_type)
-        .where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
+        .where(MemoryItem.status == status)
         .where(MemoryItem.content == content)
     ).first()
     if existing is not None:
@@ -413,7 +584,7 @@ def _find_duplicate(
                 .where(MemoryItem.id.in_(candidate_ids))  # type: ignore[union-attr]
                 .where(MemoryItem.user_id == user_id)
                 .where(MemoryItem.memory_type == memory_type)
-                .where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
+                .where(MemoryItem.status == status)
             ).all()
             # If any candidate shares > 70% of words, treat as duplicate.
             content_words = set(content.lower().split())
@@ -430,3 +601,74 @@ def _find_duplicate(
         pass
 
     return None
+
+
+# --- Confirmation workflow (user review of agent-extracted memories) ---
+
+
+def confirm_memory(session: Session, memory_id: int) -> MemoryItem | None:
+    """Confirm a pending memory: promote it to ``active`` (eligible for recall).
+
+    Returns the updated memory, or None if not found.
+    """
+    memory = session.get(MemoryItem, memory_id)
+    if memory is None:
+        return None
+    memory.status = MEMORY_STATUS_ACTIVE
+    memory.updated_at = datetime.now(UTC)
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+    log.info("memory.confirmed", memory_id=memory_id)
+    return memory
+
+
+def reject_memory(session: Session, memory_id: int) -> bool:
+    """Reject a pending memory: archive it (recoverable via the UI).
+
+    Returns True if the memory was found and rejected.
+    """
+    memory = session.get(MemoryItem, memory_id)
+    if memory is None:
+        return False
+    memory.status = MEMORY_STATUS_ARCHIVED
+    memory.updated_at = datetime.now(UTC)
+    session.add(memory)
+    session.commit()
+    log.info("memory.rejected", memory_id=memory_id)
+    return True
+
+
+def list_pending(
+    session: Session,
+    *,
+    user_id: int,
+    limit: int = 100,
+    offset: int = 0,
+) -> Sequence[MemoryItem]:
+    """List memories awaiting user confirmation, newest first."""
+    stmt = (
+        select(MemoryItem)
+        .where(MemoryItem.user_id == user_id)
+        .where(MemoryItem.status == MEMORY_STATUS_PENDING_CONFIRMATION)
+        .order_by(col(MemoryItem.created_at).desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return session.exec(stmt).all()
+
+
+def pin_memory(session: Session, memory_id: int, pinned: bool = True) -> MemoryItem | None:
+    """Pin (or unpin) a memory. Pinned memories are protected from decay/TTL.
+
+    Returns the updated memory, or None if not found.
+    """
+    memory = session.get(MemoryItem, memory_id)
+    if memory is None:
+        return None
+    memory.pinned = pinned
+    memory.updated_at = datetime.now(UTC)
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+    return memory
