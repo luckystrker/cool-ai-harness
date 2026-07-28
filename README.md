@@ -7,6 +7,7 @@ inspector/replay console, and durable agent runs. Control via the web UI.
 > Status: **Фаза 3a — memory + observability (inspector) shipped, personalities
 > pending; next is Фаза 3b (recurring tasks)** 🔄 — see
 > [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
+<img width="1718" height="1273" alt="image" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
 
 ## Stack
 
