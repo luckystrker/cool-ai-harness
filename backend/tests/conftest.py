@@ -107,6 +107,22 @@ class ScriptedProvider(LLMProvider):
         yield ChatStreamEvent(finish=True, usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_db_schema() -> None:
+    """Create all tables on the throwaway test engine once per worker.
+
+    Tests that reach the real ``app.core.db.engine`` (e.g. the executor budget
+    block integration test) need the schema to exist. Without this, the test
+    passes only when another test file happens to have called ``init_db()``
+    first — a flaky ordering dependency that breaks under ``pytest-xdist
+    -n auto --dist=loadfile`` where files are dispatched to workers
+    independently.
+    """
+    from app.core.db import init_db
+
+    init_db()
+
+
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch) -> Path:
     """Redirect the workspace to a temp dir for isolated file-tool tests."""
