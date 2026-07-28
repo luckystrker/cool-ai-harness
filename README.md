@@ -1,15 +1,24 @@
 # Cool AI Harness
 
-Personal AI agent harness with provider abstraction, tools, skills, MCP, subagents, long-term memory, multi-personality agents, observability, and recurring tasks. Control via web UI and Telegram (Bot + Web App).
+Personal AI agent harness with provider abstraction, tools, skills, MCP,
+subagents, long-term + working memory, planning mode, cost budgets, an
+inspector/replay console, and durable agent runs. Control via the web UI.
 
-> Status: **Фаза 1.5 (durable runs, security, artifacts, evals)** 🔄 — see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
+> Status: **Фаза 3a — memory + observability (inspector) shipped, personalities
+> pending; next is Фаза 3b (recurring tasks)** 🔄 — see
+> [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
 
 ## Stack
 
-- **Backend:** Python 3.12+, FastAPI, Uvicorn, SQLModel + SQLite
-- **Frontend:** React 18 + TypeScript + Vite + Tailwind (planned)
-- **Telegram:** python-telegram-bot (planned, Фаза 5)
-- **Scheduler:** APScheduler + croniter (Фаза 3b)
+- **Backend:** Python 3.12+, FastAPI, Uvicorn, SQLModel + SQLite, Alembic
+- **Frontend:** React 19 + TypeScript + Vite 8 + Tailwind 4 (zustand,
+  @tanstack/react-query, Radix-based UI primitives)
+- **LLM providers:** OpenAI + Anthropic via a single `LLMProvider` interface
+  (OpenAI-compatible base URL works for OpenRouter/DeepSeek/Groq/Ollama)
+- **Telegram:** python-telegram-bot dependency present (Bot + Web App — planned,
+  Фаза 5)
+- **Scheduler:** APScheduler + croniter deps present (recurring tasks — planned,
+  Фаза 3b)
 
 ## Quick start
 
@@ -31,7 +40,17 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3. Smoke test
+### 3. Run frontend
+
+```bash
+cd frontend
+npm install
+npm run dev          # Vite dev server (proxies /api to :8000)
+```
+
+Open the URL Vite prints (default http://localhost:5173).
+
+### 4. Smoke test
 
 ```bash
 # health
@@ -81,10 +100,10 @@ responses) — no API keys needed.
 ```bash
 cd backend
 
-# Run all 21 scenarios (gate fails if any critical scenario fails)
+# Run all 20 scenarios (gate fails if any critical scenario fails)
 python -m evals
 
-# Filter by tag
+# Filter by tag (repeatable)
 python -m evals --tag safety
 python -m evals --tag tool_selection
 python -m evals --tag cost
@@ -97,7 +116,13 @@ python -m evals --update-baseline
 
 # Compare against a saved baseline (fails on critical regressions)
 python -m evals --baseline default
+
+# Machine-readable output for CI
+python -m evals --json
 ```
+
+Scenarios live in three suites under `backend/evals/scenarios/`: `safety` (7),
+`tool_selection` (8), `cost_limits` (5).
 
 **Exit codes:** `0` = gate passed, `1` = critical regression/failure, `2` = config error.
 
@@ -132,33 +157,79 @@ EvalScenario(
 )
 ```
 
+## Subsystems
+
+Beyond the core agent loop, these subsystems are implemented:
+
+- **Durable runs** — every turn is an `AgentRun` with an append-only `run_events`
+  log, status (`running`/`awaiting_approval`/`completed`/`failed`/`cancelled`),
+  cumulative token/cost usage, checkpoints, and budget guards. Interactive runs
+  are cancellable via the registry and the cancel endpoint.
+- **Capability security** — permissions split into
+  `read`/`write`/`execute`/`network`/`git`/`send_external`; file tools are
+  workspace-confined, network tools use an SSRF-protected allowlist, code
+  execution is sandboxed, and secrets are masked in messages/traces/logs.
+- **Cost budgets** — per-period spend limits with alert threshold and optional
+  block-on-exceed; spend is logged per run.
+- **Skills** — discover `SKILL.md` skills from builtin/user dirs; rank by
+  TF-IDF keywords/tags (+ optional embedding similarity) and inject relevant
+  skill context into the system prompt.
+- **MCP** — JSON-RPC 2.0 client over stdio **and** HTTP; connects external MCP
+  servers and bridges their tools into the tool registry as `mcp_{server}_{tool}`.
+  A marketplace client queries `registry.modelcontextprotocol.io`.
+- **Subagents** — isolated conversations + durable runs spawned from roles
+  (`researcher`, `code-reviewer`, `summarizer` seeded by default); capability
+  policies per role, background launch/cancel.
+- **Planning mode** — research-first loop emits a fenced `plan` JSON block;
+  steps have dependencies (topological execution), draft → approve → execute,
+  with `plan_progress` events and templates.
+- **Memory** (Фаза 3a) — long-term memory (`MemoryItem`/`Episode`) with FTS5
+  recall + composite reranking, post-session LLM extraction, decay/consolidation
+  sweeps, and working-memory scratchpads; project-scoped visibility. Exposed to
+  the agent via memory tools.
+- **Inspector** — live `/ws/inspect/{run_id}` tail of in-progress runs, plus
+  timeline reconstruction, two-run comparison, and replay over the event log.
+
 ## Project layout
 
 ```
 cool-ai-harness/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI entrypoint
-│   │   ├── core/                # config, logging, db, security
-│   │   ├── providers/           # LLM provider abstraction (OpenAI-compatible)
-│   │   ├── agent/               # agent loop + durable runs + approvals
-│   │   ├── security/            # capability policy, SSRF, secrets, sandbox, breakpoints
-│   │   ├── tools/               # tool registry + builtins (files, code, web)
-│   │   ├── skills/              # skill registry + builtins (planned)
-│   │   ├── mcp/                 # MCP client (planned)
-│   │   ├── memory/              # long-term memory (planned, Фаза 3a)
-│   │   ├── tasks/               # cron jobs / scheduler (planned, Фаза 3b)
-│   │   ├── api/                 # HTTP/WebSocket routes
-│   │   ├── telegram/            # bot + web app (planned, Фаза 5)
+│   │   ├── main.py              # FastAPI entrypoint (create_app, lifespan, routers, /ws)
+│   │   ├── core/                # config (pydantic-settings), db, logging, security (Fernet)
+│   │   ├── providers/           # LLMProvider + OpenAI/Anthropic impls, registry, resilience, pricing
+│   │   ├── agent/               # loop: executor, runners, service, events, runs, approvals,
+│   │   │                        #       permissions, planning, subagents
+│   │   ├── security/            # capability policy, SSRF, secrets, sandbox, breakpoints, cost
+│   │   ├── tools/               # tool registry + builtins (files, code, web, memory)
+│   │   ├── skills/              # skill registry + discovery + TF-IDF/embedding matching
+│   │   ├── mcp/                 # MCP client (stdio + HTTP), registry, marketplace, tool bridge
+│   │   ├── memory/              # long-term + working memory: extractor, retrieval (FTS5),
+│   │   │                        #   context_builder, lifecycle (decay/consolidation), tools
+│   │   ├── observability/       # run inspector: live tail, timeline, compare, replay
+│   │   ├── budgets/             # spend/budget service
+│   │   ├── artifacts/           # content-addressed artifact storage
+│   │   ├── api/                 # HTTP + WebSocket routes + schemas
 │   │   ├── models/              # SQLModel tables
-│   │   └── observability/       # analytics (planned, Фаза 3a)
-│   ├── evals/                   # agent eval scenarios + CI gate
-│   ├── alembic/                 # database migrations
-│   ├── tests/
+│   │   ├── tasks/               # cron jobs / scheduler (planned, Фаза 3b)
+│   │   └── telegram/            # bot + web app (planned, Фаза 5)
+│   ├── evals/                   # agent eval scenarios + CI gate (20 scenarios)
+│   ├── alembic/                 # database migrations (head: 0011_memory)
+│   ├── tests/                   # pytest suite (~456 tests)
 │   └── pyproject.toml
-├── frontend/                    # React SPA
+├── frontend/                    # React 19 SPA (Vite + TypeScript + Tailwind 4)
+│   └── src/
+│       ├── api/                 # typed boundary to backend (types, streaming, clients)
+│       ├── hooks/               # useConversationStream (SSE/WS) + others
+│       ├── components/          # chat/, inspector/, subagents/, layout/, settings/, ui/
+│       ├── pages/               # ChatPage, SettingsPage, MemoryPage, SubagentsPage,
+│       │                        #   InspectorPage, BudgetsPage
+│       └── lib/                 # utils, queryClient, agentConfig, ...
 ├── docs/
-│   └── PLAN.md                  # full roadmap
+│   ├── PLAN.md                  # full roadmap
+│   └── phases/                  # per-phase specs (phase-0 .. phase-7)
+├── LICENSE                      # MIT
 └── .env.example
 ```
 
@@ -169,10 +240,10 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 | Фаза | Статус |
 |------|--------|
 | **Фаза 0** — Foundation | ✅ Done |
-| **Фаза 1** — Agent loop + tools + chat MVP | ✅ **MVP ready** |
-| **Фаза 1.5** — Надёжность запусков, безопасность, артефакты, evals, HITL | 🔄 **Current** |
-| **Фаза 2** — Skills + MCP + subagents + planning mode | ⏳ |
-| **Фаза 3a** — Memory + personalities + observability + KB | ⏳ |
+| **Фаза 1** — Agent loop + tools + chat MVP | ✅ Done |
+| **Фаза 1.5** — Надёжность запусков, безопасность, артефакты, evals, HITL | ✅ Done |
+| **Фаза 2** — Skills + MCP + subagents + planning mode | ✅ Done |
+| **Фаза 3a** — Memory + observability + personalities | 🔄 **Current** (memory + inspector shipped; personalities pending) |
 | **Фаза 3b** — Recurring tasks + RSS + webhook | ⏳ |
 | **Фаза 4** — Deep research + code + multimodal + browser | ⏳ |
 | **Фаза 5** — Telegram + voice interface | ⏳ |
@@ -183,4 +254,4 @@ Each phase has its own file in [`docs/phases/`](docs/phases/).
 
 ## License
 
-MIT © Danil Kondratiuk
+MIT © 2026 Danil Kondratiuk — see [`LICENSE`](LICENSE).
