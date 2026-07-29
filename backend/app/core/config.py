@@ -105,6 +105,13 @@ class Settings(BaseSettings):
         default="",
         description="Default system prompt text; empty = load from file/built-in",
     )
+    # Skills context injection mode:
+    #   "relevant_only" — inject only skills matched to the user's input (max 3)
+    #   "all"           — inject the full skills catalog every turn
+    skills_context_mode: str = Field(
+        default="relevant_only",
+        description='Skills injection: "relevant_only" or "all"',
+    )
 
     # --- Agent permissions & working directory (defaults) ---
     # Per-conversation settings override these. Empty path = use workspaces_dir.
@@ -147,6 +154,18 @@ class Settings(BaseSettings):
     agent_run_timeout_s: float | None = Field(
         default=None,
         description="Wall-clock timeout per run in seconds; None = no timeout",
+    )
+
+    # --- Context window management ---
+    # Sliding-window truncation keeps the conversation within the model's
+    # context window. Token count is estimated (chars / 4) — no external deps.
+    context_window_tokens: int = Field(
+        default=128_000,
+        description="Model context window size in tokens (for truncation)",
+    )
+    context_reserve_ratio: float = Field(
+        default=0.8,
+        description="Fraction of context window to use for history (rest for output)",
     )
 
     # --- Provider resilience (Фаза 1.5 §5) ---

@@ -21,6 +21,7 @@ from sqlmodel import Session
 from app.agent import AgentConfig, AgentEvent, AgentExecutor, AgentLimits, get_default_system_prompt
 from app.agent.permissions import PermissionsConfig
 from app.agent.permissions import merge as merge_permissions
+from app.agent.project_instructions import load_project_instructions
 from app.agent.runs import run_registry
 from app.agent.service import (
     append_message,
@@ -43,6 +44,20 @@ from app.security.capabilities import merge_policy as merge_capability_policy
 from app.security.secrets import mask_secrets_in_value
 
 log = get_logger(__name__)
+
+# --- Context assembly budget (item 6) ---
+# Maximum characters for ALL injected context blocks combined (project
+# instructions + plan + memory + skills). ~20 000 chars ≈ 5 000 tokens.
+MAX_INJECTED_CONTEXT_CHARS = 20_000
+
+# Priority weights for budget allocation. When a section is shorter than its
+# allocation, the surplus is redistributed proportionally to the others.
+_CONTEXT_WEIGHTS: dict[str, float] = {
+    "project_instructions": 0.30,
+    "plan": 0.25,
+    "memory": 0.25,
+    "skills": 0.20,
+}
 
 # Event kinds that get persisted to the run_events log one row each, in order.
 # token/thinking are batched (see _EventLog) to avoid a write-per-token storm;
@@ -156,47 +171,49 @@ async def run_conversation_turn(
     if effective_tool_names is None and _profile and _profile.tool_names:
         effective_tool_names = _profile.tool_names
 
-    # Inject active plan context (Фаза 2 §1) so the agent knows which plan
-    # steps to execute and can mark them via plan_step_update.
+    # --- Collect injectable context sections (budget-aware assembly) ---
+    # Each section is collected independently, then truncated to fit within
+    # MAX_INJECTED_CONTEXT_CHARS using priority-weighted allocation.
+    _sections: dict[str, str | None] = {}
+
+    # Project instructions (AGENTS.md from working directory).
+    _sections["project_instructions"] = load_project_instructions(working_directory)
+
+    # Active plan context (Фаза 2 §1).
     from app.agent.planning import build_plan_context
 
-    plan_ctx = build_plan_context(session, conversation_id)
-    if plan_ctx and effective_system_prompt:
-        effective_system_prompt = f"{effective_system_prompt}\n\n{plan_ctx}"
-    elif plan_ctx:
-        effective_system_prompt = plan_ctx
+    _sections["plan"] = build_plan_context(session, conversation_id)
 
-    # Inject relevant skills context (Фаза 2 §3) based on the user's input.
-    # Auto-detects which skills are relevant and appends a brief catalog so
-    # the agent knows skills exist and can activate them via use_skill tool.
+    # Relevant skills context (Фаза 2 §3).
     if user_input:
         from app.skills.context import build_skills_context
 
-        skills_ctx = build_skills_context(user_input)
-        if skills_ctx and effective_system_prompt:
-            effective_system_prompt = f"{effective_system_prompt}\n\n{skills_ctx}"
-        elif skills_ctx:
-            effective_system_prompt = skills_ctx
+        _sections["skills"] = build_skills_context(user_input)
+    else:
+        _sections["skills"] = None
 
-    # Inject memory context (Фаза 3a) — user preferences, relevant long-term
-    # memories, conversation summary, and working memory state.
-    # When a profile is active, pass its id as agent_id for memory namespacing.
+    # Memory context (Фаза 3a).
     if settings.memory_enabled:
         from app.memory.context_builder import build_memory_context
 
         _mem_user = get_or_create_default_user(session)
         assert _mem_user.id is not None
-        memory_ctx = build_memory_context(
+        _sections["memory"] = build_memory_context(
             session,
             user_id=_mem_user.id,
             agent_id=_profile.id if _profile else None,
             conversation_id=conversation_id,
             query=user_input,
         )
-        if memory_ctx and effective_system_prompt:
-            effective_system_prompt = f"{effective_system_prompt}\n\n{memory_ctx}"
-        elif memory_ctx:
-            effective_system_prompt = memory_ctx
+    else:
+        _sections["memory"] = None
+
+    # Assemble with token budget.
+    assembled_context = _assemble_context_budget(_sections)
+    if assembled_context and effective_system_prompt:
+        effective_system_prompt = f"{effective_system_prompt}\n\n{assembled_context}"
+    elif assembled_context:
+        effective_system_prompt = assembled_context
 
     effective_permissions: PermissionsConfig = merge_permissions(
         dict(settings.default_tool_permissions), conversation_permissions
@@ -503,6 +520,99 @@ def _limits_to_config(limits: AgentLimits, tool_names: list[str] | None) -> dict
         "max_cost_usd": limits.max_cost_usd,
         "tool_names": tool_names,
     }
+
+
+def _assemble_context_budget(sections: dict[str, str | None]) -> str | None:
+    """Assemble context sections with priority-weighted budget allocation.
+
+    Each section gets a character budget proportional to its weight. If a
+    section is shorter than its allocation, the surplus is redistributed to
+    the remaining sections proportionally. Sections that exceed their final
+    budget are truncated (at a line boundary when possible).
+
+    Returns the concatenated context string, or None if all sections are empty.
+    """
+    # Filter to non-empty sections.
+    active: dict[str, str] = {k: v for k, v in sections.items() if v}
+    if not active:
+        return None
+
+    total_budget = MAX_INJECTED_CONTEXT_CHARS
+
+    # Check if everything fits without truncation.
+    total_chars = sum(len(v) for v in active.values())
+    if total_chars <= total_budget:
+        return "\n\n".join(active.values())
+
+    # Allocate budget proportionally, redistributing surplus.
+    # Iterative: sections that fit within their allocation free up budget
+    # for the others.
+    allocations: dict[str, int] = {}
+    remaining_keys = set(active.keys())
+    remaining_budget = total_budget
+
+    for _pass in range(3):  # converges in ≤ 3 passes for 4 sections
+        if not remaining_keys:
+            break
+        # Compute weights for remaining sections.
+        weight_sum = sum(_CONTEXT_WEIGHTS.get(k, 0.2) for k in remaining_keys)
+        if weight_sum <= 0:
+            # Equal split fallback.
+            per_section = remaining_budget // len(remaining_keys)
+            for k in remaining_keys:
+                allocations[k] = per_section
+            break
+
+        settled_this_pass: list[str] = []
+        for key in remaining_keys:
+            weight = _CONTEXT_WEIGHTS.get(key, 0.2)
+            alloc = int(remaining_budget * (weight / weight_sum))
+            if len(active[key]) <= alloc:
+                # Section fits — allocate its actual size, free the surplus.
+                allocations[key] = len(active[key])
+                settled_this_pass.append(key)
+
+        if not settled_this_pass:
+            # No section fits — allocate proportionally and truncate all.
+            for key in remaining_keys:
+                weight = _CONTEXT_WEIGHTS.get(key, 0.2)
+                allocations[key] = int(remaining_budget * (weight / weight_sum))
+            break
+
+        # Remove settled sections and recalculate.
+        for key in settled_this_pass:
+            remaining_budget -= allocations[key]
+            remaining_keys.discard(key)
+
+    # Assemble with truncation.
+    parts: list[str] = []
+    for key in ("project_instructions", "plan", "memory", "skills"):
+        content = active.get(key)
+        if not content:
+            continue
+        budget = allocations.get(key, len(content))
+        if len(content) > budget:
+            content = _truncate_at_boundary(content, budget)
+            log.info(
+                "context_budget.truncated_section",
+                section=key,
+                original_chars=len(active[key]),
+                budget=budget,
+            )
+        parts.append(content)
+
+    return "\n\n".join(parts) if parts else None
+
+
+def _truncate_at_boundary(text: str, max_chars: int) -> str:
+    """Truncate text to max_chars, preferring a line boundary."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_newline = truncated.rfind("\n")
+    if last_newline > max_chars // 2:  # only if we keep at least half
+        truncated = truncated[:last_newline]
+    return truncated + "\n… (truncated)"
 
 
 def _backfill_missing_tool_results(

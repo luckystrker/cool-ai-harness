@@ -26,6 +26,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.agent.approvals import DEFAULT_APPROVAL_TIMEOUT_S, approval_registry
+from app.agent.context_window import compute_history_budget, truncate_history
 from app.agent.events import AgentEvent
 from app.agent.permissions import Decision, PermissionsConfig
 from app.agent.runs import run_registry
@@ -219,9 +220,22 @@ class AgentExecutor:
                         )
                         return
 
+                # --- Context window management ---
+                # Truncate history to fit within the model's context window
+                # before each LLM call. Preserves system prompt and recent
+                # messages; drops oldest exchanges atomically.
+                from app.core.config import get_settings as _get_settings
+
+                _ctx_settings = _get_settings()
+                _history_budget = compute_history_budget(
+                    _ctx_settings.context_window_tokens,
+                    _ctx_settings.context_reserve_ratio,
+                )
+                llm_history = truncate_history(self.history, max_tokens=_history_budget)
+
                 try:
                     async for event in self.provider.chat_completion_stream(
-                        self.history,
+                        llm_history,
                         model=self.config.model,
                         tools=tools or None,
                         temperature=self.config.temperature,
@@ -580,6 +594,18 @@ class AgentExecutor:
 
         yield AgentEvent.tool_call_start(call_id=call_id, name=name, arguments=args)
 
+        # --- Parse error gate: if the stream delivered malformed JSON args,
+        # fail explicitly instead of executing with empty/garbage arguments.
+        if call.get("_parse_error"):
+            result = ToolResult.err(
+                f"Failed to parse arguments for tool '{name}' "
+                "(stream may have been interrupted). Please retry."
+            )
+            result.metadata = {"parse_error": True, "duration_ms": 0}
+            await self._finalize_tool_call(call_id, name, result)
+            yield self._masked_tool_result(call_id, name, result)
+            return
+
         tool = get_tool(name)
         t0 = time.monotonic()
 
@@ -836,20 +862,35 @@ def _merge_one_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any
 
 
 def _normalize_tool_call(call: dict[str, Any]) -> dict[str, Any]:
-    """Parse JSON-string arguments into a dict. Returns a flat call shape."""
+    """Parse JSON-string arguments into a dict. Returns a flat call shape.
+
+    If the arguments JSON is malformed (e.g. stream interrupted mid-JSON),
+    sets ``_parse_error: True`` in the returned dict so the caller can emit
+    an explicit error instead of silently executing with empty args.
+    """
     fn = call.get("function") or {}
     name = fn.get("name", "")
     raw_args = fn.get("arguments", "")
+    parse_error = False
     if isinstance(raw_args, str):
         try:
             args = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError:
+            log.warning(
+                "agent.tool_args_parse_error",
+                tool_name=name,
+                raw_args_preview=raw_args[:200],
+            )
             args = {}
+            parse_error = True
     else:
         args = raw_args or {}
-    return {
+    result: dict[str, Any] = {
         "id": call.get("id"),
         "type": call.get("type", "function"),
         "name": name,
         "arguments": args,
     }
+    if parse_error:
+        result["_parse_error"] = True
+    return result

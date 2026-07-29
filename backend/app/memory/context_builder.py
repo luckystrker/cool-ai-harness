@@ -28,6 +28,25 @@ MAX_CONTEXT_MEMORIES = 8
 # Max characters per memory content in the context.
 MAX_MEMORY_CONTENT_CHARS = 200
 
+# Minimal English stop-word set for entity matching. Words in this set are
+# never used as entity-name hints (they trigger useless DB lookups).
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "shall", "can", "need", "dare",
+    "it", "its", "this", "that", "these", "those", "i", "me", "my",
+    "we", "our", "you", "your", "he", "him", "his", "she", "her",
+    "they", "them", "their", "what", "which", "who", "whom", "when",
+    "where", "why", "how", "all", "each", "every", "both", "few",
+    "more", "most", "other", "some", "such", "no", "nor", "not",
+    "only", "own", "same", "so", "than", "too", "very", "just",
+    "because", "as", "until", "while", "about", "between", "through",
+    "during", "before", "after", "above", "below", "up", "down",
+    "out", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "also", "into", "if", "any",
+})
+
 
 def build_memory_context(
     session: Session,
@@ -222,16 +241,25 @@ def _get_entities_block(session: Session, *, user_id: int, query: str) -> str | 
 
     Looks up entities whose canonical name appears as a substring in the user's
     input (cheap, no LLM call). Returns None if nothing matches.
+
+    Stop-words and very short tokens are filtered out to avoid useless DB
+    lookups (e.g. "the", "and", "for" would never be entity names).
     """
     from app.memory.entities import list_entities
 
     # Try each significant word in the query as an entity-name hint.
-    words = [w.strip(".,;:!?()[]\"'") for w in query.split() if len(w.strip()) > 2]
+    # Filter: strip punctuation, skip stop-words, skip words ≤ 3 chars.
+    words = [
+        w.strip(".,;:!?()[]\"'")
+        for w in query.split()
+        if len(w.strip(".,;:!?()[]\"'")) > 3
+    ]
+    words = [w for w in words if w.lower() not in _STOP_WORDS]
     if not words:
         return None
 
     found: dict[int, tuple[str, str, str]] = {}  # entity_id -> (name, type, description)
-    for word in words[:8]:  # cap lookups
+    for word in words[:5]:  # cap lookups at 5 (was 8)
         matches = list_entities(session, user_id=user_id, query=word, limit=3)
         for e in matches:
             if e.id is not None and e.id not in found:
