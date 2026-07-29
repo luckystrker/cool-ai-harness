@@ -33,7 +33,7 @@ from app.agent.runs import run_registry
 from app.budgets import (
     budget_evaluation,
     mark_alert_fired,
-    record_spend_run_scoped,
+    record_spend,
     window_start,
 )
 from app.core.db import engine
@@ -480,30 +480,36 @@ class AgentExecutor:
     ) -> list[AgentEvent]:
         """Persist this LLM call's spend and emit a budget_alert if warranted.
 
-        Returns a (possibly empty) list of events for the loop to yield. Records
-        spend via the run-scoped helper (own session) so the executor never
-        holds a DB session across the loop. Errors are logged and swallowed —
-        spend accounting must not break a turn.
+        Returns a (possibly empty) list of events for the loop to yield. Uses a
+        single short-lived session for both spend recording and budget evaluation
+        (item 8: eliminates the redundant second session open). Errors are logged
+        and swallowed — spend accounting must not break a turn.
         """
         provider_name = getattr(self.provider, "name", "") or ""
-        record_spend_run_scoped(
-            user_id=self.config.user_id or 0,
-            model=self.config.model,
-            provider_name=provider_name,
-            usage=call_usage,
-            run_id=self.config.run_id,
-            conversation_id=self.config.conversation_id,
-        )
         events: list[AgentEvent] = []
+        user_id = self.config.user_id
+        if user_id is None:
+            return events
         try:
             with Session(engine) as session:
-                evaluation = budget_evaluation(session, user_id=self.config.user_id)
+                # Record spend (commits internally so evaluation sees it).
+                record_spend(
+                    session,
+                    user_id=user_id,
+                    model=self.config.model,
+                    provider_name=provider_name,
+                    usage=call_usage,
+                    run_id=self.config.run_id,
+                    conversation_id=self.config.conversation_id,
+                )
+                # Evaluate budget + fire alerts in the same session.
+                evaluation = budget_evaluation(session, user_id=user_id)
                 for window, ws in evaluation.windows.items():
                     if not ws.alerted or ws.limit_usd is None:
                         continue
                     # Debounce: fire at most once per period per window.
                     row = session.exec(
-                        select(Budget).where(Budget.user_id == self.config.user_id)
+                        select(Budget).where(Budget.user_id == user_id)
                     ).first()
                     last = getattr(row, "last_alert_at", None) if row else None
                     # Re-fire only if no alert has fired in this window's period.
@@ -517,10 +523,10 @@ class AgentExecutor:
                             pct=ws.pct,
                         )
                     )
-                    mark_alert_fired(session, user_id=self.config.user_id)
+                    mark_alert_fired(session, user_id=user_id)
                     break  # one alert event per call is enough
         except Exception as exc:
-            log.warning("agent.budget_alert_failed", error=str(exc))
+            log.warning("agent.budget_spend_or_alert_failed", error=str(exc))
         return events
 
     def _build_run_context(self) -> RunContext:

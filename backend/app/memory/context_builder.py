@@ -239,16 +239,15 @@ def _get_working_memory_block(session: Session, *, conversation_id: int) -> str 
 def _get_entities_block(session: Session, *, user_id: int, query: str) -> str | None:
     """Build the relevant named-entities section.
 
-    Looks up entities whose canonical name appears as a substring in the user's
-    input (cheap, no LLM call). Returns None if nothing matches.
+    Looks up entities whose canonical name (or alias) appears as a substring
+    in any significant word of the user's input. Uses a single batched DB
+    query (item 9: eliminates the per-word N+1 loop).
 
-    Stop-words and very short tokens are filtered out to avoid useless DB
-    lookups (e.g. "the", "and", "for" would never be entity names).
+    Stop-words and very short tokens are filtered out to avoid useless matches.
     """
-    from app.memory.entities import list_entities
+    from app.memory.entities import batch_match_entities
 
-    # Try each significant word in the query as an entity-name hint.
-    # Filter: strip punctuation, skip stop-words, skip words ≤ 3 chars.
+    # Extract significant words: strip punctuation, skip stop-words, skip ≤ 3 chars.
     words = [
         w.strip(".,;:!?()[]\"'")
         for w in query.split()
@@ -258,22 +257,17 @@ def _get_entities_block(session: Session, *, user_id: int, query: str) -> str | 
     if not words:
         return None
 
-    found: dict[int, tuple[str, str, str]] = {}  # entity_id -> (name, type, description)
-    for word in words[:5]:  # cap lookups at 5 (was 8)
-        matches = list_entities(session, user_id=user_id, query=word, limit=3)
-        for e in matches:
-            if e.id is not None and e.id not in found:
-                desc = e.description or ""
-                if len(desc) > MAX_MEMORY_CONTENT_CHARS:
-                    desc = desc[:MAX_MEMORY_CONTENT_CHARS] + "…"
-                found[e.id] = (e.name, e.entity_type, desc)
-
-    if not found:
+    # Single batched query (was: up to 5 separate list_entities calls).
+    matches = batch_match_entities(session, user_id=user_id, words=words[:5], limit=6)
+    if not matches:
         return None
 
     lines = ["[RELEVANT ENTITIES]"]
-    for name, etype, desc in list(found.values())[:6]:
-        line = f"- {name} ({etype})"
+    for e in matches:
+        desc = e.description or ""
+        if len(desc) > MAX_MEMORY_CONTENT_CHARS:
+            desc = desc[:MAX_MEMORY_CONTENT_CHARS] + "…"
+        line = f"- {e.name} ({e.entity_type})"
         if desc:
             line += f": {desc}"
         lines.append(line)

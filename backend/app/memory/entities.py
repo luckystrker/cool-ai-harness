@@ -378,3 +378,49 @@ def count_entities(session: Session, *, user_id: int) -> int:
     return session.exec(
         select(func.count()).select_from(Entity).where(Entity.user_id == user_id)
     ).one()
+
+
+def batch_match_entities(
+    session: Session,
+    *,
+    user_id: int,
+    words: list[str],
+    limit: int = 6,
+) -> list[Entity]:
+    """Match entities against multiple query words in a single DB round-trip.
+
+    Replaces the per-word ``list_entities`` loop (N+1 pattern) with one query
+    that fetches recent entities, then matches all words in Python. Matching
+    logic is identical to ``list_entities(query=...)``: case-insensitive
+    substring on canonical name or any alias.
+
+    Returns de-duplicated entities (first match wins), capped at ``limit``.
+    """
+    if not words:
+        return []
+
+    # Over-fetch to allow Python-side filtering (same ratio as list_entities).
+    fetch_limit = limit * 10
+    stmt = (
+        select(Entity)
+        .where(Entity.user_id == user_id)
+        .order_by(col(Entity.updated_at).desc())
+        .limit(fetch_limit)
+    )
+    entities = list(session.exec(stmt).all())
+
+    words_lower = [w.lower() for w in words]
+    matched: list[Entity] = []
+    seen: set[int] = set()
+    for e in entities:
+        if e.id is None or e.id in seen:
+            continue
+        name_lower = e.name.lower()
+        aliases_lower = [a.lower() for a in (e.aliases or [])]
+        if any(w in name_lower or any(w in a for a in aliases_lower) for w in words_lower):
+            matched.append(e)
+            seen.add(e.id)
+            if len(matched) >= limit:
+                break
+
+    return matched

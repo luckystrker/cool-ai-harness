@@ -189,6 +189,7 @@ def append_message(
     usage: dict | None = None,
     thinking: str | None = None,
     tool_result: dict | None = None,
+    commit: bool = True,
 ) -> MessageRow:
     row = MessageRow(
         conversation_id=conversation_id,
@@ -200,8 +201,13 @@ def append_message(
         tool_result=tool_result,
     )
     session.add(row)
-    session.commit()
-    session.refresh(row)
+    if commit:
+        session.commit()
+        session.refresh(row)
+    else:
+        # Flush assigns the PK (autoincrement) without ending the transaction,
+        # allowing the caller to batch multiple writes into a single commit.
+        session.flush()
     return row
 
 
@@ -237,12 +243,15 @@ def create_run(
     return run
 
 
-def update_run(session: Session, run_id: int, **fields) -> AgentRun | None:
+def update_run(session: Session, run_id: int, *, commit: bool = True, **fields) -> AgentRun | None:
     """Patch arbitrary columns on a run. Returns the run, or None if not found.
 
     Callers pass only the fields they want to change (e.g. status=...,
     iterations=..., usage=...). ``None`` values are written as-is, so use
     update_run_status/finish_run helpers when a sentinel-free update is needed.
+
+    When ``commit=False``, flushes without committing so the caller can batch
+    multiple writes into a single transaction.
     """
     run = session.get(AgentRun, run_id)
     if run is None:
@@ -250,8 +259,11 @@ def update_run(session: Session, run_id: int, **fields) -> AgentRun | None:
     for key, value in fields.items():
         setattr(run, key, value)
     session.add(run)
-    session.commit()
-    session.refresh(run)
+    if commit:
+        session.commit()
+        session.refresh(run)
+    else:
+        session.flush()
     return run
 
 

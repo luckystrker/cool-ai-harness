@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from sqlmodel import Session
 
@@ -39,7 +40,8 @@ from app.models import ToolCall as ToolCallRow
 from app.models.run import RUN_STATUS_RUNNING
 from app.observability import inspector_registry
 from app.providers import LLMProvider
-from app.security.breakpoints import merge_breakpoints
+from app.security.breakpoints import BreakpointsConfig, merge_breakpoints
+from app.security.capabilities import CapabilityPolicy
 from app.security.capabilities import merge_policy as merge_capability_policy
 from app.security.secrets import mask_secrets_in_value
 
@@ -99,6 +101,237 @@ class _EventLog:
         self._buffer.clear()
 
 
+# --- Item 10: pipeline stages extracted from run_conversation_turn ---
+
+
+@dataclass
+class _ResolvedTurn:
+    """Fully resolved configuration for a conversation turn.
+
+    Produced by :func:`_resolve_turn_config`; consumed by
+    :func:`run_conversation_turn`. Each field is independently testable.
+    """
+
+    system_prompt: str | None
+    tool_names: list[str] | None
+    permissions: PermissionsConfig
+    capability_policy: CapabilityPolicy
+    breakpoints: BreakpointsConfig
+    limits: AgentLimits
+    # Resolved profile id (for memory agent_id); None when no profile active.
+    profile_id: int | None
+
+
+def _resolve_turn_config(
+    session: Session,
+    *,
+    conversation_id: int,
+    system_prompt: str | None,
+    tool_names: list[str] | None,
+    working_directory: str | None,
+    user_input: str | None,
+    conversation_permissions: dict[str, str] | None,
+    conversation_capability_policy: dict[str, str] | None,
+    conversation_breakpoints: list[dict] | None,
+    limits: AgentLimits | None,
+    profile_id: int | None,
+) -> _ResolvedTurn:
+    """Resolve all per-turn configuration from layered sources.
+
+    Pipeline: profile → prompt → tools → context injection → security merge.
+    Each stage is a pure function of its inputs, making the pipeline testable
+    without running the full agent loop.
+    """
+    settings = get_settings()
+
+    # --- Stage 1: resolve profile ---
+    _profile = None
+    if profile_id is not None:
+        from app.agent.personalities.service import get_profile
+
+        _profile = get_profile(session, profile_id)
+
+    # --- Stage 2: resolve system prompt (per-request > profile > default) ---
+    effective_prompt: str | None
+    if system_prompt:
+        effective_prompt = system_prompt
+    elif _profile and _profile.system_prompt:
+        effective_prompt = _profile.system_prompt
+    else:
+        effective_prompt = get_default_system_prompt() or None
+
+    # --- Stage 3: resolve tool whitelist (per-request > profile > all) ---
+    effective_tools = tool_names
+    if effective_tools is None and _profile and _profile.tool_names:
+        effective_tools = _profile.tool_names
+
+    # --- Stage 4: collect + assemble injected context (budget-aware) ---
+    _sections: dict[str, str | None] = {}
+    _sections["project_instructions"] = load_project_instructions(working_directory)
+
+    from app.agent.planning import build_plan_context
+
+    _sections["plan"] = build_plan_context(session, conversation_id)
+
+    if user_input:
+        from app.skills.context import build_skills_context
+
+        _sections["skills"] = build_skills_context(user_input)
+    else:
+        _sections["skills"] = None
+
+    if settings.memory_enabled:
+        from app.memory.context_builder import build_memory_context
+
+        _mem_user = get_or_create_default_user(session)
+        assert _mem_user.id is not None
+        _sections["memory"] = build_memory_context(
+            session,
+            user_id=_mem_user.id,
+            agent_id=_profile.id if _profile else None,
+            conversation_id=conversation_id,
+            query=user_input,
+        )
+    else:
+        _sections["memory"] = None
+
+    assembled = _assemble_context_budget(_sections)
+    if assembled and effective_prompt:
+        effective_prompt = f"{effective_prompt}\n\n{assembled}"
+    elif assembled:
+        effective_prompt = assembled
+
+    # --- Stage 5: merge security layers (global < profile < conversation) ---
+    effective_permissions: PermissionsConfig = merge_permissions(
+        dict(settings.default_tool_permissions), conversation_permissions
+    )
+    _profile_cap_policy = None
+    if _profile and _profile.settings and isinstance(_profile.settings, dict):
+        _profile_cap_policy = _profile.settings.get("capability_policy")
+    effective_capability_policy = merge_capability_policy(
+        dict(settings.capability_policy), _profile_cap_policy
+    )
+    # Pass .caps (dict) so the second merge preserves the first merge's result
+    # (passing the CapabilityPolicy object would be treated as non-dict → {}).
+    effective_capability_policy = merge_capability_policy(
+        effective_capability_policy.caps, conversation_capability_policy
+    )
+    effective_breakpoints = merge_breakpoints(None, conversation_breakpoints)
+    effective_limits = limits or _default_limits(settings)
+
+    return _ResolvedTurn(
+        system_prompt=effective_prompt,
+        tool_names=effective_tools,
+        permissions=effective_permissions,
+        capability_policy=effective_capability_policy,
+        breakpoints=effective_breakpoints,
+        limits=effective_limits,
+        profile_id=_profile.id if _profile else None,
+    )
+
+def _persist_tool_result(
+    session: Session,
+    *,
+    settings,
+    conversation_id: int,
+    run_id: int | None,
+    payload: dict,
+    persisted_last_assistant_id: int | None,
+    pending_tool_args: dict[str, dict],
+    pending_approval_meta: dict[str, tuple[str, float]],
+    approval_requested: set[str],
+    iteration_count: int,
+) -> None:
+    """Persist all rows for a tool_result event in a single transaction (item 7+10).
+
+    Writes: tool message + ToolCallRow + ApprovalAudit + run checkpoint,
+    then commits once.
+    """
+    result = payload.get("result") or {}
+    call_id = payload.get("id")
+
+    # 1. Tool message (flush, no commit yet).
+    append_message(
+        session,
+        conversation_id=conversation_id,
+        role="tool",
+        content=result.get("output"),
+        tool_result={
+            "tool_call_id": call_id,
+            "name": payload.get("name"),
+            "result": result,
+        },
+        commit=False,
+    )
+
+    # 2. Observability row.
+    metadata = result.get("metadata") or {}
+    tool_args = pending_tool_args.pop(call_id, None)
+    session.add(
+        ToolCallRow(
+            conversation_id=conversation_id,
+            message_id=persisted_last_assistant_id,
+            name=payload.get("name", ""),
+            arguments=tool_args,
+            result=result,
+            duration_ms=metadata.get("duration_ms"),
+            success=not result.get("is_error", False),
+            error=result.get("error"),
+        )
+    )
+
+    # 3. Approval audit.
+    is_denied = bool(metadata.get("denied"))
+    is_breakpoint = bool(metadata.get("breakpoint"))
+    bp_type = metadata.get("breakpoint")
+    audit_name, audit_t0 = pending_approval_meta.pop(call_id, (payload.get("name", ""), 0.0))
+    audit_duration_ms = int((time.monotonic() - audit_t0) * 1000) if audit_t0 else None
+    if is_denied and call_id in approval_requested:
+        decision_source = "timeout"
+    elif call_id in approval_requested:
+        decision_source = "user"
+    elif is_denied:
+        decision_source = "policy"
+    else:
+        decision_source = "auto"
+    approval_requested.discard(call_id)
+    session.add(
+        ApprovalAudit(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            call_id=call_id or "",
+            tool_name=audit_name,
+            arguments=mask_secrets_in_value(
+                tool_args or {},
+                enabled=settings.mask_secrets,
+            ),
+            approved=not is_denied,
+            decision_source=decision_source,
+            decided_by="default",
+            reason=f"Breakpoint: {bp_type}" if is_breakpoint else None,
+            is_breakpoint=is_breakpoint,
+            breakpoint_type=bp_type if is_breakpoint else None,
+            duration_ms=audit_duration_ms,
+        )
+    )
+
+    # 4. Run checkpoint.
+    if run_id is not None:
+        update_run(
+            session,
+            run_id,
+            commit=False,
+            checkpoint={
+                "iteration": iteration_count,
+                "last_call_id": call_id,
+                "last_tool": payload.get("name"),
+            },
+        )
+
+    # Single commit for all writes.
+    session.commit()
+
+
 async def run_conversation_turn(
     *,
     session: Session,
@@ -145,109 +378,38 @@ async def run_conversation_turn(
       - ``cancellable`` (requires run_id) registers the run for cancellation;
         the executor polls the registry each iteration / before each tool call.
     """
+    settings = get_settings()
     history = load_history(session, conversation_id)
 
-    settings = get_settings()
-
-    # Resolve agent profile (Фаза 3a §2) — provides base system prompt, tool
-    # whitelist, and memory namespace. Per-request overrides still take priority.
-    _profile = None
-    if profile_id is not None:
-        from app.agent.personalities.service import get_profile
-
-        _profile = get_profile(session, profile_id)
-
-    # Resolve the effective system prompt:
-    # per-request > profile > settings default > built-in file.
-    if system_prompt:
-        effective_system_prompt = system_prompt
-    elif _profile and _profile.system_prompt:
-        effective_system_prompt = _profile.system_prompt
-    else:
-        effective_system_prompt = get_default_system_prompt() or None
-
-    # Resolve effective tool names: per-request > profile > all.
-    effective_tool_names = tool_names
-    if effective_tool_names is None and _profile and _profile.tool_names:
-        effective_tool_names = _profile.tool_names
-
-    # --- Collect injectable context sections (budget-aware assembly) ---
-    # Each section is collected independently, then truncated to fit within
-    # MAX_INJECTED_CONTEXT_CHARS using priority-weighted allocation.
-    _sections: dict[str, str | None] = {}
-
-    # Project instructions (AGENTS.md from working directory).
-    _sections["project_instructions"] = load_project_instructions(working_directory)
-
-    # Active plan context (Фаза 2 §1).
-    from app.agent.planning import build_plan_context
-
-    _sections["plan"] = build_plan_context(session, conversation_id)
-
-    # Relevant skills context (Фаза 2 §3).
-    if user_input:
-        from app.skills.context import build_skills_context
-
-        _sections["skills"] = build_skills_context(user_input)
-    else:
-        _sections["skills"] = None
-
-    # Memory context (Фаза 3a).
-    if settings.memory_enabled:
-        from app.memory.context_builder import build_memory_context
-
-        _mem_user = get_or_create_default_user(session)
-        assert _mem_user.id is not None
-        _sections["memory"] = build_memory_context(
-            session,
-            user_id=_mem_user.id,
-            agent_id=_profile.id if _profile else None,
-            conversation_id=conversation_id,
-            query=user_input,
-        )
-    else:
-        _sections["memory"] = None
-
-    # Assemble with token budget.
-    assembled_context = _assemble_context_budget(_sections)
-    if assembled_context and effective_system_prompt:
-        effective_system_prompt = f"{effective_system_prompt}\n\n{assembled_context}"
-    elif assembled_context:
-        effective_system_prompt = assembled_context
-
-    effective_permissions: PermissionsConfig = merge_permissions(
-        dict(settings.default_tool_permissions), conversation_permissions
+    # --- Resolve all per-turn configuration (item 10: extracted pipeline) ---
+    resolved = _resolve_turn_config(
+        session,
+        conversation_id=conversation_id,
+        system_prompt=system_prompt,
+        tool_names=tool_names,
+        working_directory=working_directory,
+        user_input=user_input,
+        conversation_permissions=conversation_permissions,
+        conversation_capability_policy=conversation_capability_policy,
+        conversation_breakpoints=conversation_breakpoints,
+        limits=limits,
+        profile_id=profile_id,
     )
-    # Merge capability policy: global < profile < conversation.
-    _profile_cap_policy = None
-    if _profile and _profile.settings and isinstance(_profile.settings, dict):
-        _profile_cap_policy = _profile.settings.get("capability_policy")
-    effective_capability_policy = merge_capability_policy(
-        dict(settings.capability_policy), _profile_cap_policy
-    )
-    effective_capability_policy = merge_capability_policy(
-        effective_capability_policy, conversation_capability_policy
-    )
-    effective_breakpoints = merge_breakpoints(
-        None, conversation_breakpoints  # Global breakpoints from settings (future)
-    )
-    effective_limits = limits or _default_limits(settings)
 
     executor = AgentExecutor(
         provider=provider,
         config=AgentConfig(
             model=model,
-            system_prompt=effective_system_prompt,
-            tool_names=effective_tool_names,
-            limits=effective_limits,
+            system_prompt=resolved.system_prompt,
+            tool_names=resolved.tool_names,
+            limits=resolved.limits,
             working_directory=working_directory,
-            permissions=effective_permissions,
-            capability_policy=effective_capability_policy,
-            breakpoints=effective_breakpoints,
+            permissions=resolved.permissions,
+            capability_policy=resolved.capability_policy,
+            breakpoints=resolved.breakpoints,
             auto_approve=auto_approve,
             run_id=run_id,
             cancellable=cancellable,
-            # Cost-budget accounting (Фаза 1.5 §5): single-user MVP.
             user_id=get_or_create_default_user(session).id,
             conversation_id=conversation_id,
         ),
@@ -265,30 +427,16 @@ async def run_conversation_turn(
             session,
             run_id,
             status=RUN_STATUS_RUNNING,
-            config=_limits_to_config(effective_limits, tool_names),
+            config=_limits_to_config(resolved.limits, tool_names),
         )
 
-    # The executor emits one `message` event per loop iteration (per assistant
-    # turn). An iteration that requests tools yields a message with tool_calls;
-    # a later iteration yields the final text answer. We persist each of them as
-    # its own row so the tool-call request is never lost (previously only the
-    # last message was saved on `finish`, which dropped the tool_calls when a
-    # follow-up text turn overwrote them).
+    # --- Mutable loop state ---
     persisted_last_assistant_id: int | None = None
-    # tool_call_id -> arguments dict. Captured from tool_call_start so the
-    # ToolCall observability row (written on tool_result) can record what was
-    # actually invoked, not just the result.
     pending_tool_args: dict[str, dict] = {}
-    # tool_call_id -> (name, t0_monotonic) for approval audit timing.
     pending_approval_meta: dict[str, tuple[str, float]] = {}
-    # call_ids that had an explicit approval request (vs auto-allowed).
     approval_requested: set[str] = set()
-    # Count of completed LLM iterations for the run row.
     iteration_count = 0
     terminal_reason: str | None = None
-    # Wall-clock start of the turn, used to stamp the duration on the final
-    # assistant message(s). Captured here (not at run creation) so it reflects
-    # the actual loop time, independent of pre-loop setup.
     turn_t0 = time.monotonic()
 
     try:
@@ -300,7 +448,6 @@ async def run_conversation_turn(
                 content = event.payload.get("content")
                 tool_calls = event.payload.get("tool_calls")
                 thinking = event.payload.get("thinking")
-                # Skip truly empty turns (no text, no tool calls) — nothing to show.
                 if content or tool_calls:
                     row = append_message(
                         session,
@@ -314,9 +461,8 @@ async def run_conversation_turn(
                 iteration_count += 1
                 if run_id is not None:
                     update_run(session, run_id, iterations=iteration_count)
+
             elif event.kind == "tool_call_start":
-                # Remember the arguments so the observability row (written when
-                # the tool finishes) can record them.
                 call_id = event.payload.get("id")
                 if call_id is not None:
                     pending_tool_args[call_id] = event.payload.get("arguments") or {}
@@ -324,9 +470,8 @@ async def run_conversation_turn(
                         event.payload.get("name", ""),
                         time.monotonic(),
                     )
+
             elif event.kind == "tool_approval_request":
-                # Track that an approval was requested so we can audit it when
-                # the tool_result arrives (approved or denied).
                 call_id = event.payload.get("id")
                 if call_id is not None:
                     approval_requested.add(call_id)
@@ -335,99 +480,24 @@ async def run_conversation_turn(
                             event.payload.get("name", ""),
                             time.monotonic(),
                         )
+
             elif event.kind == "tool_result":
-                payload = event.payload
-                result = payload.get("result") or {}
-                call_id = payload.get("id")
-                # Persist the structured result plus a tool_call_id/name so the
-                # reloaded history can reconstruct the provider tool message and
-                # the UI can show the result inline with its call.
-                append_message(
+                _persist_tool_result(
                     session,
+                    settings=settings,
                     conversation_id=conversation_id,
-                    role="tool",
-                    content=result.get("output"),
-                    tool_result={
-                        "tool_call_id": call_id,
-                        "name": payload.get("name"),
-                        "result": result,
-                    },
+                    run_id=run_id,
+                    payload=event.payload,
+                    persisted_last_assistant_id=persisted_last_assistant_id,
+                    pending_tool_args=pending_tool_args,
+                    pending_approval_meta=pending_approval_meta,
+                    approval_requested=approval_requested,
+                    iteration_count=iteration_count,
                 )
-                # Observability: one row per tool invocation (Фаза 3a prep).
-                metadata = result.get("metadata") or {}
-                tool_args = pending_tool_args.pop(call_id, None)
-                session.add(
-                    ToolCallRow(
-                        conversation_id=conversation_id,
-                        message_id=persisted_last_assistant_id,
-                        name=payload.get("name", ""),
-                        arguments=tool_args,
-                        result=result,
-                        duration_ms=metadata.get("duration_ms"),
-                        success=not result.get("is_error", False),
-                        error=result.get("error"),
-                    )
-                )
-                # Approval audit: record the decision (approved/denied/auto).
-                # If the tool was denied, the metadata carries {"denied": True}.
-                is_denied = bool(metadata.get("denied"))
-                is_breakpoint = bool(metadata.get("breakpoint"))
-                bp_type = metadata.get("breakpoint")
-                audit_name, audit_t0 = pending_approval_meta.pop(call_id, (payload.get("name", ""), 0.0))
-                audit_duration_ms = int((time.monotonic() - audit_t0) * 1000) if audit_t0 else None
-                # Determine the decision source:
-                #   - "timeout": approval was requested but timed out (auto-denied)
-                #   - "user":    approval was requested and resolved by the user
-                #   - "policy":  denied by capability/permission policy (no user)
-                #   - "auto":    allowed without asking (auto_approve or allow)
-                if is_denied and call_id in approval_requested:
-                    decision_source = "timeout"
-                elif call_id in approval_requested:
-                    decision_source = "user"
-                elif is_denied:
-                    decision_source = "policy"
-                else:
-                    decision_source = "auto"
-                approval_requested.discard(call_id)
-                session.add(
-                    ApprovalAudit(
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        call_id=call_id or "",
-                        tool_name=audit_name,
-                        arguments=mask_secrets_in_value(
-                            tool_args or {},
-                            enabled=settings.mask_secrets,
-                        ),
-                        approved=not is_denied,
-                        decision_source=decision_source,
-                        decided_by="default",
-                        reason=f"Breakpoint: {bp_type}" if is_breakpoint else None,
-                        is_breakpoint=is_breakpoint,
-                        breakpoint_type=bp_type if is_breakpoint else None,
-                        duration_ms=audit_duration_ms,
-                    )
-                )
-                session.commit()
-                # Checkpoint: record the last completed tool call so a future
-                # resume knows where the loop got to.
-                if run_id is not None:
-                    update_run(
-                        session,
-                        run_id,
-                        checkpoint={
-                            "iteration": iteration_count,
-                            "last_call_id": call_id,
-                            "last_tool": payload.get("name"),
-                        },
-                    )
+
             elif event.kind == "finish":
                 terminal_reason = event.payload.get("reason")
                 usage = event.payload.get("usage")
-                # Stamp the most recent assistant message with the turn's
-                # aggregated usage (when reported) plus the model id and the
-                # whole-turn wall-clock duration, so reloaded history can show
-                # "which model / how long" without joining agent_runs.
                 if persisted_last_assistant_id is not None:
                     row = session.get(MessageRow, persisted_last_assistant_id)
                     if row is not None:
@@ -447,6 +517,7 @@ async def run_conversation_turn(
                         usage=usage,
                         iterations=event.payload.get("iterations", iteration_count),
                     )
+
             elif event.kind == "error":
                 if run_id is not None:
                     if event_log is not None:
@@ -458,23 +529,18 @@ async def run_conversation_turn(
                         error=event.payload.get("detail") or event.payload.get("message"),
                         iterations=iteration_count,
                     )
+
             yield event
 
             # Inspector live-feed: publish every event to subscribers (Фаза 1.5 §6).
             if run_id is not None:
                 inspector_registry.publish(run_id, event.to_dict())
     finally:
-        # If the loop exited without a terminal event (e.g. an unexpected
-        # exception escaped the executor, or the runner was cancelled itself),
-        # make sure the run row doesn't stay "running" forever.
         if event_log is not None:
             event_log.flush()
 
-        # History consistency: if the last assistant message requested tool_calls
-        # but the run ended before all tool results were persisted (cancel/error
-        # mid-batch), append placeholder tool results for the missing ones.
-        # Without this, the next turn sees an assistant message with N tool_calls
-        # but fewer than N tool responses, which confuses the LLM provider.
+        # History consistency: backfill placeholder tool results for any
+        # tool_calls that never completed (cancel/error mid-batch).
         if persisted_last_assistant_id is not None:
             _backfill_missing_tool_results(session, conversation_id, persisted_last_assistant_id)
 
@@ -487,8 +553,6 @@ async def run_conversation_turn(
                 "failed",
                 "cancelled",
             ):
-                # Cancellation takes precedence: if the registry says it was
-                # cancelled, record that; otherwise treat as a failure.
                 reason = (
                     "cancelled" if (cancellable and run_registry.is_cancelled(run_id)) else "error"
                 )
