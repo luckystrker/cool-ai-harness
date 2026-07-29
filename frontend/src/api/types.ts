@@ -125,6 +125,10 @@ export interface ToolCall {
 
 export interface ConversationDetail extends Conversation {
   messages: Message[]
+  /** Rolling summary of compacted older messages (null when not compacted). */
+  compact_summary?: string | null
+  /** Messages with id <= this are covered by compact_summary. */
+  compact_up_to_message_id?: number | null
 }
 
 export interface SendMessageRequest {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Archive, Loader2, MessageSquare, Sparkles, Paperclip } from "lucide-react"
+import { Archive, ChevronDown, Loader2, MessageSquare, Sparkles, Paperclip } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
@@ -9,6 +9,7 @@ import { plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
 import type { Message, ToolPermissions } from "@/api/types"
+import { Markdown } from "@/components/chat/Markdown"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
@@ -87,10 +88,24 @@ export function ChatPage() {
     clearPending()
   }, [convId, clearPending])
 
+  // Compaction: messages covered by the working-memory rolling summary are
+  // collapsed into a summary block (expandable); the rest renders normally.
+  const compactCutoff = detail?.compact_up_to_message_id ?? null
+  const compactSummary = detail?.compact_summary ?? null
+
+  const compactedMsgs = useMemo<MessageViewModel[]>(() => {
+    if (!detail?.messages || compactCutoff == null || !compactSummary) return []
+    return stitchHistory(detail.messages.filter((m) => m.id <= compactCutoff))
+  }, [detail, compactCutoff, compactSummary])
+
   const historyMsgs = useMemo<MessageViewModel[]>(() => {
     if (!detail?.messages) return []
-    return stitchHistory(detail.messages)
-  }, [detail])
+    const visible =
+      compactCutoff != null && compactSummary
+        ? detail.messages.filter((m) => m.id > compactCutoff)
+        : detail.messages
+    return stitchHistory(visible)
+  }, [detail, compactCutoff, compactSummary])
 
   // The chat model picker shows every model the user marked as available in
   // provider settings (provider.chat_models), deduped across providers.
@@ -362,12 +377,15 @@ export function ChatPage() {
                 <div className="py-16 text-center text-sm text-muted-foreground">
                   Loading…
                 </div>
-              ) : historyMsgs.length === 0 && pendingMsgs.length === 0 ? (
+              ) : historyMsgs.length === 0 && pendingMsgs.length === 0 && compactedMsgs.length === 0 ? (
                 <div className="py-16 text-center text-sm text-muted-foreground">
                   Send a message to start the conversation.
                 </div>
               ) : (
                 <>
+                  {compactedMsgs.length > 0 && (
+                    <CompactedHistory messages={compactedMsgs} />
+                  )}
                   {historyMsgs.map((m) => (
                     <MessageBubble key={m.id} msg={m} />
                   ))}
@@ -380,6 +398,9 @@ export function ChatPage() {
                       onPlanExecute={handlePlanExecute}
                     />
                   ))}
+                  {compactedMsgs.length > 0 && compactSummary && (
+                    <CompactSummary summary={compactSummary} />
+                  )}
                 </>
               )}
             </div>
@@ -499,8 +520,59 @@ function EmptyState() {
   )
 }
 
+/**
+ * Collapsed block of compacted messages at the top of the chat: the original
+ * messages stay in history and can be expanded; the rolling summary itself is
+ * rendered at the end of the history (see CompactSummary).
+ */
+function CompactedHistory({ messages }: { messages: MessageViewModel[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-4 overflow-hidden rounded-lg border border-dashed bg-muted/30">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        title={open ? "Hide original messages" : "Show original messages"}
+      >
+        <Archive className="h-3.5 w-3.5 shrink-0" />
+        <span className="font-medium">
+          Compacted history — {messages.length} messages summarized
+        </span>
+        <ChevronDown
+          className={cn(
+            "ml-auto h-3.5 w-3.5 shrink-0 transition-transform",
+            open && "rotate-180"
+          )}
+        />
+      </button>
+      {open && (
+        <div className="space-y-3 border-t bg-background/50 px-3 py-3">
+          {messages.map((m) => (
+            <MessageBubble key={m.id} msg={m} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Rolling summary of the compacted messages, shown at the end of the history. */
+function CompactSummary({ summary }: { summary: string }) {
+  return (
+    <div className="mt-4 rounded-lg border border-dashed bg-muted/30 px-3 py-2">
+      <div className="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <Archive className="h-3.5 w-3.5 shrink-0" />
+        Summary of compacted messages
+      </div>
+      <Markdown content={summary} className="text-sm" />
+    </div>
+  )
+}
+
 /** Compact button — summarizes older messages to reduce context size. */
 function CompactButton({ convId, disabled }: { convId: number; disabled?: boolean }) {
+  const queryClient = useQueryClient()
   const compactMutation = useMutation({
     mutationFn: () => conversationsApi.compact(convId),
     onSuccess: (data) => {
@@ -508,6 +580,8 @@ function CompactButton({ convId, disabled }: { convId: number; disabled?: boolea
         toast.success(
           `Compacted ${data.messages_compacted} messages (${data.summary_length} chars summary)`
         )
+        // Refresh the conversation so compacted messages collapse immediately.
+        queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
       } else {
         toast.info(data.reason || "Nothing to compact")
       }

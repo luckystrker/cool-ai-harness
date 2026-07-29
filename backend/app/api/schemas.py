@@ -110,6 +110,11 @@ class MessageOut(BaseModel):
 
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut] = []
+    # Compaction state (working-memory rolling summary): messages with
+    # id <= compact_up_to_message_id are covered by compact_summary. The UI
+    # collapses them behind the summary; both are None when not compacted.
+    compact_summary: str | None = None
+    compact_up_to_message_id: int | None = None
 
 
 class SendMessageRequest(BaseModel):

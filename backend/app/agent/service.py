@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.models import AgentRun, Conversation, RunEvent, User
 from app.models import Message as MessageRow
@@ -163,10 +163,21 @@ def delete_conversation(session: Session, conv_id: int) -> bool:
 
 
 def load_history(session: Session, conv_id: int) -> list[Message]:
-    """Load a conversation's messages in chronological order as provider Messages."""
-    rows = session.exec(
-        select(MessageRow).where(MessageRow.conversation_id == conv_id).order_by(MessageRow.id)
-    ).all()
+    """Load a conversation's messages in chronological order as provider Messages.
+
+    When the conversation has been compacted (working-memory rolling summary
+    exists), messages already covered by the summary are skipped: the summary
+    is injected into the system prompt by the memory context builder, so
+    keeping the original rows would only bloat the context without adding
+    information.
+    """
+    from app.memory.service import get_working_memory
+
+    query = select(MessageRow).where(MessageRow.conversation_id == conv_id)
+    wm = get_working_memory(session, conv_id)
+    if wm is not None and wm.summary and wm.summary_up_to_message_id is not None:
+        query = query.where(col(MessageRow.id) > wm.summary_up_to_message_id)
+    rows = session.exec(query.order_by(MessageRow.id)).all()
     return [
         Message(
             role=row.role,

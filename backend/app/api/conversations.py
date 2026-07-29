@@ -154,6 +154,15 @@ def get_conversation_detail(
         raise HTTPException(status_code=404, detail="Conversation not found")
     msgs = list_messages(session, conv_id)
     meta = conv.metadata_ or {}
+    # Compaction state: the rolling summary + cutoff let the UI collapse the
+    # already-compacted messages behind the summary text.
+    from app.memory.service import get_working_memory
+
+    wm = get_working_memory(session, conv_id)
+    compact_summary = wm.summary if wm is not None and wm.summary else None
+    compact_cutoff = (
+        wm.summary_up_to_message_id if compact_summary is not None and wm is not None else None
+    )
     return ConversationDetail(
         id=conv.id,
         user_id=conv.user_id,
@@ -166,6 +175,8 @@ def get_conversation_detail(
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         messages=[_msg_to_out(m) for m in msgs],
+        compact_summary=compact_summary,
+        compact_up_to_message_id=compact_cutoff,
     )
 
 
@@ -211,17 +222,22 @@ async def compact_conversation(
 
     Triggers the working memory summarization: older messages are compressed
     into a rolling summary stored in WorkingMemory, reducing the context size
-    for future turns.
+    for future turns. ``load_history`` skips messages covered by the summary,
+    so the next agent turn sees only the recent messages plus the summary
+    (injected via the memory context block).
     """
     from app.core.config import get_settings
-    from app.memory.service import update_working_memory_summary
+    from app.memory.service import get_working_memory, update_working_memory_summary
     from app.providers import Message as ProviderMessage
+
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return {"status": "skipped", "reason": "Memory subsystem is disabled"}
 
     conv = get_conversation(session, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    settings = get_settings()
     msgs = list_messages(session, conv_id)
 
     # Only compact if there are enough messages.
@@ -233,15 +249,29 @@ async def compact_conversation(
             "message_count": len(msgs),
         }
 
-    # Build transcript of older messages (all but the last 10).
+    # Build transcript of older messages (all but the last 10). When a
+    # previous summary exists, only messages after its cutoff are new —
+    # re-summarizing the already-compacted rows would waste tokens.
+    wm = get_working_memory(session, conv_id)
+    prev_cutoff = (
+        wm.summary_up_to_message_id
+        if wm is not None and wm.summary and wm.summary_up_to_message_id is not None
+        else None
+    )
     keep_recent = 10
     older_msgs = msgs[:-keep_recent] if len(msgs) > keep_recent else []
-    if not older_msgs:
-        return {"status": "skipped", "reason": "No messages to compact"}
+    new_msgs = [
+        m for m in older_msgs if prev_cutoff is None or (m.id is not None and m.id > prev_cutoff)
+    ]
+    if not new_msgs:
+        return {"status": "skipped", "reason": "No new messages to compact"}
 
-    # Build a transcript for summarization.
+    # Build a transcript for summarization. Roll the previous summary forward
+    # so the new one covers the whole compacted prefix.
     transcript_lines = []
-    for m in older_msgs:
+    if wm is not None and wm.summary:
+        transcript_lines.append(f"[Previous summary of the earlier conversation]\n{wm.summary}")
+    for m in new_msgs:
         role = m.role
         content = m.content or ""
         if len(content) > 300:
@@ -275,7 +305,8 @@ async def compact_conversation(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Summarization failed: {exc}") from exc
 
-    # Store the summary in working memory.
+    # Store the summary in working memory. The cutoff covers the whole
+    # compacted prefix (previous + newly compacted messages).
     last_compacted_msg_id = older_msgs[-1].id if older_msgs else None
     update_working_memory_summary(
         session, conv_id, summary, up_to_message_id=last_compacted_msg_id
@@ -283,7 +314,7 @@ async def compact_conversation(
 
     return {
         "status": "compacted",
-        "messages_compacted": len(older_msgs),
+        "messages_compacted": len(new_msgs),
         "messages_kept": keep_recent,
         "summary_length": len(summary),
     }
