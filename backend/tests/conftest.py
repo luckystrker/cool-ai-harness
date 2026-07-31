@@ -25,6 +25,12 @@ if _TEST_DB.exists():
     _TEST_DB.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 
+# Keep the recurring-task scheduler (Фаза 3b) out of the test process: the app
+# lifespan would otherwise start an APScheduler engine that fires real task
+# runs mid-suite. Tests that exercise the engine enable it explicitly via
+# monkeypatch on the settings object.
+os.environ["SCHEDULER_ENABLED"] = "false"
+
 from app.providers import ChatStreamEvent, LLMProvider, Message, ToolSpec, Usage  # noqa: E402
 
 

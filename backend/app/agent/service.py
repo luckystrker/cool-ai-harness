@@ -93,8 +93,14 @@ def list_conversations(session: Session, *, user_id: int) -> Sequence[Conversati
         .where(Conversation.user_id == user_id)
         .order_by(Conversation.updated_at.desc())
     ).all()
-    # Hide subagent-owned conversations from the regular chat list.
-    return [r for r in rows if not (r.metadata_ or {}).get("is_subagent")]
+    # Hide machine-owned conversations (subagent and scheduled-task runs) from
+    # the regular chat list.
+    return [
+        r
+        for r in rows
+        if not (r.metadata_ or {}).get("is_subagent")
+        and not (r.metadata_ or {}).get("is_task")
+    ]
 
 
 def get_conversation(session: Session, conv_id: int) -> Conversation | None:

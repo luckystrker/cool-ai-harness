@@ -7,6 +7,7 @@ import {
   Bot,
   Brain,
   Bug,
+  CalendarClock,
   ChevronRight,
   FolderOpen,
   Globe,
@@ -333,6 +334,11 @@ export function Sidebar() {
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/subagents">
             <Bot className="h-4 w-4" /> Subagents
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/tasks">
+            <CalendarClock className="h-4 w-4" /> Tasks
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">

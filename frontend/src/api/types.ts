@@ -1084,3 +1084,152 @@ export interface WikiArticle {
   created_at: string
   updated_at: string
 }
+
+// --- Recurring tasks / cron jobs (Фаза 3b) ---
+
+export type TaskTriggerType = "cron" | "interval" | "date"
+export type TaskRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped"
+export type TaskTriggerSource = "schedule" | "manual" | "agent"
+export type TaskMisfirePolicy = "skip" | "run"
+export type TaskApprovalPolicy = "deny_external" | "allow_all"
+export type TaskDeliveryChannel = "ui" | "webhook" | "telegram" | "email"
+
+export interface ScheduledTask {
+  id: number
+  user_id: number
+  name: string
+  description: string | null
+  trigger_type: TaskTriggerType
+  cron_expression: string | null
+  interval_seconds: number | null
+  run_at: string | null
+  timezone: string
+  quiet_hours_start: string | null
+  quiet_hours_end: string | null
+  misfire_policy: TaskMisfirePolicy
+  prompt: string
+  workflow_type: string | null
+  profile_id: number | null
+  model: string | null
+  tools_whitelist: string[] | null
+  capability_policy: Record<string, string> | null
+  working_directory: string | null
+  approval_policy: TaskApprovalPolicy
+  delivery_channels: TaskDeliveryChannel[] | null
+  delivery_config: Record<string, unknown> | null
+  max_iterations: number
+  max_cost_per_run: number | null
+  timeout_s: number | null
+  enabled: boolean
+  next_run_at: string | null
+  last_run_at: string | null
+  last_status: TaskRunStatus | null
+  run_count: number
+  failure_count: number
+  created_at: string
+  updated_at: string
+  /** Derived server-side: human-readable schedule + upcoming fire times (UTC). */
+  schedule_description: string | null
+  next_runs: string[]
+}
+
+export interface ScheduledTaskCreate {
+  name: string
+  prompt?: string
+  description?: string
+  trigger_type?: TaskTriggerType
+  cron_expression?: string
+  interval_seconds?: number
+  run_at?: string
+  timezone?: string
+  quiet_hours_start?: string | null
+  quiet_hours_end?: string | null
+  misfire_policy?: TaskMisfirePolicy
+  template?: string
+  profile_id?: number | null
+  model?: string
+  tools_whitelist?: string[] | null
+  capability_policy?: Record<string, string> | null
+  working_directory?: string | null
+  approval_policy?: TaskApprovalPolicy
+  delivery_channels?: TaskDeliveryChannel[]
+  delivery_config?: Record<string, unknown>
+  max_iterations?: number
+  max_cost_per_run?: number | null
+  timeout_s?: number | null
+  enabled?: boolean
+}
+
+export type ScheduledTaskUpdate = Partial<Omit<ScheduledTaskCreate, "template">>
+
+export interface TaskRun {
+  id: number
+  task_id: number
+  conversation_id: number | null
+  run_id: number | null
+  status: TaskRunStatus
+  trigger_source: TaskTriggerSource
+  prompt: string
+  output: string | null
+  error: string | null
+  skip_reason: string | null
+  approval_policy: TaskApprovalPolicy | null
+  approval_reason: string | null
+  usage: Record<string, unknown> | null
+  duration_ms: number | null
+  delivery_status: Record<string, string> | null
+  delivered_at: string | null
+  is_read: boolean
+  started_at: string
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskRunDetail extends TaskRun {
+  messages: {
+    id: number
+    role: string
+    content: string | null
+    tool_calls: Record<string, unknown>[] | null
+    tool_result: Record<string, unknown> | null
+    created_at: string
+  }[]
+}
+
+export interface TaskTemplate {
+  slug: string
+  name: string
+  description: string
+  prompt: string
+  cron_expression: string
+  tools_whitelist: string[] | null
+  max_iterations: number
+  delivery_channels: string[]
+}
+
+export interface ParseCronResponse {
+  cron_expression: string | null
+  description: string | null
+  next_runs: string[]
+  detail: string | null
+}
+
+export interface TaskInbox {
+  unread_count: number
+  runs: TaskRun[]
+}
+
+export interface SchedulerStatus {
+  enabled: boolean
+  running: boolean
+  timezone: string
+  max_concurrent_tasks: number
+  jobs: { id: string; name: string; next_run_time: string | null }[]
+}

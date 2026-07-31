@@ -310,6 +310,41 @@ class Settings(BaseSettings):
         description="Auto-reject unconfirmed memories after N days (0 = disabled)",
     )
 
+    # --- Recurring tasks / scheduler (Фаза 3b) ---
+    # Master switch: when False the APScheduler engine never starts (tasks can
+    # still be created and run manually).
+    scheduler_enabled: bool = Field(
+        default=True,
+        description="Start the APScheduler engine for recurring tasks",
+    )
+    # Default IANA timezone for tasks that don't specify one.
+    scheduler_timezone: str = Field(
+        default="UTC",
+        description="Default timezone for cron schedules (IANA name)",
+    )
+    # How many scheduled tasks may execute simultaneously (global guard; each
+    # individual task is additionally limited to one concurrent instance).
+    scheduler_max_concurrent_tasks: int = Field(
+        default=3,
+        description="Max scheduled tasks executing at the same time",
+    )
+    # Grace period (seconds) for a missed fire time before the misfire policy
+    # applies. Passed to APScheduler as misfire_grace_time.
+    scheduler_misfire_grace_s: int = Field(
+        default=300,
+        description="Seconds a missed fire time may still run before misfire policy applies",
+    )
+    # Wall-clock timeout per task run; the task's own timeout_s overrides it.
+    scheduler_task_timeout_s: float = Field(
+        default=900.0,
+        description="Default wall-clock timeout per scheduled task run (seconds)",
+    )
+    # Consecutive failures after which a task is auto-disabled. 0 = never.
+    scheduler_max_consecutive_failures: int = Field(
+        default=5,
+        description="Auto-disable a task after N consecutive failures (0 = never)",
+    )
+
     # --- Observability / OTel export (Фаза 3a §5) ---
     # When set, LLM calls and tool invocations are exported as OTel spans to
     # the configured OTLP endpoint (e.g. http://localhost:4318). Empty = disabled.

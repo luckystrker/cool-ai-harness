@@ -25,6 +25,7 @@ from app.api.routes import router as api_router
 from app.api.runs import router as runs_router
 from app.api.skills import router as skills_router
 from app.api.subagents import router as subagents_router
+from app.api.tasks import router as tasks_router
 from app.api.websocket import router as ws_router
 from app.api.wiki import router as wiki_router
 from app.api.workspace import router as workspace_router
@@ -69,7 +70,16 @@ async def lifespan(app: FastAPI):
         register_mcp_tools()
         log.info("app.mcp_ready", servers=len(mcp_configs))
 
+    # Start the recurring-task scheduler (Фаза 3b §1). Jobs are rebuilt from
+    # the scheduled_tasks table, so schedules survive a restart.
+    from app.tasks.scheduler import shutdown_scheduler, start_scheduler
+
+    jobs = await start_scheduler()
+    log.info("app.scheduler_ready", jobs=jobs)
+
     yield
+
+    await shutdown_scheduler()
 
     # Shutdown MCP connections.
     from app.mcp import get_mcp_registry as _get_mcp_reg
@@ -135,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router, prefix="/api")
     app.include_router(mcp_router, prefix="/api")
     app.include_router(subagents_router, prefix="/api")
+    app.include_router(tasks_router, prefix="/api")
     app.include_router(profiles_router, prefix="/api")
     app.include_router(memory_router, prefix="/api")
     app.include_router(entities_router, prefix="/api")
