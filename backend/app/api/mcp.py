@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.logging import get_logger
-from app.mcp.config import save_mcp_configs
+from app.mcp.config import rollback_mcp_configs, save_mcp_configs
 from app.mcp.models import MCPServerConfig, MCPServerStatus, MCPTransport
 from app.mcp.registry import get_mcp_registry
 from app.mcp.tool_bridge import refresh_mcp_tools, unregister_mcp_tools
@@ -46,6 +46,9 @@ class MCPServerCreate(BaseModel):
     description: str = Field(default="", max_length=500)
     capabilities: list[str] = Field(default_factory=list)
     timeout_s: float = Field(default=30.0, ge=1.0, le=300.0)
+    version: str = Field(default="", description="Plugin version (semver)")
+    author: str = Field(default="", description="Plugin author")
+    compatibility: str = Field(default="", description="Minimum harness version")
 
 
 class MCPServerUpdate(BaseModel):
@@ -86,6 +89,9 @@ class MCPServerOut(BaseModel):
     url: str = ""
     capabilities: list[str] = Field(default_factory=list)
     timeout_s: float = 30.0
+    version: str = ""
+    author: str = ""
+    compatibility: str = ""
     error: str | None = None
     tools: list[MCPToolOut] = Field(default_factory=list)
     server_info: dict[str, Any] = Field(default_factory=dict)
@@ -138,6 +144,9 @@ def _state_to_out(state) -> MCPServerOut:
         url=state.config.url,
         capabilities=state.config.capabilities,
         timeout_s=state.config.timeout_s,
+        version=state.config.version,
+        author=state.config.author,
+        compatibility=state.config.compatibility,
         error=state.error,
         tools=[
             MCPToolOut(
@@ -441,3 +450,29 @@ async def store_install(req: MCPStoreInstallRequest) -> MCPStoreInstallResponse:
         tools_count=state.tool_count,
         error=state.error,
     )
+
+
+# --- Config rollback (Фаза 2 §2 lifecycle) ---
+
+
+@router.post("/mcp/rollback")
+async def post_mcp_rollback() -> dict:
+    """Rollback MCP config to the previous version (safe rollback).
+
+    Restores config.yaml.bak over config.yaml, reloads the registry,
+    and reconnects servers.
+    """
+    configs = rollback_mcp_configs()
+    if configs is None:
+        raise HTTPException(status_code=404, detail="No backup config found")
+
+    registry = get_mcp_registry()
+    # Disconnect all current servers.
+    await registry.shutdown()
+    # Reload from restored config.
+    registry.load_configs(configs)
+    await registry.connect_all()
+    refresh_mcp_tools()
+
+    log.info("mcp.api.rolled_back", servers=len(configs))
+    return {"rolled_back": True, "servers": len(configs)}

@@ -80,6 +80,7 @@ def _plan_to_out(session: Session, plan) -> PlanOut:
                 status=s.status,
                 depends_on=s.depends_on,
                 tools=s.tools,
+                delegate_role=s.delegate_role,
                 result_summary=s.result_summary,
             )
             for s in steps

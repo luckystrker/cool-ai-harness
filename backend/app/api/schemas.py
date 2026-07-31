@@ -77,6 +77,11 @@ class ConversationUpdate(BaseModel):
     capability_policy: dict[str, str] | None = None
     breakpoints: list[dict[str, Any]] | None = None
     profile_id: int | None = None
+    # Conversation organization (Фаза 3a §4).
+    tags: list[str] | None = None
+    folder: str | None = None
+    is_pinned: bool | None = None
+    is_archived: bool | None = None
 
 
 class ConversationOut(BaseModel):
@@ -89,6 +94,10 @@ class ConversationOut(BaseModel):
     capability_policy: dict[str, str] | None = None
     breakpoints: list[dict[str, Any]] | None = None
     profile_id: int | None = None
+    tags: list[str] = []
+    folder: str | None = None
+    is_pinned: bool = False
+    is_archived: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -306,6 +315,7 @@ class PlanStepOut(BaseModel):
     status: str = "pending"
     depends_on: list[int] | None = None
     tools: list[str] | None = None
+    delegate_role: str | None = None
     result_summary: str | None = None
 
 
@@ -330,6 +340,7 @@ class PlanStepUpdate(BaseModel):
     description: str | None = None
     depends_on: list[int] | None = None
     tools: list[str] | None = None
+    delegate_role: str | None = None
 
 
 class PlanUpdate(BaseModel):

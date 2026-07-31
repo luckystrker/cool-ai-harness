@@ -10,9 +10,9 @@
 |------|--------|
 | [Фаза 0 — Фундамент](phases/phase-0.md) | ✅ Завершено |
 | [Фаза 1 — MVP (Agent Loop + Чат)](phases/phase-1.md) | ✅ **MVP готов** |
-| [Фаза 1.5 — Надёжность, безопасность, артефакты](phases/phase-1.5.md) | 🔄 **Текущая** |
-| [Фаза 2 — Skills + MCP + Subagents + Planning](phases/phase-2.md) | ⏳ Ожидает |
-| [Фаза 3a — Memory + Personalities + Observability](phases/phase-3a.md) | ⏳ Ожидает |
+| [Фаза 1.5 — Надёжность, безопасность, артефакты](phases/phase-1.5.md) | ✅ Завершено |
+| [Фаза 2 — Skills + MCP + Subagents + Planning](phases/phase-2.md) | ✅ Завершено |
+| [Фаза 3a — Memory + Personalities + Observability](phases/phase-3a.md) | ✅ Завершено |
 | [Фаза 3b — Recurring Tasks + RSS + Webhook](phases/phase-3b.md) | ⏳ Ожидает |
 | [Фаза 4 — Workflows + Multimodal + Browser/Code tools](phases/phase-4.md) | ⏳ Ожидает |
 | [Фаза 5 — Telegram + Voice](phases/phase-5.md) | ⏳ Ожидает |

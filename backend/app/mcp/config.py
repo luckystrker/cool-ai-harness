@@ -105,10 +105,12 @@ def load_mcp_configs() -> list[MCPServerConfig]:
     return configs
 
 
-def save_mcp_configs(configs: list[MCPServerConfig]) -> None:
+def save_mcp_configs(configs: list[MCPServerConfig], *, backup: bool = True) -> None:
     """Persist MCP server configs to config.yaml (merges with existing content).
 
     Only updates the ``mcp_servers`` key; other keys are preserved.
+    When ``backup=True``, saves the previous config to ``config.yaml.bak``
+    for safe rollback (Фаза 2 §2 lifecycle).
     """
     config_path = get_config_path()
 
@@ -119,6 +121,15 @@ def save_mcp_configs(configs: list[MCPServerConfig]) -> None:
         except Exception:
             existing = {}
 
+    # Save backup for rollback before overwriting.
+    if backup and config_path.exists():
+        backup_path = config_path.with_suffix(".yaml.bak")
+        try:
+            backup_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+            log.debug("mcp.config_backup_saved", path=str(backup_path))
+        except Exception as exc:
+            log.warning("mcp.config_backup_failed", error=str(exc))
+
     existing["mcp_servers"] = [c.to_dict() for c in configs]
 
     try:
@@ -126,6 +137,29 @@ def save_mcp_configs(configs: list[MCPServerConfig]) -> None:
         log.info("mcp.configs_saved", count=len(configs), path=str(config_path))
     except Exception as exc:
         log.error("mcp.config_save_error", path=str(config_path), error=str(exc))
+
+
+def rollback_mcp_configs() -> list[MCPServerConfig] | None:
+    """Rollback to the previous config.yaml backup (Фаза 2 §2 safe rollback).
+
+    Restores ``config.yaml.bak`` over ``config.yaml`` and returns the
+    restored configs. Returns None if no backup exists.
+    """
+    config_path = get_config_path()
+    backup_path = config_path.with_suffix(".yaml.bak")
+
+    if not backup_path.exists():
+        log.warning("mcp.rollback_no_backup")
+        return None
+
+    try:
+        config_path.write_text(backup_path.read_text(encoding="utf-8"), encoding="utf-8")
+        log.info("mcp.config_rolled_back", path=str(config_path))
+    except Exception as exc:
+        log.error("mcp.rollback_failed", error=str(exc))
+        return None
+
+    return load_mcp_configs()
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

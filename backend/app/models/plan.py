@@ -93,6 +93,9 @@ class PlanStep(TimestampMixin, table=True):
     depends_on: list[int] | None = Field(default=None, sa_column=Column("depends_on", JSON))
     # Suggested tool names for this step.
     tools: list[str] | None = Field(default=None, sa_column=Column("tools", JSON))
+    # Subagent role name to delegate this step to (subplan delegation).
+    # When set, execution spawns a subagent with this role instead of running inline.
+    delegate_role: str | None = None
     # Brief summary of the step's execution result.
     result_summary: str | None = Field(default=None, sa_column=Column(Text))
     # The sub-run that executed this step (links to agent_runs.id).

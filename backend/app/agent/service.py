@@ -112,6 +112,10 @@ def update_conversation(
     capability_policy: dict | None = None,
     breakpoints: list[dict] | None = None,
     profile_id: int | None = None,
+    tags: list[str] | None = None,
+    folder: str | None = None,
+    is_pinned: bool | None = None,
+    is_archived: bool | None = None,
 ) -> Conversation | None:
     """Patch updatable fields on a conversation.
 
@@ -120,6 +124,7 @@ def update_conversation(
     ``permissions``, pass an empty value (``""`` / ``{}`` respectively).
     ``capability_policy`` and ``breakpoints`` follow the same convention.
     ``profile_id`` uses a special sentinel: pass ``-1`` to clear it.
+    ``folder`` uses a special sentinel: pass ``""`` to clear it.
     """
     conv = session.get(Conversation, conv_id)
     if conv is None:
@@ -143,6 +148,15 @@ def update_conversation(
         conv.metadata_ = meta or None
     if profile_id is not None:
         conv.profile_id = profile_id if profile_id != -1 else None
+    # Conversation organization (Фаза 3a §4).
+    if tags is not None:
+        conv.tags = tags
+    if folder is not None:
+        conv.folder = folder or None
+    if is_pinned is not None:
+        conv.is_pinned = is_pinned
+    if is_archived is not None:
+        conv.is_archived = is_archived
     session.add(conv)
     session.commit()
     session.refresh(conv)

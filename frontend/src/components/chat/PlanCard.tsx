@@ -130,6 +130,11 @@ function StepRow({ step }: { step: PlanStep }) {
             Depends on: {step.depends_on.map((d) => `#${d + 1}`).join(", ")}
           </p>
         )}
+        {step.delegate_role && (
+          <p className="text-xs text-purple-600 dark:text-purple-400">
+            Delegated to: {step.delegate_role}
+          </p>
+        )}
       </div>
     </li>
   )

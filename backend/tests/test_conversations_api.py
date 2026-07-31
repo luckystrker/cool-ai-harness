@@ -241,9 +241,10 @@ def test_compact_too_few_messages_skipped() -> None:
     with _client() as c:
         cid = c.post("/api/conversations", json={"model": "test-model"}).json()["id"]
 
+    from sqlmodel import Session
+
     from app.agent.service import append_message
     from app.core.db import engine
-    from sqlmodel import Session
 
     with Session(engine) as session:
         for i in range(5):
@@ -266,9 +267,10 @@ def test_compact_summarizes_and_trims_history(monkeypatch) -> None:
     with _client() as c:
         cid = c.post("/api/conversations", json={"model": "test-model"}).json()["id"]
 
+    from sqlmodel import Session
+
     from app.agent.service import append_message, load_history
     from app.core.db import engine
-    from sqlmodel import Session
 
     with Session(engine) as session:
         for i in range(32):
@@ -319,9 +321,10 @@ def test_compact_again_without_new_messages_skipped(monkeypatch) -> None:
     with _client() as c:
         cid = c.post("/api/conversations", json={"model": "test-model"}).json()["id"]
 
+    from sqlmodel import Session
+
     from app.agent.service import append_message
     from app.core.db import engine
-    from sqlmodel import Session
 
     with Session(engine) as session:
         for i in range(32):

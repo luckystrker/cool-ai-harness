@@ -37,6 +37,15 @@ class Conversation(TimestampMixin, table=True):
     )
     # Active agent profile (Фаза 3a §2). None = default system prompt.
     profile_id: int | None = Field(default=None, foreign_key="agent_profiles.id", index=True)
+    # --- Conversation Organization (Фаза 3a §4) ---
+    # Tags for categorization and filtering.
+    tags: list[str] = Field(default_factory=list, sa_column=Column("tags", JSON))
+    # Folder/collection name for grouping (None = uncategorized).
+    folder: str | None = Field(default=None, index=True)
+    # Pinned conversations appear at the top of the sidebar.
+    is_pinned: bool = Field(default=False, index=True)
+    # Archived conversations are hidden from the default list.
+    is_archived: bool = Field(default=False, index=True)
     # Free-form metadata (e.g. breakpoints, is_subagent flag).
     metadata_: dict[str, Any] | None = Field(
         default=None, sa_column=Column("metadata_", JSON)

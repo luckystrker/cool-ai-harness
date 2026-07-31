@@ -62,6 +62,11 @@ export interface Conversation {
   breakpoints: BreakpointConfig[] | null
   /** Active agent profile (Фаза 3a §2). Null = default system prompt. */
   profile_id: number | null
+  /** Conversation organization (Фаза 3a §4). */
+  tags: string[]
+  folder: string | null
+  is_pinned: boolean
+  is_archived: boolean
   created_at: string
   updated_at: string
 }
@@ -516,6 +521,7 @@ export interface PlanStep {
   status: PlanStepStatus
   depends_on?: number[] | null
   tools?: string[] | null
+  delegate_role?: string | null
   result_summary?: string | null
 }
 
@@ -1060,4 +1066,21 @@ export interface ProfileUpdate {
   settings?: Record<string, unknown>
   avatar_color?: string
   is_active?: boolean
+}
+
+// --- Wiki / Knowledge Base (Фаза 3a §3) ---
+
+export interface WikiArticle {
+  id: number
+  title: string
+  content: string
+  category: string
+  tags: string[]
+  source: string
+  source_memory_id?: number | null
+  is_pinned: boolean
+  is_archived: boolean
+  version: number
+  created_at: string
+  updated_at: string
 }

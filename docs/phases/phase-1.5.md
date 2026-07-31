@@ -1,6 +1,6 @@
 # Фаза 1.5: Надёжность, безопасность и артефакты
 
-> **Статус:** 🔄 Текущая
+> **Статус:** ✅ Завершено
 > **Длительность:** 1 неделя
 
 Цель: до подключения внешних MCP-серверов, subagents и cron-задач сделать каждый запуск агента управляемым, проверяемым и безопасным.
@@ -134,12 +134,16 @@ API: `POST /conversations/{id}/artifacts` (upload), `GET .../artifacts` (list с
 precise snapshot pricing (auto-fetch из API провайдера) — таблица обновляется
 вручную.
 
-## 6. Debug / Inspector Mode (`app/observability/inspector/`) 🆕
+## 6. Debug / Inspector Mode (`app/observability/inspector/`) ✅
 
-- "Developer Tools" для агентских запусков: полный raw JSON каждого LLM-запроса, token allocation, timing каждого шага, diff промптов между итерациями
-- Replay режим: воспроизвести run с теми же входными данными, но другой моделью/промптом
-- Side-by-side сравнение двух запусков
-- WebSocket для live-инспекции текущего запуска
+**Реализовано:** Run timeline reconstruction, side-by-side comparison, replay.
+Backend: `app/observability/inspector.py` + `app/api/inspector.py`.
+Frontend: `InspectorPage.tsx` (routed at `/inspector`, linked in Sidebar) +
+`RunTimeline`, `ComparisonView` components.
+
+**Что отложено**: WebSocket для live-инспекции текущего запуска (текущий
+InspectorRegistry поддерживает live tail, но отдельный WS-endpoint для
+инспектора не выделен).
 
 ---
 
