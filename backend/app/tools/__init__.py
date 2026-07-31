@@ -29,6 +29,7 @@ def register_builtins() -> None:
     from app.tools.skill_tools import register_skill_tools
     from app.tools.subagent_tools import register_subagent_tools
     from app.tools.web_tools import register_web_tools
+    from app.tools.wiki_tools import register_wiki_tools
 
     register_file_tools()
     register_code_tools()
@@ -38,6 +39,7 @@ def register_builtins() -> None:
     register_mcp_management_tools()
     register_subagent_tools()
     register_memory_tools()
+    register_wiki_tools()
 
 
 # Auto-register on import so the agent loop sees them out of the box.

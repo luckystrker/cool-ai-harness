@@ -67,6 +67,8 @@ Rules for steps:
 - Steps are ordered by "position" (0-based).
 - "depends_on" lists positions that must complete first.
 - "tools" lists suggested tool names for the step.
+- "delegate_role" (optional) names a subagent role to delegate the step to \
+(e.g. "researcher", "code-reviewer"). When set, a subagent executes the step.
 - 3-10 steps depending on complexity.
 - Each step must be independently verifiable.
 
@@ -196,6 +198,7 @@ def create_plan(
             status=STEP_STATUS_PENDING,
             depends_on=step_data.get("depends_on"),
             tools=step_data.get("tools"),
+            delegate_role=step_data.get("delegate_role"),
         )
         session.add(row)
     session.commit()
@@ -259,6 +262,7 @@ def update_plan_steps(
                 status=STEP_STATUS_PENDING,
                 depends_on=step_data.get("depends_on"),
                 tools=step_data.get("tools"),
+                delegate_role=step_data.get("delegate_role"),
             )
             session.add(row)
         plan.steps = steps
@@ -332,6 +336,51 @@ def _topological_order(steps: list[PlanStep]) -> list[PlanStep]:
     return order
 
 
+async def _execute_step_via_subagent(
+    session: Session,
+    *,
+    step: PlanStep,
+    prompt: str,
+    role_name: str,
+    parent_conversation_id: int,
+    working_directory: str | None = None,
+) -> tuple[str, bool]:
+    """Execute a plan step by delegating to a subagent with the given role.
+
+    Returns (result_summary, failed).
+    """
+    from app.agent.subagents import (
+        create_subagent_run,
+        execute_subagent,
+        get_role_by_name,
+    )
+
+    role = get_role_by_name(session, role_name)
+    if role is None:
+        log.warning("planning.delegate_role_not_found", role=role_name, step=step.position)
+        return f"Failed: subagent role '{role_name}' not found", True
+
+    try:
+        sa_run = create_subagent_run(
+            session,
+            prompt=prompt,
+            parent_conversation_id=parent_conversation_id,
+            role=role,
+            name=f"plan-step-{step.position}:{role_name}",
+        )
+        result = await execute_subagent(sa_run.id)  # type: ignore[arg-type]
+        if result:
+            return result[:500], False
+        # Check if the run failed.
+        session.refresh(sa_run)
+        if sa_run.error:
+            return f"Failed: {sa_run.error[:300]}", True
+        return sa_run.result_summary or "Completed via subagent", False
+    except Exception as exc:
+        log.error("planning.subagent_step_failed", step=step.position, error=str(exc))
+        return f"Failed: {exc!s}"[:500], True
+
+
 async def execute_plan_steps(
     session: Session,
     plan: Plan,
@@ -394,38 +443,49 @@ async def execute_plan_steps(
             step_prompt += f"\n{step.description}\n"
         step_prompt += "\nComplete this step and provide a brief summary of what was accomplished."
 
-        # Execute via a mini agent loop (limited iterations per step).
-        step_config = AgentConfig(
-            model=model,
-            system_prompt=None,
-            tool_names=None,
-            limits=AgentLimits(max_iterations=5),
-            working_directory=working_directory,
-            auto_approve=True,  # Plan steps run without per-tool approval.
-        )
-        executor = AgentExecutor(
-            provider=provider,
-            config=step_config,
-            history=list(exec_history),
-        )
+        # Delegate to subagent if delegate_role is set.
+        if step.delegate_role:
+            summary, step_failed = await _execute_step_via_subagent(
+                session,
+                step=step,
+                prompt=step_prompt,
+                role_name=step.delegate_role,
+                parent_conversation_id=plan.conversation_id,
+                working_directory=working_directory,
+            )
+        else:
+            # Execute via a mini agent loop (limited iterations per step).
+            step_config = AgentConfig(
+                model=model,
+                system_prompt=None,
+                tool_names=None,
+                limits=AgentLimits(max_iterations=5),
+                working_directory=working_directory,
+                auto_approve=True,  # Plan steps run without per-tool approval.
+            )
+            executor = AgentExecutor(
+                provider=provider,
+                config=step_config,
+                history=list(exec_history),
+            )
 
-        step_result_parts: list[str] = []
-        step_failed = False
-        try:
-            async for event in executor.stream(step_prompt):
-                if event.kind == "token":
-                    step_result_parts.append(event.payload.get("text", ""))
-                elif event.kind == "error" or (
-                    event.kind == "finish" and event.payload.get("reason") == "error"
-                ):
-                    step_failed = True
-        except Exception as exc:
-            log.error("planning.step_failed", step=step.position, error=str(exc))
-            step_failed = True
+            step_result_parts: list[str] = []
+            step_failed = False
+            try:
+                async for event in executor.stream(step_prompt):
+                    if event.kind == "token":
+                        step_result_parts.append(event.payload.get("text", ""))
+                    elif event.kind == "error" or (
+                        event.kind == "finish" and event.payload.get("reason") == "error"
+                    ):
+                        step_failed = True
+            except Exception as exc:
+                log.error("planning.step_failed", step=step.position, error=str(exc))
+                step_failed = True
 
-        # Summarize the step result.
-        result_text = "".join(step_result_parts).strip()
-        summary = result_text[:500] if result_text else ("Failed" if step_failed else "Completed")
+            # Summarize the step result.
+            result_text = "".join(step_result_parts).strip()
+            summary = result_text[:500] if result_text else ("Failed" if step_failed else "Completed")
 
         if step_failed:
             step.status = STEP_STATUS_FAILED

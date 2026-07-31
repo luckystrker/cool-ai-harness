@@ -64,12 +64,32 @@ def _provider_row_to_llm(row: ProviderRow) -> LLMProvider:
             default_model=model,
         )
 
+    # Subscription adapters (experimental — Фаза 1).
+    if name.startswith("subscription/"):
+        return _build_subscription_provider(name, api_key, model)
+
     # Every OpenAI-compatible backend (openai/openrouter/deepseek/groq/ollama/
-    # local) is served by OpenAIProvider. Subscription adapters will dispatch
-    # to their own classes here once added.
+    # local) is served by OpenAIProvider.
     return OpenAIProvider(
         base_url=base_url,
         api_key=api_key or "ollama",  # ollama ignores the key
+        default_model=model,
+    )
+
+
+def _build_subscription_provider(name: str, session_token: str, model: str | None) -> LLMProvider:
+    """Build an experimental subscription provider adapter."""
+    from app.providers.subscription import ChatGPTPlusProvider, ClaudeProProvider
+
+    if "claude" in name:
+        return ClaudeProProvider(session_token=session_token, default_model=model)
+    if "chatgpt" in name or "openai" in name:
+        return ChatGPTPlusProvider(session_token=session_token, default_model=model)
+    # Fallback: treat as OpenAI-compatible (shouldn't happen).
+    log.warning("providers.unknown_subscription", name=name)
+    return OpenAIProvider(
+        base_url="https://api.openai.com/v1",
+        api_key=session_token,
         default_model=model,
     )
 

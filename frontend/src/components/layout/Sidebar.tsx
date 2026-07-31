@@ -3,8 +3,10 @@ import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   BarChart3,
+  BookOpen,
   Bot,
   Brain,
+  Bug,
   ChevronRight,
   FolderOpen,
   Globe,
@@ -314,6 +316,11 @@ export function Sidebar() {
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/wiki">
+            <BookOpen className="h-4 w-4" /> Wiki
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/profiles">
             <Settings2 className="h-4 w-4" /> Profiles
           </a>
@@ -331,6 +338,11 @@ export function Sidebar() {
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/budgets">
             <Wallet className="h-4 w-4" /> Budgets
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/inspector">
+            <Bug className="h-4 w-4" /> Inspector
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">

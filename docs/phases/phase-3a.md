@@ -1,6 +1,6 @@
 # Фаза 3a: Memory + Personalities + Observability + Knowledge Management
 
-> **Статус:** 🔄 В работе (раздел 1 «Long-term memory» завершён; раздел 5 «Observability» завершён)
+> **Статус:** ✅ Завершено
 > **Длительность:** 2 недели
 
 Цель: долговременная память между сессиями, разные "личности" агента, полная аналитика и система знаний.
@@ -91,8 +91,8 @@
 | Раздел | Статус |
 |--------|--------|
 | 1. Long-term memory (incl. entity, confirmation, pin, export, explainability) | ✅ Завершено |
-| 2. Multi-personality agents | ⏳ Ожидает |
-| 3. Knowledge Base / Wiki | ⏳ Ожидает |
-| 4. Conversation Organization | ⏳ Ожидает |
+| 2. Multi-personality agents | ✅ Завершено |
+| 3. Knowledge Base / Wiki | ✅ Завершено |
+| 4. Conversation Organization | ✅ Завершено |
 | 5. Observability / Analytics | ✅ Завершено |
 

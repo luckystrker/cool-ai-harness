@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlmodel import Session, select
 from sse_starlette.sse import EventSourceResponse
 
@@ -35,7 +36,7 @@ from app.api.schemas import (
     ToolApprovalRequest,
 )
 from app.core.db import get_session
-from app.models import ApprovalAudit
+from app.models import ApprovalAudit, Conversation
 from app.providers import get_provider_for_model
 from app.security.capabilities import validate_policy as validate_capability_policy
 
@@ -54,6 +55,10 @@ def _conv_to_out(conv) -> ConversationOut:
         capability_policy=conv.capability_policy,
         breakpoints=meta.get("breakpoints"),
         profile_id=conv.profile_id,
+        tags=conv.tags or [],
+        folder=conv.folder,
+        is_pinned=conv.is_pinned,
+        is_archived=conv.is_archived,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -208,6 +213,10 @@ def patch_conversation(
         capability_policy=body.capability_policy,
         breakpoints=body.breakpoints,
         profile_id=body.profile_id,
+        tags=body.tags,
+        folder=body.folder,
+        is_pinned=body.is_pinned,
+        is_archived=body.is_archived,
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -517,3 +526,73 @@ def get_approval_audits(
         )
         for r in rows
     ]
+
+
+# --- Conversation search & bulk operations (Фаза 3a §4) ---
+
+
+@router.get("/conversations/search/content", response_model=list[ConversationOut])
+def search_conversation_content(
+    q: str,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+) -> list[ConversationOut]:
+    """Search across all conversation message content."""
+    from sqlmodel import col
+
+    from app.models import Message as MessageRow
+
+    # Find conversation IDs that have matching messages.
+    msg_stmt = (
+        select(MessageRow.conversation_id)
+        .where(col(MessageRow.content).contains(q))
+        .distinct()
+        .limit(limit)
+    )
+    conv_ids = list(session.exec(msg_stmt).all())
+    if not conv_ids:
+        return []
+    convs = session.exec(
+        select(Conversation).where(col(Conversation.id).in_(conv_ids))
+    ).all()
+    return [_conv_to_out(c) for c in convs]
+
+
+class BulkActionRequest(BaseModel):
+    """Bulk operation request body."""
+
+    conversation_ids: list[int]
+    action: str  # "archive" | "unarchive" | "pin" | "unpin" | "delete" | "move"
+    folder: str | None = None  # for "move" action
+
+
+@router.post("/conversations/bulk")
+def post_conversations_bulk(
+    body: BulkActionRequest, session: Session = Depends(get_session)
+) -> dict:
+    """Perform a bulk operation on multiple conversations."""
+    affected = 0
+    for conv_id in body.conversation_ids:
+        conv = session.get(Conversation, conv_id)
+        if conv is None:
+            continue
+        if body.action == "archive":
+            conv.is_archived = True
+        elif body.action == "unarchive":
+            conv.is_archived = False
+        elif body.action == "pin":
+            conv.is_pinned = True
+        elif body.action == "unpin":
+            conv.is_pinned = False
+        elif body.action == "delete":
+            delete_conversation(session, conv_id)
+            affected += 1
+            continue
+        elif body.action == "move" and body.folder is not None:
+            conv.folder = body.folder or None
+        else:
+            continue
+        session.add(conv)
+        affected += 1
+    session.commit()
+    return {"affected": affected, "action": body.action}

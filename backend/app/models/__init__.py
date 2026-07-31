@@ -21,6 +21,7 @@ from app.models.provider import Provider
 from app.models.run import AgentRun, RunEvent
 from app.models.subagent import SubagentRole, SubagentRun
 from app.models.user import User
+from app.models.wiki import WikiArticle
 
 __all__ = [
     "AgentProfile",
@@ -41,4 +42,5 @@ __all__ = [
     "TimestampMixin",
     "ToolCall",
     "User",
+    "WikiArticle",
 ]

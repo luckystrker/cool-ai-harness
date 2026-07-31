@@ -61,6 +61,8 @@ class MCPServerConfig:
     """Configuration for a single MCP server connection.
 
     Supports both stdio (subprocess) and HTTP (Streamable HTTP / SSE) transports.
+    Includes plugin manifest fields (version, author, compatibility) for
+    lifecycle management (Фаза 2 §2).
     """
 
     name: str
@@ -79,6 +81,11 @@ class MCPServerConfig:
     capabilities: list[str] = field(default_factory=list)
     # Timeout for tool calls in seconds.
     timeout_s: float = 30.0
+    # --- Plugin manifest (Фаза 2 §2 lifecycle) ---
+    version: str = ""  # semver string, e.g. "1.2.0"
+    author: str = ""
+    # Minimum harness version required (for forward-compatibility checks).
+    compatibility: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict (for config.yaml / API responses)."""
@@ -100,6 +107,12 @@ class MCPServerConfig:
                 d["headers"] = self.headers
         if self.capabilities:
             d["capabilities"] = self.capabilities
+        if self.version:
+            d["version"] = self.version
+        if self.author:
+            d["author"] = self.author
+        if self.compatibility:
+            d["compatibility"] = self.compatibility
         return d
 
     @classmethod
@@ -118,6 +131,9 @@ class MCPServerConfig:
             description=data.get("description", ""),
             capabilities=data.get("capabilities", []),
             timeout_s=data.get("timeout_s", 30.0),
+            version=data.get("version", ""),
+            author=data.get("author", ""),
+            compatibility=data.get("compatibility", ""),
         )
 
 

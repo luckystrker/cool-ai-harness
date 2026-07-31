@@ -26,6 +26,7 @@ from app.api.runs import router as runs_router
 from app.api.skills import router as skills_router
 from app.api.subagents import router as subagents_router
 from app.api.websocket import router as ws_router
+from app.api.wiki import router as wiki_router
 from app.api.workspace import router as workspace_router
 from app.core.config import get_settings
 from app.core.db import init_db
@@ -139,6 +140,7 @@ def create_app() -> FastAPI:
     app.include_router(entities_router, prefix="/api")
     app.include_router(workspace_router, prefix="/api")
     app.include_router(analytics_router, prefix="/api")
+    app.include_router(wiki_router, prefix="/api")
     app.include_router(ws_router)  # WebSocket routes live at /ws/...
 
     # --- Serve built frontend (SPA) if dist/ exists ---
