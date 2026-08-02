@@ -1,6 +1,6 @@
 # Фаза 4: Специализированные Workflows + Multimodal + Agent Constructor
 
-> **Статус:** 🔄 В процессе (Code Task + Git/GitHub tools готовы; deep research, multimodal, browser, Agent Constructor pending)
+> **Статус:** 🔄 В процессе (Code Task + Git/GitHub tools готовы; **Deep Research готов** (итерация 1: оркестратор + цитаты + экспорт md/html + страница + tool + cron; Playwright browser automation и PDF/DOCX экспорт отложены); multimodal, browser, Agent Constructor pending)
 > **Длительность:** 2.5-3 недели
 
 Цель: три мощных специализированных инструмента + мультимодальный ввод + продвинутые tools.
@@ -14,6 +14,12 @@
 - Пользователь может возобновить или повторить workflow с теми же входными данными и сравнить результаты разных моделей
 
 ## 1. Deep Research skill (`app/skills/builtin/deep-research/`)
+
+> **Статус: ✅ Итерация 1 готова.** Выделенный workflow в `backend/app/research/`
+> (модель `ResearchRun` + оркестратор + API + SSE-прогресс), страница
+> `/deep-research`, tool `deep_research`, интеграция с recurring tasks
+> (`workflow_type="deep_research"`). Playwright browser automation и экспорт
+> PDF/DOCX — следующая итерация.
 
 - Декомпозиция запроса → параллельный поиск (subagents) → fetch/extract/оценка → синтез с цитированием
 - Структурированный отчёт + библиография

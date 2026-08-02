@@ -18,6 +18,7 @@ from app.models.conversation import Conversation, Message, ToolCall
 from app.models.plan import Plan, PlanStep, PlanTemplate
 from app.models.profile import AgentProfile
 from app.models.provider import Provider
+from app.models.research import ResearchRun
 from app.models.rss import RssEntry, RssSubscription
 from app.models.run import AgentRun, RunEvent
 from app.models.subagent import SubagentRole, SubagentRun
@@ -38,6 +39,7 @@ __all__ = [
     "PlanStep",
     "PlanTemplate",
     "Provider",
+    "ResearchRun",
     "RssEntry",
     "RssSubscription",
     "RunEvent",

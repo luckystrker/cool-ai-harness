@@ -1338,3 +1338,87 @@ export interface GitCheckoutRequest {
   path: string
   branch: string
 }
+
+// --- Deep Research (Фаза 4) ---
+
+export interface ResearchStartRequest {
+  topic: string
+  depth?: number
+  model?: string | null
+  conversation_id?: number | null
+}
+
+export interface ResearchRerunRequest {
+  model?: string | null
+}
+
+export type ResearchStatus = "queued" | "running" | "completed" | "failed" | "cancelled"
+
+export type ResearchConfidence = "high" | "medium" | "low"
+
+export interface ResearchSource {
+  url: string
+  title: string
+  snippet: string
+  fetched_at: string
+  sub_question: string
+  sub_questions: string[] | null
+  confidence: ResearchConfidence | string
+  conflict: boolean
+}
+
+export interface ResearchCitation {
+  index: number
+  text: string
+  source_ids: number[]
+  confidence: ResearchConfidence | string
+  conflict: boolean
+}
+
+export interface ResearchUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  cost_usd?: number
+}
+
+export interface ResearchRun {
+  id: number
+  topic: string
+  depth: number
+  model: string | null
+  status: ResearchStatus
+  input_hash: string | null
+  report_artifact_id: number | null
+  sources_count: number
+  citations_count: number
+  usage: ResearchUsage | null
+  error: string | null
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+}
+
+export interface ResearchRunDetail extends ResearchRun {
+  conversation_id: number | null
+  parent_task_run_id: number | null
+  sub_questions: string[]
+  sources: ResearchSource[]
+  citations: ResearchCitation[]
+  report_markdown: string | null
+}
+
+export type ResearchProgressEventType =
+  | "started"
+  | "stage"
+  | "subquestion_started"
+  | "subquestion_completed"
+  | "source_found"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+export interface ResearchProgressEvent {
+  type: ResearchProgressEventType
+  payload: Record<string, unknown>
+}

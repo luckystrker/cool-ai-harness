@@ -14,6 +14,7 @@ import {
   Loader2,
   MessageSquare,
   Plus,
+  SearchCheck,
   Settings,
   Settings2,
   Trash2,
@@ -334,6 +335,11 @@ export function Sidebar() {
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <a href="/subagents">
             <Bot className="h-4 w-4" /> Subagents
+          </a>
+        </Button>
+        <Button asChild variant="ghost" className="w-full justify-start gap-2">
+          <a href="/deep-research">
+            <SearchCheck className="h-4 w-4" /> Deep Research
           </a>
         </Button>
         <Button asChild variant="ghost" className="w-full justify-start gap-2">

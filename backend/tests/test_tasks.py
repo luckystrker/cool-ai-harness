@@ -426,6 +426,75 @@ class TestTaskExecution:
             assert task.failure_count == 0
             assert task.next_run_at is not None
 
+    async def test_deep_research_workflow_type_runs_pipeline(self, user_id, monkeypatch):
+        """A task with workflow_type='deep_research' runs the research pipeline.
+
+        The topic is the task prompt; the report becomes the task output and a
+        ResearchRun row is created with the report artifact (Фаза 4).
+        """
+        from app.models.research import RESEARCH_STATUS_COMPLETED as R_DONE
+        from app.providers import ChatResult, Usage
+        from tests.conftest import ScriptedProvider
+
+        class _Provider(ScriptedProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.completions = [
+                    "1. Q1\n2. Q2\n3. Q3",
+                    "# Report\nSummary [1].\n\n## Sources\n[1] https://example.com/x",
+                ]
+
+            async def chat_completion(self, messages, *, model, tools=None, **kwargs):  # type: ignore[override]
+                return ChatResult(
+                    content=self.completions.pop(0),
+                    usage=Usage(total_tokens=5, cost_usd=0.001),
+                )
+
+        provider = _Provider()
+        provider.set_script(
+            [
+                "1. Finding A https://example.com/x\n## Sources\n"
+                "https://example.com/x | X page",
+                "2. Finding A again https://example.com/x\n## Sources\n"
+                "https://example.com/x | X page",
+                "3. Finding B https://example.com/y\n## Sources\n"
+                "https://example.com/y | Y page",
+            ]
+        )
+        for module in ("app.providers", "app.research.orchestrator", "app.agent.subagents"):
+            monkeypatch.setattr(module + ".get_provider_for_model", lambda model=None: provider)
+
+        with Session(engine) as session:
+            task = _make_task(
+                session,
+                user_id,
+                name="weekly digest",
+                prompt="Weekly AI digest topic",
+                model="test-model",
+                workflow_type="deep_research",
+            )
+            task_id = task.id
+            run_id = create_task_run(session, task).id
+
+        await execute_task_run(run_id)
+
+        with Session(engine) as session:
+            run = get_task_run(session, run_id)
+            task = get_task(session, task_id)
+            assert run.status == TASK_RUN_COMPLETED
+            assert run.output and "## Sources" in run.output
+            assert task.run_count == 1
+            from sqlmodel import select
+
+            from app.models.research import ResearchRun
+
+            research = session.exec(select(ResearchRun).order_by(ResearchRun.id.desc())).first()
+            assert research is not None
+            assert research.status == R_DONE
+            assert research.topic == "Weekly AI digest topic"
+            assert research.parent_task_run_id == run_id
+            assert research.report_artifact_id is not None
+
     async def test_completed_run_is_delivered_to_ui_and_unread(self, user_id, scripted):
         scripted.set_script(["Delivered result."])
         with Session(engine) as session:

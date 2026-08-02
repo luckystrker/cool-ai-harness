@@ -572,7 +572,23 @@ async def execute_task_run(task_run_id: int) -> str | None:
         started = time.monotonic()
 
         async def _drive() -> tuple[str | None, dict | None, str | None]:
-            """Consume the agent loop, returning (output, usage, error)."""
+            """Run the workflow (deep research) or the agent loop.
+
+            Returns (output, usage, error) for both paths so finalization and
+            delivery stay identical.
+            """
+            if task.workflow_type == "deep_research":
+                # Фаза 4 — deep research workflow as a recurring task.
+                from app.research import run_research_for_task
+
+                return await run_research_for_task(
+                    session=session,
+                    task_run_id=run.id,
+                    conversation_id=run.conversation_id,
+                    topic=task.prompt,
+                    model=model,
+                )
+
             output: str | None = None
             tokens: list[str] = []
             usage: dict | None = None

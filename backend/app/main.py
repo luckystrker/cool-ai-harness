@@ -21,6 +21,7 @@ from app.api.memory import router as memory_router
 from app.api.plans import router as plans_router
 from app.api.profiles import router as profiles_router
 from app.api.providers import router as providers_router
+from app.api.research import router as research_router
 from app.api.routes import router as api_router
 from app.api.rss import router as rss_router
 from app.api.runs import router as runs_router
@@ -171,6 +172,7 @@ def create_app() -> FastAPI:
     app.include_router(workspace_router, prefix="/api", dependencies=_auth)
     app.include_router(analytics_router, prefix="/api", dependencies=_auth)
     app.include_router(wiki_router, prefix="/api", dependencies=_auth)
+    app.include_router(research_router, prefix="/api", dependencies=_auth)
     app.include_router(ws_router)  # WebSocket routes live at /ws/... (token via query param)
 
     # --- Serve built frontend (SPA) if dist/ exists ---

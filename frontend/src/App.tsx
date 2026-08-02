@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/layout/AppLayout"
 import { AnalyticsPage } from "@/pages/AnalyticsPage"
 import { ChatPage } from "@/pages/ChatPage"
+import { DeepResearchPage } from "@/pages/DeepResearchPage"
 import { InspectorPage } from "@/pages/InspectorPage"
 import { MemoryPage } from "@/pages/MemoryPage"
 import { ProfilesPage } from "@/pages/ProfilesPage"
@@ -24,6 +25,7 @@ function App() {
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/budgets" element={<BudgetsPage />} />
         <Route path="/subagents" element={<SubagentsPage />} />
+        <Route path="/deep-research" element={<DeepResearchPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/inspector" element={<InspectorPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -563,3 +563,74 @@ class GitCheckoutRequest(BaseModel):
 
     path: str
     branch: str
+
+
+# --- deep research (Фаза 4) ---
+
+
+class ResearchStartRequest(BaseModel):
+    """Start a deep research workflow."""
+
+    topic: str
+    depth: int = 4
+    model: str | None = None
+    conversation_id: int | None = None
+
+
+class ResearchRerunRequest(BaseModel):
+    """Repeat a previous research run (optionally with a different model)."""
+
+    model: str | None = None
+
+
+class ResearchSourceOut(BaseModel):
+    """One collected web source with provenance and confidence."""
+
+    url: str
+    title: str = ""
+    snippet: str = ""
+    fetched_at: str = ""
+    sub_question: str = ""
+    sub_questions: list[str] | None = None
+    confidence: str = "medium"
+    conflict: bool = False
+
+
+class ResearchCitationOut(BaseModel):
+    """One report citation: claim text + referenced source + confidence."""
+
+    index: int
+    text: str = ""
+    source_ids: list[int] = Field(default_factory=list)
+    confidence: str = "medium"
+    conflict: bool = False
+
+
+class ResearchRunOut(BaseModel):
+    """Summary of a research run (list view)."""
+
+    id: int
+    topic: str
+    depth: int
+    model: str | None = None
+    status: str
+    input_hash: str | None = None
+    report_artifact_id: int | None = None
+    sources_count: int = 0
+    citations_count: int = 0
+    usage: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
+class ResearchRunDetail(ResearchRunOut):
+    """Full research run: sub-questions, sources, citations, report."""
+
+    conversation_id: int | None = None
+    parent_task_run_id: int | None = None
+    sub_questions: list[str] = Field(default_factory=list)
+    sources: list[ResearchSourceOut] = Field(default_factory=list)
+    citations: list[ResearchCitationOut] = Field(default_factory=list)
+    report_markdown: str | None = None

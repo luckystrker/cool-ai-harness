@@ -29,6 +29,7 @@ def register_builtins() -> None:
     from app.tools.github_tools import register_github_tools
     from app.tools.mcp_tools import register_mcp_management_tools
     from app.tools.plan_tools import register_plan_tools
+    from app.tools.research_tools import register_research_tools
     from app.tools.rss_tools import register_rss_tools
     from app.tools.skill_tools import register_skill_tools
     from app.tools.subagent_tools import register_subagent_tools
@@ -49,6 +50,7 @@ def register_builtins() -> None:
     register_memory_tools()
     register_task_tools()
     register_rss_tools()
+    register_research_tools()
     register_wiki_tools()
 
 
