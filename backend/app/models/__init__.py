@@ -18,10 +18,12 @@ from app.models.conversation import Conversation, Message, ToolCall
 from app.models.plan import Plan, PlanStep, PlanTemplate
 from app.models.profile import AgentProfile
 from app.models.provider import Provider
+from app.models.rss import RssEntry, RssSubscription
 from app.models.run import AgentRun, RunEvent
 from app.models.subagent import SubagentRole, SubagentRun
 from app.models.task import ScheduledTask, TaskRun
 from app.models.user import User
+from app.models.webhook import WebhookEndpoint, WebhookEvent
 from app.models.wiki import WikiArticle
 
 __all__ = [
@@ -36,6 +38,8 @@ __all__ = [
     "PlanStep",
     "PlanTemplate",
     "Provider",
+    "RssEntry",
+    "RssSubscription",
     "RunEvent",
     "ScheduledTask",
     "SpendLog",
@@ -45,5 +49,7 @@ __all__ = [
     "TimestampMixin",
     "ToolCall",
     "User",
+    "WebhookEndpoint",
+    "WebhookEvent",
     "WikiArticle",
 ]

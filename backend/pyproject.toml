@@ -25,6 +25,8 @@ dependencies = [
     # Scheduler (cron jobs — Фаза 3b)
     "apscheduler>=3.10",
     "croniter>=3.0",
+    # RSS parsing (Фаза 3b §6)
+    "feedparser>=6.0",
     # Telegram
     "python-telegram-bot>=21.6",
     # Crypto (encrypting API keys at rest)

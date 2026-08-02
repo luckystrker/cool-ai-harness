@@ -22,10 +22,13 @@ from app.api.plans import router as plans_router
 from app.api.profiles import router as profiles_router
 from app.api.providers import router as providers_router
 from app.api.routes import router as api_router
+from app.api.rss import router as rss_router
 from app.api.runs import router as runs_router
 from app.api.skills import router as skills_router
 from app.api.subagents import router as subagents_router
 from app.api.tasks import router as tasks_router
+from app.api.webhooks import public_router as webhooks_public_router
+from app.api.webhooks import router as webhooks_router
 from app.api.websocket import router as ws_router
 from app.api.wiki import router as wiki_router
 from app.api.workspace import router as workspace_router
@@ -159,6 +162,9 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router, prefix="/api", dependencies=_auth)
     app.include_router(subagents_router, prefix="/api", dependencies=_auth)
     app.include_router(tasks_router, prefix="/api", dependencies=_auth)
+    app.include_router(rss_router, prefix="/api", dependencies=_auth)
+    app.include_router(webhooks_router, prefix="/api", dependencies=_auth)
+    app.include_router(webhooks_public_router, prefix="/api")  # no auth: HMAC-secured
     app.include_router(profiles_router, prefix="/api", dependencies=_auth)
     app.include_router(memory_router, prefix="/api", dependencies=_auth)
     app.include_router(entities_router, prefix="/api", dependencies=_auth)

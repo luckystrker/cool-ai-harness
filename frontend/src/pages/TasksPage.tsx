@@ -6,25 +6,35 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Globe,
   Inbox,
   Loader2,
   Pause,
   Pencil,
   Play,
   Plus,
+  RefreshCw,
+  Rss,
   SkipForward,
   Trash2,
+  Webhook,
   XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
+import { rssApi } from "@/api/rss"
 import { tasksApi } from "@/api/tasks"
+import { webhooksApi } from "@/api/webhooks"
 import type {
+  RssEntry,
+  RssSubscription,
   ScheduledTask,
   ScheduledTaskCreate,
   ScheduledTaskUpdate,
   TaskDeliveryChannel,
   TaskRun,
   TaskRunStatus,
+  WebhookEndpoint,
+  WebhookEvent,
 } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -40,7 +50,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
-type Tab = "tasks" | "inbox"
+type Tab = "tasks" | "inbox" | "rss" | "webhooks"
 
 function formatWhen(iso: string | null | undefined): string {
   if (!iso) return "—"
@@ -180,7 +190,7 @@ export function TasksPage() {
       </div>
 
       <div className="flex gap-1 border-b">
-        {(["tasks", "inbox"] as Tab[]).map((t) => (
+        {(["tasks", "inbox", "rss", "webhooks"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -190,6 +200,8 @@ export function TasksPage() {
             )}
           >
             {t === "inbox" && <Inbox className="h-3.5 w-3.5" />}
+            {t === "rss" && <Rss className="h-3.5 w-3.5" />}
+            {t === "webhooks" && <Webhook className="h-3.5 w-3.5" />}
             {t}
             {t === "inbox" && (inbox?.unread_count ?? 0) > 0 && (
               <span className="ml-1 rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">
@@ -229,6 +241,10 @@ export function TasksPage() {
       )}
 
       {tab === "inbox" && <InboxPanel />}
+
+      {tab === "rss" && <RssPanel />}
+
+      {tab === "webhooks" && <WebhooksPanel />}
 
       <TaskDialog
         open={dialogOpen}
@@ -659,5 +675,352 @@ function TaskDialog({
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// --- RSS Panel ---
+
+function RssPanel() {
+  const queryClient = useQueryClient()
+  const [url, setUrl] = useState("")
+  const [category, setCategory] = useState("")
+
+  const { data: subscriptions = [] } = useQuery({
+    queryKey: ["rss", "subscriptions"],
+    queryFn: () => rssApi.listSubscriptions(),
+    refetchInterval: 30_000,
+  })
+
+  const { data: entries = [] } = useQuery({
+    queryKey: ["rss", "entries"],
+    queryFn: () => rssApi.allEntries({ limit: 30 }),
+    refetchInterval: 30_000,
+  })
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["rss"] })
+  }
+
+  const subscribeMutation = useMutation({
+    mutationFn: () => rssApi.subscribe({ url, category: category || undefined }),
+    onSuccess: () => {
+      invalidate()
+      setUrl("")
+      setCategory("")
+      toast.success("Subscribed")
+    },
+    onError: (e) => toast.error("Failed to subscribe", { description: String(e) }),
+  })
+
+  const unsubscribeMutation = useMutation({
+    mutationFn: (id: number) => rssApi.unsubscribe(id),
+    onSuccess: () => {
+      invalidate()
+      toast.success("Unsubscribed")
+    },
+  })
+
+  const fetchMutation = useMutation({
+    mutationFn: (id: number) => rssApi.fetchNow(id),
+    onSuccess: (data) => {
+      invalidate()
+      toast.success(`Fetched ${data.new_entries} new entries`)
+    },
+  })
+
+  const markReadMutation = useMutation({
+    mutationFn: (id: number) => rssApi.markRead(id),
+    onSuccess: () => invalidate(),
+  })
+
+  return (
+    <div className="space-y-4">
+      {/* Add subscription */}
+      <div className="flex gap-2">
+        <Input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://example.com/feed.xml"
+          className="flex-1"
+        />
+        <Input
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          placeholder="category"
+          className="w-32"
+        />
+        <Button onClick={() => subscribeMutation.mutate()} disabled={!url.trim()}>
+          <Plus className="mr-1 h-4 w-4" /> Subscribe
+        </Button>
+      </div>
+
+      {/* Subscriptions list */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium text-muted-foreground">
+          Subscriptions ({subscriptions.length})
+        </h3>
+        {subscriptions.map((sub: RssSubscription) => (
+          <Card key={sub.id}>
+            <CardContent className="flex items-center justify-between py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">{sub.title || sub.url}</p>
+                <p className="truncate text-xs text-muted-foreground">{sub.url}</p>
+                <div className="mt-1 flex gap-2">
+                  {sub.category && <Badge variant="outline">{sub.category}</Badge>}
+                  <Badge variant="secondary">{sub.entry_count} entries</Badge>
+                  {sub.last_error && (
+                    <Badge variant="destructive" className="max-w-40 truncate">
+                      {sub.last_error}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => fetchMutation.mutate(sub.id)}
+                  title="Fetch now"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => unsubscribeMutation.mutate(sub.id)}
+                  title="Unsubscribe"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {/* Recent entries */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium text-muted-foreground">Recent entries</h3>
+        {entries.length === 0 && (
+          <p className="py-4 text-center text-sm text-muted-foreground">No entries yet.</p>
+        )}
+        {entries.map((entry: RssEntry) => (
+          <div
+            key={entry.id}
+            className={cn(
+              "flex items-start gap-2 rounded-md border p-2",
+              !entry.is_read && "bg-accent/50"
+            )}
+          >
+            <Globe className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              {entry.link ? (
+                <a
+                  href={entry.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-medium hover:underline"
+                >
+                  {entry.title || "(no title)"}
+                </a>
+              ) : (
+                <span className="text-sm font-medium">{entry.title || "(no title)"}</span>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {entry.author && `${entry.author} · `}
+                {formatWhen(entry.published_at)}
+              </p>
+            </div>
+            {!entry.is_read && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => markReadMutation.mutate(entry.id)}
+                title="Mark read"
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// --- Webhooks Panel ---
+
+function WebhooksPanel() {
+  const queryClient = useQueryClient()
+  const [name, setName] = useState("")
+  const [sourceType, setSourceType] = useState("custom")
+  const [expandedEp, setExpandedEp] = useState<number | null>(null)
+
+  const { data: endpoints = [] } = useQuery({
+    queryKey: ["webhooks"],
+    queryFn: () => webhooksApi.list(),
+    refetchInterval: 15_000,
+  })
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["webhooks"] })
+
+  const createMutation = useMutation({
+    mutationFn: () => webhooksApi.create({ name, source_type: sourceType }),
+    onSuccess: () => {
+      invalidate()
+      setName("")
+      toast.success("Webhook created")
+    },
+    onError: (e) => toast.error("Failed to create webhook", { description: String(e) }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => webhooksApi.delete(id),
+    onSuccess: () => {
+      invalidate()
+      toast.success("Webhook deleted")
+    },
+  })
+
+  const replayMutation = useMutation({
+    mutationFn: ({ epId, evId }: { epId: number; evId: number }) =>
+      webhooksApi.replay(epId, evId),
+    onSuccess: () => {
+      invalidate()
+      toast.success("Event replayed")
+    },
+  })
+
+  return (
+    <div className="space-y-4">
+      {/* Create endpoint */}
+      <div className="flex gap-2">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Webhook name"
+          className="flex-1"
+        />
+        <select
+          value={sourceType}
+          onChange={(e) => setSourceType(e.target.value)}
+          className="rounded-md border bg-background px-3 py-1.5 text-sm"
+        >
+          <option value="custom">Custom</option>
+          <option value="github">GitHub</option>
+          <option value="notion">Notion</option>
+          <option value="slack">Slack</option>
+        </select>
+        <Button onClick={() => createMutation.mutate()} disabled={!name.trim()}>
+          <Plus className="mr-1 h-4 w-4" /> Create
+        </Button>
+      </div>
+
+      {/* Endpoints list */}
+      {endpoints.length === 0 && (
+        <p className="py-8 text-center text-sm text-muted-foreground">
+          No webhook endpoints yet. Create one to receive events from external systems.
+        </p>
+      )}
+      {endpoints.map((ep: WebhookEndpoint) => (
+        <EndpointCard
+          key={ep.id}
+          endpoint={ep}
+          expanded={expandedEp === ep.id}
+          onToggle={() => setExpandedEp(expandedEp === ep.id ? null : ep.id)}
+          onDelete={() => deleteMutation.mutate(ep.id)}
+          onReplay={(evId) => replayMutation.mutate({ epId: ep.id, evId })}
+        />
+      ))}
+    </div>
+  )
+}
+
+function EndpointCard({
+  endpoint,
+  expanded,
+  onToggle,
+  onDelete,
+  onReplay,
+}: {
+  endpoint: WebhookEndpoint
+  expanded: boolean
+  onToggle: () => void
+  onDelete: () => void
+  onReplay: (eventId: number) => void
+}) {
+  const { data: events = [] } = useQuery({
+    queryKey: ["webhooks", endpoint.id, "events"],
+    queryFn: () => webhooksApi.listEvents(endpoint.id, { limit: 20 }),
+    enabled: expanded,
+  })
+
+  return (
+    <Card>
+      <CardHeader className="cursor-pointer py-3" onClick={onToggle}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {expanded ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronRight className="h-4 w-4" />
+            )}
+            <CardTitle className="text-sm">{endpoint.name}</CardTitle>
+            <Badge variant="outline">{endpoint.source_type}</Badge>
+            {!endpoint.enabled && <Badge variant="secondary">disabled</Badge>}
+          </div>
+          <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); onDelete() }}>
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      {expanded && (
+        <CardContent className="space-y-3 pt-0">
+          <div className="rounded-md bg-muted p-2 text-xs font-mono">
+            <p className="text-muted-foreground">URL</p>
+            <p className="select-all">{endpoint.url_path}</p>
+            <p className="mt-1 text-muted-foreground">Secret</p>
+            <p className="select-all">{endpoint.secret}</p>
+          </div>
+          <div className="space-y-1">
+            <h4 className="text-xs font-medium text-muted-foreground">
+              Events ({events.length})
+            </h4>
+            {events.map((ev: WebhookEvent) => (
+              <div
+                key={ev.id}
+                className="flex items-center justify-between rounded border px-2 py-1 text-xs"
+              >
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant={
+                      ev.status === "completed"
+                        ? "secondary"
+                        : ev.status === "rejected" || ev.status === "failed"
+                          ? "destructive"
+                          : "outline"
+                    }
+                  >
+                    {ev.status}
+                  </Badge>
+                  <span>{ev.event_type || "unknown"}</span>
+                  <span className="text-muted-foreground">{formatWhen(ev.received_at)}</span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  onClick={() => onReplay(ev.id)}
+                  title="Replay"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      )}
+    </Card>
   )
 }

@@ -1233,3 +1233,74 @@ export interface SchedulerStatus {
   max_concurrent_tasks: number
   jobs: { id: string; name: string; next_run_time: string | null }[]
 }
+
+// --- RSS / News Aggregator (Фаза 3b §6) ---
+
+export interface RssSubscription {
+  id: number
+  user_id: number
+  url: string
+  title: string | null
+  site_url: string | null
+  category: string | null
+  fetch_interval_minutes: number
+  enabled: boolean
+  last_fetched_at: string | null
+  last_error: string | null
+  entry_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RssEntry {
+  id: number
+  subscription_id: number
+  guid: string
+  title: string | null
+  link: string | null
+  author: string | null
+  summary: string | null
+  published_at: string | null
+  content_hash: string | null
+  is_read: boolean
+  fetched_at: string
+}
+
+// --- Webhook Router (Фаза 3b §7) ---
+
+export type WebhookSourceType = "github" | "notion" | "slack" | "custom"
+export type WebhookEventStatus =
+  | "received"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "rejected"
+
+export interface WebhookEndpoint {
+  id: number
+  user_id: number
+  name: string
+  hook_id: string
+  secret: string
+  source_type: WebhookSourceType
+  event_filter: string[] | null
+  task_id: number | null
+  prompt_template: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  url_path: string
+}
+
+export interface WebhookEvent {
+  id: number
+  endpoint_id: number
+  event_type: string | null
+  payload: Record<string, unknown> | null
+  signature_valid: boolean
+  status: WebhookEventStatus
+  task_run_id: number | null
+  error: string | null
+  received_at: string
+  created_at: string
+}

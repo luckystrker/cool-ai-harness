@@ -223,7 +223,7 @@ async def start_scheduler() -> int:
 
 
 def _register_maintenance_jobs() -> None:
-    """Register built-in maintenance jobs (memory lifecycle)."""
+    """Register built-in maintenance jobs (memory lifecycle, RSS fetch)."""
     if _scheduler is None or not _scheduler.running:
         return
     _scheduler.add_job(
@@ -231,6 +231,16 @@ def _register_maintenance_jobs() -> None:
         trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),
         id="internal:memory_maintenance",
         name="Memory lifecycle maintenance",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    # RSS feed fetch sweep: every 15 minutes, fetch all due subscriptions.
+    _scheduler.add_job(
+        _run_rss_fetch,
+        trigger=IntervalTrigger(minutes=15),
+        id="internal:rss_fetch",
+        name="RSS feed fetch sweep",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -248,6 +258,19 @@ async def _run_memory_maintenance() -> None:
         log.info("scheduler.memory_maintenance_done", **results)
     except Exception as exc:
         log.error("scheduler.memory_maintenance_failed", error=str(exc))
+
+
+async def _run_rss_fetch() -> None:
+    """Fetch all due RSS subscriptions (Фаза 3b §6)."""
+    try:
+        from app.rss.service import fetch_all_due
+
+        with Session(engine) as session:
+            results = fetch_all_due(session)
+        if results.get("new_entries"):
+            log.info("scheduler.rss_fetch_done", **results)
+    except Exception as exc:
+        log.error("scheduler.rss_fetch_failed", error=str(exc))
 
 
 async def shutdown_scheduler() -> None:
