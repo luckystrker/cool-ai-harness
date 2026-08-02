@@ -345,6 +345,20 @@ class Settings(BaseSettings):
         description="Auto-disable a task after N consecutive failures (0 = never)",
     )
 
+    # --- Git / GitHub (Фаза 4) ---
+    github_token: str = Field(
+        default="",
+        description="GitHub PAT for API tools (PR review, issues, actions)",
+    )
+    git_default_branch: str = Field(
+        default="main",
+        description="Default branch name for new repositories",
+    )
+    bash_timeout_s: float = Field(
+        default=30.0,
+        description="Default timeout for bash_execute tool (seconds)",
+    )
+
     # --- Observability / OTel export (Фаза 3a §5) ---
     # When set, LLM calls and tool invocations are exported as OTel spans to
     # the configured OTLP endpoint (e.g. http://localhost:4318). Empty = disabled.

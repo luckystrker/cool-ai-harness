@@ -1304,3 +1304,37 @@ export interface WebhookEvent {
   received_at: string
   created_at: string
 }
+
+// --- Workspace / Git (Фаза 4) ---
+
+export interface GitStatusOut {
+  path: string
+  is_git: boolean
+  branch: string | null
+  staged: string[]
+  modified: string[]
+  untracked: string[]
+}
+
+export interface GitLogEntryOut {
+  hash: string
+  message: string
+  author: string
+  date: string
+}
+
+export interface GitLogOut {
+  path: string
+  commits: GitLogEntryOut[]
+}
+
+export interface GitBranchOut {
+  path: string
+  branches: string[]
+  current: string | null
+}
+
+export interface GitCheckoutRequest {
+  path: string
+  branch: string
+}

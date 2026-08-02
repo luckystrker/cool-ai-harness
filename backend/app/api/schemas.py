@@ -518,3 +518,48 @@ class ProfileOut(BaseModel):
     is_active: bool = True
     created_at: datetime
     updated_at: datetime
+
+
+# --- workspace / git (Фаза 4) ---
+
+
+class GitStatusOut(BaseModel):
+    """Parsed git status for the workspace API."""
+
+    path: str
+    is_git: bool
+    branch: str | None = None
+    staged: list[str] = Field(default_factory=list)
+    modified: list[str] = Field(default_factory=list)
+    untracked: list[str] = Field(default_factory=list)
+
+
+class GitLogEntry(BaseModel):
+    """A single commit in the git log."""
+
+    hash: str
+    message: str
+    author: str
+    date: str
+
+
+class GitLogOut(BaseModel):
+    """Git log response."""
+
+    path: str
+    commits: list[GitLogEntry] = Field(default_factory=list)
+
+
+class GitBranchOut(BaseModel):
+    """Branch listing for a repository."""
+
+    path: str
+    branches: list[str] = Field(default_factory=list)
+    current: str | None = None
+
+
+class GitCheckoutRequest(BaseModel):
+    """Request to switch branch."""
+
+    path: str
+    branch: str

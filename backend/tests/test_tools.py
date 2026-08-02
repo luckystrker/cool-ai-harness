@@ -14,6 +14,11 @@ from app.tools import ToolArgs, ToolResult, get_registry, register_tool
 def test_builtins_registered_on_import() -> None:
     names = set(get_registry().keys())
     assert {"read_file", "write_file", "list_files", "python_execute", "web_search", "web_fetch"} <= names
+    # Фаза 4: bash, git, and github tools.
+    assert {"bash_execute", "git_status", "git_clone", "git_diff", "git_log"} <= names
+    assert {"git_blame", "git_branch", "git_commit", "git_push"} <= names
+    assert {"github_pr_list", "github_pr_diff", "github_pr_review"} <= names
+    assert {"github_issue_list", "github_issue_create", "github_actions_status"} <= names
 
 
 def test_register_tool_rejects_sync_func() -> None:

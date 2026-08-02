@@ -59,8 +59,23 @@ _DEFAULT_TOOL_CAPS: dict[str, frozenset[Capability]] = {
     "write_file": frozenset({Capability.WRITE}),
     "list_files": frozenset({Capability.READ}),
     "python_execute": frozenset({Capability.EXECUTE}),
+    "bash_execute": frozenset({Capability.EXECUTE}),
     "web_search": frozenset({Capability.NETWORK}),
     "web_fetch": frozenset({Capability.NETWORK}),
+    "git_status": frozenset({Capability.GIT}),
+    "git_clone": frozenset({Capability.GIT, Capability.NETWORK}),
+    "git_diff": frozenset({Capability.GIT}),
+    "git_log": frozenset({Capability.GIT}),
+    "git_blame": frozenset({Capability.GIT}),
+    "git_branch": frozenset({Capability.GIT}),
+    "git_commit": frozenset({Capability.GIT}),
+    "git_push": frozenset({Capability.GIT, Capability.NETWORK}),
+    "github_pr_list": frozenset({Capability.NETWORK, Capability.GIT}),
+    "github_pr_diff": frozenset({Capability.NETWORK, Capability.GIT}),
+    "github_pr_review": frozenset({Capability.NETWORK, Capability.GIT}),
+    "github_issue_list": frozenset({Capability.NETWORK, Capability.GIT}),
+    "github_issue_create": frozenset({Capability.NETWORK, Capability.GIT}),
+    "github_actions_status": frozenset({Capability.NETWORK, Capability.GIT}),
 }
 
 
