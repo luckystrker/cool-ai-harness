@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import get_settings
@@ -19,6 +19,19 @@ engine = create_engine(
     echo=False,
     connect_args=connect_args,
 )
+
+# SQLite performance pragmas: WAL mode allows concurrent readers during writes,
+# synchronous=NORMAL avoids an fsync per commit (huge throughput gain), and
+# busy_timeout prevents immediate SQLITE_BUSY errors under contention.
+if _settings.database_url.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 
 
 # Columns added after the initial schema. Each entry is (table, column, DDL).

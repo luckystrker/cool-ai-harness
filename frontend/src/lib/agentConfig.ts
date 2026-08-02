@@ -18,12 +18,52 @@ import type {
 // The "*" entry is the wildcard default applied to any tool not listed.
 export const TOOL_NAMES = [
   "*",
+  // File tools
   "read_file",
   "write_file",
   "list_files",
+  // Code execution
   "python_execute",
+  // Web tools
   "web_search",
   "web_fetch",
+  // Planning
+  "plan_step_update",
+  // Skills
+  "list_skills",
+  "use_skill",
+  "create_skill",
+  // MCP management
+  "mcp_list_servers",
+  "mcp_add_server",
+  "mcp_remove_server",
+  "mcp_connect_server",
+  "mcp_disconnect_server",
+  "mcp_search_store",
+  "mcp_install_server",
+  // Subagents
+  "spawn_subagent",
+  // Memory
+  "memory_remember",
+  "memory_recall",
+  "memory_forget",
+  "memory_update",
+  "memory_list",
+  "set_working_memory",
+  "get_working_memory",
+  "entity_lookup",
+  // Tasks / scheduler
+  "create_task",
+  "list_tasks",
+  "update_task",
+  "delete_task",
+  "run_task_now",
+  "parse_cron",
+  // Wiki / knowledge base
+  "read_wiki",
+  "write_wiki",
+  "search_wiki",
+  "update_wiki",
 ] as const
 
 export const CAPABILITY_NAMES = [

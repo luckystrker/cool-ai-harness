@@ -25,6 +25,7 @@ from app.agent.runners import run_conversation_turn
 from app.agent.runs import run_registry
 from app.agent.service import append_message, create_run, get_conversation
 from app.api.schemas import SendMessageRequest
+from app.core.auth import verify_ws_token
 from app.core.logging import get_logger
 from app.observability import inspector_registry
 from app.providers import get_provider_for_model
@@ -43,6 +44,9 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
     are serialized and sent as text frames. Multiple turns per connection are
     supported; a turn's failure does not close the socket.
     """
+    if not verify_ws_token(websocket):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
     await websocket.accept()
 
     # We need a DB session independent of FastAPI's request scope (this isn't
@@ -131,6 +135,9 @@ async def inspect_run_ws(websocket: WebSocket, run_id: int) -> None:
     sentinel is sent and the connection closes. If the run is already
     finished (or unknown), sends an error frame and closes immediately.
     """
+    if not verify_ws_token(websocket):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
     await websocket.accept()
 
     # Quick check: is the run still active? If not, inform and close.

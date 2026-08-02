@@ -322,7 +322,7 @@ class TestSelectRelevantSkills:
             for i in range(10)
         ]
         result = select_relevant_skills("skill number", skills, max_skills=3)
-        assert len(result) <= 3
+        assert len(result) == 3  # exactly max_skills when enough candidates exist
 
 
 # --- Context injection ---

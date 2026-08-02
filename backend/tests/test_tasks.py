@@ -722,12 +722,15 @@ class TestSchedulerEngine:
             assert isinstance(build_trigger(date_task), DateTrigger)
 
     def test_sync_is_noop_without_running_engine(self, user_id):
-        from app.tasks.scheduler import remove_task_job, sync_task_job
+        from app.tasks.scheduler import is_running, remove_task_job, sync_task_job
 
+        assert is_running() is False
         with Session(engine) as session:
             task = _make_task(session, user_id)
             sync_task_job(task)  # must not raise
             remove_task_job(task.id)
+        # Scheduler still not running after no-op calls.
+        assert is_running() is False
 
     def test_status_reports_disabled_in_tests(self):
         from app.tasks.scheduler import scheduler_status

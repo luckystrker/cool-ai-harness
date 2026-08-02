@@ -115,6 +115,8 @@ async def _spawn_subagent(
 
 def register_subagent_tools() -> None:
     """Register subagent-related tools. Idempotent."""
+    from app.security.capabilities import Capability
+
     register_tool(
         name="spawn_subagent",
         description=(
@@ -127,5 +129,6 @@ def register_subagent_tools() -> None:
         ),
         args_model=SpawnSubagentArgs,
         func=_spawn_subagent,
-        dangerous=False,
+        dangerous=True,
+        capabilities=frozenset({Capability.EXECUTE}),
     )

@@ -20,12 +20,18 @@ def _fernet() -> Fernet:
 
     Honors SECRET_KEY when it is a valid Fernet key; otherwise derives a stable
     key from SECRET_KEY so the MVP works out-of-the-box (with a warning that
-    secrets won't survive a SECRET_KEY change). The default placeholder
-    ``CHANGE_ME`` is replaced so we never silently encrypt with a known value.
+    secrets won't survive a SECRET_KEY change). In production, a missing or
+    default SECRET_KEY is a fatal startup error.
     """
     settings = get_settings()
     raw = settings.secret_key or ""
     if not raw or raw == "CHANGE_ME":
+        if settings.environment == "production":
+            raise RuntimeError(
+                "SECRET_KEY must be set to a real value in production. "
+                "Generate with: python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
+            )
         log.warning(
             "security.secret_key_not_set",
             hint="Generate with: python -c \"from cryptography.fernet import Fernet; "

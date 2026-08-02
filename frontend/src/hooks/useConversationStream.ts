@@ -120,8 +120,27 @@ export function useConversationStream() {
   const startedAtRef = useRef<number | null>(null)
   /** Live accumulator ref so respondApproval can mutate approval status. */
   const accRef = useRef<Accumulator | null>(null)
+  /** rAF throttle: avoids per-token React re-renders (batches to ~60fps). */
+  const rafRef = useRef<number | null>(null)
+  const flushScheduledRef = useRef(false)
 
   const flush = (acc: Accumulator, streaming = true) => {
+    // Schedule a rAF-throttled render. Multiple flush() calls within one frame
+    // coalesce into a single setState, reducing re-renders from O(tokens) to
+    // O(frames). Non-streaming flushes (finish) are immediate for correctness.
+    if (!streaming) {
+      _doFlush(acc, streaming)
+      return
+    }
+    if (flushScheduledRef.current) return // already scheduled
+    flushScheduledRef.current = true
+    rafRef.current = requestAnimationFrame(() => {
+      flushScheduledRef.current = false
+      _doFlush(acc, streaming)
+    })
+  }
+
+  const _doFlush = (acc: Accumulator, streaming: boolean) => {
     const tcs = Array.from(acc.toolCalls.values())
     const elapsedMs =
       startedAtRef.current != null
@@ -443,6 +462,12 @@ export function useConversationStream() {
           flush(acc)
         }
       } finally {
+        // Cancel any pending rAF-throttled flush.
+        if (rafRef.current != null) {
+          cancelAnimationFrame(rafRef.current)
+          rafRef.current = null
+        }
+        flushScheduledRef.current = false
         // Mark the assistant message as not streaming anymore (caret off),
         // freezing the final elapsed time.
         const elapsedMs =

@@ -38,8 +38,10 @@ class InspectorRegistry:
 
         Returns an asyncio.Queue that will receive AgentEvent dicts (via
         ``event.to_dict()``) and a final ``None`` sentinel when the run ends.
+        Bounded to 1000 events to prevent unbounded memory growth from slow
+        WebSocket consumers.
         """
-        queue: asyncio.Queue[Any] = asyncio.Queue()
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
         self._subscribers.setdefault(run_id, []).append(queue)
         log.debug("inspector.subscribed", run_id=run_id)
         return queue

@@ -114,8 +114,12 @@ def is_safe_url(
         try:
             infos = socket.getaddrinfo(hostname, None)
         except socket.gaierror:
-            # Can't resolve — let the HTTP client handle the error.
-            return UrlSafetyResult(safe=True)
+            # Can't resolve — block to be safe (prevents bypasses via DNS
+            # failures that a subsequent HTTP client might handle differently).
+            return UrlSafetyResult(
+                safe=False,
+                reason=f"Cannot resolve hostname {hostname!r} (DNS failure)",
+            )
         for info in infos:
             ip_str = info[4][0]
             if is_private_ip(ip_str):

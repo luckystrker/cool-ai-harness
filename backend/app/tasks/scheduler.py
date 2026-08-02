@@ -199,6 +199,7 @@ async def start_scheduler() -> int:
     """Start the engine and load jobs from the database. Returns the job count.
 
     Returns 0 without starting anything when ``scheduler_enabled`` is False.
+    Also registers internal maintenance jobs (memory lifecycle sweeps).
     """
     global _scheduler
     settings = get_settings()
@@ -212,8 +213,41 @@ async def start_scheduler() -> int:
     _scheduler.start()
     with Session(engine) as session:
         count = load_jobs(session)
+
+    # Register internal maintenance: daily memory lifecycle sweep (decay, TTL,
+    # validity, pending-expiry). Runs at 03:00 UTC to avoid user-active hours.
+    _register_maintenance_jobs()
+
     log.info("scheduler.started", jobs=count, timezone=settings.scheduler_timezone)
     return count
+
+
+def _register_maintenance_jobs() -> None:
+    """Register built-in maintenance jobs (memory lifecycle)."""
+    if _scheduler is None or not _scheduler.running:
+        return
+    _scheduler.add_job(
+        _run_memory_maintenance,
+        trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),
+        id="internal:memory_maintenance",
+        name="Memory lifecycle maintenance",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    log.info("scheduler.maintenance_registered")
+
+
+async def _run_memory_maintenance() -> None:
+    """Run all memory lifecycle sweeps (decay, TTL, validity, pending expiry)."""
+    try:
+        from app.memory.lifecycle import run_full_maintenance
+
+        with Session(engine) as session:
+            results = run_full_maintenance(session)
+        log.info("scheduler.memory_maintenance_done", **results)
+    except Exception as exc:
+        log.error("scheduler.memory_maintenance_failed", error=str(exc))
 
 
 async def shutdown_scheduler() -> None:

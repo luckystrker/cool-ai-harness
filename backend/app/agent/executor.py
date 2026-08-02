@@ -853,7 +853,8 @@ def _merge_tool_call_deltas(
 def _merge_one_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any]) -> None:
     idx = delta.get("index", 0)
     while len(calls) <= idx:
-        calls.append({"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+        # Use a list for arguments to avoid O(n²) string concatenation.
+        calls.append({"id": None, "type": "function", "function": {"name": "", "arguments": []}})
     target = calls[idx]
     if delta.get("id"):
         target["id"] = delta["id"]
@@ -864,7 +865,7 @@ def _merge_one_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any
     if fn_delta.get("name"):
         fn["name"] += fn_delta["name"]
     if fn_delta.get("arguments"):
-        fn["arguments"] += fn_delta["arguments"]
+        fn["arguments"].append(fn_delta["arguments"])
 
 
 def _normalize_tool_call(call: dict[str, Any]) -> dict[str, Any]:
@@ -877,6 +878,9 @@ def _normalize_tool_call(call: dict[str, Any]) -> dict[str, Any]:
     fn = call.get("function") or {}
     name = fn.get("name", "")
     raw_args = fn.get("arguments", "")
+    # Join accumulated fragments (list) into a single string.
+    if isinstance(raw_args, list):
+        raw_args = "".join(raw_args)
     parse_error = False
     if isinstance(raw_args, str):
         try:

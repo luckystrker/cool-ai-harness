@@ -163,10 +163,19 @@ def _fts5_search(
     Falls back gracefully if the FTS5 table doesn't exist (test environments).
     """
     try:
+        import re as _re
+
         from sqlalchemy import text
 
         # Tokenize the query for FTS5: use OR between words for broader matching.
-        words = [w.strip() for w in query.split() if len(w.strip()) > 1]
+        # Sanitize words to alphanumerics/underscores to prevent FTS5 query-language
+        # injection (NOT, NEAR, quotes, etc.).
+        words = [
+            _re.sub(r"[^A-Za-z0-9_]", "", w.strip())
+            for w in query.split()
+            if len(w.strip()) > 1
+        ]
+        words = [w for w in words if w]  # drop empties after sanitization
         if not words:
             return []
         # Limit query terms to avoid overly broad searches.

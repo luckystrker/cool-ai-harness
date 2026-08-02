@@ -127,19 +127,23 @@ _TAG = re.compile(rb"<[^>]+>")
 _WS = re.compile(rb"\s+")
 
 
+_MAX_REDIRECTS = 10
+
+
 async def web_fetch(*, url: str, max_chars: int = 20_000) -> ToolResult:
     """Fetch a URL and return extracted main text (HTML stripped).
 
-    SSRF-protected: blocks private IPs, enforces domain allowlist, and caps
-    response body size.
+    SSRF-protected: blocks private IPs, enforces domain allowlist, caps
+    response body size, and re-validates every redirect hop to prevent
+    SSRF via open-redirect chains.
     """
     settings = get_settings()
+    allowed_domains = settings.network_allowed_domains or None
+    block_private = settings.ssrf_block_private_ips
 
-    # SSRF check: block private IPs and enforce domain allowlist.
+    # SSRF check on the initial URL.
     safety = check_url_safety(
-        url,
-        allowed_domains=settings.network_allowed_domains or None,
-        block_private_ips=settings.ssrf_block_private_ips,
+        url, allowed_domains=allowed_domains, block_private_ips=block_private
     )
     if not safety.safe:
         return ToolResult.err(
@@ -149,29 +153,55 @@ async def web_fetch(*, url: str, max_chars: int = 20_000) -> ToolResult:
         )
 
     max_bytes = settings.network_max_response_bytes
-    async with (
-        httpx.AsyncClient(timeout=30, follow_redirects=True) as client,
-        # Stream the response so we can enforce a size limit without downloading
-        # an arbitrarily large body.
-        client.stream("GET", url, headers={"User-Agent": "CoolAIHarness/0.1"}) as resp,
-    ):
-        resp.raise_for_status()
-        chunks: list[bytes] = []
-        total = 0
-        size_truncated = False
-        async for chunk in resp.aiter_bytes(chunk_size=8192):
-            total += len(chunk)
-            if max_bytes and total > max_bytes:
-                size_truncated = True
-                # Keep only up to the limit.
-                remaining = max_bytes - (total - len(chunk))
-                if remaining > 0:
-                    chunks.append(chunk[:remaining])
+    current_url = url
+
+    # Manual redirect loop: re-check each hop for SSRF safety.
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        for _hop in range(_MAX_REDIRECTS + 1):
+            async with client.stream(
+                "GET", current_url, headers={"User-Agent": "CoolAIHarness/0.1"}
+            ) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        return ToolResult.err("Redirect with no Location header")
+                    # Resolve relative redirects.
+                    next_url = str(resp.url.join(location))
+                    # Re-check SSRF safety on the redirect target.
+                    hop_safety = check_url_safety(
+                        next_url,
+                        allowed_domains=allowed_domains,
+                        block_private_ips=block_private,
+                    )
+                    if not hop_safety.safe:
+                        return ToolResult.err(
+                            f"Redirect blocked (SSRF protection): {hop_safety.reason}",
+                            blocked_url=next_url,
+                            blocked_ip=hop_safety.blocked_ip,
+                        )
+                    current_url = next_url
+                    continue
+
+                # Final response — stream the body with size cap.
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                size_truncated = False
+                async for chunk in resp.aiter_bytes(chunk_size=8192):
+                    total += len(chunk)
+                    if max_bytes and total > max_bytes:
+                        size_truncated = True
+                        remaining = max_bytes - (total - len(chunk))
+                        if remaining > 0:
+                            chunks.append(chunk[:remaining])
+                        break
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                status_code = resp.status_code
+                final_url = str(resp.url)
                 break
-            chunks.append(chunk)
-        body = b"".join(chunks)
-        status_code = resp.status_code
-        final_url = str(resp.url)
+        else:
+            return ToolResult.err(f"Too many redirects (>{_MAX_REDIRECTS})")
 
     body = _TAG_SCRIPT.sub(b" ", body)
     body = _TAG.sub(b" ", body)

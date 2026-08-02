@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Bot, Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { conversationsApi } from "@/api/conversations"
 import { subagentsApi } from "@/api/subagents"
 import type { SubagentRole } from "@/api/types"
 import { RoleEditor } from "@/components/subagents/RoleEditor"
@@ -30,6 +31,12 @@ export function SubagentsPage() {
     refetchInterval: 3000,
   })
 
+  // Fetch conversations to get a valid parent for standalone launches.
+  const { data: conversations = [] } = useQuery({
+    queryKey: ["conversations"],
+    queryFn: conversationsApi.list,
+  })
+
   const deleteRoleMutation = useMutation({
     mutationFn: (id: number) => subagentsApi.deleteRole(id),
     onSuccess: () => {
@@ -44,8 +51,10 @@ export function SubagentsPage() {
   const activeRuns = standaloneRuns.filter((r) => r.status === "queued" || r.status === "running")
   const pastRuns = standaloneRuns.filter((r) => ["completed", "failed", "cancelled"].includes(r.status))
 
-  // Use conversation_id=1 as the default parent for standalone launches.
-  const parentConvId = runs[0]?.parent_conversation_id ?? 1
+  // Use the first available conversation as parent for standalone launches.
+  // Prefer the parent from existing runs; fall back to the first conversation.
+  const parentConvId =
+    runs[0]?.parent_conversation_id ?? conversations[0]?.id ?? null
 
   return (
     <div className="flex h-full">
@@ -206,7 +215,15 @@ export function SubagentsPage() {
             </div>
           )}
 
-          {tab === "launch" && <LaunchForm parentConversationId={parentConvId} />}
+          {tab === "launch" &&
+            (parentConvId != null ? (
+              <LaunchForm parentConversationId={parentConvId} />
+            ) : (
+              <div className="p-4 text-sm text-muted-foreground">
+                No conversations available. Create a conversation first to launch
+                subagents.
+              </div>
+            ))}
 
           {tab === "roles" && showEditor && (
             <RoleEditor

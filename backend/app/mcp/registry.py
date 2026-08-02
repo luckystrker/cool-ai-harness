@@ -43,11 +43,26 @@ class MCPRegistry:
     # --- Configuration ---
 
     def add_server(self, config: MCPServerConfig) -> None:
-        """Add or update a server configuration. Does not auto-connect."""
+        """Add or update a server configuration. Does not auto-connect.
+
+        If the server was previously connected, disconnect the old client to
+        prevent resource leaks (the new config takes effect on next connect).
+        """
         existing = self._servers.get(config.name)
         if existing and existing.status == MCPServerStatus.CONNECTED:
-            # Mark for reconnect on next refresh.
-            pass
+            # Disconnect the old client so it doesn't leak; the new config
+            # will be used on the next connect_server() call.
+            old_client = self._clients.pop(config.name, None)
+            if old_client:
+                try:
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(old_client.disconnect())
+                    task.add_done_callback(
+                        lambda t: t.exception() if not t.cancelled() else None
+                    )
+                except RuntimeError:
+                    pass  # No running loop; client will be GC'd.
+            log.info("mcp.server_replacing_connected", name=config.name)
         self._servers[config.name] = MCPServerState(config=config)
         log.info("mcp.server_added", name=config.name, transport=config.transport.value)
 

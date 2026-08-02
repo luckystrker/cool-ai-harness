@@ -126,12 +126,16 @@ def register_mcp_tools(tools: list[MCPToolInfo] | None = None) -> int:
         func = _make_tool_func(tool_info)
         capabilities = _resolve_capabilities(tool_info)
 
+        # Deny-by-default: MCP tools without explicitly declared capabilities
+        # are marked dangerous so they go through the approval gate.
+        is_dangerous = capabilities is None
+
         register_tool(
             name=qualified_name,
             description=f"[MCP:{tool_info.server_name}] {tool_info.description}",
             args_model=args_model,
             func=func,
-            dangerous=False,
+            dangerous=is_dangerous,
             capabilities=capabilities,
         )
         _registered_mcp_tools.add(qualified_name)

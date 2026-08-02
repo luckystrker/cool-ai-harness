@@ -3,11 +3,33 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 
 import structlog
 
 from app.core.config import get_settings
+
+# Patterns that look like secrets in log values (API keys, tokens, passwords).
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|credential)\s*[=:]\s*\S+"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),  # OpenAI-style keys
+    re.compile(r"\bsk-ant-[A-Za-z0-9-]{20,}\b"),  # Anthropic-style keys
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._-]{20,}"),
+]
+
+
+def _mask_secrets_processor(
+    logger: object, method_name: str, event_dict: dict
+) -> dict:
+    """Structlog processor: mask secret-looking values in log event strings."""
+    for key, value in list(event_dict.items()):
+        if isinstance(value, str) and len(value) > 10:
+            for pattern in _SECRET_PATTERNS:
+                if pattern.search(value):
+                    event_dict[key] = pattern.sub("[REDACTED]", value)
+                    break
+    return event_dict
 
 
 def configure_logging() -> None:
@@ -20,6 +42,7 @@ def configure_logging() -> None:
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
+        _mask_secrets_processor,
     ]
 
     structlog.configure(

@@ -193,26 +193,28 @@ async def test_executor_blocks_when_budget_exceeded(db_session, scripted_provide
             usage=Usage(cost_usd=2.0),
         )
 
-    scripted_provider.set_script(["should not be reached"])
-    ex = AgentExecutor(
-        provider=scripted_provider,
-        config=AgentConfig(model="m", user_id=budgets.DEFAULT_USER_ID),
-    )
-    events = [e async for e in ex.stream("hi")]
-    finish = events[-1]
-    assert finish.kind == "finish"
-    assert finish.payload["reason"] == "budget_exceeded"
-    # Provider was never called — we blocked before the LLM round-trip.
-    assert scripted_provider.calls == []
-
-    # Cleanup so other tests don't inherit the exceeded budget.
-    with _S(real_engine) as s:
-        budgets.set_override(s, None)
-        budgets.upsert_budget(
-            s, daily_limit_usd=None, weekly_limit_usd=None, monthly_limit_usd=None
+    try:
+        scripted_provider.set_script(["should not be reached"])
+        ex = AgentExecutor(
+            provider=scripted_provider,
+            config=AgentConfig(model="m", user_id=budgets.DEFAULT_USER_ID),
         )
-        from app.models import SpendLog
-        rows = s.exec(__import__("sqlmodel").select(SpendLog)).all()
-        for r in rows:
-            s.delete(r)
-        s.commit()
+        events = [e async for e in ex.stream("hi")]
+        finish = events[-1]
+        assert finish.kind == "finish"
+        assert finish.payload["reason"] == "budget_exceeded"
+        # Provider was never called — we blocked before the LLM round-trip.
+        assert scripted_provider.calls == []
+    finally:
+        # Cleanup so other tests don't inherit the exceeded budget.
+        with _S(real_engine) as s:
+            budgets.set_override(s, None)
+            budgets.upsert_budget(
+                s, daily_limit_usd=None, weekly_limit_usd=None, monthly_limit_usd=None
+            )
+            from app.models import SpendLog
+
+            rows = s.exec(__import__("sqlmodel").select(SpendLog)).all()
+            for r in rows:
+                s.delete(r)
+            s.commit()

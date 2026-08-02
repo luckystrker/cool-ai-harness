@@ -337,6 +337,8 @@ async def _parse_cron(text: str) -> ToolResult:
 
 def register_task_tools() -> None:
     """Register the schedule-management tools. Idempotent."""
+    from app.security.capabilities import Capability
+
     register_tool(
         name="create_task",
         description=(
@@ -347,6 +349,8 @@ def register_task_tools() -> None:
         ),
         args_model=CreateTaskArgs,
         func=_create_task,
+        dangerous=True,
+        capabilities=frozenset({Capability.EXECUTE}),
     )
     register_tool(
         name="list_tasks",
@@ -381,6 +385,8 @@ def register_task_tools() -> None:
         ),
         args_model=TaskIdArgs,
         func=_run_task_now,
+        dangerous=True,
+        capabilities=frozenset({Capability.EXECUTE}),
     )
     register_tool(
         name="parse_cron",
