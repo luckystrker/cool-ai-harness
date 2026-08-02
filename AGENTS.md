@@ -3,9 +3,10 @@
 Guidance for AI coding agents working in this repository. Read this before
 editing. Cool AI Harness is a personal AI agent harness: a Python/FastAPI
 backend plus a React/TypeScript SPA, following a phased roadmap in
-[`docs/PLAN.md`](docs/PLAN.md) and [`docs/phases/`](docs/phases/). Phases 0–2
-are done; **Фаза 3a** (memory + observability) is current — long-term/working
-memory shipped, recurring tasks (Фаза 3b) are next.
+[`docs/PLAN.md`](docs/PLAN.md) and [`docs/phases/`](docs/phases/). Phases 0–3b
+are done; **Фаза 4** (workflows, multimodal, browser/code tools) is current —
+Code Task + Git/GitHub tools shipped, deep research / multimodal / browser
+pending. Telegram (Фаза 5) is still an empty placeholder.
 
 ## Repository layout
 
@@ -40,17 +41,24 @@ phase specs; do not violate them without an explicit decision:
 - **Durable execution.** Every agent turn is an `AgentRun` with an append-only
   `run_events` log, status (`running`/`awaiting_approval`/`completed`/`failed`/
   `cancelled`), cumulative token/cost usage, a checkpoint after each tool call,
-  and budget guards. Subagent and planning runs are durable too. Do not add side
-  effects outside a run's event log.
+  and budget guards. Subagent, planning, and scheduled (cron) runs are durable
+  too. Do not add side effects outside a run's event log.
 - **Memory is append-first and project-scoped.** Long-term memory lives in
-  `backend/app/memory/` (`MemoryItem`/`Episode`/`WorkingMemory`); recall is
-  FTS5 + composite reranking, extraction/decay/consolidation are background
-  sweeps. Memory visibility is keyed by the working directory (`_project_key`).
-  The agent reaches memory only through registered memory tools — never write
-  to the memory tables directly from the loop.
+  `backend/app/memory/` (`MemoryItem`/`Episode`/`WorkingMemory`, plus entity
+  extraction); recall is FTS5 + composite reranking,
+  extraction/decay/consolidation are background sweeps. Memory visibility is
+  keyed by the working directory (`_project_key`). The agent reaches memory only
+  through registered memory tools — never write to the memory tables directly
+  from the loop.
 - **Observability = the event log, not side channels.** The run inspector
   (`backend/app/observability/`) reconstructs timelines/comparisons/replay from
-  `run_events`. Prefer emitting an event over adding a separate logging path.
+  `run_events`; `backend/app/analytics/` aggregates spend/tool/runs stats from
+  the DB. Prefer emitting an event over adding a separate logging path.
+- **Context window is budgeted.** `agent/context_window.py` estimates tokens
+  and truncates history within a budget; `agent/project_instructions.py` loads
+  AGENTS.md-style project instructions from the working directory; context
+  compaction collapses old turns. Keep token estimation in one place when
+  adding prompt content.
 - **Models are the source of truth in dev/tests** (`SQLModel.create_all`); in
   production the app applies Alembic migrations on startup. Any change to
   `backend/app/models/*.py` **must** ship a matching migration in
@@ -84,24 +92,30 @@ backend/app/
 ├── core/              # config (pydantic-settings), db, logging, security (Fernet)
 ├── providers/         # LLMProvider + OpenAI/Anthropic impls, registry, resilience, pricing
 ├── agent/             # loop: executor, runners, service, events, runs, approvals,
-│                      #       permissions, planning, subagents
+│                      #       permissions, planning, subagents, personalities,
+│                      #       context_window, project_instructions
 ├── security/          # capability policy, SSRF, secrets, sandbox, breakpoints, cost
-├── tools/             # tool registry + builtins (files, code, web, memory)
+├── tools/             # tool registry + builtins (files, code, bash, git, github, web,
+│                      #   mcp, memory, skills, plan, subagent, task, rss, wiki, context)
 ├── skills/            # skill registry + discovery + TF-IDF/embedding matching (Фаза 2)
 ├── mcp/               # MCP client (stdio + HTTP), registry, marketplace, tool bridge (Фаза 2)
 ├── memory/            # long-term + working memory: extractor, retrieval (FTS5),
-│                      #   context_builder, lifecycle, tools (Фаза 3a)
+│                      #   entities, context_builder, lifecycle, tools (Фаза 3a)
 ├── observability/     # run inspector: live tail, timeline, compare, replay
+├── analytics/         # aggregating dashboards, LLM-call log, OTel export (Фаза 3a)
 ├── budgets/           # spend/budget service
 ├── artifacts/         # content-addressed artifact storage
+├── tasks/             # recurring tasks: scheduler, cron, delivery, templates (Фаза 3b)
+├── rss/               # RSS aggregator: subscriptions, fetch, summarize (Фаза 3b)
+├── webhooks/          # webhook router (Фаза 3b)
+├── wiki/              # wiki article store + tools
 ├── api/               # HTTP + WebSocket routes + schemas
 ├── models/            # SQLModel tables
-├── tasks/             # cron jobs / scheduler (EMPTY — Фаза 3b)
 └── telegram/          # bot + web app (EMPTY — Фаза 5)
 ```
 
-> `tasks/` and `telegram/` are currently empty placeholders (0-byte
-> `__init__.py`); their deps are listed in `pyproject.toml` but no code exists.
+> `telegram/` is still an empty placeholder (0-byte `__init__.py`); its deps
+> are listed in `pyproject.toml` but no code exists.
 
 ### Conventions
 
@@ -124,7 +138,7 @@ pip install -e ".[dev]"          # install backend + dev deps
 ruff check .                     # lint (required)
 ruff format .                    # format (optional)
 mypy app                         # typecheck (dev dep; strict=false)
-pytest                           # run the ~456-test suite (required)
+pytest                           # run the ~725-test suite (required)
 pytest tests/test_agent.py -v    # single file
 pytest -n auto                   # run tests in parallel (xdist)
 python -m evals                  # agent eval CI gate: exit 0 pass / 1 regression / 2 config
@@ -137,13 +151,31 @@ alembic revision --autogenerate -m "describe change"   # new migration after mod
 
 - `agent/executor.py` + `agent/runners.py` → update `tests/test_agent.py`.
   Every agent-loop change in history shipped with agent tests.
+- `agent/context_window.py` / `agent/project_instructions.py` (context budget,
+  AGENTS.md loading, compaction) → update `tests/test_agent.py`; UI in
+  `frontend/src/components/chat/` (collapsible history, composer toolbar).
 - `agent/planning.py` → update `tests/test_planning.py`; UI in
   `frontend/src/components/chat/PlanCard.tsx` + `frontend/src/api/plans.ts`.
 - `agent/subagents.py` → update `tests/test_subagents.py`; UI in
   `frontend/src/components/subagents/` + `frontend/src/pages/SubagentsPage.tsx`.
-- `memory/*` (service, retrieval, extractor, lifecycle, tools) → update
-  `tests/test_memory.py`; UI in `frontend/src/pages/MemoryPage.tsx` +
-  `frontend/src/api/memory.ts`. Memory is reached only via `memory/tools.py`.
+- `agent/personalities/` (multi-profile agents) → update
+  `tests/test_profiles.py`; UI in `frontend/src/pages/ProfilesPage.tsx` +
+  `frontend/src/api/profiles.ts` + `frontend/src/components/chat/ProfileSwitcher.tsx`.
+- `memory/*` (service, retrieval, extractor, entities, lifecycle, tools) →
+  update `tests/test_memory.py`; UI in `frontend/src/pages/MemoryPage.tsx` +
+  `frontend/src/api/memory.ts` + `frontend/src/components/memory/`
+  (EntitiesPanel, ExplainPanel, ReviewQueue). Memory is reached only via
+  `memory/tools.py`.
+- `analytics/*` + `api/analytics.py` → update `tests/test_analytics.py`; UI in
+  `frontend/src/pages/AnalyticsPage.tsx` + `frontend/src/api/analytics.ts`.
+- `tasks/*` (scheduler, cron, delivery, templates) → update
+  `tests/test_tasks.py`; UI in `frontend/src/pages/TasksPage.tsx` +
+  `frontend/src/api/tasks.ts`.
+- `rss/*` → update `tests/test_rss.py`; UI/API in `frontend/src/api/rss.ts`.
+- `webhooks/*` → update `tests/test_webhooks.py`; UI/API in
+  `frontend/src/api/webhooks.ts`.
+- `wiki/*` → UI/API in `frontend/src/pages/WikiPage.tsx` +
+  `frontend/src/api/wiki.ts`.
 - `skills/*` → update `tests/test_skills.py`; UI/API in
   `frontend/src/api/skills.ts`.
 - `mcp/*` → update `tests/test_mcp.py`; UI/API in
@@ -153,9 +185,12 @@ alembic revision --autogenerate -m "describe change"   # new migration after mod
 - `budgets/*` → update `tests/test_budgets.py`; UI in
   `frontend/src/pages/BudgetsPage.tsx` + `frontend/src/api/budgets.ts`.
 - `artifacts/*` → update `tests/test_artifacts.py`.
+- `tools/*` — git/code/bash tools → update `tests/test_git_tools.py` /
+  `tests/test_tools.py` / `tests/test_sandbox.py` (code execution requires
+  sandboxing and capability checks).
 - `app/models/*.py` → add a `backend/alembic/versions/*.py` migration
   (autogenerate it; verify with `alembic upgrade head`). Current head is
-  `0011_memory`.
+  `0020_webhooks`.
 - `app/api/schemas.py` or `app/api/*_router.py` → update
   `frontend/src/api/types.ts` and the consuming hook/component.
 - `app/agent/events.py` + `app/api/websocket.py` → update
@@ -180,20 +215,25 @@ UI primitives in `src/components/ui` (Radix-based).
 frontend/src/
 ├── main.tsx, App.tsx        # entry + routing
 ├── api/                    # typed boundary to backend — one client per subsystem
-│                           #   (types, streaming, conversations, providers, settings,
-│                           #    mcp, memory, plans, skills, subagents, inspector,
-│                           #    budgets, artifacts, workspace)
+│                           #   (types, streaming, client, conversations, providers, settings,
+│                           #    mcp, memory, plans, skills, subagents, inspector, budgets,
+│                           #    artifacts, workspace, profiles, analytics, tasks, rss,
+│                           #    webhooks, wiki)
 ├── hooks/                  # useConversationStream.ts (SSE/WS)
 ├── components/
 │   ├── chat/               # MessageBubble, ToolCallBlock, ApprovalCard (write diffs),
-│   │                       #   PlanCard, ArtifactPanel, BudgetIndicator, ThinkingBlock, ...
+│   │                       #   PlanCard, ArtifactPanel, BudgetIndicator, ThinkingBlock,
+│   │                       #   ProfileSwitcher, ComposerToolbar, DirectoryBrowserDialog,
+│   │                       #   ProjectDialog, ProjectSettingsDialog, Markdown, ...
+│   ├── memory/             # EntitiesPanel, ExplainPanel, ReviewQueue
 │   ├── inspector/          # RunTimeline, ComparisonView
 │   ├── subagents/          # LaunchForm, RoleEditor, RunCard, SubagentOutputDialog
 │   ├── settings/           # ChatModelsPicker
 │   ├── layout/             # AppLayout, Sidebar
 │   └── ui/                 # Radix-based primitives (button, card, dialog, ...)
-├── pages/                  # ChatPage, SettingsPage, MemoryPage, SubagentsPage,
-│                           #   InspectorPage, BudgetsPage
+├── pages/                  # ChatPage, MemoryPage, WikiPage, ProfilesPage, AnalyticsPage,
+│                           #   TasksPage, SettingsPage, BudgetsPage, SubagentsPage,
+│                           #   InspectorPage
 ├── lib/                    # utils, queryClient, agentConfig, modelFormat, projects
 └── assets/
 ```
@@ -225,8 +265,9 @@ npm run preview           # preview the production build
 ### Co-change expectations
 
 - `src/api/types.ts` ↔ `backend/app/api/schemas.py` — keep shapes in sync. Each
-  subsystem also has its own client (`src/api/{memory,plans,subagents,...}.ts`)
-  mirroring the matching `app/api/*_router.py`.
+  subsystem also has its own client (`src/api/{memory,plans,subagents,tasks,
+  rss,webhooks,wiki,profiles,analytics,...}.ts`) mirroring the matching
+  `app/api/*_router.py`.
 - `src/hooks/useConversationStream.ts` ↔ `backend/app/api/websocket.py` +
   `backend/app/agent/events.py`.
 - A new backend SSE/WS event → add a handler in `useConversationStream.ts` and

@@ -1,6 +1,6 @@
 # Фаза 4: Специализированные Workflows + Multimodal + Agent Constructor
 
-> **Статус:** ⏳ Ожидает
+> **Статус:** 🔄 В процессе (Code Task + Git/GitHub tools готовы; deep research, multimodal, browser, Agent Constructor pending)
 > **Длительность:** 2.5-3 недели
 
 Цель: три мощных специализированных инструмента + мультимодальный ввод + продвинутые tools.

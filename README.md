@@ -1,12 +1,14 @@
 # Cool AI Harness
 
 Personal AI agent harness with provider abstraction, tools, skills, MCP,
-subagents, long-term + working memory, planning mode, cost budgets, an
+subagents, long-term + working memory, personalities, planning mode, recurring
+tasks (cron), RSS aggregation, webhooks, wiki, cost budgets, analytics, an
 inspector/replay console, and durable agent runs. Control via the web UI.
 
-> Status: **Фаза 3a — memory + observability (inspector) shipped, personalities
-> pending; next is Фаза 3b (recurring tasks)** 🔄 — see
-> [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
+> Status: **Фаза 3a + 3b shipped** (memory, personalities, observability,
+> analytics, recurring tasks, RSS, webhook); **Фаза 4 in progress** (Code Task
+> + Git/GitHub tools done, deep research / multimodal / browser pending) 🔄 —
+> see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
 <img width="1718" height="1273" alt="image" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
 
 ## Stack
@@ -16,10 +18,14 @@ inspector/replay console, and durable agent runs. Control via the web UI.
   @tanstack/react-query, Radix-based UI primitives)
 - **LLM providers:** OpenAI + Anthropic via a single `LLMProvider` interface
   (OpenAI-compatible base URL works for OpenRouter/DeepSeek/Groq/Ollama)
+- **Scheduler:** APScheduler (AsyncIOScheduler) + croniter — cron/interval/date
+  recurring agent tasks (Фаза 3b)
+- **RSS:** feedparser-based aggregator with per-subscription filters and LLM
+  summarization (Фаза 3b)
+- **Observability:** unified LLM-call log, aggregating dashboards, optional
+  OpenTelemetry export (Фаза 3a)
 - **Telegram:** python-telegram-bot dependency present (Bot + Web App — planned,
   Фаза 5)
-- **Scheduler:** APScheduler + croniter deps present (recurring tasks — planned,
-  Фаза 3b)
 
 ## Quick start
 
@@ -83,7 +89,8 @@ curl -X POST http://localhost:8000/api/conversations/1/runs/1/cancel
 
 Schema changes are managed with **Alembic** (`backend/alembic`). In production
 the app applies `alembic upgrade head` on startup; in development/tests it uses
-`SQLModel.create_all` (models are the source of truth there).
+`SQLModel.create_all` (models are the source of truth there). Current head:
+`0020_webhooks`.
 
 ```bash
 cd backend
@@ -101,7 +108,7 @@ responses) — no API keys needed.
 ```bash
 cd backend
 
-# Run all 20 scenarios (gate fails if any critical scenario fails)
+# Run all 21 scenarios (gate fails if any critical scenario fails)
 python -m evals
 
 # Filter by tag (repeatable)
@@ -122,7 +129,7 @@ python -m evals --baseline default
 python -m evals --json
 ```
 
-Scenarios live in three suites under `backend/evals/scenarios/`: `safety` (7),
+Scenarios live in three suites under `backend/evals/scenarios/`: `safety` (8),
 `tool_selection` (8), `cost_limits` (5).
 
 **Exit codes:** `0` = gate passed, `1` = critical regression/failure, `2` = config error.
@@ -170,6 +177,9 @@ Beyond the core agent loop, these subsystems are implemented:
   `read`/`write`/`execute`/`network`/`git`/`send_external`; file tools are
   workspace-confined, network tools use an SSRF-protected allowlist, code
   execution is sandboxed, and secrets are masked in messages/traces/logs.
+- **Context management** — token-aware history budgeting/truncation, project
+  instructions loading (AGENTS.md from the working directory), and working
+  context compaction with collapsible chat history.
 - **Cost budgets** — per-period spend limits with alert threshold and optional
   block-on-exceed; spend is logged per run.
 - **Skills** — discover `SKILL.md` skills from builtin/user dirs; rank by
@@ -180,16 +190,34 @@ Beyond the core agent loop, these subsystems are implemented:
   A marketplace client queries `registry.modelcontextprotocol.io`.
 - **Subagents** — isolated conversations + durable runs spawned from roles
   (`researcher`, `code-reviewer`, `summarizer` seeded by default); capability
-  policies per role, background launch/cancel.
+  policies per role, background launch/cancel, delegated plan steps.
 - **Planning mode** — research-first loop emits a fenced `plan` JSON block;
   steps have dependencies (topological execution), draft → approve → execute,
   with `plan_progress` events and templates.
 - **Memory** (Фаза 3a) — long-term memory (`MemoryItem`/`Episode`) with FTS5
-  recall + composite reranking, post-session LLM extraction, decay/consolidation
+  recall + composite reranking, entity extraction with confirmation/explain
+  panels, pinning/export, post-session LLM extraction, decay/consolidation
   sweeps, and working-memory scratchpads; project-scoped visibility. Exposed to
   the agent via memory tools.
+- **Personalities** (Фаза 3a) — multiple agent profiles with distinct system
+  prompts/names/descriptions; switchable per chat, persisted in the DB
+  (`agent_profiles`).
+- **Analytics** (Фаза 3a) — aggregating dashboards (spend, tool usage, runs,
+  latency), unified LLM-call log, and optional OpenTelemetry export.
 - **Inspector** — live `/ws/inspect/{run_id}` tail of in-progress runs, plus
   timeline reconstruction, two-run comparison, and replay over the event log.
+- **Recurring tasks** (Фаза 3b) — APScheduler-backed cron/interval/date agent
+  tasks persisted in the DB; scheduled runs are durable with delivery templates
+  (reminders, reports, summaries).
+- **RSS** (Фаза 3b) — feed subscriptions with filters, scheduled aggregation,
+  and LLM summarization into a digest/inbox.
+- **Webhooks** (Фаза 3b) — HTTP webhook router that triggers agent runs/tasks
+  from external services (signed, idempotent).
+- **Wiki** — markdown article store (`wiki_articles`) with agent search/write
+  tools and a browsing UI.
+- **Code & Git tools** (Фаза 4, in progress) — sandboxed `bash`/Python
+  execution, git status/diff/log/commit/push via the local CLI, and GitHub
+  integration (issues/PRs/actions).
 
 ## Project layout
 
@@ -201,32 +229,38 @@ cool-ai-harness/
 │   │   ├── core/                # config (pydantic-settings), db, logging, security (Fernet)
 │   │   ├── providers/           # LLMProvider + OpenAI/Anthropic impls, registry, resilience, pricing
 │   │   ├── agent/               # loop: executor, runners, service, events, runs, approvals,
-│   │   │                        #       permissions, planning, subagents
+│   │   │                        #       permissions, planning, subagents, personalities,
+│   │   │                        #       context_window, project_instructions
 │   │   ├── security/            # capability policy, SSRF, secrets, sandbox, breakpoints, cost
-│   │   ├── tools/               # tool registry + builtins (files, code, web, memory)
+│   │   ├── tools/               # tool registry + builtins (files, code, bash, git, github, web,
+│   │   │                        #   mcp, memory, skills, plan, subagent, task, rss, wiki, context)
 │   │   ├── skills/              # skill registry + discovery + TF-IDF/embedding matching
 │   │   ├── mcp/                 # MCP client (stdio + HTTP), registry, marketplace, tool bridge
 │   │   ├── memory/              # long-term + working memory: extractor, retrieval (FTS5),
-│   │   │                        #   context_builder, lifecycle (decay/consolidation), tools
+│   │   │                        #   entities, context_builder, lifecycle, tools
 │   │   ├── observability/       # run inspector: live tail, timeline, compare, replay
+│   │   ├── analytics/           # aggregating dashboards, LLM-call log, OTel export
 │   │   ├── budgets/             # spend/budget service
 │   │   ├── artifacts/           # content-addressed artifact storage
+│   │   ├── tasks/               # recurring tasks: scheduler, cron, delivery, templates (Фаза 3b)
+│   │   ├── rss/                 # RSS aggregator: subscriptions, fetch, summarize (Фаза 3b)
+│   │   ├── webhooks/            # webhook router (Фаза 3b)
+│   │   ├── wiki/                # wiki article store + tools
 │   │   ├── api/                 # HTTP + WebSocket routes + schemas
 │   │   ├── models/              # SQLModel tables
-│   │   ├── tasks/               # cron jobs / scheduler (planned, Фаза 3b)
 │   │   └── telegram/            # bot + web app (planned, Фаза 5)
-│   ├── evals/                   # agent eval scenarios + CI gate (20 scenarios)
-│   ├── alembic/                 # database migrations (head: 0011_memory)
-│   ├── tests/                   # pytest suite (~456 tests)
+│   ├── evals/                   # agent eval scenarios + CI gate (21 scenarios)
+│   ├── alembic/                 # database migrations (head: 0020_webhooks)
+│   ├── tests/                   # pytest suite (~725 tests)
 │   └── pyproject.toml
 ├── frontend/                    # React 19 SPA (Vite + TypeScript + Tailwind 4)
 │   └── src/
 │       ├── api/                 # typed boundary to backend (types, streaming, clients)
 │       ├── hooks/               # useConversationStream (SSE/WS) + others
-│       ├── components/          # chat/, inspector/, subagents/, layout/, settings/, ui/
-│       ├── pages/               # ChatPage, SettingsPage, MemoryPage, SubagentsPage,
-│       │                        #   InspectorPage, BudgetsPage
-│       └── lib/                 # utils, queryClient, agentConfig, ...
+│       ├── components/          # chat/, memory/, inspector/, subagents/, layout/, settings/, ui/
+│       ├── pages/               # ChatPage, MemoryPage, WikiPage, ProfilesPage, AnalyticsPage,
+│       │                        #   TasksPage, SettingsPage, BudgetsPage, SubagentsPage, InspectorPage
+│       └── lib/                 # utils, queryClient, agentConfig, modelFormat, projects
 ├── docs/
 │   ├── PLAN.md                  # full roadmap
 │   └── phases/                  # per-phase specs (phase-0 .. phase-7)
@@ -244,9 +278,9 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 | **Фаза 1** — Agent loop + tools + chat MVP | ✅ Done |
 | **Фаза 1.5** — Надёжность запусков, безопасность, артефакты, evals, HITL | ✅ Done |
 | **Фаза 2** — Skills + MCP + subagents + planning mode | ✅ Done |
-| **Фаза 3a** — Memory + observability + personalities | 🔄 **Current** (memory + inspector shipped; personalities pending) |
-| **Фаза 3b** — Recurring tasks + RSS + webhook | ⏳ |
-| **Фаза 4** — Deep research + code + multimodal + browser | ⏳ |
+| **Фаза 3a** — Memory + personalities + observability | ✅ Done |
+| **Фаза 3b** — Recurring tasks + RSS + webhook | ✅ Done |
+| **Фаза 4** — Workflows + multimodal + browser/code tools | 🔄 **Current** (Code Task + Git/GitHub tools shipped; deep research, multimodal, browser pending) |
 | **Фаза 5** — Telegram + voice interface | ⏳ |
 | **Фаза 6** — Product readiness + backlog | ⏳ |
 | **Фаза 7** — UX polish + DevX | ⏳ |
