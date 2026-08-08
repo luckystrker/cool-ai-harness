@@ -251,11 +251,55 @@ def _register_maintenance_jobs() -> None:
 async def _run_memory_maintenance() -> None:
     """Run all memory lifecycle sweeps (decay, TTL, validity, pending expiry)."""
     try:
+        from app.core.config import get_settings
         from app.memory.lifecycle import run_full_maintenance
 
         with Session(engine) as session:
             results = run_full_maintenance(session)
         log.info("scheduler.memory_maintenance_done", **results)
+
+        # Hybrid index backfill: embed active memories that lack a vector.
+        # Bounded per run so the sweep stays cheap.
+        try:
+            from app.agent.service import resolve_default_model
+            from app.core.db import VEC_AVAILABLE
+            from app.memory.embeddings import backfill_embeddings
+            from app.providers import get_provider_for_model
+
+            settings = get_settings()
+            if settings.memory_hybrid_enabled and VEC_AVAILABLE:
+                with Session(engine) as session:
+                    model = resolve_default_model(session)
+                if model:
+                    provider = get_provider_for_model(model)
+                    with Session(engine) as session:
+                        embedded = await backfill_embeddings(
+                            session,
+                            provider=provider,
+                            model=settings.memory_embedding_model,
+                            dimension=settings.memory_embedding_dim,
+                            limit=100,
+                        )
+                    if embedded:
+                        log.info("scheduler.memory_embedding_backfill_done", embedded=embedded)
+        except Exception as exc:
+            log.warning("scheduler.memory_embedding_backfill_failed", error=str(exc))
+
+        # Consolidation sweep: merge similar memories (LLM-assisted).
+        try:
+            from app.memory.lifecycle import run_consolidation_sweep
+
+            with Session(engine) as session:
+                model = resolve_default_model(session)
+            if model:
+                provider = get_provider_for_model(model)
+                with Session(engine) as session:
+                    cresults = await run_consolidation_sweep(
+                        session, provider=provider, model=model
+                    )
+                log.info("scheduler.memory_consolidation_done", **cresults)
+        except Exception as exc:
+            log.warning("scheduler.memory_consolidation_failed", error=str(exc))
     except Exception as exc:
         log.error("scheduler.memory_maintenance_failed", error=str(exc))
 
@@ -296,9 +340,7 @@ def scheduler_status() -> dict:
                 {
                     "id": job.id,
                     "name": job.name,
-                    "next_run_time": job.next_run_time.isoformat()
-                    if job.next_run_time
-                    else None,
+                    "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
                 }
             )
     return {

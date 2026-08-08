@@ -102,6 +102,9 @@ class AgentConfig:
     # runners). conversation_id is recorded on each spend row for the UI.
     user_id: int | None = None
     conversation_id: int | None = None
+    # Active agent role/personality id — drives agent-scoped memory visibility
+    # for tools (memory_recall) and subagent attribution.
+    agent_id: int | None = None
 
 
 class AgentExecutor:
@@ -475,9 +478,7 @@ class AgentExecutor:
             return False
         return run_registry.is_cancelled(self.config.run_id)
 
-    def _record_spend_and_maybe_alert(
-        self, call_usage: Usage
-    ) -> list[AgentEvent]:
+    def _record_spend_and_maybe_alert(self, call_usage: Usage) -> list[AgentEvent]:
         """Persist this LLM call's spend and emit a budget_alert if warranted.
 
         Returns a (possibly empty) list of events for the loop to yield. Uses a
@@ -508,9 +509,7 @@ class AgentExecutor:
                     if not ws.alerted or ws.limit_usd is None:
                         continue
                     # Debounce: fire at most once per period per window.
-                    row = session.exec(
-                        select(Budget).where(Budget.user_id == user_id)
-                    ).first()
+                    row = session.exec(select(Budget).where(Budget.user_id == user_id)).first()
                     last = getattr(row, "last_alert_at", None) if row else None
                     # Re-fire only if no alert has fired in this window's period.
                     if last is not None and last >= window_start(window):
@@ -550,6 +549,7 @@ class AgentExecutor:
             breakpoints=self.config.breakpoints,
             conversation_id=self.config.conversation_id,
             run_id=self.config.run_id,
+            agent_id=self.config.agent_id,
         )
 
     def _resolve_decision(self, name: str, dangerous: bool) -> Decision:
@@ -621,7 +621,11 @@ class AgentExecutor:
             bp_approved = await self._wait_for_approval(call_id)
             if not bp_approved:
                 result = ToolResult.err("Breakpoint denied: the action was rejected or timed out.")
-                result.metadata = {"denied": True, "breakpoint": "before_tool", "duration_ms": _elapsed_ms(t0)}
+                result.metadata = {
+                    "denied": True,
+                    "breakpoint": "before_tool",
+                    "duration_ms": _elapsed_ms(t0),
+                }
                 await self._finalize_tool_call(call_id, name, result)
                 yield self._masked_tool_result(call_id, name, result)
                 return
@@ -632,7 +636,11 @@ class AgentExecutor:
             bp_approved = await self._wait_for_approval(call_id)
             if not bp_approved:
                 result = ToolResult.err("Breakpoint denied: the write was rejected or timed out.")
-                result.metadata = {"denied": True, "breakpoint": "before_write", "duration_ms": _elapsed_ms(t0)}
+                result.metadata = {
+                    "denied": True,
+                    "breakpoint": "before_write",
+                    "duration_ms": _elapsed_ms(t0),
+                }
                 await self._finalize_tool_call(call_id, name, result)
                 yield self._masked_tool_result(call_id, name, result)
                 return
@@ -694,7 +702,10 @@ class AgentExecutor:
         # --- Breakpoint: after_tool_result ---
         if self._should_break(BreakpointType.AFTER_TOOL_RESULT, tool_name=name):
             yield self._breakpoint_event(
-                call_id, name, args, BreakpointType.AFTER_TOOL_RESULT,
+                call_id,
+                name,
+                args,
+                BreakpointType.AFTER_TOOL_RESULT,
                 extra_context={"result_preview": (result.output or "")[:500]},
             )
             await self._wait_for_approval(call_id)
@@ -766,9 +777,7 @@ class AgentExecutor:
         """Build a tool_result event with secret masking applied to the output."""
         from app.core.config import get_settings
 
-        masked_output = mask_secrets_in_value(
-            result.output, enabled=get_settings().mask_secrets
-        )
+        masked_output = mask_secrets_in_value(result.output, enabled=get_settings().mask_secrets)
         return AgentEvent.tool_result(
             call_id=call_id,
             name=name,

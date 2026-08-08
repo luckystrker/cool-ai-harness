@@ -30,22 +30,126 @@ MAX_MEMORY_CONTENT_CHARS = 200
 
 # Minimal English stop-word set for entity matching. Words in this set are
 # never used as entity-name hints (they trigger useless DB lookups).
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
-    "being", "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "shall", "can", "need", "dare",
-    "it", "its", "this", "that", "these", "those", "i", "me", "my",
-    "we", "our", "you", "your", "he", "him", "his", "she", "her",
-    "they", "them", "their", "what", "which", "who", "whom", "when",
-    "where", "why", "how", "all", "each", "every", "both", "few",
-    "more", "most", "other", "some", "such", "no", "nor", "not",
-    "only", "own", "same", "so", "than", "too", "very", "just",
-    "because", "as", "until", "while", "about", "between", "through",
-    "during", "before", "after", "above", "below", "up", "down",
-    "out", "off", "over", "under", "again", "further", "then",
-    "once", "here", "there", "also", "into", "if", "any",
-})
+_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "dare",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "they",
+        "them",
+        "their",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "as",
+        "until",
+        "while",
+        "about",
+        "between",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "also",
+        "into",
+        "if",
+        "any",
+    }
+)
 
 
 def build_memory_context(
@@ -55,10 +159,14 @@ def build_memory_context(
     agent_id: int | None = None,
     conversation_id: int | None = None,
     query: str | None = None,
+    query_embedding: list[float] | None = None,
 ) -> str | None:
     """Build the memory context block for injection into the system prompt.
 
     Returns None if memory is disabled or no relevant memories exist.
+
+    ``query_embedding`` (optional) enables the hybrid vector leg of recall;
+    callers that own an LLMProvider should pre-embed the query.
     """
     settings = get_settings()
     if not settings.memory_enabled:
@@ -79,6 +187,7 @@ def build_memory_context(
             agent_id=agent_id,
             conversation_id=conversation_id,
             query=query,
+            query_embedding=query_embedding,
         )
         if memories_block:
             sections.append(memories_block)
@@ -138,8 +247,14 @@ def _get_memories_block(
     agent_id: int | None,
     conversation_id: int | None,
     query: str,
+    query_embedding: list[float] | None = None,
 ) -> str | None:
-    """Build the relevant long-term memories section."""
+    """Build the relevant long-term memories section.
+
+    Retrieves with ``include_preferences=False``: preferences have their own
+    section, so every slot in this block goes to genuine FTS/vector hits
+    instead of being captured by preferences during reranking.
+    """
     from app.memory.retrieval import retrieve_memories
 
     memories = retrieve_memories(
@@ -149,6 +264,8 @@ def _get_memories_block(
         agent_id=agent_id,
         conversation_id=conversation_id,
         limit=MAX_CONTEXT_MEMORIES,
+        include_preferences=False,
+        query_embedding=query_embedding,
     )
 
     # Exclude preferences (already in their own section).
@@ -248,11 +365,7 @@ def _get_entities_block(session: Session, *, user_id: int, query: str) -> str | 
     from app.memory.entities import batch_match_entities
 
     # Extract significant words: strip punctuation, skip stop-words, skip ≤ 3 chars.
-    words = [
-        w.strip(".,;:!?()[]\"'")
-        for w in query.split()
-        if len(w.strip(".,;:!?()[]\"'")) > 3
-    ]
+    words = [w.strip(".,;:!?()[]\"'") for w in query.split() if len(w.strip(".,;:!?()[]\"'")) > 3]
     words = [w for w in words if w.lower() not in _STOP_WORDS]
     if not words:
         return None

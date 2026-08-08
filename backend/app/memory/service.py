@@ -21,6 +21,7 @@ from app.memory.models import (
     MEMORY_STATUS_ACTIVE,
     MEMORY_STATUS_ARCHIVED,
     MEMORY_STATUS_PENDING_CONFIRMATION,
+    MEMORY_STATUS_SUPERSEDED,
     MEMORY_TYPE_PREFERENCE,
     SCOPE_CONVERSATION,
     SCOPE_GLOBAL,
@@ -65,6 +66,7 @@ def remember(
     structured: dict | None = None,
     ttl_days: int | None = None,
     confirmed: bool = False,
+    supersedes_id: int | None = None,
 ) -> MemoryItem:
     """Store a new memory, with deduplication and validation.
 
@@ -80,6 +82,14 @@ def remember(
 
     Dedup respects confirmation: a pending duplicate never overwrites a
     confirmed (active) fact's content, and vice versa.
+
+    Contradiction model (C3):
+    - ``supersedes_id``: when the new memory replaces an older one, confirming
+      it archives the old one (see ``confirm_memory``).
+    - For high-importance agent writes, a conflicting active memory is detected
+      mechanically (word-overlap in the near-duplicate band) and the new memory
+      is linked to it via ``supersedes_id`` — a pending new fact never silently
+      overwrites a confirmed one.
     """
     # Cap importance for non-user sources.
     if source != "user_explicit" and importance > MAX_AGENT_IMPORTANCE:
@@ -124,6 +134,22 @@ def remember(
         log.info("memory.updated_duplicate", memory_id=existing.id)
         return existing
 
+    # Contradiction detection (variant A, mechanical): a high-importance agent
+    # write that overlaps an active memory without duplicating it is treated as
+    # a correction — link it so confirming the new fact supersedes the old one.
+    if (
+        supersedes_id is None
+        and source != "user_explicit"
+        and importance >= 0.8
+        and memory_type in ("semantic", "preference")
+    ):
+        supersedes_id = _find_conflicting_memory(
+            session,
+            user_id=user_id,
+            content=content,
+            memory_type=memory_type,
+        )
+
     memory = MemoryItem(
         user_id=user_id,
         scope=scope,
@@ -138,6 +164,7 @@ def remember(
         source=source,
         status=new_status,
         ttl_days=ttl_days,
+        supersedes_id=supersedes_id,
     )
     session.add(memory)
     session.commit()
@@ -148,6 +175,7 @@ def remember(
         memory_type=memory_type,
         scope=scope,
         status=new_status,
+        supersedes_id=supersedes_id,
     )
     return memory
 
@@ -162,6 +190,8 @@ def recall(
     memory_type: str | None = None,
     scope: str | None = None,
     limit: int = 10,
+    include_preferences: bool = True,
+    query_embedding: list[float] | None = None,
 ) -> list[MemoryItem]:
     """Retrieve memories visible to the given context, optionally filtered by FTS5 query.
 
@@ -181,6 +211,8 @@ def recall(
         memory_type=memory_type,
         scope=scope,
         limit=limit,
+        include_preferences=include_preferences,
+        query_embedding=query_embedding,
     )
 
 
@@ -228,20 +260,43 @@ def explain_memory(session: Session, memory_id: int) -> dict | None:
 def update_memory(
     session: Session,
     memory_id: int,
+    *,
+    cap_agent_importance: bool = False,
     **fields,
 ) -> MemoryItem | None:
-    """Update fields on a memory item. Returns None if not found."""
+    """Update fields on a memory item. Returns None if not found.
+
+    Importance set through the agent-facing update path is capped at
+    ``MAX_AGENT_IMPORTANCE`` (user-visible API edits are not capped).
+    """
     memory = session.get(MemoryItem, memory_id)
     if memory is None:
         return None
     allowed_fields = {
-        "content", "memory_type", "scope", "agent_id", "importance",
-        "confidence", "status", "tags", "structured", "ttl_days", "valid_to",
+        "content",
+        "memory_type",
+        "scope",
+        "agent_id",
+        "importance",
+        "confidence",
+        "status",
+        "tags",
+        "structured",
+        "ttl_days",
+        "valid_to",
         "pinned",
     }
     for key, value in fields.items():
-        if key in allowed_fields:
-            setattr(memory, key, value)
+        if key not in allowed_fields:
+            continue
+        if (
+            cap_agent_importance
+            and key == "importance"
+            and isinstance(value, (int, float))
+            and value > MAX_AGENT_IMPORTANCE
+        ):
+            value = MAX_AGENT_IMPORTANCE
+        setattr(memory, key, value)
     memory.updated_at = datetime.now(UTC)
     session.add(memory)
     session.commit()
@@ -253,12 +308,20 @@ def forget(session: Session, memory_id: int, *, hard: bool = False) -> bool:
     """Archive (soft-delete) or permanently delete a memory.
 
     By default, sets status to 'archived' (recoverable). With hard=True,
-    deletes the row entirely.
+    deletes the row entirely (including its embedding vector).
     """
     memory = session.get(MemoryItem, memory_id)
     if memory is None:
         return False
     if hard:
+        try:
+            from app.memory.embeddings import delete_vector
+
+            # Vector cleanup first, in its own committed transaction: a missing
+            # vec0 table (test envs) must never roll back the memory deletion.
+            delete_vector(session, memory_id=memory_id)
+        except Exception:
+            pass
         session.delete(memory)
     else:
         memory.status = MEMORY_STATUS_ARCHIVED
@@ -283,9 +346,7 @@ def list_memories(
     """List memories with optional filters, ordered by importance desc then recency."""
     stmt = select(MemoryItem).where(MemoryItem.user_id == user_id)
     if agent_id is not None:
-        stmt = stmt.where(
-            (MemoryItem.agent_id == agent_id) | (MemoryItem.scope == SCOPE_GLOBAL)
-        )
+        stmt = stmt.where((MemoryItem.agent_id == agent_id) | (MemoryItem.scope == SCOPE_GLOBAL))
     if memory_type is not None:
         stmt = stmt.where(MemoryItem.memory_type == memory_type)
     if scope is not None:
@@ -330,9 +391,7 @@ def export_memories(
     stmt = select(MemoryItem).where(MemoryItem.user_id == user_id)
     if not include_archived:
         stmt = stmt.where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
-    stmt = stmt.order_by(
-        col(MemoryItem.memory_type).asc(), col(MemoryItem.importance).desc()
-    )
+    stmt = stmt.order_by(col(MemoryItem.memory_type).asc(), col(MemoryItem.importance).desc())
     memories = list(session.exec(stmt).all())
 
     if fmt == "markdown":
@@ -560,20 +619,18 @@ def _find_duplicate(
     try:
         from sqlalchemy import text
 
-        # Use FTS5 match to find similar content. We check for memories that
-        # share significant words with the new content.
-        words = content.split()
-        if len(words) < 3:
+        from app.memory.retrieval import _fts_quote, _fts_terms
+
+        # OR-based candidate discovery: a near-duplicate may phrase the fact
+        # differently, so any significant shared term should surface it; the
+        # word-overlap check below does the actual dedup decision.
+        terms = sorted(_fts_terms(content), key=len, reverse=True)[:4]
+        if len(terms) < 3:
             return None
-        # Build a query from the first few significant words.
-        query_words = [w for w in words if len(w) > 3][:5]
-        if not query_words:
-            return None
-        fts_query = " AND ".join(query_words)
+        fts_query = " OR ".join(_fts_quote(t) for t in terms)
         rows = session.execute(
             text(
-                "SELECT rowid FROM memory_fts WHERE memory_fts MATCH :query "
-                "AND rank < -5.0 LIMIT 5"
+                "SELECT rowid FROM memory_fts WHERE memory_fts MATCH :query ORDER BY rank LIMIT 12"
             ),
             {"query": fts_query},
         ).all()
@@ -603,23 +660,120 @@ def _find_duplicate(
     return None
 
 
+def find_similar_active_memories(
+    session: Session,
+    *,
+    user_id: int,
+    content: str,
+    memory_type: str | None = None,
+    min_overlap: float = 0.4,
+    limit: int = 3,
+) -> list[tuple[MemoryItem, float]]:
+    """Active memories with word-overlap ≥ ``min_overlap`` against ``content``.
+
+    Returns [(memory, overlap), ...] sorted by overlap desc. Used by conflict
+    detection (C3): the LLM conflict pass and the mechanical supersede path.
+    Best-effort: FTS table may not exist in test environments → empty list.
+    """
+    try:
+        from sqlalchemy import text
+
+        from app.memory.retrieval import _fts_quote, _fts_terms
+
+        # OR-based candidate discovery: conflicts often *replace* words, so the
+        # AND-query would miss them; the overlap band check does the deciding.
+        terms = sorted(_fts_terms(content), key=len, reverse=True)[:4]
+        if len(terms) < 3:
+            return []
+        fts_query = " OR ".join(_fts_quote(t) for t in terms)
+        rows = session.execute(
+            text(
+                "SELECT rowid FROM memory_fts WHERE memory_fts MATCH :query ORDER BY rank LIMIT 12"
+            ),
+            {"query": fts_query},
+        ).all()
+        if not rows:
+            return []
+        candidate_ids = [r[0] for r in rows]
+        stmt = (
+            select(MemoryItem)
+            .where(MemoryItem.id.in_(candidate_ids))  # type: ignore[union-attr]
+            .where(MemoryItem.user_id == user_id)
+            .where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
+        )
+        if memory_type:
+            stmt = stmt.where(MemoryItem.memory_type == memory_type)
+        candidates = session.exec(stmt).all()
+
+        content_words = set(content.lower().split())
+        out: list[tuple[MemoryItem, float]] = []
+        for candidate in candidates:
+            cand_words = set(candidate.content.lower().split())
+            if not content_words or not cand_words:
+                continue
+            overlap = len(content_words & cand_words) / max(len(content_words), len(cand_words))
+            if overlap >= min_overlap:
+                out.append((candidate, overlap))
+        out.sort(key=lambda x: x[1], reverse=True)
+        return out[:limit]
+    except Exception:
+        return []
+
+
+def _find_conflicting_memory(
+    session: Session,
+    *,
+    user_id: int,
+    content: str,
+    memory_type: str,
+) -> int | None:
+    """Find an active memory this write likely *corrects* (C3, variant A).
+
+    Unlike dedup (overlap > 0.7 -> same fact), a conflict lives in the
+    0.45-0.75 overlap band: substantially similar topic, different content.
+    Returns the conflicting memory's id, or None.
+    """
+    for candidate, overlap in find_similar_active_memories(
+        session,
+        user_id=user_id,
+        content=content,
+        memory_type=memory_type,
+        min_overlap=0.45,
+        limit=5,
+    ):
+        if overlap < 0.75 and candidate.id is not None:
+            return candidate.id
+    return None
+
+
 # --- Confirmation workflow (user review of agent-extracted memories) ---
 
 
 def confirm_memory(session: Session, memory_id: int) -> MemoryItem | None:
     """Confirm a pending memory: promote it to ``active`` (eligible for recall).
 
+    When the confirmed memory carries ``supersedes_id`` (it replaced an older
+    fact — C3), the superseded memory is archived so the two never compete.
+
     Returns the updated memory, or None if not found.
     """
     memory = session.get(MemoryItem, memory_id)
     if memory is None:
         return None
+    superseded = memory.supersedes_id
     memory.status = MEMORY_STATUS_ACTIVE
     memory.updated_at = datetime.now(UTC)
     session.add(memory)
+    if superseded is not None:
+        old = session.get(MemoryItem, superseded)
+        if old is not None and old.id != memory.id and old.status == MEMORY_STATUS_ACTIVE:
+            old.status = MEMORY_STATUS_SUPERSEDED
+            old.supersedes_id = memory.id
+            old.updated_at = datetime.now(UTC)
+            session.add(old)
     session.commit()
     session.refresh(memory)
-    log.info("memory.confirmed", memory_id=memory_id)
+    log.info("memory.confirmed", memory_id=memory_id, superseded=superseded)
     return memory
 
 

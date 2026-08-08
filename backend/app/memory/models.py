@@ -234,3 +234,23 @@ class MemoryItemEntity(SQLModel, table=True):
 
     memory_id: int = Field(foreign_key="memory_items.id", primary_key=True)
     entity_id: int = Field(foreign_key="entities.id", primary_key=True)
+
+
+class MemoryEmbedding(SQLModel, table=True):
+    """Metadata for a memory's embedding vector.
+
+    The vector itself lives in the ``memory_vec`` vec0 virtual table (created
+    by migration 0021); this row tracks which model produced it and when, so
+    the backfill sweep can (re)index stale or missing vectors.
+    """
+
+    __tablename__ = "memory_embeddings"
+
+    id: int | None = Field(default=None, primary_key=True)
+    memory_id: int = Field(foreign_key="memory_items.id", index=True, unique=True)
+    # Embedding model used to produce the vector.
+    model: str = Field(default="")
+    # Dimension of the stored vector (must match the vec0 table DDL).
+    dimension: int = Field(default=1536)
+    created_at: datetime | None = Field(default_factory=_utcnow)
+    updated_at: datetime | None = Field(default_factory=_utcnow)

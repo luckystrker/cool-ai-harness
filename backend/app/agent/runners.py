@@ -66,8 +66,18 @@ _CONTEXT_WEIGHTS: dict[str, float] = {
 # these "structural" kinds are flushed immediately because they're the spine of
 # a replay and are infrequent enough that batching adds no benefit.
 _STRUCTUREAL_KINDS = frozenset(
-    {"start", "message", "tool_call_start", "tool_result", "finish", "error",
-     "react_thought", "react_action", "react_observation", "llm_call_complete"}
+    {
+        "start",
+        "message",
+        "tool_call_start",
+        "tool_result",
+        "finish",
+        "error",
+        "react_thought",
+        "react_action",
+        "react_observation",
+        "llm_call_complete",
+    }
 )
 
 
@@ -135,6 +145,7 @@ def _resolve_turn_config(
     conversation_breakpoints: list[dict] | None,
     limits: AgentLimits | None,
     profile_id: int | None,
+    query_embedding: list[float] | None = None,
 ) -> _ResolvedTurn:
     """Resolve all per-turn configuration from layered sources.
 
@@ -191,6 +202,7 @@ def _resolve_turn_config(
             agent_id=_profile.id if _profile else None,
             conversation_id=conversation_id,
             query=user_input,
+            query_embedding=query_embedding,
         )
     else:
         _sections["memory"] = None
@@ -228,6 +240,7 @@ def _resolve_turn_config(
         limits=effective_limits,
         profile_id=_profile.id if _profile else None,
     )
+
 
 def _persist_tool_result(
     session: Session,
@@ -381,6 +394,23 @@ async def run_conversation_turn(
     settings = get_settings()
     history = load_history(session, conversation_id)
 
+    # Hybrid retrieval: embed the user's query once per turn so the vector leg
+    # of memory search works (best-effort; providers without embed() support
+    # make retrieval fall back to FTS5).
+    query_embedding: list[float] | None = None
+    if user_input and settings.memory_enabled and settings.memory_hybrid_enabled:
+        try:
+            from app.memory.embeddings import VEC_AVAILABLE, vec_table_ready
+
+            if VEC_AVAILABLE and vec_table_ready():
+                embeddings = await provider.embed(
+                    [user_input], model=settings.memory_embedding_model
+                )
+                if embeddings:
+                    query_embedding = embeddings[0]
+        except Exception:
+            query_embedding = None
+
     # --- Resolve all per-turn configuration (item 10: extracted pipeline) ---
     resolved = _resolve_turn_config(
         session,
@@ -394,6 +424,7 @@ async def run_conversation_turn(
         conversation_breakpoints=conversation_breakpoints,
         limits=limits,
         profile_id=profile_id,
+        query_embedding=query_embedding,
     )
 
     executor = AgentExecutor(
@@ -412,6 +443,7 @@ async def run_conversation_turn(
             cancellable=cancellable,
             user_id=get_or_create_default_user(session).id,
             conversation_id=conversation_id,
+            agent_id=resolved.profile_id,
         ),
         history=history,
     )
@@ -560,6 +592,23 @@ async def run_conversation_turn(
 
             # Notify inspector subscribers that the run has ended.
             inspector_registry.notify_finished(run_id)
+
+            # Post-run memory extraction (A): fire-and-forget, only for main
+            # runs that reached a terminal state. Skips cancelled runs.
+            if run is not None:
+                session.refresh(run)
+                if run.status in ("completed", "failed"):
+                    try:
+                        from app.memory.extraction_runner import schedule_after_run
+
+                        schedule_after_run(
+                            conversation_id=conversation_id,
+                            run_id=run_id,
+                            provider=provider,
+                            model=model,
+                        )
+                    except Exception as exc:
+                        log.warning("agent.memory_extraction_schedule_failed", error=str(exc))
 
 
 def serialize_event(event: AgentEvent) -> str:

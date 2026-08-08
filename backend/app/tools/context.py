@@ -56,6 +56,9 @@ class RunContext:
     # ad-hoc / test contexts.
     conversation_id: int | None = None
     run_id: int | None = None
+    # Active agent role/personality (profile) for memory scope visibility.
+    # Tools (e.g. memory_recall) use it to see agent-scoped memories.
+    agent_id: int | None = None
 
     def resolve_workdir(self) -> Path:
         """Return workdir, ensuring it exists."""

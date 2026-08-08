@@ -274,10 +274,12 @@ class Settings(BaseSettings):
         default=10,
         description="Max memories returned per recall query",
     )
-    # BM25 rank threshold for FTS5 search (lower = stricter).
+    # BM25 rank threshold for FTS5 search (lower = stricter). BM25 ranks are
+    # negative; good matches sit around -1..-3. 0 (default) disables the
+    # filter. Tighter values (e.g. -2) drop weak single-term matches.
     memory_fts_min_rank: float = Field(
-        default=-10.0,
-        description="BM25 rank threshold for FTS5 memory search",
+        default=0.0,
+        description="BM25 rank threshold for FTS5 memory search (0 = disabled)",
     )
     # Periodic decay of unused memories.
     memory_decay_enabled: bool = Field(
@@ -308,6 +310,44 @@ class Settings(BaseSettings):
     memory_auto_reject_unconfirmed_days: int = Field(
         default=14,
         description="Auto-reject unconfirmed memories after N days (0 = disabled)",
+    )
+    # Minimum number of NEW messages between two automatic extractions of the
+    # same conversation (debounce; tool-call-heavy turns bypass the gate).
+    memory_extraction_min_interval: int = Field(
+        default=8,
+        description="Min new messages between automatic memory extractions",
+    )
+    # Hybrid retrieval: FTS5 + vector search (sqlite-vec) over embeddings.
+    memory_hybrid_enabled: bool = Field(
+        default=True,
+        description="Enable hybrid (FTS5 + embeddings) memory retrieval",
+    )
+    # Dimension of the embedding vectors stored in the vec0 table. Changing
+    # this requires recreating the virtual table (migration).
+    memory_embedding_dim: int = Field(
+        default=1536,
+        description="Embedding vector dimension for the vec0 index",
+    )
+    # Model used for embeddings (None = provider default, e.g. text-embedding-3-small).
+    memory_embedding_model: str | None = Field(
+        default=None,
+        description="Embedding model; None = provider default",
+    )
+    # Consolidation: merge similar memories into one (LLM-assisted).
+    memory_consolidation_llm_enabled: bool = Field(
+        default=True,
+        description="Use the LLM to merge consolidation groups",
+    )
+    # Max groups consolidated per sweep (protects against runaway merges).
+    memory_consolidation_max_groups: int = Field(
+        default=5,
+        description="Max memory groups consolidated per sweep",
+    )
+    # Contradiction handling: LLM conflict check during extraction sets
+    # supersedes_id so confirming the new fact archives the old one.
+    memory_conflict_check_enabled: bool = Field(
+        default=True,
+        description="LLM conflict detection during memory extraction",
     )
 
     # --- Recurring tasks / scheduler (Фаза 3b) ---

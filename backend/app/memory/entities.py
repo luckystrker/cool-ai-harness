@@ -70,9 +70,7 @@ def upsert_entity(
     type/description are replaced if provided.
     """
     existing = session.exec(
-        select(Entity)
-        .where(Entity.user_id == user_id)
-        .where(Entity.name == name)
+        select(Entity).where(Entity.user_id == user_id).where(Entity.name == name)
     ).first()
 
     if existing is not None:
@@ -263,8 +261,14 @@ def link_entities(
     return relation
 
 
-def memories_for_entity(session: Session, entity_id: int) -> list[MemoryItem]:
-    """Return all active memories linked to an entity."""
+def memories_for_entity(
+    session: Session,
+    entity_id: int,
+    *,
+    active_only: bool = True,
+    user_id: int | None = None,
+) -> list[MemoryItem]:
+    """Return memories linked to an entity (optionally only ``active`` ones)."""
     rows = session.exec(
         select(MemoryItemEntity.memory_id).where(MemoryItemEntity.entity_id == entity_id)
     ).all()
@@ -273,13 +277,14 @@ def memories_for_entity(session: Session, entity_id: int) -> list[MemoryItem]:
     memory_ids = [r for r in rows if r is not None]
     if not memory_ids:
         return []
-    return list(
-        session.exec(
-            select(MemoryItem)
-            .where(col(MemoryItem.id).in_(memory_ids))
-            .order_by(col(MemoryItem.updated_at).desc())
-        ).all()
-    )
+    stmt = select(MemoryItem).where(col(MemoryItem.id).in_(memory_ids))
+    if active_only:
+        from app.memory.models import MEMORY_STATUS_ACTIVE
+
+        stmt = stmt.where(MemoryItem.status == MEMORY_STATUS_ACTIVE)
+    if user_id is not None:
+        stmt = stmt.where(MemoryItem.user_id == user_id)
+    return list(session.exec(stmt.order_by(col(MemoryItem.updated_at).desc())).all())
 
 
 # --- LLM extraction ---

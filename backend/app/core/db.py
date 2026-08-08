@@ -8,8 +8,11 @@ from sqlalchemy import event, inspect, text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 _settings = get_settings()
+
+log = get_logger(__name__)
 
 # check_same_thread=False: FastAPI may use threads; we rely on session-per-request.
 connect_args = {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
@@ -32,6 +35,31 @@ if _settings.database_url.startswith("sqlite"):
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
+
+
+# --- sqlite-vec (vector search over memory embeddings) ---
+# Loaded per-connection (SQLite loadable extensions are per-connection). The
+# extension may be unavailable (Python builds without loadable-extension
+# support); memory retrieval degrades gracefully to FTS5 in that case.
+VEC_AVAILABLE = False
+
+if _settings.database_url.startswith("sqlite"):
+    try:
+        import sqlite_vec
+
+        @event.listens_for(engine, "connect")
+        def _load_vec_extension(dbapi_conn, connection_record):
+            try:
+                dbapi_conn.enable_load_extension(True)
+                sqlite_vec.load(dbapi_conn)
+                dbapi_conn.enable_load_extension(False)
+            except Exception:
+                # Not fatal: vector search falls back to FTS5-only retrieval.
+                pass
+
+        VEC_AVAILABLE = True
+    except Exception:
+        VEC_AVAILABLE = False
 
 
 # Columns added after the initial schema. Each entry is (table, column, DDL).
@@ -61,6 +89,61 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
 ]
 
 
+# Memory virtual tables created by migrations 0011 (FTS5 mirror) and 0021
+# (vec0 vector table) — SQLModel.create_all doesn't know about them, so the
+# dev/test path recreates them here. DDL mirrors the migrations verbatim.
+_FTS_MIRROR_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5("
+    "content, tags, memory_type UNINDEXED, content='memory_items', content_rowid='id')"
+)
+_FTS_MIRROR_TRIGGERS = [
+    (
+        "CREATE TRIGGER IF NOT EXISTS memory_items_ai AFTER INSERT ON memory_items BEGIN"
+        " INSERT INTO memory_fts(rowid, content, tags, memory_type)"
+        " VALUES (new.id, new.content, COALESCE(new.tags, ''), new.memory_type);"
+        " END"
+    ),
+    (
+        "CREATE TRIGGER IF NOT EXISTS memory_items_ad AFTER DELETE ON memory_items BEGIN"
+        " INSERT INTO memory_fts(memory_fts, rowid, content, tags, memory_type)"
+        " VALUES ('delete', old.id, old.content, COALESCE(old.tags, ''), old.memory_type);"
+        " END"
+    ),
+    (
+        "CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE ON memory_items BEGIN"
+        " INSERT INTO memory_fts(memory_fts, rowid, content, tags, memory_type)"
+        " VALUES ('delete', old.id, old.content, COALESCE(old.tags, ''), old.memory_type);"
+        " INSERT INTO memory_fts(rowid, content, tags, memory_type)"
+        " VALUES (new.id, new.content, COALESCE(new.tags, ''), new.memory_type);"
+        " END"
+    ),
+]
+_VEC_TABLE_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0("
+    "memory_id INTEGER PRIMARY KEY, embedding FLOAT[1536] distance_metric=cosine)"
+)
+
+
+def _create_memory_virtual_tables() -> None:
+    """Create the FTS5 mirror + vec0 table that create_all doesn't cover.
+
+    Idempotent (IF NOT EXISTS everywhere). The vec0 table needs the sqlite-vec
+    extension; when it's unavailable the DDL fails and retrieval degrades to
+    FTS5-only — logged and non-fatal, with the FTS mirror already committed.
+    """
+    with Session(engine) as session:
+        session.execute(text(_FTS_MIRROR_DDL))
+        for trigger in _FTS_MIRROR_TRIGGERS:
+            session.execute(text(trigger))
+        session.commit()
+        try:
+            session.execute(text(_VEC_TABLE_DDL))
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            log.warning("db.memory_vec_unavailable", error=str(exc))
+
+
 def init_db() -> None:
     """Create all tables. Called on startup.
 
@@ -81,6 +164,7 @@ def init_db() -> None:
     else:
         SQLModel.metadata.create_all(engine)
         _apply_lightweight_migrations()
+        _create_memory_virtual_tables()
         _hide_legacy_test_conversations()
     _seed_profiles()
 

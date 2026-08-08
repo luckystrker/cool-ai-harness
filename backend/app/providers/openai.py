@@ -38,12 +38,16 @@ class OpenAIProvider(LLMProvider):
         api_key: str,
         default_model: str | None = None,
         timeout: float = 120.0,
+        embed_timeout: float = 15.0,
         transport: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.default_model = default_model
         self.timeout = timeout
+        # Embeddings are single-shot short requests; a long chat timeout (120s)
+        # would stall embedding backfills and SSE startup — use a short one.
+        self.embed_timeout = embed_timeout
         # Optional injected httpx transport — used by tests to avoid real
         # network calls (httpx.MockTransport). None in production.
         self._transport = transport
@@ -80,7 +84,14 @@ class OpenAIProvider(LLMProvider):
         if not tools:
             return None
         return [
-            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
             for t in tools
         ]
 
@@ -111,17 +122,13 @@ class OpenAIProvider(LLMProvider):
         return payload
 
     @staticmethod
-    def _parse_usage(
-        raw_usage: dict[str, Any] | None, *, model: str | None = None
-    ) -> Usage | None:
+    def _parse_usage(raw_usage: dict[str, Any] | None, *, model: str | None = None) -> Usage | None:
         if not raw_usage:
             return None
         prompt = raw_usage.get("prompt_tokens", 0)
         completion = raw_usage.get("completion_tokens", 0)
         total = raw_usage.get("total_tokens", 0)
-        cost = (
-            estimate_cost_usd(model, prompt, completion) if model else None
-        )
+        cost = estimate_cost_usd(model, prompt, completion) if model else None
         return Usage(
             prompt_tokens=prompt,
             completion_tokens=completion,
@@ -169,6 +176,34 @@ class OpenAIProvider(LLMProvider):
             )
         out.sort(key=lambda m: m.id)
         return out
+
+    # ---- embeddings (hybrid memory retrieval) ----
+
+    async def embed(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+        """Create embeddings via the OpenAI-compatible ``/embeddings`` endpoint.
+
+        Falls back to the configured ``memory_embedding_model``, then to
+        ``text-embedding-3-small``. Works with any backend that speaks the
+        OpenAI embeddings API (OpenAI, Ollama, LM Studio, vLLM, ...).
+
+        Uses a short dedicated timeout (``embed_timeout``, default 15s) rather
+        than the chat ``timeout`` so embedding calls never stall a run for the
+        full 120s when the endpoint is unreachable.
+        """
+        if not model:
+            from app.core.config import get_settings
+
+            model = get_settings().memory_embedding_model or "text-embedding-3-small"
+        payload = {"model": model, "input": texts}
+        url = f"{self.base_url}/embeddings"
+        async with httpx.AsyncClient(
+            timeout=self.embed_timeout, transport=self._transport
+        ) as client:
+            resp = await client.post(url, headers=self._headers(), json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        items = sorted(data.get("data", []), key=lambda d: d.get("index", 0))
+        return [item["embedding"] for item in items]
 
     # ---- non-streaming ----
 
@@ -235,9 +270,10 @@ class OpenAIProvider(LLMProvider):
         payload.setdefault("stream_options", {"include_usage": True})
 
         url = f"{self.base_url}/chat/completions"
-        async with httpx.AsyncClient(timeout=self.timeout) as client, client.stream(
-            "POST", url, headers=self._headers(), json=payload
-        ) as resp:
+        async with (
+            httpx.AsyncClient(timeout=self.timeout) as client,
+            client.stream("POST", url, headers=self._headers(), json=payload) as resp,
+        ):
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):

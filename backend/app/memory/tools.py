@@ -151,6 +151,33 @@ async def _memory_recall(
 
     ctx = get_run_context()
     now = None
+
+    # Hybrid vector leg: embed the query best-effort (provider/model resolved
+    # from settings; failures degrade to FTS5-only recall).
+    query_embedding: list[float] | None = None
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if settings.memory_hybrid_enabled:
+            from app.memory.embeddings import VEC_AVAILABLE, vec_table_ready
+
+            if VEC_AVAILABLE and vec_table_ready():
+                from app.agent.service import resolve_default_model
+                from app.providers import get_provider_for_model
+
+                with Session(engine) as s:
+                    model = resolve_default_model(s)
+                if model:
+                    provider = get_provider_for_model(model)
+                    embeddings = await provider.embed(
+                        [query], model=settings.memory_embedding_model
+                    )
+                    if embeddings:
+                        query_embedding = embeddings[0]
+    except Exception:
+        query_embedding = None
+
     with Session(engine) as session:
         from datetime import UTC, datetime
 
@@ -162,9 +189,11 @@ async def _memory_recall(
             session,
             user_id=user.id,
             query=query,
+            agent_id=ctx.agent_id,
             conversation_id=ctx.conversation_id,
             memory_type=memory_type,
             limit=limit,
+            query_embedding=query_embedding,
         )
         now = datetime.now(UTC)
         results = [
@@ -216,7 +245,7 @@ async def _memory_update(
         return ToolResult.err("No fields to update")
 
     with Session(engine) as session:
-        memory = update_memory(session, memory_id, **fields)
+        memory = update_memory(session, memory_id, cap_agent_importance=True, **fields)
     if memory is None:
         return ToolResult.err(f"Memory {memory_id} not found")
     return ToolResult.ok(
@@ -236,9 +265,7 @@ async def _memory_list(
 
         user = get_or_create_default_user(session)
         assert user.id is not None
-        memories = list_memories(
-            session, user_id=user.id, memory_type=memory_type, limit=limit
-        )
+        memories = list_memories(session, user_id=user.id, memory_type=memory_type, limit=limit)
     results = [
         {
             "id": m.id,
@@ -289,7 +316,9 @@ async def _get_working_memory(key: str | None = None) -> ToolResult:
     state = wm.state or {}
     if key is not None:
         value = state.get(key)
-        return ToolResult.ok(json.dumps({"key": key, "value": value}, ensure_ascii=False, default=str))
+        return ToolResult.ok(
+            json.dumps({"key": key, "value": value}, ensure_ascii=False, default=str)
+        )
     return ToolResult.ok(json.dumps(state, ensure_ascii=False, default=str))
 
 

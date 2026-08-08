@@ -70,6 +70,18 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         is_sqlite = connection.dialect.name == "sqlite"
+        if is_sqlite:
+            # Load the sqlite-vec extension so migration 0021 can create the
+            # vec0 virtual table. Best-effort: Python builds without loadable
+            # extensions skip it, and memory retrieval degrades to FTS5.
+            try:
+                import sqlite_vec
+
+                connection.connection.enable_load_extension(True)
+                sqlite_vec.load(connection.connection)
+                connection.connection.enable_load_extension(False)
+            except Exception:
+                pass
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

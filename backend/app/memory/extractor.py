@@ -130,11 +130,25 @@ async def extract_memories_from_conversation(
     # Store extracted memories.
     from app.memory.service import create_episode, remember
 
+    # Conflict detection (C3, variant B — LLM): for each candidate fact, decide
+    # whether it contradicts/updates an active memory; the resulting
+    # supersedes_id makes confirming the new fact archive the old one.
+    supersedes: dict[str, dict[str, int | None]] = {}
+    if settings.memory_conflict_check_enabled:
+        supersedes = await detect_conflicts_with_active(
+            session,
+            provider=provider,
+            model=extraction_model,
+            user_id=user_id,
+            extracted=extracted,
+        )
+
     stored_count = 0
+    stored_memories: list = []
 
     # User preferences.
     for pref in extracted.get("user_preferences", []):
-        remember(
+        memory = remember(
             session,
             user_id=user_id,
             content=pref["content"],
@@ -144,12 +158,14 @@ async def extract_memories_from_conversation(
             confidence=pref.get("confidence", 0.7),
             source=MEMORY_SOURCE_AGENT_EXTRACTION,
             conversation_id=conversation_id,
+            supersedes_id=supersedes.get("preference", {}).get(pref["content"]),
         )
+        stored_memories.append(memory)
         stored_count += 1
 
     # Project facts.
     for fact in extracted.get("project_facts", []):
-        remember(
+        memory = remember(
             session,
             user_id=user_id,
             content=fact["content"],
@@ -159,12 +175,14 @@ async def extract_memories_from_conversation(
             confidence=fact.get("confidence", 0.6),
             source=MEMORY_SOURCE_AGENT_EXTRACTION,
             conversation_id=conversation_id,
+            supersedes_id=supersedes.get("fact", {}).get(fact["content"]),
         )
+        stored_memories.append(memory)
         stored_count += 1
 
     # Procedures.
     for proc in extracted.get("procedures", []):
-        remember(
+        memory = remember(
             session,
             user_id=user_id,
             content=proc["content"],
@@ -175,7 +193,9 @@ async def extract_memories_from_conversation(
             confidence=proc.get("confidence", 0.6),
             source=MEMORY_SOURCE_AGENT_EXTRACTION,
             conversation_id=conversation_id,
+            supersedes_id=supersedes.get("procedure", {}).get(proc["content"]),
         )
+        stored_memories.append(memory)
         stored_count += 1
 
     # Episode summary.
@@ -194,18 +214,20 @@ async def extract_memories_from_conversation(
         )
 
     # Entity extraction: pull named entities out of the transcript and link them
-    # to the most recently stored memory. Failures here are non-fatal.
+    # to the anchor memory (the most important one stored this run), so
+    # entity-driven recall (C2) can find this memory later. Best-effort.
     entities_count = 0
     try:
         from app.memory.entities import extract_entities_from_text
 
+        anchor = max(stored_memories, key=lambda m: m.importance, default=None)
         created_entities = await extract_entities_from_text(
             session,
             provider=provider,
             model=extraction_model,
             user_id=user_id,
             text=transcript,
-            link_memory_id=None,
+            link_memory_id=anchor.id if anchor is not None else None,
         )
         entities_count = len(created_entities)
     except Exception as exc:  # extraction is best-effort
@@ -216,6 +238,7 @@ async def extract_memories_from_conversation(
         conversation_id=conversation_id,
         stored_count=stored_count,
         entities_count=entities_count,
+        conflicts=len(supersedes),
     )
     return {"stored_count": stored_count, "extracted": extracted, "entities_count": entities_count}
 
@@ -282,3 +305,131 @@ def _parse_extraction_result(content: str) -> dict[str, Any] | None:
             except json.JSONDecodeError:
                 pass
     return None
+
+
+CONFLICT_CHECK_SYSTEM_PROMPT = """\
+You compare newly extracted facts against existing memories. For each new fact, \
+decide whether it contradicts/updates an existing memory (same topic, different \
+or corrected content) or merely complements it.
+
+Existing memories are given as: id: "<content>".
+New facts are indexed 0..N-1.
+
+Return ONLY valid JSON:
+{"results": [{"index": 0, "conflict_with": null | <existing id>, "kind": "contradicts|updates|complements|duplicate"}]}
+
+Rules:
+- "contradicts"/"updates": the new fact replaces or corrects the existing one.
+- "complements": adds new information, no conflict.
+- "duplicate": same meaning as an existing memory (should be merged, not kept).
+- If unsure, prefer "complements" with conflict_with null.
+- No markdown fences, no extra text.
+"""
+
+
+async def detect_conflicts_with_active(
+    session: Session,
+    *,
+    provider: LLMProvider,
+    model: str,
+    user_id: int,
+    extracted: dict[str, Any],
+) -> dict[str, dict[str, int | None]]:
+    """LLM conflict pass over extracted facts (C3, variant B).
+
+    Returns {bucket: {content: superseded_memory_id | None}} — bucket is one of
+    "preference" / "fact" / "procedure". Best-effort: on any failure returns
+    empty mappings (the mechanical supersede path in ``remember`` still runs).
+    """
+    from app.memory.service import find_similar_active_memories
+
+    # Collect candidates: (bucket, index, content, existing_memories).
+    batches: list[dict] = []
+    for bucket, items in (
+        ("preference", extracted.get("user_preferences", [])),
+        ("fact", extracted.get("project_facts", [])),
+        ("procedure", extracted.get("procedures", [])),
+    ):
+        for item in items:
+            content_text = item.get("content", "").strip() if isinstance(item, dict) else ""
+            if not content_text:
+                continue
+            candidates = find_similar_active_memories(
+                session,
+                user_id=user_id,
+                content=content_text,
+                min_overlap=0.3,
+                limit=3,
+            )
+            batches.append(
+                {
+                    "bucket": bucket,
+                    "content": content_text,
+                    "candidates": candidates,
+                }
+            )
+
+    if not batches:
+        return {}
+
+    # Build the prompt: existing memories by id, new facts by index.
+    seen_ids: set[int] = set()
+    existing_lines: list[str] = []
+    for b in batches:
+        for mem, _ in b["candidates"]:
+            if mem.id is not None and mem.id not in seen_ids:
+                seen_ids.add(mem.id)
+                existing_lines.append(f'{mem.id}: "{mem.content[:200]}"')
+    new_facts_lines = [f'{i}: "{b["content"][:200]}"' for i, b in enumerate(batches)]
+
+    prompt = (
+        "Existing memories:\n"
+        + ("\n".join(existing_lines) if existing_lines else "(none)")
+        + "\n\nNew facts:\n"
+        + "\n".join(new_facts_lines)
+    )
+
+    try:
+        result = await provider.chat_completion(
+            [
+                Message(role="system", content=CONFLICT_CHECK_SYSTEM_PROMPT),
+                Message(role="user", content=prompt),
+            ],
+            model=model,
+            temperature=0.1,
+            max_tokens=800,
+        )
+        raw = (result.content or "").strip()
+        # Strip markdown fences if the model wrapped the JSON.
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1]
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+        parsed = json.loads(raw)
+    except Exception as exc:
+        log.warning("memory.conflict_check_failed", error=str(exc))
+        return {}
+
+    results = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(results, list):
+        return {}
+
+    supersedes: dict[str, dict[str, int | None]] = {}
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        index = row.get("index")
+        if not isinstance(index, int) or not (0 <= index < len(batches)):
+            continue
+        kind = row.get("kind")
+        conflict_id = row.get("conflict_with")
+        if kind not in ("contradicts", "updates"):
+            continue
+        if not isinstance(conflict_id, int) or conflict_id not in seen_ids:
+            continue
+        batch = batches[index]
+        bucket_map = supersedes.setdefault(batch["bucket"], {})
+        bucket_map[batch["content"]] = conflict_id
+
+    return supersedes

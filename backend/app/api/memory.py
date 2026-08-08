@@ -26,7 +26,9 @@ entities_router = APIRouter(prefix="/entities", tags=["memory"])
 
 class MemoryCreate(BaseModel):
     content: str = Field(description="Memory content")
-    memory_type: str = Field(default="semantic", description="semantic|episodic|procedural|preference")
+    memory_type: str = Field(
+        default="semantic", description="semantic|episodic|procedural|preference"
+    )
     scope: str = Field(default="global", description="global|agent|conversation")
     agent_id: int | None = None
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -374,9 +376,7 @@ def memory_stats() -> MemoryStatsOut:
 
         # Total episodes.
         total_episodes = session.exec(
-            select(func.count())
-            .select_from(Episode)
-            .where(Episode.user_id == user_id)
+            select(func.count()).select_from(Episode).where(Episode.user_id == user_id)
         ).one()
 
         # Total archived.
@@ -448,6 +448,39 @@ async def trigger_extraction(body: ExtractRequest) -> ExtractResponse:
     return ExtractResponse(
         status="completed",
         stored_count=result.get("stored_count", 0),
+    )
+
+
+class ConsolidateResponse(BaseModel):
+    status: str
+    groups: int = 0
+    consolidated: int = 0
+    detail: str | None = None
+
+
+@router.post("/consolidate", response_model=ConsolidateResponse)
+async def trigger_consolidation() -> ConsolidateResponse:
+    """Run the consolidation sweep now (merge similar memories, LLM-assisted)."""
+    from app.agent.service import resolve_default_model
+    from app.memory.lifecycle import run_consolidation_sweep
+    from app.providers import get_provider_for_model
+
+    with Session(engine) as session:
+        model = resolve_default_model(session)
+    if model is None:
+        return ConsolidateResponse(status="error", detail="No model configured")
+
+    provider = get_provider_for_model(model)
+
+    with Session(engine) as session:
+        results = await run_consolidation_sweep(
+            session, provider=provider, model=model, user_id=_get_user_id()
+        )
+
+    return ConsolidateResponse(
+        status="completed",
+        groups=results.get("groups", 0),
+        consolidated=results.get("consolidated", 0),
     )
 
 
