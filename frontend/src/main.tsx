@@ -6,7 +6,12 @@ import { Toaster } from "sonner"
 import "./index.css"
 import App from "./App.tsx"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
+import { initTelegramWebApp } from "@/lib/telegramWebApp"
 import { queryClient } from "@/lib/queryClient"
+
+// Telegram WebApp integration: no-op outside Telegram, loads the SDK and
+// syncs theme/viewport when the SPA runs inside a bot's WebApp view.
+initTelegramWebApp()
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

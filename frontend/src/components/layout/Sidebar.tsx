@@ -1,29 +1,21 @@
 import { useMemo, useState } from "react"
-import { useNavigate, useParams } from "react-router-dom"
+import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
-  BarChart3,
-  BookOpen,
-  Bot,
-  Brain,
-  Bug,
-  CalendarClock,
   ChevronRight,
   FolderOpen,
   Globe,
   Loader2,
   MessageSquare,
   Plus,
-  SearchCheck,
-  Settings,
   Settings2,
   Trash2,
-  Wallet,
 } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import type { Conversation } from "@/api/types"
 import { loadAgentDefaults, loadLastModel } from "@/lib/agentConfig"
+import { NAV_ITEMS } from "@/lib/nav"
 import {
   deleteProject,
   loadConversationProjectMap,
@@ -37,8 +29,12 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
-export function Sidebar() {
+export function Sidebar({
+  className,
+  inDrawer = false,
+}: { className?: string; inDrawer?: boolean } = {}) {
   const navigate = useNavigate()
+  const location = useLocation()
   const { conversationId } = useParams()
   const queryClient = useQueryClient()
 
@@ -168,7 +164,7 @@ export function Sidebar() {
             <span className="truncate">{c.title || `Conversation #${c.id}`}</span>
           </button>
           <button
-            className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+            className="text-muted-foreground hover:text-destructive md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
             title="Delete"
             onClick={() => handleDelete(c.id)}
           >
@@ -180,7 +176,9 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r bg-muted/30">
+    <aside
+      className={cn("flex shrink-0 flex-col border-r bg-muted/30", className ?? "w-72")}
+    >
       {/* Brand */}
       <div className="flex h-14 items-center gap-2 border-b px-4">
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -188,6 +186,31 @@ export function Sidebar() {
         </div>
         <span className="font-semibold tracking-tight">Harness</span>
       </div>
+
+      {/* Pinned section nav (mobile drawer) — Material navigation drawers keep
+          destinations fixed at the top; the conversation list scrolls below. */}
+      {inDrawer && (
+        <nav className="grid shrink-0 grid-cols-2 gap-1 border-b px-2 py-2">
+          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
+            const active = location.pathname.startsWith(to)
+            return (
+              <Button
+                key={to}
+                variant="ghost"
+                className={cn(
+                  "min-h-11 justify-start gap-2 rounded-full text-sm",
+                  active
+                    ? "bg-accent font-medium text-accent-foreground"
+                    : "text-muted-foreground"
+                )}
+                onClick={() => navigate(to)}
+              >
+                <Icon className="h-4 w-4" /> {label}
+              </Button>
+            )
+          })}
+        </nav>
+      )}
 
       {/* New chat — creates a conversation immediately, no title prompt.
           The title can be edited later via the conversation settings. */}
@@ -255,7 +278,7 @@ export function Sidebar() {
                       </span>
                     </button>
                     <button
-                      className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-foreground"
+                      className="text-muted-foreground hover:text-foreground md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
                       title="New chat in this project"
                       onClick={() => createInProjectMutation.mutate(p)}
                     >
@@ -266,14 +289,14 @@ export function Sidebar() {
                       )}
                     </button>
                     <button
-                      className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-foreground"
+                      className="text-muted-foreground hover:text-foreground md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
                       title="Project settings"
                       onClick={() => setSettingsProject(p)}
                     >
                       <Settings2 className="h-3.5 w-3.5" />
                     </button>
                     <button
-                      className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                      className="text-muted-foreground hover:text-destructive md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
                       title="Delete project"
                       onClick={() => handleDeleteProject(p.id)}
                     >
@@ -310,59 +333,27 @@ export function Sidebar() {
         )}
       </ScrollArea>
 
-      {/* Footer */}
-      <div className="space-y-1 border-t p-2">
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/memory">
-            <Brain className="h-4 w-4" /> Memory
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/wiki">
-            <BookOpen className="h-4 w-4" /> Wiki
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/profiles">
-            <Settings2 className="h-4 w-4" /> Profiles
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/analytics">
-            <BarChart3 className="h-4 w-4" /> Analytics
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/subagents">
-            <Bot className="h-4 w-4" /> Subagents
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/deep-research">
-            <SearchCheck className="h-4 w-4" /> Deep Research
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/tasks">
-            <CalendarClock className="h-4 w-4" /> Tasks
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/budgets">
-            <Wallet className="h-4 w-4" /> Budgets
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/inspector">
-            <Bug className="h-4 w-4" /> Inspector
-          </a>
-        </Button>
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <a href="/settings">
-            <Settings className="h-4 w-4" /> Settings
-          </a>
-        </Button>
-      </div>
+      {/* Footer (desktop): section navigation pinned to the bottom. */}
+      {!inDrawer && (
+        <div className="space-y-1 border-t p-2">
+          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
+            const active = location.pathname.startsWith(to)
+            return (
+              <Button
+                key={to}
+                variant="ghost"
+                className={cn(
+                  "w-full justify-start gap-2",
+                  active && "bg-accent text-accent-foreground"
+                )}
+                onClick={() => navigate(to)}
+              >
+                <Icon className="h-4 w-4" /> {label}
+              </Button>
+            )
+          })}
+        </div>
+      )}
 
       <ProjectDialog
         open={projectDialogOpen}

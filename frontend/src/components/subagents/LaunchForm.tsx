@@ -60,7 +60,7 @@ export function LaunchForm({ parentConversationId }: LaunchFormProps) {
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="grid gap-1.5">
             <Label htmlFor="launch-role">Role</Label>
             <select
@@ -102,7 +102,7 @@ export function LaunchForm({ parentConversationId }: LaunchFormProps) {
       <Button
         onClick={() => launchMutation.mutate()}
         disabled={!prompt.trim() || launchMutation.isPending}
-        className="self-start gap-2"
+        className="w-full gap-2 sm:w-auto sm:self-start"
       >
         <Rocket className="h-4 w-4" />
         {launchMutation.isPending ? "Launching..." : "Launch"}

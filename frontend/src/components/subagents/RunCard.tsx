@@ -73,22 +73,22 @@ export function RunCard({ run }: { run: SubagentRun }) {
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6"
+              className="h-9 w-9 md:h-6 md:w-6"
               onClick={() => cancelMutation.mutate()}
               title="Cancel"
             >
-              <Square className="h-3 w-3" />
+              <Square className="h-3.5 w-3.5 md:h-3 md:w-3" />
             </Button>
           )}
           {isTerminal && (
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6"
+              className="h-9 w-9 md:h-6 md:w-6"
               onClick={() => deleteMutation.mutate()}
               title="Delete"
             >
-              <Trash2 className="h-3 w-3" />
+              <Trash2 className="h-3.5 w-3.5 md:h-3 md:w-3" />
             </Button>
           )}
         </div>

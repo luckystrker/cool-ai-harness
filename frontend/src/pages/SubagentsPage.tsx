@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Bot, Pencil, Plus, Trash2 } from "lucide-react"
+import { ArrowLeft, Bot, Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { subagentsApi } from "@/api/subagents"
@@ -10,12 +10,81 @@ import { RunCard } from "@/components/subagents/RunCard"
 import { LaunchForm } from "@/components/subagents/LaunchForm"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useIsMobile } from "@/hooks/useMediaQuery"
 import { cn } from "@/lib/utils"
 
 type Tab = "roles" | "launch" | "monitor"
 
+/** Shared role list: desktop left panel + mobile Roles tab. Actions are
+ *  hover-revealed on desktop but always visible on touch devices. */
+function RoleList({
+  roles,
+  selectedId,
+  onSelect,
+  onDelete,
+}: {
+  roles: SubagentRole[]
+  selectedId: number | null
+  onSelect: (role: SubagentRole) => void
+  onDelete: (id: number) => void
+}) {
+  return (
+    <ul className="space-y-0.5 p-2">
+      {roles.map((role) => (
+        <li
+          key={role.id}
+          className={cn(
+            "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted",
+            selectedId === role.id && "bg-muted"
+          )}
+        >
+          <button className="min-w-0 flex-1 text-left" onClick={() => onSelect(role)}>
+            <span className="truncate font-medium">{role.name}</span>
+            {role.is_builtin && (
+              <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                builtin
+              </span>
+            )}
+            {role.description && (
+              <p className="truncate text-xs text-muted-foreground">{role.description}</p>
+            )}
+          </button>
+          <div className="flex shrink-0 gap-0.5 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 md:h-5 md:w-5"
+              onClick={() => onSelect(role)}
+              title="Edit"
+            >
+              <Pencil className="h-3.5 w-3.5 md:h-3 md:w-3" />
+            </Button>
+            {!role.is_builtin && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 md:h-5 md:w-5"
+                onClick={() => onDelete(role.id)}
+                title="Delete"
+              >
+                <Trash2 className="h-3.5 w-3.5 md:h-3 md:w-3" />
+              </Button>
+            )}
+          </div>
+        </li>
+      ))}
+      {roles.length === 0 && (
+        <li className="px-2 py-3 text-center text-xs text-muted-foreground">
+          No roles defined yet.
+        </li>
+      )}
+    </ul>
+  )
+}
+
 export function SubagentsPage() {
   const queryClient = useQueryClient()
+  const isMobile = useIsMobile()
   const [tab, setTab] = useState<Tab>("monitor")
   const [editingRole, setEditingRole] = useState<SubagentRole | null>(null)
   const [showEditor, setShowEditor] = useState(false)
@@ -46,6 +115,18 @@ export function SubagentsPage() {
     onError: (e) => toast.error("Failed to delete role", { description: String(e) }),
   })
 
+  const openNewRole = () => {
+    setEditingRole(null)
+    setShowEditor(true)
+    setTab("roles")
+  }
+
+  const openRole = (role: SubagentRole) => {
+    setEditingRole(role)
+    setShowEditor(true)
+    setTab("roles")
+  }
+
   // Only show standalone launches (not chat-spawned subagents with parent_run_id).
   const standaloneRuns = runs.filter((r) => r.parent_run_id == null)
   const activeRuns = standaloneRuns.filter((r) => r.status === "queued" || r.status === "running")
@@ -56,10 +137,20 @@ export function SubagentsPage() {
   const parentConvId =
     runs[0]?.parent_conversation_id ?? conversations[0]?.id ?? null
 
+  const roleList = (
+    <RoleList
+      roles={roles}
+      selectedId={editingRole?.id ?? null}
+      onSelect={openRole}
+      onDelete={(id) => deleteRoleMutation.mutate(id)}
+    />
+  )
+
   return (
-    <div className="flex h-full">
-      {/* Left panel: roles + run history */}
-      <div className="flex w-72 shrink-0 flex-col border-r">
+    <div className="flex h-full flex-col md:flex-row">
+      {/* Left panel: roles + run history (desktop only — on mobile these live
+          inside the Roles / Monitor tabs). */}
+      <div className="hidden w-72 shrink-0 flex-col border-r md:flex">
         <div className="flex items-center justify-between border-b px-3 py-2">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
@@ -69,11 +160,7 @@ export function SubagentsPage() {
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            onClick={() => {
-              setEditingRole(null)
-              setShowEditor(true)
-              setTab("roles")
-            }}
+            onClick={openNewRole}
             title="New Role"
           >
             <Plus className="h-4 w-4" />
@@ -87,65 +174,7 @@ export function SubagentsPage() {
               Roles
             </span>
           </div>
-          <ul className="space-y-0.5 p-2">
-            {roles.map((role: SubagentRole) => (
-              <li
-                key={role.id}
-                className={cn(
-                  "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted",
-                  editingRole?.id === role.id && "bg-muted"
-                )}
-              >
-                <button
-                  className="min-w-0 flex-1 text-left"
-                  onClick={() => {
-                    setEditingRole(role)
-                    setShowEditor(true)
-                    setTab("roles")
-                  }}
-                >
-                  <span className="truncate font-medium">{role.name}</span>
-                  {role.is_builtin && (
-                    <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
-                      builtin
-                    </span>
-                  )}
-                  {role.description && (
-                    <p className="truncate text-xs text-muted-foreground">{role.description}</p>
-                  )}
-                </button>
-                <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5"
-                    onClick={() => {
-                      setEditingRole(role)
-                      setShowEditor(true)
-                      setTab("roles")
-                    }}
-                  >
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                  {!role.is_builtin && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5"
-                      onClick={() => deleteRoleMutation.mutate(role.id)}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-              </li>
-            ))}
-            {roles.length === 0 && (
-              <li className="px-2 py-3 text-center text-xs text-muted-foreground">
-                No roles defined yet.
-              </li>
-            )}
-          </ul>
+          {roleList}
 
           {/* Run history */}
           <div className="px-3 pt-3">
@@ -166,16 +195,16 @@ export function SubagentsPage() {
         </ScrollArea>
       </div>
 
-      {/* Right panel: tabbed content */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Tab bar */}
-        <div className="flex border-b">
+      {/* Content panel with the tab bar */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Tab bar — M3-style tabs, full-width and touch-friendly on mobile */}
+        <div className="flex shrink-0 border-b">
           {(["monitor", "launch", "roles"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={cn(
-                "px-4 py-2 text-sm font-medium capitalize transition-colors hover:text-foreground",
+                "min-h-11 flex-1 px-4 text-sm font-medium capitalize transition-colors hover:text-foreground md:flex-none",
                 tab === t
                   ? "border-b-2 border-primary text-foreground"
                   : "text-muted-foreground"
@@ -225,7 +254,59 @@ export function SubagentsPage() {
               </div>
             ))}
 
-          {tab === "roles" && showEditor && (
+          {/* Mobile Roles tab: list ↔ editor navigation with a back action. */}
+          {tab === "roles" && isMobile && (
+            <>
+              {showEditor ? (
+                <div>
+                  <div className="flex items-center gap-1 border-b px-2 py-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-10 w-10"
+                      onClick={() => {
+                        setShowEditor(false)
+                        setEditingRole(null)
+                      }}
+                      title="Back to roles"
+                      aria-label="Back to roles"
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                    </Button>
+                    <span className="truncate text-sm font-semibold">
+                      {editingRole ? editingRole.name : "New Role"}
+                    </span>
+                  </div>
+                  <RoleEditor
+                    key={editingRole?.id ?? "new"}
+                    role={editingRole}
+                    onSaved={() => {
+                      setShowEditor(false)
+                      setEditingRole(null)
+                    }}
+                  />
+                </div>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between border-b px-3 py-2">
+                    <span className="text-sm font-semibold">Roles</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={openNewRole}
+                    >
+                      <Plus className="h-4 w-4" /> New Role
+                    </Button>
+                  </div>
+                  {roleList}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Desktop Roles tab: editor only (list is in the left panel). */}
+          {tab === "roles" && !isMobile && showEditor && (
             <RoleEditor
               key={editingRole?.id ?? "new"}
               role={editingRole}
@@ -235,7 +316,7 @@ export function SubagentsPage() {
               }}
             />
           )}
-          {tab === "roles" && !showEditor && (
+          {tab === "roles" && !isMobile && !showEditor && (
             <div className="p-4 text-sm text-muted-foreground">
               Select a role from the left panel to edit, or click + to create a new one.
             </div>

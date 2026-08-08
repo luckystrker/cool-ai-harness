@@ -14,6 +14,11 @@ export interface ChatComposerProps {
   onRemoveFile?: (index: number) => void
   /** Optional toolbar rendered below the input (workdir, mode, model pickers). */
   toolbar?: React.ReactNode
+  /**
+   * Optional leading control rendered instead of the attach button (mobile
+   * replaces the paperclip with a "+" that opens the settings sheet).
+   */
+  leading?: React.ReactNode
 }
 
 /** Auto-growing textarea with send + attach buttons. Enter to send, Shift+Enter for newline. */
@@ -26,6 +31,7 @@ export function ChatComposer({
   pendingFiles = [],
   onRemoveFile,
   toolbar,
+  leading,
 }: ChatComposerProps) {
   const [value, setValue] = useState("")
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -83,28 +89,29 @@ export function ChatComposer({
         )}
 
         <div className="relative flex items-end gap-2">
-          {/* Attach button */}
-          {onAttach && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={handleFileSelect}
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-10 w-10 shrink-0 text-muted-foreground"
-                title="Attach files"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled || streaming}
-              >
-                <Paperclip className="h-4 w-4" />
-              </Button>
-            </>
-          )}
+          {/* Leading control: custom (mobile "+") or the attach button */}
+          {leading ??
+            (onAttach && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={handleFileSelect}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-10 w-10 shrink-0 text-muted-foreground"
+                  title="Attach files"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={disabled || streaming}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              </>
+            ))}
 
           <Textarea
             ref={ref}

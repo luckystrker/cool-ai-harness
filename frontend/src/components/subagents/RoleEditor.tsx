@@ -100,7 +100,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="grid gap-1.5">
             <Label htmlFor="role-model">Model (optional)</Label>
             <Input
@@ -134,7 +134,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
             {availableTools.map((tool) => (
               <label
                 key={tool}
-                className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-muted"
+                className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1.5 text-sm hover:bg-muted"
               >
                 <input
                   type="checkbox"
@@ -167,7 +167,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
       <Button
         onClick={() => saveMutation.mutate()}
         disabled={!name.trim() || saveMutation.isPending}
-        className="self-start gap-2"
+        className="w-full gap-2 sm:w-auto sm:self-start"
       >
         <Save className="h-4 w-4" />
         {saveMutation.isPending ? "Saving..." : role ? "Update Role" : "Create Role"}

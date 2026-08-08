@@ -5,6 +5,7 @@ import { ChatPage } from "@/pages/ChatPage"
 import { DeepResearchPage } from "@/pages/DeepResearchPage"
 import { InspectorPage } from "@/pages/InspectorPage"
 import { MemoryPage } from "@/pages/MemoryPage"
+import { MobilePreviewPage } from "@/pages/MobilePreviewPage"
 import { ProfilesPage } from "@/pages/ProfilesPage"
 import { SettingsPage } from "@/pages/SettingsPage"
 import { BudgetsPage } from "@/pages/BudgetsPage"
@@ -15,6 +16,9 @@ import { WikiPage } from "@/pages/WikiPage"
 function App() {
   return (
     <Routes>
+      {/* Dev-only mobile UI comparison — outside AppLayout so the desktop
+          shell never interferes with the phone frames. */}
+      <Route path="/mobile-preview" element={<MobilePreviewPage />} />
       <Route element={<AppLayout />}>
         <Route index element={<ChatPage />} />
         <Route path="/chat/:conversationId" element={<ChatPage />} />

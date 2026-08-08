@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Archive, ChevronDown, Loader2, MessageSquare, Sparkles, Paperclip } from "lucide-react"
+import { Archive, ChevronDown, Loader2, Menu, MessageSquare, Sparkles, Paperclip, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
@@ -13,10 +13,13 @@ import { Markdown } from "@/components/chat/Markdown"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { ChatComposer } from "@/components/chat/ChatComposer"
+import { ComposerSheet } from "@/components/chat/ComposerSheet"
 import { ComposerToolbar } from "@/components/chat/ComposerToolbar"
 import { BudgetIndicator } from "@/components/chat/BudgetIndicator"
 import { ProfileSwitcher } from "@/components/chat/ProfileSwitcher"
 import { useConversationStream } from "@/hooks/useConversationStream"
+import { useIsMobile } from "@/hooks/useMediaQuery"
+import { useMobileNav } from "@/hooks/useMobileNav"
 import {
   MODE_PRESETS,
   modeFromPerms,
@@ -82,6 +85,9 @@ export function ChatPage() {
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [planMode, setPlanMode] = useState(false)
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const isMobile = useIsMobile()
+  const { openDrawer } = useMobileNav()
 
   // When a different conversation is selected, drop any pending bubbles.
   useEffect(() => {
@@ -350,17 +356,28 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-14 items-center gap-2 border-b px-4">
+      <header className="flex h-14 items-center gap-2 border-b px-3 md:px-4">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-11 w-11 shrink-0 text-muted-foreground md:hidden"
+          title="Open conversations"
+          onClick={openDrawer}
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
         <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="truncate font-medium">
           {detail?.title || `Conversation #${convId}`}
         </span>
         <CompactButton convId={convId} disabled={isStreaming} />
-        <ProfileSwitcher conversation={detail ?? null} />
+        <div className="hidden sm:block">
+          <ProfileSwitcher conversation={detail ?? null} />
+        </div>
         <Button
           variant="ghost"
           size="sm"
-          className={cn("ml-auto px-2", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
+          className={cn("ml-auto hidden px-2 md:inline-flex", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
           title="Toggle attachments panel"
           onClick={() => setArtifactsOpen((v) => !v)}
         >
@@ -369,7 +386,7 @@ export function ChatPage() {
         <BudgetIndicator />
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
         <div className="flex flex-1 flex-col overflow-hidden">
           <div ref={scrollRef} className="flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl py-4">
@@ -414,28 +431,62 @@ export function ChatPage() {
               streaming={isStreaming}
               pendingFiles={pendingFiles}
               onRemoveFile={handleRemoveFile}
+              leading={
+                isMobile ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-11 w-11 shrink-0 text-muted-foreground"
+                    title="Chat settings"
+                    onClick={() => setSheetOpen(true)}
+                  >
+                    <Plus className="h-5 w-5" />
+                  </Button>
+                ) : undefined
+              }
               toolbar={
-                <ComposerToolbar
-                  workingDirectory={detail?.working_directory ?? null}
-                  onWorkingDirectoryChange={handleWorkdirChange}
-                  mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
-                  onModeChange={handleModeChange}
-                  currentModel={currentModel}
-                  modelOptions={providerModels}
-                  suggestedModels={suggestedModels}
-                  usedContextTokens={usedContextTokens}
-                  onModelChange={handleModelChange}
-                  modelPending={updateMutation.isPending}
-                  planMode={planMode}
-                  onPlanModeChange={setPlanMode}
-                />
+                isMobile ? undefined : (
+                  <ComposerToolbar
+                    workingDirectory={detail?.working_directory ?? null}
+                    onWorkingDirectoryChange={handleWorkdirChange}
+                    mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
+                    onModeChange={handleModeChange}
+                    currentModel={currentModel}
+                    modelOptions={providerModels}
+                    suggestedModels={suggestedModels}
+                    usedContextTokens={usedContextTokens}
+                    onModelChange={handleModelChange}
+                    modelPending={updateMutation.isPending}
+                    planMode={planMode}
+                    onPlanModeChange={setPlanMode}
+                  />
+                )
               }
             />
+            {isMobile && (
+              <ComposerSheet
+                open={sheetOpen}
+                onClose={() => setSheetOpen(false)}
+                workingDirectory={detail?.working_directory ?? null}
+                onWorkingDirectoryChange={handleWorkdirChange}
+                mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
+                onModeChange={handleModeChange}
+                currentModel={currentModel}
+                modelOptions={providerModels}
+                suggestedModels={suggestedModels}
+                onModelChange={handleModelChange}
+                planMode={planMode}
+                onPlanModeChange={setPlanMode}
+                pendingFiles={pendingFiles}
+                onAttach={handleAttach}
+                onRemoveFile={handleRemoveFile}
+              />
+            )}
           </div>
         </div>
 
         {artifactsOpen && (
-          <div className="w-72 shrink-0">
+          <div className="absolute inset-y-0 right-0 z-30 w-72 shrink-0 shadow-xl md:static md:z-auto md:shadow-none">
             <ArtifactPanel conversationId={convId} />
           </div>
         )}
@@ -505,8 +556,18 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
 }
 
 function EmptyState() {
+  const { openDrawer } = useMobileNav()
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+    <div className="relative flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute left-2 top-2 h-11 w-11 text-muted-foreground md:hidden"
+        title="Open conversations"
+        onClick={openDrawer}
+      >
+        <Menu className="h-5 w-5" />
+      </Button>
       <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground">
         <Sparkles className="h-6 w-6" />
       </div>
