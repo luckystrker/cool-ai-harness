@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
@@ -8,6 +8,7 @@ import {
   Loader2,
   MessageSquare,
   Plus,
+  Search,
   Settings2,
   Trash2,
 } from "lucide-react"
@@ -15,7 +16,7 @@ import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import type { Conversation } from "@/api/types"
 import { loadAgentDefaults, loadLastModel } from "@/lib/agentConfig"
-import { NAV_ITEMS } from "@/lib/nav"
+import { NAV_GROUPS } from "@/lib/nav"
 import {
   deleteProject,
   loadConversationProjectMap,
@@ -26,6 +27,15 @@ import {
 import { ProjectDialog } from "@/components/chat/ProjectDialog"
 import { ProjectSettingsDialog } from "@/components/chat/ProjectSettingsDialog"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
@@ -52,6 +62,22 @@ export function Sidebar({
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [settingsProject, setSettingsProject] = useState<Project | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const [searchQuery, setSearchQuery] = useState("")
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { kind: "conversation"; conversation: Conversation }
+    | { kind: "project"; project: Project }
+    | null
+  >(null)
+  const activeNavGroup = NAV_GROUPS.find((group) =>
+    group.items.some((item) => location.pathname.startsWith(item.to))
+  )?.id
+  const [expandedNavGroup, setExpandedNavGroup] = useState<string | null>(
+    activeNavGroup ?? null
+  )
+
+  useEffect(() => {
+    if (activeNavGroup) setExpandedNavGroup(activeNavGroup)
+  }, [activeNavGroup])
 
   const createMutation = useMutation({
     mutationFn: conversationsApi.create,
@@ -59,7 +85,9 @@ export function Sidebar({
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
       navigate(`/chat/${conv.id}`)
     },
-    onError: (e) => toast.error("Failed to create conversation", { description: String(e) }),
+    onError: () => toast.error("Conversation could not be created", {
+      description: "Check that the local harness is running, then try again.",
+    }),
   })
 
   const deleteMutation = useMutation({
@@ -67,8 +95,12 @@ export function Sidebar({
     onSuccess: (_data, deletedId) => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
       if (Number(conversationId) === deletedId) navigate("/")
+      setDeleteTarget(null)
+      toast.success("Conversation deleted")
     },
-    onError: (e) => toast.error("Failed to delete", { description: String(e) }),
+    onError: () => toast.error("Conversation was not deleted", {
+      description: "Refresh the list and try again. Your conversation is still available.",
+    }),
   })
 
   // Create a new chat inside an existing project: pin the project's folder,
@@ -100,7 +132,9 @@ export function Sidebar({
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
       navigate(`/chat/${conv.id}`)
     },
-    onError: (e) => toast.error("Failed to create chat", { description: String(e) }),
+    onError: () => toast.error("Project conversation could not be created", {
+      description: "Check that the local harness is running, then try again.",
+    }),
   })
 
   const handleCreate = () => {
@@ -115,11 +149,13 @@ export function Sidebar({
       breakpoints: defaults.breakpoints,
     })
   }
-  const handleDelete = (id: number) => deleteMutation.mutate(id)
-
-  const handleDeleteProject = (id: string) => {
-    setProjects(deleteProject(id))
+  const handleDeleteProject = (project: Project) => {
+    setProjects(deleteProject(project.id))
     setConvProjectMap(loadConversationProjectMap())
+    setDeleteTarget(null)
+    toast.success("Project removed", {
+      description: "Its conversations are still available.",
+    })
   }
 
   const toggleCollapsed = (id: string) =>
@@ -131,20 +167,35 @@ export function Sidebar({
     })
 
   // Split conversations into per-project buckets + an unassigned list.
-  const { byProject, unassigned } = useMemo(() => {
+  const { byProject, unassigned, visibleProjects } = useMemo(() => {
     const map = new Map<string, Conversation[]>()
     const rest: Conversation[] = []
+    const query = searchQuery.trim().toLocaleLowerCase()
+    const matchesConversation = (conversation: Conversation) =>
+      !query ||
+      (conversation.title || `Conversation #${conversation.id}`)
+        .toLocaleLowerCase()
+        .includes(query)
     for (const c of conversations) {
       const pid = convProjectMap[String(c.id)]
       if (pid && projects.some((p) => p.id === pid)) {
-        if (!map.has(pid)) map.set(pid, [])
-        map.get(pid)!.push(c)
-      } else {
+        const project = projects.find((p) => p.id === pid)
+        if (matchesConversation(c) || project?.name.toLocaleLowerCase().includes(query)) {
+          if (!map.has(pid)) map.set(pid, [])
+          map.get(pid)!.push(c)
+        }
+      } else if (matchesConversation(c)) {
         rest.push(c)
       }
     }
-    return { byProject: map, unassigned: rest }
-  }, [conversations, convProjectMap, projects])
+    const filteredProjects = projects.filter(
+      (project) =>
+        !query ||
+        project.name.toLocaleLowerCase().includes(query) ||
+        (map.get(project.id)?.length ?? 0) > 0
+    )
+    return { byProject: map, unassigned: rest, visibleProjects: filteredProjects }
+  }, [conversations, convProjectMap, projects, searchQuery])
 
   const renderConversationRow = (c: Conversation) => {
     const active = Number(conversationId) === c.id
@@ -164,9 +215,15 @@ export function Sidebar({
             <span className="truncate">{c.title || `Conversation #${c.id}`}</span>
           </button>
           <button
-            className="text-muted-foreground hover:text-destructive md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
-            title="Delete"
-            onClick={() => handleDelete(c.id)}
+            className={cn(
+              "grid shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100",
+              inDrawer
+                ? "h-11 w-11"
+                : "h-7 w-7 opacity-0 group-hover:opacity-100"
+            )}
+            title={`Delete ${c.title || `Conversation #${c.id}`}`}
+            aria-label={`Delete ${c.title || `Conversation #${c.id}`}`}
+            onClick={() => setDeleteTarget({ kind: "conversation", conversation: c })}
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
@@ -190,26 +247,13 @@ export function Sidebar({
       {/* Pinned section nav (mobile drawer) — Material navigation drawers keep
           destinations fixed at the top; the conversation list scrolls below. */}
       {inDrawer && (
-        <nav className="grid shrink-0 grid-cols-2 gap-1 border-b px-2 py-2">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
-            const active = location.pathname.startsWith(to)
-            return (
-              <Button
-                key={to}
-                variant="ghost"
-                className={cn(
-                  "min-h-11 justify-start gap-2 rounded-full text-sm",
-                  active
-                    ? "bg-accent font-medium text-accent-foreground"
-                    : "text-muted-foreground"
-                )}
-                onClick={() => navigate(to)}
-              >
-                <Icon className="h-4 w-4" /> {label}
-              </Button>
-            )
-          })}
-        </nav>
+        <NavigationGroups
+          expanded={expandedNavGroup}
+          onExpandedChange={setExpandedNavGroup}
+          pathname={location.pathname}
+          onNavigate={navigate}
+          className="border-b px-2 py-2"
+        />
       )}
 
       {/* New chat — creates a conversation immediately, no title prompt.
@@ -227,6 +271,16 @@ export function Sidebar({
           )}
           New conversation
         </Button>
+        <div className="relative mt-2">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search conversations"
+            aria-label="Search conversations"
+            className="h-10 pl-9 text-base md:text-sm"
+          />
+        </div>
       </div>
 
       <ScrollArea className="flex-1 px-2 pb-2">
@@ -236,8 +290,9 @@ export function Sidebar({
             Projects
           </span>
           <button
-            className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="grid h-9 w-9 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             title="Add project"
+            aria-label="Add project"
             onClick={() => setProjectDialogOpen(true)}
           >
             <Plus className="h-3.5 w-3.5" />
@@ -250,7 +305,7 @@ export function Sidebar({
           </p>
         ) : (
           <ul className="mb-2 space-y-0.5">
-            {projects.map((p) => {
+            {visibleProjects.map((p) => {
               const chats = byProject.get(p.id) ?? []
               const isCollapsed = collapsed.has(p.id)
               return (
@@ -278,8 +333,9 @@ export function Sidebar({
                       </span>
                     </button>
                     <button
-                      className="text-muted-foreground hover:text-foreground md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
                       title="New chat in this project"
+                      aria-label={`New conversation in ${p.name}`}
                       onClick={() => createInProjectMutation.mutate(p)}
                     >
                       {createInProjectMutation.isPending ? (
@@ -289,16 +345,18 @@ export function Sidebar({
                       )}
                     </button>
                     <button
-                      className="text-muted-foreground hover:text-foreground md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
                       title="Project settings"
+                      aria-label={`Settings for ${p.name}`}
                       onClick={() => setSettingsProject(p)}
                     >
                       <Settings2 className="h-3.5 w-3.5" />
                     </button>
                     <button
-                      className="text-muted-foreground hover:text-destructive md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
                       title="Delete project"
-                      onClick={() => handleDeleteProject(p.id)}
+                      aria-label={`Remove project ${p.name}`}
+                      onClick={() => setDeleteTarget({ kind: "project", project: p })}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -326,7 +384,11 @@ export function Sidebar({
           </div>
         ) : unassigned.length === 0 ? (
           <p className="px-3 py-4 text-center text-sm text-muted-foreground">
-            {conversations.length === 0 ? "No conversations yet." : "No other conversations."}
+            {searchQuery
+              ? "No conversations match your search."
+              : conversations.length === 0
+                ? "No conversations yet."
+                : "No other conversations."}
           </p>
         ) : (
           <ul className="space-y-0.5">{unassigned.map(renderConversationRow)}</ul>
@@ -335,24 +397,13 @@ export function Sidebar({
 
       {/* Footer (desktop): section navigation pinned to the bottom. */}
       {!inDrawer && (
-        <div className="space-y-1 border-t p-2">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
-            const active = location.pathname.startsWith(to)
-            return (
-              <Button
-                key={to}
-                variant="ghost"
-                className={cn(
-                  "w-full justify-start gap-2",
-                  active && "bg-accent text-accent-foreground"
-                )}
-                onClick={() => navigate(to)}
-              >
-                <Icon className="h-4 w-4" /> {label}
-              </Button>
-            )
-          })}
-        </div>
+        <NavigationGroups
+          expanded={expandedNavGroup}
+          onExpandedChange={setExpandedNavGroup}
+          pathname={location.pathname}
+          onNavigate={navigate}
+          className="border-t p-2"
+        />
       )}
 
       <ProjectDialog
@@ -373,6 +424,106 @@ export function Sidebar({
         }}
         onSaved={(projects) => setProjects(projects)}
       />
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {deleteTarget?.kind === "conversation"
+                ? "Delete this conversation?"
+                : "Remove this project?"}
+            </DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.kind === "conversation"
+                ? `“${deleteTarget.conversation.title || `Conversation #${deleteTarget.conversation.id}`}” and its message history will be permanently deleted.`
+                : `“${deleteTarget?.project.name}” will be removed as a grouping. Its conversations will remain available.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() => {
+                if (deleteTarget?.kind === "conversation") {
+                  deleteMutation.mutate(deleteTarget.conversation.id)
+                } else if (deleteTarget?.kind === "project") {
+                  handleDeleteProject(deleteTarget.project)
+                }
+              }}
+            >
+              {deleteMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              {deleteTarget?.kind === "conversation" ? "Delete conversation" : "Remove project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </aside>
+  )
+}
+
+function NavigationGroups({
+  expanded,
+  onExpandedChange,
+  pathname,
+  onNavigate,
+  className,
+}: {
+  expanded: string | null
+  onExpandedChange: (id: string | null) => void
+  pathname: string
+  onNavigate: (to: string) => void
+  className?: string
+}) {
+  return (
+    <nav className={cn("shrink-0 space-y-1", className)} aria-label="Product areas">
+      {NAV_GROUPS.map((group) => {
+        const open = expanded === group.id
+        const active = group.items.some((item) => pathname.startsWith(item.to))
+        return (
+          <div key={group.id}>
+            <button
+              type="button"
+              className={cn(
+                "flex h-9 w-full items-center rounded-md px-2 text-xs font-semibold transition-colors hover:bg-accent",
+                active ? "text-foreground" : "text-muted-foreground"
+              )}
+              aria-expanded={open}
+              onClick={() => onExpandedChange(open ? null : group.id)}
+            >
+              {group.label}
+              <ChevronRight
+                className={cn("ml-auto h-3.5 w-3.5 transition-transform", open && "rotate-90")}
+              />
+            </button>
+            {open && (
+              <div className="grid grid-cols-2 gap-1 py-1">
+                {group.items.map(({ to, label, icon: Icon }) => {
+                  const itemActive = pathname.startsWith(to)
+                  return (
+                    <Button
+                      key={to}
+                      variant="ghost"
+                      className={cn(
+                        "h-10 min-w-0 justify-start gap-2 px-2 text-xs",
+                        itemActive
+                          ? "bg-accent text-accent-foreground"
+                          : "text-muted-foreground"
+                      )}
+                      onClick={() => onNavigate(to)}
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span className="truncate">{label}</span>
+                    </Button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </nav>
   )
 }

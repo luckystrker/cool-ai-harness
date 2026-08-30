@@ -9,6 +9,8 @@ export interface ChatComposerProps {
   onAttach?: (files: File[]) => void
   streaming?: boolean
   disabled?: boolean
+  /** Optional first-use draft. The user can edit it before sending. */
+  initialValue?: string
   /** Files pending upload (shown as chips above the input). */
   pendingFiles?: File[]
   onRemoveFile?: (index: number) => void
@@ -28,12 +30,13 @@ export function ChatComposer({
   onAttach,
   streaming,
   disabled,
+  initialValue = "",
   pendingFiles = [],
   onRemoveFile,
   toolbar,
   leading,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
+  const [value, setValue] = useState(initialValue)
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -60,7 +63,7 @@ export function ChatComposer({
   }
 
   return (
-    <div className="border-t bg-background p-3">
+    <div className="border-t bg-background p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
       <div className="mx-auto max-w-3xl">
         {/* Pending file chips */}
         {pendingFiles.length > 0 && (
@@ -126,7 +129,7 @@ export function ChatComposer({
             placeholder="Message the agent…  (Shift+Enter for newline)"
             rows={1}
             disabled={disabled}
-            className="min-h-[40px] resize-none pr-12"
+            className="min-h-11 resize-none pr-14 text-base md:text-sm"
           />
           {streaming ? (
             <Button
@@ -134,7 +137,7 @@ export function ChatComposer({
               variant="destructive"
               onClick={onCancel}
               title="Stop"
-              className="absolute bottom-1 right-1 h-8 w-8"
+              className="absolute bottom-0 right-0 h-11 w-11"
             >
               <Square className="h-4 w-4" />
             </Button>
@@ -144,7 +147,7 @@ export function ChatComposer({
               onClick={submit}
               disabled={!value.trim() || disabled}
               title="Send"
-              className="absolute bottom-1 right-1 h-8 w-8"
+              className="absolute bottom-0 right-0 h-11 w-11"
             >
               <Send className="h-4 w-4" />
             </Button>

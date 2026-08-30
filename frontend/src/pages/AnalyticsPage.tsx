@@ -22,6 +22,11 @@ import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 })
+const fmtPercent = (n: number, maximumFractionDigits = 1) =>
+  new Intl.NumberFormat(undefined, {
+    style: "percent",
+    maximumFractionDigits,
+  }).format(n)
 
 const DAYS_OPTIONS = [7, 14, 30, 90] as const
 
@@ -64,28 +69,30 @@ export function AnalyticsPage() {
   })
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-6 p-6">
+    <div className="h-full overflow-x-hidden overflow-y-auto">
+      <div className="mx-auto max-w-5xl space-y-6 p-4 sm:p-6">
         {/* Header */}
-        <header className="flex items-center justify-between">
+        <header className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground md:flex">
               <BarChart3 className="h-4 w-4" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold">Analytics</h1>
+              <h1 className="sr-only text-lg font-semibold md:not-sr-only">Analytics</h1>
               <p className="text-sm text-muted-foreground">
                 Spend, tool usage, latency, and memory activity.
               </p>
             </div>
           </div>
-          <div className="flex gap-1">
+          <div className="grid w-full grid-cols-4 gap-1 sm:w-auto" aria-label="Analytics time range">
             {DAYS_OPTIONS.map((d) => (
               <button
                 key={d}
                 onClick={() => setDays(d)}
+                aria-label={`Show the last ${d} days`}
+                aria-pressed={days === d}
                 className={cn(
-                  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  "min-h-11 rounded-md px-2.5 py-1 text-xs font-medium transition-colors sm:min-h-9",
                   days === d
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground hover:bg-accent"
@@ -127,12 +134,12 @@ function SummaryCards({ summary }: { summary: AnalyticsSummary }) {
     { label: "LLM calls", value: String(summary.total_llm_calls) },
     { label: "Tokens", value: summary.total_tokens.toLocaleString() },
     { label: "Tool calls", value: String(summary.total_tool_calls) },
-    { label: "Tool success", value: `${(summary.tool_success_rate * 100).toFixed(1)}%` },
+    { label: "Tool success", value: fmtPercent(summary.tool_success_rate) },
   ]
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
       {cards.map((c) => (
-        <Card key={c.label}>
+        <Card key={c.label} className="last:col-span-2 sm:last:col-span-1">
           <CardContent className="py-3">
             <p className="text-xs text-muted-foreground">{c.label}</p>
             <p className="text-lg font-semibold tabular-nums">{c.value}</p>
@@ -143,10 +150,20 @@ function SummaryCards({ summary }: { summary: AnalyticsSummary }) {
   )
 }
 
+function EmptyMetric({ message }: { message: string }) {
+  return (
+    <div className="py-5 text-center">
+      <p className="text-sm font-medium">Nothing to chart yet</p>
+      <p className="mx-auto mt-1 max-w-xs text-xs leading-5 text-muted-foreground">{message}</p>
+    </div>
+  )
+}
+
 // --- Spend over time (bar chart) ---
 
 function SpendOverTimeCard({ data }: { data: SpendTimeSeriesPoint[] }) {
   const max = Math.max(...data.map((d) => d.cost_usd), 0.001)
+  const hasSpend = data.some((point) => point.cost_usd > 0)
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -154,15 +171,18 @@ function SpendOverTimeCard({ data }: { data: SpendTimeSeriesPoint[] }) {
         <CardDescription>Daily USD cost</CardDescription>
       </CardHeader>
       <CardContent>
-        {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        {!hasSpend ? (
+          <EmptyMetric message="No model spend was recorded in this time range." />
         ) : (
           <div className="flex h-32 items-end gap-0.5">
             {data.map((d) => (
               <div
                 key={d.period}
-                className="group relative flex-1"
+                className="group relative flex-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={`${d.period}: ${fmtUsd(d.cost_usd)} (${d.calls} calls)`}
+                role="img"
+                tabIndex={0}
+                aria-label={`${d.period}: ${fmtUsd(d.cost_usd)}, ${d.calls} calls`}
               >
                 <div
                   className="w-full rounded-t bg-primary/70 transition-colors group-hover:bg-primary"
@@ -189,7 +209,7 @@ function SpendByModelCard({ data }: { data: ModelSpend[] }) {
       </CardHeader>
       <CardContent className="space-y-2">
         {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+          <EmptyMetric message="No model-level spend was recorded in this time range." />
         ) : (
           data.map((d) => (
             <div key={d.model} className="space-y-1">
@@ -217,6 +237,7 @@ function SpendByModelCard({ data }: { data: ModelSpend[] }) {
 
 function LatencyCard({ data }: { data: LatencyPoint[] }) {
   const max = Math.max(...data.map((d) => d.max_ms), 1)
+  const hasLatency = data.some((point) => point.avg_ms > 0)
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -224,15 +245,18 @@ function LatencyCard({ data }: { data: LatencyPoint[] }) {
         <CardDescription>Average response time per day (ms)</CardDescription>
       </CardHeader>
       <CardContent>
-        {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        {!hasLatency ? (
+          <EmptyMetric message="No completed model calls have latency samples in this time range." />
         ) : (
           <div className="flex h-32 items-end gap-0.5">
             {data.map((d) => (
               <div
                 key={d.period}
-                className="group relative flex-1"
+                className="group relative flex-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={`${d.period}: avg ${d.avg_ms.toFixed(0)}ms (min ${d.min_ms}, max ${d.max_ms})`}
+                role="img"
+                tabIndex={0}
+                aria-label={`${d.period}: average ${d.avg_ms.toFixed(0)} milliseconds, minimum ${d.min_ms}, maximum ${d.max_ms}`}
               >
                 <div
                   className="w-full rounded-t bg-blue-500/70 transition-colors group-hover:bg-blue-500"
@@ -251,6 +275,7 @@ function LatencyCard({ data }: { data: LatencyPoint[] }) {
 
 function MemoryActivityCard({ data }: { data: MemoryActivityPoint[] }) {
   const max = Math.max(...data.map((d) => d.created), 1)
+  const hasActivity = data.some((point) => point.created > 0)
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -258,15 +283,18 @@ function MemoryActivityCard({ data }: { data: MemoryActivityPoint[] }) {
         <CardDescription>New memories created per day</CardDescription>
       </CardHeader>
       <CardContent>
-        {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No data</p>
+        {!hasActivity ? (
+          <EmptyMetric message="No new memories were created in this time range." />
         ) : (
           <div className="flex h-32 items-end gap-0.5">
             {data.map((d) => (
               <div
                 key={d.period}
-                className="group relative flex-1"
+                className="group relative flex-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={`${d.period}: ${d.created} memories (${Object.entries(d.by_type).map(([k, v]) => `${k}:${v}`).join(", ")})`}
+                role="img"
+                tabIndex={0}
+                aria-label={`${d.period}: ${d.created} memories created`}
               >
                 <div
                   className="w-full rounded-t bg-emerald-500/70 transition-colors group-hover:bg-emerald-500"
@@ -313,7 +341,7 @@ function TopToolsCard({ data }: { data: TopTool[] }) {
                     <td className="px-3 py-1.5 text-right tabular-nums">{t.avg_duration_ms.toFixed(0)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">
                       <span className={cn(t.success_rate < 0.9 && "text-destructive")}>
-                        {(t.success_rate * 100).toFixed(0)}%
+                        {fmtPercent(t.success_rate, 0)}
                       </span>
                     </td>
                     <td className="px-3 py-1.5 text-right tabular-nums">
@@ -349,7 +377,7 @@ function CallHistoryCard({ data, total }: { data: CallHistoryRow[]; total: numbe
         {data.length === 0 ? (
           <p className="py-4 text-center text-xs text-muted-foreground">No calls recorded</p>
         ) : (
-          <div className="max-h-72 overflow-y-auto rounded-md border">
+          <div className="max-h-72 overflow-auto rounded-md border">
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-muted/50 text-muted-foreground">
                 <tr>

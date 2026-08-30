@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
@@ -23,6 +23,8 @@ import type {
 import {
   BREAKPOINT_TYPES,
   CAPABILITY_NAMES,
+  MODE_LABELS,
+  MODE_PRESETS,
   PERMISSIONS,
   PERM_STYLES,
   TOOL_NAMES,
@@ -45,6 +47,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -65,9 +68,13 @@ const EMPTY_FORM: ProviderCreate = {
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
+  const [activeSection, setActiveSection] = useState<
+    "connections" | "agent" | "extensions" | "prompt"
+  >("connections")
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm, setCreateForm] = useState<ProviderCreate>(EMPTY_FORM)
   const [editing, setEditing] = useState<Provider | null>(null)
+  const [deletingProvider, setDeletingProvider] = useState<Provider | null>(null)
 
   const { data: providers = [], isLoading } = useQuery({
     queryKey: ["providers"],
@@ -82,7 +89,9 @@ export function SettingsPage() {
       setCreateOpen(false)
       setCreateForm(EMPTY_FORM)
     },
-    onError: (e) => toast.error("Failed to add provider", { description: String(e) }),
+    onError: () => toast.error("Provider could not be added", {
+      description: "Check the endpoint and API key, then try again.",
+    }),
   })
 
   const updateMutation = useMutation({
@@ -93,7 +102,9 @@ export function SettingsPage() {
       toast.success("Provider updated")
       setEditing(null)
     },
-    onError: (e) => toast.error("Failed to update provider", { description: String(e) }),
+    onError: () => toast.error("Provider changes were not saved", {
+      description: "Check the endpoint and credentials, then try again.",
+    }),
   })
 
   const deleteMutation = useMutation({
@@ -101,8 +112,11 @@ export function SettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["providers"] })
       toast.success("Provider deleted")
+      setDeletingProvider(null)
     },
-    onError: (e) => toast.error("Failed to delete", { description: String(e) }),
+    onError: () => toast.error("Provider was not deleted", {
+      description: "It may still be in use. Refresh the page and try again.",
+    }),
   })
 
   const handleCreate = () => {
@@ -114,90 +128,121 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-6 p-6">
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <KeyRound className="h-4 w-4" />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold">Providers</h1>
-              <p className="text-sm text-muted-foreground">
-                Manage API keys for LLM providers. Keys are encrypted at rest.
-              </p>
-            </div>
-          </div>
-
-          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-            <DialogTrigger asChild>
-              <Button className="gap-2">
-                <Plus className="h-4 w-4" /> Add provider
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Add provider</DialogTitle>
-              </DialogHeader>
-              <ProviderForm form={createForm} onChange={setCreateForm} />
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setCreateOpen(false)}>
-                  Cancel
-                </Button>
-                <Button onClick={handleCreate} disabled={createMutation.isPending}>
-                  {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+    <div className="h-full overflow-x-hidden overflow-y-auto">
+      <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
+        <header>
+          <h1 className="sr-only text-2xl font-semibold tracking-[-0.02em] md:not-sr-only">Settings</h1>
+          <p className="mt-1 max-w-[65ch] text-sm text-muted-foreground">
+            Configure model connections, agent safety, extensions, and the default prompt.
+          </p>
         </header>
 
-        {isLoading ? (
-          <div className="flex justify-center py-12">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
-        ) : providers.length === 0 ? (
-          <Card>
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
-              No providers yet. Click <strong>Add provider</strong> to configure one.
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="space-y-3">
-            {providers.map((p) => (
-              <ProviderRow
-                key={p.id}
-                provider={p}
-                onEdit={() => setEditing(p)}
-                onDelete={() => deleteMutation.mutate(p.id)}
-                deleting={deleteMutation.isPending}
-                onSetDefault={() =>
-                  updateMutation.mutate({ id: p.id, body: { is_default: true } })
-                }
-                settingDefault={
-                  updateMutation.isPending &&
-                  updateMutation.variables?.id === p.id
-                }
-              />
-            ))}
-          </div>
+        <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1 sm:grid-cols-4" role="tablist" aria-label="Settings sections">
+          {([
+            ["connections", "Connections", KeyRound],
+            ["agent", "Agent", ShieldCheck],
+            ["extensions", "Extensions", Plug],
+            ["prompt", "Prompt", FileText],
+          ] as const).map(([id, label, Icon]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={activeSection === id}
+              onClick={() => setActiveSection(id)}
+              className={cn(
+                "flex min-h-10 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors",
+                activeSection === id
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {activeSection === "connections" && (
+          <section className="space-y-4" aria-labelledby="providers-heading">
+            <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 id="providers-heading" className="text-lg font-semibold">Model providers</h2>
+                <p className="text-sm text-muted-foreground">
+                  API keys are encrypted at rest and never shown in full.
+                </p>
+              </div>
+
+              <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+                <DialogTrigger asChild>
+                  <Button className="gap-2">
+                    <Plus className="h-4 w-4" /> Add provider
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Add provider</DialogTitle>
+                  </DialogHeader>
+                  <ProviderForm form={createForm} onChange={setCreateForm} />
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setCreateOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button onClick={handleCreate} disabled={createMutation.isPending}>
+                      {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                      Save provider
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            {isLoading ? (
+              <div className="flex justify-center py-12">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : providers.length === 0 ? (
+              <div className="rounded-xl border border-dashed px-5 py-10 text-center">
+                <h3 className="font-medium">Connect a model provider</h3>
+                <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+                  Add an OpenAI-compatible or Anthropic endpoint before starting a model run.
+                </p>
+                <Button className="mt-4" onClick={() => setCreateOpen(true)}>
+                  <Plus className="h-4 w-4" /> Add your first provider
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {providers.map((p) => (
+                  <ProviderRow
+                    key={p.id}
+                    provider={p}
+                    onEdit={() => setEditing(p)}
+                    onDelete={() => setDeletingProvider(p)}
+                    deleting={deleteMutation.isPending}
+                    onSetDefault={() =>
+                      updateMutation.mutate({ id: p.id, body: { is_default: true } })
+                    }
+                    settingDefault={
+                      updateMutation.isPending &&
+                      updateMutation.variables?.id === p.id
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </section>
         )}
 
-        {/* Global agent configuration (defaults for new conversations). */}
-        <AgentConfigSection />
-
-        {/* Skills management */}
-        <SkillsSection />
-
-        {/* MCP servers management */}
-        <MCPServersSection />
-
-        {/* MCP Store */}
-        <MCPStoreSection />
-
-        {/* System prompt editor */}
-        <SystemPromptSection />
+        {activeSection === "agent" && <AgentConfigSection />}
+        {activeSection === "extensions" && (
+          <div className="space-y-6">
+            <SkillsSection />
+            <MCPServersSection />
+            <MCPStoreSection />
+          </div>
+        )}
+        {activeSection === "prompt" && <SystemPromptSection />}
       </div>
 
       <EditProviderDialog
@@ -212,6 +257,30 @@ export function SettingsPage() {
         }}
         pending={updateMutation.isPending}
       />
+
+      <Dialog open={deletingProvider !== null} onOpenChange={(open) => !open && setDeletingProvider(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete this provider?</DialogTitle>
+            <DialogDescription>
+              {deletingProvider
+                ? `“${deletingProvider.label || deletingProvider.name}” and its stored credentials will be permanently removed.`
+                : "This provider will be permanently removed."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button variant="outline" onClick={() => setDeletingProvider(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() => deletingProvider && deleteMutation.mutate(deletingProvider.id)}
+            >
+              {deleteMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Delete provider
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -234,8 +303,8 @@ function ProviderRow({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <CardTitle className="text-base">{p.label || p.name}</CardTitle>
             <Badge variant="outline" className="font-mono">{p.name}</Badge>
             {p.is_subscription && <Badge variant="secondary">subscription</Badge>}
@@ -253,7 +322,7 @@ function ProviderRow({
               <Badge variant="warning">disabled</Badge>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             <label
               className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"
               title="Use as the default provider for new conversations"
@@ -277,7 +346,8 @@ function ProviderRow({
               size="icon"
               className="text-muted-foreground hover:text-foreground"
               onClick={onEdit}
-              title="Edit"
+              title={`Edit ${p.label || p.name}`}
+              aria-label={`Edit ${p.label || p.name}`}
             >
               <Pencil className="h-4 w-4" />
             </Button>
@@ -287,7 +357,8 @@ function ProviderRow({
               className="text-muted-foreground hover:text-destructive"
               onClick={onDelete}
               disabled={deleting}
-              title="Delete"
+              title={`Delete ${p.label || p.name}`}
+              aria-label={`Delete ${p.label || p.name}`}
             >
               {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             </Button>
@@ -533,6 +604,18 @@ function AgentConfigSection() {
   const [bpList, setBpList] = useState<BreakpointConfig[]>(
     () => loadAgentDefaults().breakpoints
   )
+  const [toolQuery, setToolQuery] = useState("")
+  const [changedOnly, setChangedOnly] = useState(false)
+  const filteredTools = useMemo(() => {
+    const query = toolQuery.trim().toLocaleLowerCase()
+    return TOOL_NAMES.filter(
+      (tool) =>
+        (!changedOnly || perms[tool] !== undefined) &&
+        (!query || tool.toLocaleLowerCase().includes(query))
+    )
+  }, [changedOnly, perms, toolQuery])
+  const advancedChangeCount =
+    Object.keys(perms).length + Object.keys(capPolicy).length + bpList.length
 
   const cycle = (tool: string) => {
     setPerms((cur) => {
@@ -582,6 +665,45 @@ function AgentConfigSection() {
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
+        <div className="space-y-2">
+          <Label>Safety preset</Label>
+          <p className="text-xs text-muted-foreground">
+            Choose the default posture for new conversations. You can still override individual
+            tools below.
+          </p>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {MODE_LABELS.map(({ mode, label, hint }) => {
+              const active =
+                JSON.stringify(perms) === JSON.stringify(MODE_PRESETS[mode])
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setPerms({ ...MODE_PRESETS[mode] })}
+                  className={cn(
+                    "min-h-16 rounded-lg border px-3 py-2 text-left transition-colors",
+                    active
+                      ? "border-primary bg-primary/5"
+                      : "hover:bg-muted"
+                  )}
+                >
+                  <span className="block text-sm font-medium">{label}</span>
+                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">{hint}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        <details className="group rounded-lg border" open={advancedChangeCount > 1}>
+          <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Advanced overrides
+            <span className="ml-auto text-xs font-normal text-muted-foreground">
+              {advancedChangeCount} configured
+            </span>
+            <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+          </summary>
+          <div className="space-y-5 border-t p-3 sm:p-4">
         {/* Tool permissions */}
         <div className="space-y-2">
           <Label>Tool permissions</Label>
@@ -589,8 +711,28 @@ function AgentConfigSection() {
             Click a cell to cycle: allow → ask → deny. The “*” row is the
             default for any tool not listed.
           </p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={toolQuery}
+                onChange={(event) => setToolQuery(event.target.value)}
+                placeholder="Search tools"
+                aria-label="Search tool permissions"
+                className="pl-9 text-base sm:text-sm"
+              />
+            </div>
+            <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 text-sm">
+              <input
+                type="checkbox"
+                checked={changedOnly}
+                onChange={(event) => setChangedOnly(event.target.checked)}
+              />
+              Changed only
+            </label>
+          </div>
           <div className="rounded-md border">
-            {TOOL_NAMES.map((tool, i) => {
+            {filteredTools.map((tool, i) => {
               const value = (perms[tool] ?? (tool === "*" ? "ask" : "inherit")) as
                 | ToolPermission
                 | "inherit"
@@ -607,7 +749,7 @@ function AgentConfigSection() {
                     type="button"
                     onClick={() => cycle(tool)}
                     className={cn(
-                      "rounded px-2 py-0.5 text-xs font-medium capitalize transition-colors",
+                      "min-h-8 rounded px-3 py-1 text-xs font-medium capitalize transition-colors",
                       value === "inherit"
                         ? "bg-muted text-muted-foreground"
                         : PERM_STYLES[value]
@@ -618,6 +760,11 @@ function AgentConfigSection() {
                 </div>
               )
             })}
+            {filteredTools.length === 0 && (
+              <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                No tool permissions match this filter.
+              </p>
+            )}
           </div>
         </div>
 
@@ -667,7 +814,7 @@ function AgentConfigSection() {
             Pause the agent at key points for human review. The agent blocks
             until you approve or the timeout fires.
           </p>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {BREAKPOINT_TYPES.map(({ type, label, hint }) => {
               const active = bpList.some((bp) => bp.type === type)
               return (
@@ -689,8 +836,20 @@ function AgentConfigSection() {
             })}
           </div>
         </div>
+          </div>
+        </details>
 
-        <div className="flex justify-end">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setPerms({ ...MODE_PRESETS.ask })
+              setCapPolicy({})
+              setBpList([])
+            }}
+          >
+            <RotateCcw className="h-4 w-4" /> Reset to safe defaults
+          </Button>
           <Button onClick={handleSave}>Save agent defaults</Button>
         </div>
       </CardContent>
@@ -719,7 +878,9 @@ function SkillsSection() {
       queryClient.invalidateQueries({ queryKey: ["skills"] })
       toast.success("Skill deleted")
     },
-    onError: (e) => toast.error("Failed to delete skill", { description: String(e) }),
+    onError: () => toast.error("Skill was not deleted", {
+      description: "Built-in skills cannot be removed. Refresh the list and try again.",
+    }),
   })
 
   const skills: SkillInfo[] = data?.skills ?? []
@@ -814,6 +975,25 @@ function SkillsSection() {
 
 // --- MCP servers management ---
 
+function explainMcpError(error: string) {
+  if (error.includes("WinError 2") || error.includes("Failed to spawn")) {
+    return {
+      summary: "The server command could not be found.",
+      recovery: "Check the command and arguments, then reconnect the server.",
+    }
+  }
+  if (error.toLocaleLowerCase().includes("connection")) {
+    return {
+      summary: "The server did not accept the connection.",
+      recovery: "Confirm that it is running and that its URL or transport is correct.",
+    }
+  }
+  return {
+    summary: "The server could not be connected.",
+    recovery: "Review its configuration, then try reconnecting.",
+  }
+}
+
 const EMPTY_MCP_FORM: MCPServerCreate = {
   name: "",
   transport: "stdio",
@@ -848,7 +1028,9 @@ function MCPServersSection() {
       setForm(EMPTY_MCP_FORM)
       setArgsText("")
     },
-    onError: (e) => toast.error("Failed to add MCP server", { description: String(e) }),
+    onError: () => toast.error("MCP server could not be added", {
+      description: "Check the transport, command or URL, and required fields.",
+    }),
   })
 
   const removeMutation = useMutation({
@@ -857,7 +1039,9 @@ function MCPServersSection() {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
       toast.success("MCP server removed")
     },
-    onError: (e) => toast.error("Failed to remove server", { description: String(e) }),
+    onError: () => toast.error("MCP server was not removed", {
+      description: "Disconnect it first, then try again.",
+    }),
   })
 
   const connectMutation = useMutation({
@@ -867,10 +1051,13 @@ function MCPServersSection() {
       if (res.status === "connected") {
         toast.success(`Connected to ${res.name}`, { description: `${res.tools_count} tools discovered` })
       } else {
-        toast.error(`Failed to connect ${res.name}`, { description: res.error ?? undefined })
+        const explanation = explainMcpError(res.error ?? "")
+        toast.error(`${res.name} could not connect`, { description: explanation.recovery })
       }
     },
-    onError: (e) => toast.error("Connection failed", { description: String(e) }),
+    onError: () => toast.error("MCP server could not connect", {
+      description: "Check that the server is running and its configuration is correct.",
+    }),
   })
 
   const disconnectMutation = useMutation({
@@ -879,7 +1066,9 @@ function MCPServersSection() {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
       toast.success("Server disconnected")
     },
-    onError: (e) => toast.error("Disconnect failed", { description: String(e) }),
+    onError: () => toast.error("MCP server did not disconnect", {
+      description: "Wait a moment, then try again.",
+    }),
   })
 
   const reconnectAllMutation = useMutation({
@@ -888,7 +1077,9 @@ function MCPServersSection() {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
       toast.success("All servers reconnected")
     },
-    onError: (e) => toast.error("Reconnect failed", { description: String(e) }),
+    onError: () => toast.error("Servers could not be reconnected", {
+      description: "Review the servers marked with an error and reconnect them individually.",
+    }),
   })
 
   const handleAdd = () => {
@@ -908,7 +1099,7 @@ function MCPServersSection() {
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
               <Server className="h-4 w-4" />
@@ -921,7 +1112,7 @@ function MCPServersSection() {
               </CardDescription>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -947,7 +1138,7 @@ function MCPServersSection() {
                   <DialogTitle>Add MCP server</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label htmlFor="mcp-name">Name</Label>
                       <Input
@@ -1037,7 +1228,9 @@ function MCPServersSection() {
           </p>
         ) : (
           <div className="rounded-md border">
-            {servers.map((server, i) => (
+            {servers.map((server, i) => {
+              const friendlyError = server.error ? explainMcpError(server.error) : null
+              return (
               <div
                 key={server.name}
                 className={cn(
@@ -1045,8 +1238,8 @@ function MCPServersSection() {
                   i > 0 && "border-t"
                 )}
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-medium">{server.name}</span>
                     <Badge variant="outline" className="text-[10px]">
                       {server.transport}
@@ -1066,15 +1259,16 @@ function MCPServersSection() {
                     )}
                     {!server.enabled && <Badge variant="warning">disabled</Badge>}
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 self-end sm:self-auto">
                     {server.status === "connected" ? (
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        className="h-9 w-9 text-muted-foreground hover:text-foreground"
                         onClick={() => disconnectMutation.mutate(server.name)}
                         disabled={disconnectMutation.isPending}
-                        title="Disconnect"
+                        title={`Disconnect ${server.name}`}
+                        aria-label={`Disconnect ${server.name}`}
                       >
                         <Unplug className="h-3.5 w-3.5" />
                       </Button>
@@ -1082,10 +1276,11 @@ function MCPServersSection() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        className="h-9 w-9 text-muted-foreground hover:text-foreground"
                         onClick={() => connectMutation.mutate(server.name)}
                         disabled={connectMutation.isPending}
-                        title="Connect"
+                        title={`Connect ${server.name}`}
+                        aria-label={`Connect ${server.name}`}
                       >
                         <Plug className="h-3.5 w-3.5" />
                       </Button>
@@ -1093,10 +1288,11 @@ function MCPServersSection() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      className="h-9 w-9 text-muted-foreground hover:text-destructive"
                       onClick={() => removeMutation.mutate(server.name)}
                       disabled={removeMutation.isPending}
-                      title="Remove"
+                      title={`Remove ${server.name}`}
+                      aria-label={`Remove ${server.name}`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
@@ -1105,8 +1301,15 @@ function MCPServersSection() {
                 {server.description && (
                   <p className="mt-0.5 text-xs text-muted-foreground">{server.description}</p>
                 )}
-                {server.error && (
-                  <p className="mt-0.5 text-xs text-destructive">{server.error}</p>
+                {friendlyError && server.error && (
+                  <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    <p className="font-medium">{friendlyError.summary}</p>
+                    <p className="mt-0.5 text-xs leading-5">{friendlyError.recovery}</p>
+                    <details className="mt-1 text-xs">
+                      <summary className="cursor-pointer font-medium">Technical details</summary>
+                      <code className="mt-1 block break-all text-[11px] leading-4">{server.error}</code>
+                    </details>
+                  </div>
                 )}
                 {server.tools.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1">
@@ -1122,7 +1325,8 @@ function MCPServersSection() {
                   </div>
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
         <p className="text-xs text-muted-foreground">
@@ -1162,12 +1366,15 @@ function MCPStoreSection() {
           description: `${res.tools_count} tools available`,
         })
       } else {
+        const explanation = res.error ? explainMcpError(res.error) : null
         toast.success(`Installed ${res.name}`, {
-          description: res.error ?? "Server configured (not connected)",
+          description: explanation?.summary ?? "Server configured but not connected.",
         })
       }
     },
-    onError: (e) => toast.error("Install failed", { description: String(e) }),
+    onError: () => toast.error("MCP server could not be installed", {
+      description: "Check the registry connection and try again.",
+    }),
   })
 
   const results: MCPStoreItem[] = data?.results ?? []
@@ -1317,7 +1524,9 @@ function SystemPromptSection() {
         description: res.is_custom ? "Custom prompt active." : "Reset to built-in default.",
       })
     },
-    onError: (e) => toast.error("Failed to save system prompt", { description: String(e) }),
+    onError: () => toast.error("System prompt was not saved", {
+      description: "Your text is still here. Check the connection and try again.",
+    }),
   })
 
   const handleSave = () => {

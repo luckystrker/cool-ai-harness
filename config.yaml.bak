@@ -1,0 +1,8 @@
+mcp_servers:
+- name: hc-srv
+  transport: stdio
+  enabled: true
+  description: ''
+  timeout_s: 30.0
+  command: echo
+  args: []

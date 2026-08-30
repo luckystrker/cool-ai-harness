@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useParams } from "react-router-dom"
+import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Archive, ChevronDown, Loader2, Menu, MessageSquare, Sparkles, Paperclip, Plus } from "lucide-react"
+import {
+  Archive,
+  ArrowRight,
+  CheckCircle2,
+  ChevronDown,
+  GitBranch,
+  Loader2,
+  Menu,
+  MessageSquare,
+  Paperclip,
+  Plus,
+  SearchCheck,
+  ShieldCheck,
+} from "lucide-react"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
@@ -22,6 +35,8 @@ import { useIsMobile } from "@/hooks/useMediaQuery"
 import { useMobileNav } from "@/hooks/useMobileNav"
 import {
   MODE_PRESETS,
+  loadAgentDefaults,
+  loadLastModel,
   modeFromPerms,
   saveLastModel,
   type PermissionMode,
@@ -32,6 +47,7 @@ import { cn } from "@/lib/utils"
 
 export function ChatPage() {
   const { conversationId } = useParams()
+  const [searchParams] = useSearchParams()
   const convId = conversationId ? Number(conversationId) : null
   const queryClient = useQueryClient()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -425,6 +441,8 @@ export function ChatPage() {
 
           <div className="mx-auto w-full max-w-3xl">
             <ChatComposer
+              key={convId}
+              initialValue={searchParams.get("draft") ?? ""}
               onSend={handleSend}
               onCancel={cancel}
               onAttach={handleAttach}
@@ -557,8 +575,58 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
 
 function EmptyState() {
   const { openDrawer } = useMobileNav()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const createMutation = useMutation({
+    mutationFn: async (draft: string | null) => {
+      const defaults = loadAgentDefaults()
+      const lastModel = loadLastModel()
+      const conversation = await conversationsApi.create({
+        ...(lastModel ? { model: lastModel } : {}),
+        permissions: defaults.permissions,
+        capability_policy: defaults.capabilityPolicy,
+        breakpoints: defaults.breakpoints,
+      })
+      return { conversation, draft }
+    },
+    onSuccess: ({ conversation, draft }) => {
+      queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      const query = draft ? `?draft=${encodeURIComponent(draft)}` : ""
+      navigate(`/chat/${conversation.id}${query}`)
+    },
+    onError: () =>
+      toast.error("Conversation could not be created", {
+        description: "Check that the local harness is running, then try again.",
+        action: { label: "Retry", onClick: () => createMutation.mutate(null) },
+      }),
+  })
+
+  const starters = [
+    {
+      title: "Build or repair a feature",
+      hint: "Inspect the project, propose a plan, then implement and verify it.",
+      prompt:
+        "Inspect this project and help me implement the next highest-impact improvement. Start with a concise plan, then make the changes and verify them.",
+      icon: GitBranch,
+    },
+    {
+      title: "Research a difficult question",
+      hint: "Collect evidence, compare sources, and produce a cited answer.",
+      prompt:
+        "Research this question thoroughly. Compare reliable sources, call out uncertainty, and give me a concise evidence-backed recommendation: ",
+      icon: SearchCheck,
+    },
+    {
+      title: "Audit a risky change",
+      hint: "Find failure modes, security gaps, and missing verification.",
+      prompt:
+        "Audit the current project for the highest-risk reliability, security, and usability gaps. Prioritize concrete findings and propose verified fixes.",
+      icon: ShieldCheck,
+    },
+  ]
+
   return (
-    <div className="relative flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+    <div className="relative h-full overflow-y-auto px-4 py-10 sm:px-8 sm:py-14">
       <Button
         variant="ghost"
         size="icon"
@@ -568,14 +636,63 @@ function EmptyState() {
       >
         <Menu className="h-5 w-5" />
       </Button>
-      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-        <Sparkles className="h-6 w-6" />
-      </div>
-      <div>
-        <h1 className="text-xl font-semibold">Cool AI Harness</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Select a conversation on the left, or create a new one to get started.
+      <div className="mx-auto flex w-full max-w-2xl flex-col items-center text-center">
+        <div className="flex items-center gap-3" aria-label="Harness run cycle: plan, act, verify">
+          {["Plan", "Act", "Verify"].map((step, index) => (
+            <div key={step} className="flex items-center gap-3">
+              <span
+                className={cn(
+                  "grid h-9 w-9 place-items-center rounded-full text-xs font-semibold",
+                  index === 2
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                    : "bg-primary text-primary-foreground"
+                )}
+              >
+                {index === 2 ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+              </span>
+              {index < 2 && <span className="h-px w-7 bg-border sm:w-12" aria-hidden />}
+            </div>
+          ))}
+        </div>
+
+        <h1 className="mt-7 max-w-xl text-balance text-3xl font-semibold tracking-[-0.025em] sm:text-4xl">
+          Turn an outcome into a verified run.
+        </h1>
+        <p className="mt-3 max-w-[60ch] text-pretty text-base leading-7 text-muted-foreground">
+          Keep the model, tools, approvals, memory, and run history together. Start with a real
+          goal; adjust the draft before anything runs.
         </p>
+
+        <div className="mt-8 w-full space-y-2 text-left">
+          {starters.map(({ title, hint, prompt, icon: Icon }) => (
+            <button
+              key={title}
+              type="button"
+              disabled={createMutation.isPending}
+              onClick={() => createMutation.mutate(prompt)}
+              className="group flex min-h-16 w-full items-center gap-4 rounded-xl border bg-background px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+            >
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-muted text-foreground">
+                <Icon className="h-5 w-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block font-medium">{title}</span>
+                <span className="mt-0.5 block text-sm leading-5 text-muted-foreground">{hint}</span>
+              </span>
+              <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+            </button>
+          ))}
+        </div>
+
+        <Button
+          variant="ghost"
+          className="mt-4"
+          disabled={createMutation.isPending}
+          onClick={() => createMutation.mutate(null)}
+        >
+          {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+          Start with a blank conversation
+        </Button>
       </div>
     </div>
   )

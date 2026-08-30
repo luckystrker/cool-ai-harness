@@ -49,6 +49,7 @@ export function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => 
           open ? "translate-x-0" : "-translate-x-full"
         )}
         aria-hidden={!open}
+        inert={!open}
       >
         <Sidebar inDrawer className="h-full w-full rounded-r-2xl bg-background" />
       </div>
