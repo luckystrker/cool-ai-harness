@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react"
+import { getErrorDescription } from "@/api/client"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
@@ -459,7 +460,10 @@ export function useConversationStream() {
         }
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
-          acc.content += `\n\n⚠️ Stream error: ${String(e)}`
+          acc.content += `\n\n**Reply interrupted.** ${getErrorDescription(
+            e,
+            "Check that the local harness is running, then send your message again."
+          )}`
           acc.errored = true
           flush(acc)
         }

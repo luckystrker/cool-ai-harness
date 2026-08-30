@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft, GitCompareArrows, Loader2, Plus, SearchCheck, X } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { deepResearchApi } from "@/api/research"
 import type { ResearchRun, ResearchRunDetail } from "@/api/types"
 import { ResearchCompare } from "@/components/research/ResearchCompare"
@@ -87,7 +88,9 @@ export function DeepResearchPage() {
       toast.success("Research started")
     } catch (e) {
       setMobilePane("list")
-      toast.error("Research failed to start", { description: String(e) })
+      toast.error("Research did not start", {
+        description: getErrorDescription(e, "Review the topic and model, then try again."),
+      })
     }
   }, [topic, depth, model, start, reset])
 
@@ -98,7 +101,10 @@ export function DeepResearchPage() {
       queryClient.invalidateQueries({ queryKey: ["research-run", id] })
       toast.success("Research cancelled")
     },
-    onError: (e) => toast.error("Cancel failed", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Research is still running", {
+        description: getErrorDescription(error, "Try cancelling again."),
+      }),
   })
 
   const rerunMutation = useMutation({
@@ -110,7 +116,10 @@ export function DeepResearchPage() {
       queryClient.invalidateQueries({ queryKey: ["research-runs"] })
       toast.success(`Rerun started (run #${run.id})`)
     },
-    onError: (e) => toast.error("Rerun failed", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Research rerun did not start", {
+        description: getErrorDescription(error, "Check the model override and try again."),
+      }),
   })
 
   const compareCandidates = useMemo(
@@ -147,27 +156,27 @@ export function DeepResearchPage() {
             <div className="rounded-md border p-3">
               <div className="grid gap-2.5">
                 <div className="grid gap-1">
-                  <Label htmlFor="research-topic">Topic</Label>
+                  <Label htmlFor="research-topic">Research question</Label>
                   <Textarea
                     id="research-topic"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
-                    placeholder="e.g. History of the Alpha framework and its adoption"
+                    placeholder="For example: How has the Alpha framework been adopted over time?"
                     rows={3}
                   />
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="grid gap-1">
-                    <Label htmlFor="research-depth">Depth</Label>
+                    <Label htmlFor="research-depth">Questions to investigate</Label>
                     <select
                       id="research-depth"
                       value={depth}
                       onChange={(e) => setDepth(parseInt(e.target.value))}
                       className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-sm"
                     >
-                      <option value={3}>3 sub-questions</option>
-                      <option value={4}>4 sub-questions</option>
-                      <option value={5}>5 sub-questions</option>
+                      <option value={3}>3 questions</option>
+                      <option value={4}>4 questions</option>
+                      <option value={5}>5 questions</option>
                     </select>
                   </div>
                   <div className="grid gap-1">
@@ -218,7 +227,7 @@ export function DeepResearchPage() {
               ))}
               {runs.length === 0 && !showLiveProgress && (
                 <p className="px-1 py-4 text-center text-sm text-muted-foreground">
-                  No research runs yet. Start one above.
+                  No research reports yet. Enter a question above to start one.
                 </p>
               )}
             </ul>
@@ -314,7 +323,7 @@ export function DeepResearchPage() {
                     size="sm"
                     onClick={() => selected.id != null && cancelMutation.mutate(selected.id)}
                   >
-                    Cancel
+                    Cancel research
                   </Button>
                 )}
                 {selected.status === "completed" && (
@@ -323,7 +332,7 @@ export function DeepResearchPage() {
                       aria-label="Model override for rerun"
                       value={rerunModel}
                       onChange={(e) => setRerunModel(e.target.value)}
-                      placeholder="Model override"
+                      placeholder="Optional model for rerun"
                       className="h-11 min-w-0 flex-1 sm:h-8 sm:w-40 sm:flex-none"
                     />
                     <Button
@@ -332,7 +341,7 @@ export function DeepResearchPage() {
                       disabled={rerunMutation.isPending}
                       onClick={() => selected.id != null && rerunMutation.mutate(selected.id)}
                     >
-                      {rerunMutation.isPending ? "Rerunning..." : "Rerun"}
+                      {rerunMutation.isPending ? "Starting rerun…" : "Rerun research"}
                     </Button>
                     {compareCandidates.length > 0 && (
                       <Button

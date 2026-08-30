@@ -311,7 +311,7 @@ export function Sidebar({
 
         {projects.length === 0 ? (
           <p className="px-3 pb-2 text-xs text-muted-foreground">
-            No projects yet. Add one to group chats under a folder.
+            No projects yet. Add one to keep related conversations together.
           </p>
         ) : (
           <ul className="mb-2 space-y-0.5">
@@ -351,7 +351,7 @@ export function Sidebar({
                     </button>
                     <button
                       className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:focus-visible:opacity-100 md:group-hover:opacity-100"
-                      title="New chat in this project"
+                      title="New conversation in this project"
                       aria-label={`New conversation in ${p.name}`}
                       onClick={() => createInProjectMutation.mutate(p)}
                     >
@@ -371,7 +371,7 @@ export function Sidebar({
                     </button>
                     <button
                       className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:focus-visible:opacity-100 md:group-hover:opacity-100"
-                      title="Delete project"
+                      title="Remove project from the sidebar"
                       aria-label={`Remove project ${p.name}`}
                       onClick={() => setDeleteTarget({ kind: "project", project: p })}
                     >

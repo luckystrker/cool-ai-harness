@@ -320,7 +320,9 @@ function TopToolsCard({ data }: { data: TopTool[] }) {
       </CardHeader>
       <CardContent>
         {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No tool calls recorded</p>
+          <p className="py-4 text-center text-xs text-muted-foreground">
+            No tool calls were recorded in this time range.
+          </p>
         ) : (
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-xs">
@@ -375,7 +377,9 @@ function CallHistoryCard({ data, total }: { data: CallHistoryRow[]; total: numbe
       </CardHeader>
       <CardContent>
         {data.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No calls recorded</p>
+          <p className="py-4 text-center text-xs text-muted-foreground">
+            No model calls were recorded yet.
+          </p>
         ) : (
           <div className="max-h-72 overflow-auto rounded-md border">
             <table className="w-full text-xs">

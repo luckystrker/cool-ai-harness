@@ -111,7 +111,7 @@ export function DirectoryBrowserDialog({
               ))}
               {listing && listing.directories.length === 0 && (
                 <p className="px-2 py-6 text-center text-xs text-muted-foreground">
-                  No sub-directories
+                  This folder has no subfolders.
                 </p>
               )}
             </div>

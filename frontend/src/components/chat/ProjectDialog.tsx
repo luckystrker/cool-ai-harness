@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react"
 import { FolderOpen, Globe, HardDrive, Loader2, Plus } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import {
   addProject,
@@ -70,7 +71,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
     onOpenChange(next)
   }
 
-  const canCreate = type === "remote" || Boolean(path)
+  const canCreate = type === "local" && Boolean(path)
 
   const handleCreate = async () => {
     if (!canCreate || creating) return
@@ -103,7 +104,9 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
       reset()
       onCreated(conv.id, project)
     } catch (e) {
-      toast.error("Failed to create project chat", { description: String(e) })
+      toast.error("Project was not created", {
+        description: getErrorDescription(e, "Check the project folder and try again."),
+      })
       setCreating(false)
     }
   }
@@ -115,8 +118,8 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
           <DialogHeader>
             <DialogTitle>Add project</DialogTitle>
             <DialogDescription>
-              Group chats under a shared folder and instructions. Creating a
-              project starts a new chat inside it.
+              Keep related conversations in one working folder with shared
+              instructions. Creating a project also starts its first conversation.
             </DialogDescription>
           </DialogHeader>
 
@@ -140,23 +143,20 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
                 </button>
                 <button
                   type="button"
-                  onClick={() => setType("remote")}
+                  disabled
+                  title="Remote projects are not available yet"
                   className={cn(
                     "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
-                    type === "remote"
-                      ? "border-primary bg-primary/10 text-foreground"
-                      : "border-muted-foreground/30 text-muted-foreground hover:bg-accent/60"
+                    "cursor-not-allowed border-muted-foreground/20 text-muted-foreground opacity-60"
                   )}
                 >
                   <Globe className="h-4 w-4" />
                   Remote
                 </button>
               </div>
-              {type === "remote" && (
-                <p className="text-xs text-muted-foreground">
-                  Remote projects aren&apos;t available yet — coming soon.
-                </p>
-              )}
+              <p className="text-xs text-muted-foreground">
+                Remote projects are not available yet.
+              </p>
             </div>
 
             {/* Folder selection (local only) */}
@@ -186,7 +186,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
             {/* Project name */}
             <div className="space-y-1.5">
               <Label htmlFor="project-name" className="text-xs text-muted-foreground">
-                Name
+                Name (optional)
               </Label>
               <Input
                 id="project-name"
@@ -200,7 +200,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
             {/* Description */}
             <div className="space-y-1.5">
               <Label htmlFor="project-description" className="text-xs text-muted-foreground">
-                Description
+                Description (optional)
               </Label>
               <Textarea
                 id="project-description"
@@ -214,13 +214,13 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
             {/* Extra system instructions */}
             <div className="space-y-1.5">
               <Label htmlFor="project-instructions" className="text-xs text-muted-foreground">
-                Additional system instructions
+                Agent instructions (optional)
               </Label>
               <Textarea
                 id="project-instructions"
                 value={systemInstructions}
                 onChange={(e) => setSystemInstructions(e.target.value)}
-                placeholder="Extra guidance applied to every agent in this project…"
+                placeholder="For example: run the test suite before finishing each task."
                 className="min-h-[80px] resize-y text-sm"
               />
             </div>
@@ -232,7 +232,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
             </Button>
             <Button onClick={handleCreate} disabled={!canCreate || creating}>
               {creating ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Plus className="mr-1.5 h-4 w-4" />}
-              Create chat
+              Create project and conversation
             </Button>
           </DialogFooter>
         </DialogContent>

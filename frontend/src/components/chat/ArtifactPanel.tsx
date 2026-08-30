@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { artifactsApi } from "@/api/artifacts"
 import type { Artifact, ArtifactKind } from "@/api/types"
 import { Button } from "@/components/ui/button"
@@ -53,7 +54,10 @@ export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["artifacts", conversationId] })
     },
-    onError: (e) => toast.error("Failed to delete artifact", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Attachment was not deleted", {
+        description: getErrorDescription(error, "Refresh the attachment list and try again."),
+      }),
   })
 
   return (
@@ -67,10 +71,10 @@ export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
 
       <ScrollArea className="flex-1">
         {isLoading ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
+          <div className="py-8 text-center text-sm text-muted-foreground">Loading attachments…</div>
         ) : artifacts.length === 0 ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No attachments yet. Use the 📎 button in the composer to upload files.
+            No attachments yet. Use “Attach files” in the composer to add context.
           </div>
         ) : (
           <ul className="space-y-1 p-2">

@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Wallet, Loader2, ShieldOff, ShieldCheck, AlertTriangle } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { budgetsApi } from "@/api/budgets"
 import type { BudgetStatusResponse, BudgetWindow, BudgetWindowSpend } from "@/api/types"
 import { Button } from "@/components/ui/button"
@@ -39,7 +40,10 @@ export function BudgetsPage() {
       queryClient.invalidateQueries({ queryKey: ["budgets"] })
       toast.success("Budget updated")
     },
-    onError: (e) => toast.error("Failed to update budget", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Budget limits were not saved", {
+        description: getErrorDescription(error, "Review the limits and try again."),
+      }),
   })
 
   const overrideMutation = useMutation({
@@ -48,7 +52,10 @@ export function BudgetsPage() {
       queryClient.invalidateQueries({ queryKey: ["budgets"] })
       toast.success("Block override active")
     },
-    onError: (e) => toast.error("Failed to set override", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Budget block was not lifted", {
+        description: getErrorDescription(error, "Check the duration and try again."),
+      }),
   })
 
   const clearOverrideMutation = useMutation({
@@ -57,7 +64,10 @@ export function BudgetsPage() {
       queryClient.invalidateQueries({ queryKey: ["budgets"] })
       toast.success("Block override cleared")
     },
-    onError: (e) => toast.error("Failed to clear override", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Budget override was not cleared", {
+        description: getErrorDescription(error, "Refresh the budget status and try again."),
+      }),
   })
 
   return (
@@ -70,8 +80,8 @@ export function BudgetsPage() {
           <div>
             <h1 className="text-lg font-semibold">Budgets</h1>
             <p className="text-sm text-muted-foreground">
-              Daily, weekly, and monthly cost ceilings. The agent alerts at the
-              threshold and blocks new calls once a budget is exceeded.
+              Set daily, weekly, and monthly spending limits. Harness warns at
+              the threshold and can block new model calls after a limit is reached.
             </p>
           </div>
         </header>
@@ -119,8 +129,8 @@ function StatusBanner({ status }: { status: BudgetStatusResponse }) {
         <CardContent className="flex items-center gap-3 py-3">
           <AlertTriangle className="h-5 w-5 text-destructive" />
           <div className="text-sm">
-            <strong>Budget exceeded.</strong> New LLM calls are blocked.
-            {status.overridden && " An override is active — calls are allowed for now."}
+            <strong>Spending limit reached.</strong> New model calls are blocked.
+            {status.overridden && " A temporary override is active, so calls are allowed for now."}
           </div>
         </CardContent>
       </Card>
@@ -279,10 +289,10 @@ function OverrideControls({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Block override</CardTitle>
+        <CardTitle className="text-base">Temporarily allow model calls</CardTitle>
         <CardDescription>
-          Temporarily lift a budget block. The agent resumes calls until the
-          override expires, then the block reapplies.
+          Pause budget blocking for a fixed time. When the override expires,
+          Harness applies the spending limits again.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-wrap items-end gap-3">
@@ -292,11 +302,11 @@ function OverrideControls({
         </div>
         <Button onClick={handleOverride} disabled={overridePending} variant="outline" className="gap-1.5">
           {overridePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
-          Lift block
+          Allow calls temporarily
         </Button>
         <Button onClick={onClear} disabled={clearPending || !status.overridden} variant="outline" className="gap-1.5">
           {clearPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-          Clear override
+          End override now
         </Button>
         {status.override_until && (
           <span className="text-xs text-muted-foreground">
@@ -321,7 +331,9 @@ function SpendHistory({ rows, loading }: { rows: import("@/api/types").SpendRow[
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
         ) : rows.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No spend recorded yet.</p>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No model-call spending has been recorded yet.
+          </p>
         ) : (
           <div className="max-h-80 overflow-y-auto rounded-md border">
             <table className="w-full text-xs">

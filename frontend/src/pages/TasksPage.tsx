@@ -21,6 +21,7 @@ import {
   XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { rssApi } from "@/api/rss"
 import { tasksApi } from "@/api/tasks"
 import { webhooksApi } from "@/api/webhooks"
@@ -120,7 +121,10 @@ export function TasksPage() {
       setDialogOpen(false)
       toast.success("Task created")
     },
-    onError: (e) => toast.error("Failed to create task", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Scheduled task was not created", {
+        description: getErrorDescription(error, "Review the task settings and try again."),
+      }),
   })
 
   const updateMutation = useMutation({
@@ -132,7 +136,10 @@ export function TasksPage() {
       setEditing(null)
       toast.success("Task updated")
     },
-    onError: (e) => toast.error("Failed to update task", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Task changes were not saved", {
+        description: getErrorDescription(error, "Review the task settings and try again."),
+      }),
   })
 
   const deleteMutation = useMutation({
@@ -141,7 +148,10 @@ export function TasksPage() {
       invalidate()
       toast.success("Task deleted")
     },
-    onError: (e) => toast.error("Failed to delete task", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Scheduled task was not deleted", {
+        description: getErrorDescription(error, "Refresh the task list and try again."),
+      }),
   })
 
   const runMutation = useMutation({
@@ -150,7 +160,10 @@ export function TasksPage() {
       invalidate()
       toast.success("Run started", { description: "Result appears in the inbox." })
     },
-    onError: (e) => toast.error("Failed to start run", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Task run did not start", {
+        description: getErrorDescription(error, "Check the task settings and try again."),
+      }),
   })
 
   const toggleMutation = useMutation({
@@ -172,7 +185,7 @@ export function TasksPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <CalendarClock className="h-6 w-6" />
-          <h1 className="text-2xl font-bold">Scheduled Tasks</h1>
+          <h1 className="text-2xl font-bold">Scheduled tasks</h1>
           {scheduler && (
             <Badge variant={scheduler.running ? "secondary" : "outline"} className="ml-1">
               scheduler {scheduler.running ? "running" : scheduler.enabled ? "idle" : "off"}
@@ -185,7 +198,7 @@ export function TasksPage() {
             setDialogOpen(true)
           }}
         >
-          <Plus className="mr-1 h-4 w-4" /> New Task
+          <Plus className="mr-1 h-4 w-4" /> New scheduled task
         </Button>
       </div>
 
@@ -216,8 +229,8 @@ export function TasksPage() {
         <div className="space-y-3">
           {tasks.length === 0 && (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No scheduled tasks yet. Create one, or ask the agent in chat:
-              "every Monday at 9am send me a news digest".
+              No scheduled tasks yet. Create one here, or ask the agent in a
+              conversation—for example, “Every Monday at 9 AM, send me a news digest.”
             </p>
           )}
           {tasks.map((task) => (
@@ -286,7 +299,12 @@ function TaskCard({
     <Card className={cn(!task.enabled && "opacity-60")}>
       <CardHeader className="pb-2">
         <div className="flex items-center gap-2">
-          <button onClick={onToggleExpand} className="shrink-0">
+          <button
+            onClick={onToggleExpand}
+            className="shrink-0"
+            aria-label={expanded ? `Hide run history for ${task.name}` : `Show run history for ${task.name}`}
+            title={expanded ? "Hide run history" : "Show run history"}
+          >
             {expanded ? (
               <ChevronDown className="h-4 w-4 text-muted-foreground" />
             ) : (
@@ -318,13 +336,31 @@ function TaskCard({
         </div>
       </CardHeader>
       <CardContent className="flex items-center gap-1 pt-0">
-        <Button variant="ghost" size="sm" onClick={onRun} title="Run now">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRun}
+          title="Run task now"
+          aria-label={`Run ${task.name} now`}
+        >
           <Play className="h-3.5 w-3.5" />
         </Button>
-        <Button variant="ghost" size="sm" onClick={onToggleEnabled} title="Enable/Pause">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onToggleEnabled}
+          title={task.enabled ? "Pause task" : "Enable task"}
+          aria-label={task.enabled ? `Pause ${task.name}` : `Enable ${task.name}`}
+        >
           {task.enabled ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
         </Button>
-        <Button variant="ghost" size="sm" onClick={onEdit} title="Edit">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onEdit}
+          title="Edit task"
+          aria-label={`Edit ${task.name}`}
+        >
           <Pencil className="h-3.5 w-3.5" />
         </Button>
         <Button
@@ -332,7 +368,8 @@ function TaskCard({
           size="sm"
           className="text-destructive"
           onClick={onDelete}
-          title="Delete"
+          title="Delete scheduled task"
+          aria-label={`Delete ${task.name}`}
         >
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
@@ -349,7 +386,9 @@ function TaskCard({
             Run history
           </span>
           {runs.length === 0 ? (
-            <p className="py-2 text-xs text-muted-foreground">No runs yet.</p>
+            <p className="py-2 text-xs text-muted-foreground">
+              This task has not run yet. Use “Run task now” to test it.
+            </p>
           ) : (
             <ul className="mt-1 space-y-1">
               {runs.map((run) => (
@@ -558,7 +597,7 @@ function TaskDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{task ? "Edit Task" : "New Scheduled Task"}</DialogTitle>
+          <DialogTitle>{task ? "Edit scheduled task" : "New scheduled task"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <div className="space-y-1">
@@ -572,13 +611,13 @@ function TaskDialog({
           </div>
 
           <div className="space-y-1">
-            <Label htmlFor="task-prompt">Prompt</Label>
+            <Label htmlFor="task-prompt">Instructions</Label>
             <Textarea
               id="task-prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={4}
-              placeholder="What should the agent do on every run?"
+              placeholder="Describe what the agent should do each time this task runs."
             />
           </div>
 
@@ -589,7 +628,7 @@ function TaskDialog({
               value={schedule}
               onChange={(e) => setSchedule(e.target.value)}
               onBlur={handleScheduleBlur}
-              placeholder="0 9 * * 1  or  every monday at 9am"
+              placeholder="Every Monday at 9 AM"
               className="font-mono text-sm"
             />
             {parsedSchedule && (
@@ -625,7 +664,7 @@ function TaskDialog({
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label htmlFor="task-max-iterations">Max iterations</Label>
+              <Label htmlFor="task-max-iterations">Maximum agent steps</Label>
               <Input
                 id="task-max-iterations"
                 type="number"
@@ -636,7 +675,7 @@ function TaskDialog({
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="task-approval-policy">External side effects</Label>
+              <Label htmlFor="task-approval-policy">Actions outside Harness</Label>
               <select
                 id="task-approval-policy"
                 value={approvalPolicy}
@@ -645,8 +684,8 @@ function TaskDialog({
                 }
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
               >
-                <option value="deny_external">Deny (safe default)</option>
-                <option value="allow_all">Allow (pre-approved)</option>
+                <option value="deny_external">Block external actions</option>
+                <option value="allow_all">Allow without approval</option>
               </select>
             </div>
           </div>
@@ -661,7 +700,7 @@ function TaskDialog({
                     checked={channels.includes(ch)}
                     onChange={() => toggleChannel(ch)}
                   />
-                  {ch}
+                  {ch === "ui" ? "Harness inbox" : "Webhook"}
                 </label>
               ))}
             </div>
@@ -681,7 +720,7 @@ function TaskDialog({
               Cancel
             </Button>
             <Button onClick={handleSubmit} disabled={!name.trim() || !schedule.trim()}>
-              {task ? "Save" : "Create"}
+              {task ? "Save task" : "Create scheduled task"}
             </Button>
           </div>
         </div>
@@ -721,7 +760,10 @@ function RssPanel() {
       setCategory("")
       toast.success("Subscribed")
     },
-    onError: (e) => toast.error("Failed to subscribe", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Feed was not added", {
+        description: getErrorDescription(error, "Check the feed URL and try again."),
+      }),
   })
 
   const unsubscribeMutation = useMutation({
@@ -758,7 +800,7 @@ function RssPanel() {
         <Input
           value={category}
           onChange={(e) => setCategory(e.target.value)}
-          placeholder="category"
+          placeholder="Category (optional)"
           className="w-32"
         />
         <Button onClick={() => subscribeMutation.mutate()} disabled={!url.trim()}>
@@ -814,7 +856,9 @@ function RssPanel() {
       <div className="space-y-2">
         <h3 className="text-sm font-medium text-muted-foreground">Recent entries</h3>
         {entries.length === 0 && (
-          <p className="py-4 text-center text-sm text-muted-foreground">No entries yet.</p>
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            No feed entries yet. Add a feed, then fetch it to check for new entries.
+          </p>
         )}
         {entries.map((entry: RssEntry) => (
           <div
@@ -884,7 +928,10 @@ function WebhooksPanel() {
       setName("")
       toast.success("Webhook created")
     },
-    onError: (e) => toast.error("Failed to create webhook", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Webhook endpoint was not created", {
+        description: getErrorDescription(error, "Check the endpoint settings and try again."),
+      }),
   })
 
   const deleteMutation = useMutation({
@@ -925,7 +972,7 @@ function WebhooksPanel() {
           <option value="slack">Slack</option>
         </select>
         <Button onClick={() => createMutation.mutate()} disabled={!name.trim()}>
-          <Plus className="mr-1 h-4 w-4" /> Create
+          <Plus className="mr-1 h-4 w-4" /> Create webhook
         </Button>
       </div>
 

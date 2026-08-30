@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ComparisonView } from "@/components/inspector/ComparisonView"
 import { RunTimeline } from "@/components/inspector/RunTimeline"
-import { api } from "@/api/client"
+import { api, getErrorDescription } from "@/api/client"
 
 type Mode = "timeline" | "compare"
 
@@ -65,7 +65,10 @@ export function InspectorPage() {
     onSuccess: (data) => {
       toast.success(`Replay started: new run #${data.new_run_id}`)
     },
-    onError: (e) => toast.error("Replay failed", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Run replay did not start", {
+        description: getErrorDescription(error, "Select a run and try again."),
+      }),
   })
 
   return (
@@ -73,7 +76,12 @@ export function InspectorPage() {
       {/* Header */}
       <div className="flex h-14 items-center gap-3 border-b px-4">
         <Bug className="h-5 w-5 text-primary" />
-        <h1 className="font-semibold">Inspector</h1>
+        <div>
+          <h1 className="font-semibold">Run inspector</h1>
+          <p className="hidden text-xs text-muted-foreground sm:block">
+            Review an agent run step by step or compare two runs.
+          </p>
+        </div>
         <div className="ml-auto flex gap-1">
           <Button
             variant={mode === "timeline" ? "default" : "ghost"}
@@ -110,7 +118,7 @@ export function InspectorPage() {
                 setCompareRunId(null)
               }}
             >
-              <option value="">Select…</option>
+              <option value="">Choose a conversation</option>
               {conversations.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.title || `Conversation #${c.id}`}
@@ -130,7 +138,7 @@ export function InspectorPage() {
                 value={selectedRunId ?? ""}
                 onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
               >
-                <option value="">Select…</option>
+                <option value="">Choose a run</option>
                 {runs.map((r) => (
                   <option key={r.id} value={r.id}>
                     Run #{r.id} — {r.status} ({r.iterations} iter)
@@ -151,7 +159,7 @@ export function InspectorPage() {
                 value={compareRunId ?? ""}
                 onChange={(e) => setCompareRunId(e.target.value ? Number(e.target.value) : null)}
               >
-                <option value="">Select…</option>
+                <option value="">Choose a second run</option>
                 {runs
                   .filter((r) => r.id !== selectedRunId)
                   .map((r) => (
@@ -167,7 +175,7 @@ export function InspectorPage() {
           {mode === "timeline" && selectedRunId !== null && (
             <div className="space-y-2 border-t pt-3">
               <Label htmlFor="inspector-replay-model" className="text-xs">
-                Replay with model override
+                Replay with a different model (optional)
               </Label>
               <Input
                 id="inspector-replay-model"
@@ -187,7 +195,7 @@ export function InspectorPage() {
                 ) : (
                   <Play className="h-3.5 w-3.5" />
                 )}
-                Replay
+                Start replay
               </Button>
             </div>
           )}

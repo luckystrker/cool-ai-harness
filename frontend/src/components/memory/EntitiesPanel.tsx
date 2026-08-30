@@ -9,6 +9,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { entitiesApi } from "@/api/memory"
 import type { Entity } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
@@ -62,7 +63,10 @@ export function EntitiesPanel() {
       queryClient.invalidateQueries({ queryKey: ["memory-stats"] })
       toast.success("Entity deleted")
     },
-    onError: (e) => toast.error("Failed to delete", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Entity was not deleted", {
+        description: getErrorDescription(error, "Refresh the entity list and try again."),
+      }),
   })
 
   return (
@@ -108,7 +112,7 @@ export function EntitiesPanel() {
               <Box className="mx-auto mb-3 h-10 w-10 opacity-30" />
               <p>No entities yet.</p>
               <p className="text-sm">
-                Entities are extracted from conversations or added manually.
+                The agent can extract entities from conversations, or you can add one manually.
               </p>
             </div>
           ) : (
@@ -293,7 +297,10 @@ function EntityEditDialog({
       toast.success("Entity updated")
       onClose()
     },
-    onError: (e) => toast.error("Failed to update", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Entity changes were not saved", {
+        description: getErrorDescription(error, "Review the entity fields and try again."),
+      }),
   })
 
   const handleSave = () => {
@@ -371,7 +378,10 @@ function EntityCreateDialog({
       setAliases("")
       setDescription("")
     },
-    onError: (e) => toast.error("Failed to create", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Entity was not created", {
+        description: getErrorDescription(error, "Review the entity fields and try again."),
+      }),
   })
 
   const handleCreate = () => {

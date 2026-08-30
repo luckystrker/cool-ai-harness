@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { profilesApi } from "@/api/profiles"
 import { conversationsApi } from "@/api/conversations"
 import type { Conversation } from "@/api/types"
@@ -39,7 +40,10 @@ export function ProfileSwitcher({ conversation }: ProfileSwitcherProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
     },
-    onError: (e) => toast.error("Failed to switch profile", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Agent profile was not changed", {
+        description: getErrorDescription(error, "Choose a profile and try again."),
+      }),
   })
 
   if (!conversation) return null

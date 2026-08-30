@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Save } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { subagentsApi } from "@/api/subagents"
 import type { SubagentRole, SubagentRoleCreate } from "@/api/types"
 import { Button } from "@/components/ui/button"
@@ -58,13 +59,16 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
       toast.success(role ? "Role updated" : "Role created")
       onSaved?.()
     },
-    onError: (e) => toast.error("Failed to save role", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Subagent role was not saved", {
+        description: getErrorDescription(error, "Review the role settings and try again."),
+      }),
   })
 
   return (
     <div className="flex flex-col gap-4 p-4">
       <h3 className="text-sm font-semibold">
-        {role ? `Edit Role: ${role.name}` : "New Role"}
+        {role ? `Edit role: ${role.name}` : "New subagent role"}
       </h3>
 
       <div className="grid gap-3">
@@ -89,12 +93,12 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
         </div>
 
         <div className="grid gap-1.5">
-          <Label htmlFor="role-prompt">System Prompt</Label>
+          <Label htmlFor="role-prompt">Role instructions</Label>
           <Textarea
             id="role-prompt"
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="You are a specialized agent that..."
+            placeholder="Describe how this role should approach its work."
             rows={5}
             className="font-mono text-xs"
           />
@@ -111,7 +115,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="role-iter">Max Iterations</Label>
+            <Label htmlFor="role-iter">Maximum agent steps</Label>
             <Input
               id="role-iter"
               type="number"
@@ -124,11 +128,13 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
         </div>
 
         <div className="grid gap-1.5">
-          <div className="text-sm font-medium">Allowed Tools</div>
+          <div className="text-sm font-medium">Available tools</div>
           <p className="text-xs text-muted-foreground">
             {selectedTools.length === 0
               ? "No restriction — the subagent can use all tools."
-              : `${selectedTools.length} tool(s) selected.`}
+              : selectedTools.length === 1
+                ? "1 tool selected."
+                : `${selectedTools.length} tools selected.`}
           </p>
           <div className="max-h-40 overflow-y-auto rounded-md border p-2">
             {availableTools.map((tool) => (
@@ -152,7 +158,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
         </div>
 
         <div className="grid gap-1.5">
-          <Label htmlFor="role-cost">Max Cost USD (optional)</Label>
+          <Label htmlFor="role-cost">Maximum cost in USD (optional)</Label>
           <Input
             id="role-cost"
             type="number"
@@ -170,7 +176,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
         className="w-full gap-2 sm:w-auto sm:self-start"
       >
         <Save className="h-4 w-4" />
-        {saveMutation.isPending ? "Saving..." : role ? "Update Role" : "Create Role"}
+        {saveMutation.isPending ? "Saving…" : role ? "Save role" : "Create role"}
       </Button>
     </div>
   )

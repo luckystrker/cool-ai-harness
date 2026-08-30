@@ -16,6 +16,7 @@ import {
   ShieldCheck,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
 import { plansApi } from "@/api/plans"
@@ -158,7 +159,10 @@ export function ChatPage() {
       queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
     },
-    onError: (e) => toast.error("Failed to change model", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Model was not changed", {
+        description: getErrorDescription(error, "Choose a model and try again."),
+      }),
   })
 
   const workdirMutation = useMutation({
@@ -168,7 +172,10 @@ export function ChatPage() {
       queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
       queryClient.invalidateQueries({ queryKey: ["workspace-recent"] })
     },
-    onError: (e) => toast.error("Failed to change working directory", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Working directory was not changed", {
+        description: getErrorDescription(error, "Choose an accessible folder and try again."),
+      }),
   })
 
   const modeMutation = useMutation({
@@ -177,7 +184,10 @@ export function ChatPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     },
-    onError: (e) => toast.error("Failed to change agent mode", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Agent mode was not changed", {
+        description: getErrorDescription(error, "Choose a mode and try again."),
+      }),
   })
 
   const handleModelChange = (model: string) => {
@@ -208,13 +218,19 @@ export function ChatPage() {
           artifactIds.push(uploaded.artifact.id)
         }
         queryClient.invalidateQueries({ queryKey: ["artifacts", convId] })
-        toast.success(`${pendingFiles.length} file(s) attached`)
+        toast.success(
+          pendingFiles.length === 1
+            ? "1 file attached"
+            : `${pendingFiles.length} files attached`
+        )
       } catch (e) {
         await Promise.allSettled(
           artifactIds.map((artifactId) => artifactsApi.delete(convId, artifactId))
         )
         queryClient.invalidateQueries({ queryKey: ["artifacts", convId] })
-        toast.error("Upload failed", { description: String(e) })
+        toast.error("Files were not attached", {
+          description: getErrorDescription(e, "Check the files and try again."),
+        })
         return
       }
       setPendingFiles([])
@@ -333,7 +349,9 @@ export function ChatPage() {
       // Mark execution done.
       queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
     } catch (e) {
-      toast.error("Plan execution failed", { description: String(e) })
+      toast.error("Plan execution stopped", {
+        description: getErrorDescription(e, "Review the plan status and try again."),
+      })
     }
   }, [convId, pendingMsgs, queryClient, setPendingMsgs])
 
@@ -355,7 +373,9 @@ export function ChatPage() {
           clearPending()
         }
       } catch (e) {
-        toast.error("Plan action failed", { description: String(e) })
+        toast.error("Plan response was not saved", {
+          description: getErrorDescription(e, "Try approving or rejecting the plan again."),
+        })
       }
     },
     [convId, pendingMsgs, clearPending, handlePlanExecute]
@@ -407,7 +427,8 @@ export function ChatPage() {
           variant="ghost"
           size="sm"
           className={cn("ml-auto hidden px-2 md:inline-flex", artifactsOpen ? "text-foreground" : "text-muted-foreground")}
-          title="Toggle attachments panel"
+          title={artifactsOpen ? "Close attachments" : "Open attachments"}
+          aria-label={artifactsOpen ? "Close attachments" : "Open attachments"}
           onClick={() => setArtifactsOpen((v) => !v)}
         >
           <Paperclip className="h-4 w-4" />
@@ -421,11 +442,11 @@ export function ChatPage() {
             <div className="mx-auto max-w-3xl py-4">
               {isLoading ? (
                 <div className="py-16 text-center text-sm text-muted-foreground">
-                  Loading…
+                  Loading conversation…
                 </div>
               ) : historyMsgs.length === 0 && pendingMsgs.length === 0 && compactedMsgs.length === 0 ? (
                 <div className="py-16 text-center text-sm text-muted-foreground">
-                  Send a message to start the conversation.
+                  Ask a question or describe a task to start this conversation.
                 </div>
               ) : (
                 <>
@@ -728,7 +749,7 @@ function CompactedHistory({ messages }: { messages: MessageViewModel[] }) {
       >
         <Archive className="h-3.5 w-3.5 shrink-0" />
         <span className="font-medium">
-          Compacted history — {messages.length} messages summarized
+          Older messages — {messages.length} summarized
         </span>
         <ChevronDown
           className={cn(
@@ -754,7 +775,7 @@ function CompactSummary({ summary }: { summary: string }) {
     <div className="mt-4 rounded-lg border border-dashed bg-muted/30 px-3 py-2">
       <div className="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground">
         <Archive className="h-3.5 w-3.5 shrink-0" />
-        Summary of compacted messages
+        Summary of older messages
       </div>
       <Markdown content={summary} className="text-sm" />
     </div>
@@ -768,16 +789,17 @@ function CompactButton({ convId, disabled }: { convId: number; disabled?: boolea
     mutationFn: () => conversationsApi.compact(convId),
     onSuccess: (data) => {
       if (data.status === "compacted") {
-        toast.success(
-          `Compacted ${data.messages_compacted} messages (${data.summary_length} chars summary)`
-        )
+        toast.success(`Summarized ${data.messages_compacted} older messages`)
         // Refresh the conversation so compacted messages collapse immediately.
         queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
       } else {
         toast.info(data.reason || "Nothing to compact")
       }
     },
-    onError: (e) => toast.error("Compact failed", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Conversation context was not compacted", {
+        description: getErrorDescription(error, "Try compacting the conversation again."),
+      }),
   })
 
   return (
@@ -785,7 +807,7 @@ function CompactButton({ convId, disabled }: { convId: number; disabled?: boolea
       variant="ghost"
       size="sm"
       className="px-2 text-muted-foreground"
-      title="Compact context: summarize older messages to reduce token usage"
+      title="Summarize older messages to free context space"
       disabled={disabled || compactMutation.isPending}
       onClick={() => compactMutation.mutate()}
     >
@@ -794,7 +816,7 @@ function CompactButton({ convId, disabled }: { convId: number; disabled?: boolea
       ) : (
         <Archive className="h-4 w-4" />
       )}
-      <span className="ml-1.5 hidden sm:inline">Compact</span>
+      <span className="ml-1.5 hidden sm:inline">Summarize history</span>
     </Button>
   )
 }

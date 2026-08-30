@@ -14,6 +14,7 @@ import {
   Wrench,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { constructorApi } from "@/api/constructor"
 import { profilesApi } from "@/api/profiles"
 import { skillsApi } from "@/api/skills"
@@ -68,7 +69,7 @@ export function ProfilesPage() {
       setProfileDialogOpen(false)
       toast.success("Agent blueprint created")
     },
-    onError: showError("Failed to create blueprint"),
+    onError: showError("Agent blueprint was not created"),
   })
   const updateMutation = useMutation({
     mutationFn: ({ id, body }: { id: number; body: ProfileUpdate }) => profilesApi.update(id, body),
@@ -77,12 +78,12 @@ export function ProfilesPage() {
       setProfileDialogOpen(false)
       toast.success("Agent blueprint updated")
     },
-    onError: showError("Failed to update blueprint"),
+    onError: showError("Blueprint changes were not saved"),
   })
   const deleteMutation = useMutation({
     mutationFn: profilesApi.delete,
     onSuccess: refreshProfiles,
-    onError: showError("Failed to delete blueprint"),
+    onError: showError("Agent blueprint was not deleted"),
   })
   const cloneMutation = useMutation({
     mutationFn: profilesApi.clone,
@@ -90,12 +91,12 @@ export function ProfilesPage() {
       refreshProfiles()
       toast.success("Blueprint copied")
     },
-    onError: showError("Failed to copy blueprint"),
+    onError: showError("Agent blueprint was not copied"),
   })
   const playgroundMutation = useMutation({
     mutationFn: (id: number) => profilesApi.playground(id),
     onSuccess: ({ conversation_id }) => navigate(`/chat/${conversation_id}`),
-    onError: showError("Failed to launch playground"),
+    onError: showError("Playground conversation did not start"),
   })
   const createMacroMutation = useMutation({
     mutationFn: constructorApi.createMacro,
@@ -104,12 +105,12 @@ export function ProfilesPage() {
       setMacroDialogOpen(false)
       toast.success("Macro tool registered")
     },
-    onError: showError("Failed to create macro tool"),
+    onError: showError("Macro tool was not created"),
   })
   const deleteMacroMutation = useMutation({
     mutationFn: constructorApi.deleteMacro,
     onSuccess: refreshMacros,
-    onError: showError("Failed to delete macro tool"),
+    onError: showError("Macro tool was not deleted"),
   })
 
   if (isLoading) {
@@ -129,7 +130,7 @@ export function ProfilesPage() {
             <h1 className="text-2xl font-bold">Agent Constructor</h1>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Compose reusable blueprints from prompts, models, tools, skills, limits, and macro tools.
+            Create reusable agent configurations with instructions, models, tools, skills, and limits.
           </p>
         </div>
         <Button onClick={() => { setEditing(null); setProfileDialogOpen(true) }}>
@@ -160,7 +161,7 @@ export function ProfilesPage() {
                 <div className="flex flex-wrap gap-1">
                   <Button size="sm" variant="ghost" onClick={() => { setEditing(profile); setProfileDialogOpen(true) }}><Pencil /> Edit</Button>
                   <Button size="sm" variant="ghost" onClick={() => cloneMutation.mutate(profile.id)}><Copy /> Copy</Button>
-                  <Button size="sm" variant="ghost" disabled={!profile.is_active} onClick={() => playgroundMutation.mutate(profile.id)}><Play /> Playground</Button>
+                  <Button size="sm" variant="ghost" disabled={!profile.is_active} onClick={() => playgroundMutation.mutate(profile.id)}><Play /> Test in conversation</Button>
                   {!profile.is_builtin && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deleteMutation.mutate(profile.id)}><Trash2 /> Delete</Button>}
                 </div>
               </CardContent>
@@ -173,12 +174,12 @@ export function ProfilesPage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="flex items-center gap-2 text-lg font-semibold"><Wrench /> Macro tools</h2>
-            <p className="text-sm text-muted-foreground">Validated sequential compositions; drag steps to reorder them.</p>
+            <p className="text-sm text-muted-foreground">Combine tools into a reusable sequence; drag steps to change their order.</p>
           </div>
           <Button variant="outline" onClick={() => setMacroDialogOpen(true)}><Plus /> New macro</Button>
         </div>
         {macros.length === 0 ? (
-          <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No macro tools yet.</CardContent></Card>
+          <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No macro tools yet. Create one to reuse a sequence of tool calls.</CardContent></Card>
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
             {macros.map((macro) => (
@@ -381,5 +382,8 @@ function slugify(value: string) {
 }
 
 function showError(title: string) {
-  return (error: Error) => toast.error(title, { description: String(error) })
+  return (error: unknown) =>
+    toast.error(title, {
+      description: getErrorDescription(error, "Review the fields and try again."),
+    })
 }

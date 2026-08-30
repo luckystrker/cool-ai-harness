@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, Clock, Loader2, X } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { memoryApi } from "@/api/memory"
 import type { MemoryItem } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
@@ -35,7 +36,10 @@ export function ReviewQueue() {
       invalidate()
       toast.success("Memory confirmed")
     },
-    onError: (e) => toast.error("Failed to confirm", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory was not confirmed", {
+        description: getErrorDescription(error, "Refresh the review queue and try again."),
+      }),
   })
 
   const rejectMutation = useMutation({
@@ -44,7 +48,10 @@ export function ReviewQueue() {
       invalidate()
       toast.success("Memory rejected")
     },
-    onError: (e) => toast.error("Failed to reject", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory was not rejected", {
+        description: getErrorDescription(error, "Refresh the review queue and try again."),
+      }),
   })
 
   return (
@@ -57,7 +64,7 @@ export function ReviewQueue() {
         ) : pending.length === 0 ? (
           <div className="py-12 text-center text-muted-foreground">
             <Clock className="mx-auto mb-3 h-10 w-10 opacity-30" />
-            <p>Nothing to review.</p>
+            <p>No memories awaiting review.</p>
             <p className="text-sm">
               Agent-extracted memories will appear here for your confirmation.
             </p>

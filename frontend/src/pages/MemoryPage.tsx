@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { memoryApi } from "@/api/memory"
 import type { MemoryItem, MemoryScope, MemoryType } from "@/api/types"
 import { EntitiesPanel } from "@/components/memory/EntitiesPanel"
@@ -90,12 +91,17 @@ export function MemoryPage() {
       queryClient.invalidateQueries({ queryKey: ["memory-stats"] })
       toast.success("Memory archived")
     },
-    onError: (e) => toast.error("Failed to delete", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory was not archived", {
+        description: getErrorDescription(error, "Refresh the memory list and try again."),
+      }),
   })
 
   const handleExport = (format: "json" | "markdown") => {
     memoryApi.exportMemories(format).catch((e) =>
-      toast.error("Export failed", { description: String(e) })
+      toast.error("Memories were not exported", {
+        description: getErrorDescription(e, "Try the export again."),
+      })
     )
   }
 
@@ -111,7 +117,7 @@ export function MemoryPage() {
           <div className="min-w-0">
             <h1 className="text-lg font-semibold">Memory</h1>
             <p className="text-sm leading-5 text-muted-foreground">
-              Long-term memory across sessions
+              Facts and preferences the agent can reuse in future conversations.
             </p>
           </div>
         </div>
@@ -160,14 +166,14 @@ export function MemoryPage() {
           active={activeTab === "global"}
           onClick={() => setActiveTab("global")}
           icon={<Globe className="h-4 w-4" />}
-          label="System (Global)"
+          label="All projects"
           count={globalMemories.length}
         />
         <TabButton
           active={activeTab === "agent"}
           onClick={() => setActiveTab("agent")}
           icon={<Database className="h-4 w-4" />}
-          label="Agent (Project)"
+          label="Current project"
           count={agentMemories.length}
         />
         <TabButton
@@ -299,9 +305,9 @@ function MemoryList({
     return (
       <div className="py-12 text-center text-muted-foreground">
         <Brain className="mx-auto mb-3 h-10 w-10 opacity-30" />
-        <p>No memories in this scope yet.</p>
+        <p>No memories here yet.</p>
         <p className="text-sm">
-          Memories are created automatically during conversations or manually.
+          The agent can create memories during conversations, or you can add one manually.
         </p>
       </div>
     )
@@ -340,7 +346,10 @@ function MemoryCard({
       queryClient.invalidateQueries({ queryKey: ["memories"] })
       toast.success(memory.pinned ? "Unpinned" : "Pinned")
     },
-    onError: (e) => toast.error("Failed to toggle pin", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory pin was not changed", {
+        description: getErrorDescription(error, "Refresh the memory list and try again."),
+      }),
   })
 
   return (
@@ -454,7 +463,10 @@ function MemoryEditDialog({
       toast.success("Memory updated")
       onClose()
     },
-    onError: (e) => toast.error("Failed to update", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory changes were not saved", {
+        description: getErrorDescription(error, "Review the memory fields and try again."),
+      }),
   })
 
   const handleSave = () => {
@@ -473,7 +485,7 @@ function MemoryEditDialog({
     <Dialog open={!!memory} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Memory</DialogTitle>
+          <DialogTitle>Edit memory</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
@@ -553,7 +565,10 @@ function MemoryCreateDialog({
       setContent("")
       setTags("")
     },
-    onError: (e) => toast.error("Failed to create", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Memory was not created", {
+        description: getErrorDescription(error, "Review the memory fields and try again."),
+      }),
   })
 
   const handleCreate = () => {
@@ -574,7 +589,7 @@ function MemoryCreateDialog({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add Memory</DialogTitle>
+          <DialogTitle>Add memory</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
@@ -654,7 +669,7 @@ function MemoryCreateDialog({
             ) : (
               <Plus className="mr-2 h-4 w-4" />
             )}
-            Create
+            Add memory
           </Button>
         </DialogFooter>
       </DialogContent>

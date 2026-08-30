@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft, Bot, Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import { subagentsApi } from "@/api/subagents"
 import type { SubagentRole } from "@/api/types"
@@ -75,7 +76,7 @@ function RoleList({
       ))}
       {roles.length === 0 && (
         <li className="px-2 py-3 text-center text-xs text-muted-foreground">
-          No roles defined yet.
+          No custom roles yet. Create one to reuse a model, prompt, and tool limits.
         </li>
       )}
     </ul>
@@ -112,7 +113,10 @@ export function SubagentsPage() {
       queryClient.invalidateQueries({ queryKey: ["subagent-roles"] })
       toast.success("Role deleted")
     },
-    onError: (e) => toast.error("Failed to delete role", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Subagent role was not deleted", {
+        description: getErrorDescription(error, "Refresh the role list and try again."),
+      }),
   })
 
   const openNewRole = () => {
@@ -161,7 +165,8 @@ export function SubagentsPage() {
             size="icon"
             className="h-7 w-7"
             onClick={openNewRole}
-            title="New Role"
+            title="Create subagent role"
+            aria-label="Create subagent role"
           >
             <Plus className="h-4 w-4" />
           </Button>
@@ -188,7 +193,7 @@ export function SubagentsPage() {
             ))}
             {standaloneRuns.length === 0 && (
               <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                No runs yet.
+                No standalone subagent runs yet.
               </p>
             )}
           </div>
@@ -218,7 +223,7 @@ export function SubagentsPage() {
         <ScrollArea className="flex-1">
           {tab === "monitor" && (
             <div className="p-4">
-              <h3 className="mb-3 text-sm font-semibold">Active Subagents</h3>
+              <h3 className="mb-3 text-sm font-semibold">Active subagents</h3>
               {activeRuns.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No active subagents. Launch one from the Launch tab.
@@ -296,7 +301,7 @@ export function SubagentsPage() {
                       className="gap-1.5"
                       onClick={openNewRole}
                     >
-                      <Plus className="h-4 w-4" /> New Role
+                      <Plus className="h-4 w-4" /> New role
                     </Button>
                   </div>
                   {roleList}
@@ -318,7 +323,7 @@ export function SubagentsPage() {
           )}
           {tab === "roles" && !isMobile && !showEditor && (
             <div className="p-4 text-sm text-muted-foreground">
-              Select a role from the left panel to edit, or click + to create a new one.
+              Select a role from the left panel to edit it, or use the plus button to create one.
             </div>
           )}
         </ScrollArea>

@@ -15,6 +15,49 @@ export class ApiError extends Error {
   }
 }
 
+/** Turn API and network failures into copy that is safe to show in the UI.
+ * Raw ApiError messages contain endpoint paths, which are useful in DevTools
+ * but do not tell a user how to recover. */
+export function getErrorDescription(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    const detail = error.detail
+    if (typeof detail === "string" && detail.trim()) return detail.trim()
+    if (detail && typeof detail === "object" && "detail" in detail) {
+      const value = (detail as { detail?: unknown }).detail
+      if (typeof value === "string" && value.trim()) return value.trim()
+      if (Array.isArray(value)) {
+        const messages = value
+          .map((item) =>
+            item && typeof item === "object" && "msg" in item
+              ? String((item as { msg: unknown }).msg)
+              : ""
+          )
+          .filter(Boolean)
+        if (messages.length > 0) return messages.join(" ")
+      }
+    }
+    if (error.status === 403) {
+      return "This action is not permitted by the current settings."
+    }
+    if (error.status === 404) {
+      return "This item is no longer available. Refresh the page and try again."
+    }
+    if (error.status === 409) {
+      return "This item changed before the action completed. Refresh and try again."
+    }
+    if (error.status >= 500) {
+      return "The local harness returned an unexpected error. Try again."
+    }
+    return fallback
+  }
+
+  if (error instanceof TypeError && error.message.toLowerCase().includes("fetch")) {
+    return "Could not reach the local harness. Check that it is running, then try again."
+  }
+  if (error instanceof Error && error.message.trim()) return error.message.trim()
+  return fallback
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit

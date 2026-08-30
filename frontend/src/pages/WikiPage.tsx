@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { BookOpen, Plus, Search, Pencil, Trash2, Pin, Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { getErrorDescription } from "@/api/client"
 import { wikiApi } from "@/api/wiki"
 import type { WikiArticle } from "@/api/types"
 import { Button } from "@/components/ui/button"
@@ -54,7 +55,10 @@ export function WikiPage() {
       toast.success("Article created")
       setDialogOpen(false)
     },
-    onError: (e) => toast.error("Failed to create article", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Article was not created", {
+        description: getErrorDescription(error, "Review the article fields and try again."),
+      }),
   })
 
   const updateMutation = useMutation({
@@ -66,7 +70,10 @@ export function WikiPage() {
       setDialogOpen(false)
       setEditing(null)
     },
-    onError: (e) => toast.error("Failed to update article", { description: String(e) }),
+    onError: (error) =>
+      toast.error("Article changes were not saved", {
+        description: getErrorDescription(error, "Review the article fields and try again."),
+      }),
   })
 
   const deleteMutation = useMutation({
@@ -75,12 +82,20 @@ export function WikiPage() {
       queryClient.invalidateQueries({ queryKey: ["wiki"] })
       toast.success("Article deleted")
     },
+    onError: (error) =>
+      toast.error("Article was not deleted", {
+        description: getErrorDescription(error, "Refresh the article list and try again."),
+      }),
   })
 
   const pinMutation = useMutation({
     mutationFn: ({ id, is_pinned }: { id: number; is_pinned: boolean }) =>
       wikiApi.update(id, { is_pinned }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["wiki"] }),
+    onError: (error) =>
+      toast.error("Pinned status was not changed", {
+        description: getErrorDescription(error, "Refresh the article list and try again."),
+      }),
   })
 
   const displayArticles = searchQuery.length >= 2 ? (searchResults ?? []) : articles
@@ -91,10 +106,10 @@ export function WikiPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <BookOpen className="h-6 w-6 text-primary" />
-          <h1 className="text-2xl font-bold">Knowledge Base</h1>
+          <h1 className="text-2xl font-bold">Knowledge base</h1>
         </div>
         <Button onClick={() => { setEditing(null); setDialogOpen(true) }}>
-          <Plus className="mr-1 h-4 w-4" /> New Article
+          <Plus className="mr-1 h-4 w-4" /> New article
         </Button>
       </div>
 
@@ -103,7 +118,8 @@ export function WikiPage() {
         <div className="relative flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search articles..."
+            placeholder="Search articles…"
+            aria-label="Search knowledge base"
             className="pl-9"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -129,7 +145,11 @@ export function WikiPage() {
         </div>
       ) : displayArticles.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">
-          {searchQuery ? "No articles match your search." : "No articles yet. Create your first one!"}
+          {searchQuery.length >= 2
+            ? "No articles match your search. Try different words or clear the search."
+            : categoryFilter
+              ? `No articles in “${categoryFilter}”. Choose another category or create one.`
+              : "No articles yet. Create one to build a reusable project reference."}
         </p>
       ) : (
         <div className="space-y-3">
@@ -151,13 +171,31 @@ export function WikiPage() {
                     </CardDescription>
                   </div>
                   <div className="flex gap-1">
-                    <Button variant="ghost" size="sm" onClick={() => pinMutation.mutate({ id: article.id, is_pinned: !article.is_pinned })}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title={article.is_pinned ? `Unpin ${article.title}` : `Pin ${article.title}`}
+                      aria-label={article.is_pinned ? `Unpin ${article.title}` : `Pin ${article.title}`}
+                      onClick={() => pinMutation.mutate({ id: article.id, is_pinned: !article.is_pinned })}
+                    >
                       <Pin className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="sm" onClick={() => { setEditing(article); setDialogOpen(true) }}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title={`Edit ${article.title}`}
+                      aria-label={`Edit ${article.title}`}
+                      onClick={() => { setEditing(article); setDialogOpen(true) }}
+                    >
                       <Pencil className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(article.id)}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title={`Permanently delete ${article.title}`}
+                      aria-label={`Permanently delete ${article.title}`}
+                      onClick={() => deleteMutation.mutate(article.id)}
+                    >
                       <Trash2 className="h-3.5 w-3.5 text-red-500" />
                     </Button>
                   </div>
@@ -165,7 +203,7 @@ export function WikiPage() {
               </CardHeader>
               <CardContent>
                 <p className="line-clamp-2 text-sm text-muted-foreground">
-                  {article.content.slice(0, 200) || "(empty)"}
+                  {article.content.slice(0, 200) || "No content"}
                 </p>
               </CardContent>
             </Card>
@@ -216,7 +254,7 @@ function ArticleDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{article ? "Edit Article" : "New Article"}</DialogTitle>
+          <DialogTitle>{article ? "Edit article" : "New article"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div>
@@ -227,6 +265,7 @@ function ArticleDialog({
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Article title"
             />
+            <p className="mt-1 text-xs text-muted-foreground">A title is required.</p>
           </div>
           <div>
             <Label htmlFor="wiki-article-content">Content (Markdown)</Label>
@@ -235,7 +274,7 @@ function ArticleDialog({
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={10}
-              placeholder="Write your article in Markdown..."
+              placeholder="Write the article in Markdown…"
             />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -257,8 +296,8 @@ function ArticleDialog({
               />
             </div>
           </div>
-          <Button onClick={handleSubmit} className="w-full">
-            {article ? "Save Changes" : "Create Article"}
+          <Button onClick={handleSubmit} className="w-full" disabled={!title.trim()}>
+            {article ? "Save article" : "Create article"}
           </Button>
         </div>
       </DialogContent>

@@ -71,7 +71,7 @@ function PageFallback() {
       role="status"
       aria-live="polite"
     >
-      Loading section…
+      Opening section…
     </div>
   )
 }

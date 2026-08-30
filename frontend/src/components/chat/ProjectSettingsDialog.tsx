@@ -108,7 +108,7 @@ export function ProjectSettingsDialog({
 
           <div className="space-y-1.5">
             <Label htmlFor="project-settings-description" className="text-xs text-muted-foreground">
-              Description
+              Description (optional)
             </Label>
             <Textarea
               id="project-settings-description"
@@ -124,13 +124,13 @@ export function ProjectSettingsDialog({
               htmlFor="project-settings-instructions"
               className="text-xs text-muted-foreground"
             >
-              Additional system instructions
+              Agent instructions (optional)
             </Label>
             <Textarea
               id="project-settings-instructions"
               value={systemInstructions}
               onChange={(e) => setSystemInstructions(e.target.value)}
-              placeholder="Extra guidance applied to every agent in this project…"
+              placeholder="For example: run the test suite before finishing each task."
               className="min-h-[80px] resize-y text-sm"
             />
           </div>
@@ -139,8 +139,8 @@ export function ProjectSettingsDialog({
           <div className="space-y-1.5">
             <div className="text-xs font-medium text-muted-foreground">Skills</div>
             <p className="text-[11px] text-muted-foreground">
-              Global skills are enabled by default. Toggle off to disable for
-              this project.
+              Skills are available in this project by default. Select a skill
+              to enable or disable it here.
             </p>
             {allSkills.length === 0 ? (
               <p className="py-2 text-xs text-muted-foreground">No skills available.</p>
@@ -191,7 +191,7 @@ export function ProjectSettingsDialog({
           </Button>
           <Button onClick={handleSave}>
             <Save className="mr-1.5 h-4 w-4" />
-            Save
+            Save project settings
           </Button>
         </DialogFooter>
       </DialogContent>
