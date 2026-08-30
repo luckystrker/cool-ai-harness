@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react"
+import { useNavigate, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store } from "lucide-react"
 import { toast } from "sonner"
@@ -69,10 +70,18 @@ const EMPTY_FORM: ProviderCreate = {
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const isProviderSetup = searchParams.get("setup") === "provider"
+  const requestedReturnTo = searchParams.get("returnTo")
+  const returnTo =
+    requestedReturnTo?.startsWith("/") && !requestedReturnTo.startsWith("//")
+      ? requestedReturnTo
+      : "/"
   const [activeSection, setActiveSection] = useState<
     "connections" | "agent" | "extensions" | "prompt"
   >("connections")
-  const [createOpen, setCreateOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(isProviderSetup)
   const [createForm, setCreateForm] = useState<ProviderCreate>(EMPTY_FORM)
   const [editing, setEditing] = useState<Provider | null>(null)
   const [deletingProvider, setDeletingProvider] = useState<Provider | null>(null)
@@ -84,11 +93,18 @@ export function SettingsPage() {
 
   const createMutation = useMutation({
     mutationFn: providersApi.create,
-    onSuccess: () => {
+    onSuccess: (provider) => {
+      queryClient.setQueryData<Provider[]>(["providers"], (current = []) => [
+        ...current.filter((item) => item.id !== provider.id),
+        provider,
+      ])
       queryClient.invalidateQueries({ queryKey: ["providers"] })
-      toast.success("Provider added")
+      toast.success(isProviderSetup ? "Model connected" : "Provider added", {
+        description: isProviderSetup ? "Preparing your first draft…" : undefined,
+      })
       setCreateOpen(false)
       setCreateForm(EMPTY_FORM)
+      if (isProviderSetup) navigate(returnTo, { replace: true })
     },
     onError: () => toast.error("Provider could not be added", {
       description: "Check the endpoint and API key, then try again.",
@@ -126,6 +142,11 @@ export function SettingsPage() {
       return
     }
     createMutation.mutate(createForm)
+  }
+
+  const handleCreateOpenChange = (open: boolean) => {
+    setCreateOpen(open)
+    if (!open && isProviderSetup) navigate("/", { replace: true })
   }
 
   return (
@@ -174,7 +195,7 @@ export function SettingsPage() {
                 </p>
               </div>
 
-              <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+              <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
                 <DialogTrigger asChild>
                   <Button className="gap-2">
                     <Plus className="h-4 w-4" /> Add provider
@@ -182,16 +203,24 @@ export function SettingsPage() {
                 </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
-                    <DialogTitle>Add provider</DialogTitle>
+                    <DialogTitle>
+                      {isProviderSetup ? "Connect your first model" : "Add provider"}
+                    </DialogTitle>
+                    {isProviderSetup && (
+                      <DialogDescription>
+                        This is the only required setup. Add your connection now; everything else
+                        can be changed later.
+                      </DialogDescription>
+                    )}
                   </DialogHeader>
                   <ProviderForm form={createForm} onChange={setCreateForm} />
                   <DialogFooter>
-                    <Button variant="outline" onClick={() => setCreateOpen(false)}>
-                      Cancel
+                    <Button variant="outline" onClick={() => handleCreateOpenChange(false)}>
+                      {isProviderSetup ? "Not now" : "Cancel"}
                     </Button>
                     <Button onClick={handleCreate} disabled={createMutation.isPending}>
                       {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                      Save provider
+                      {isProviderSetup ? "Connect and continue" : "Save provider"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>

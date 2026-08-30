@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   GitBranch,
+  KeyRound,
   Loader2,
   Menu,
   MessageSquare,
@@ -22,7 +23,7 @@ import { artifactsApi } from "@/api/artifacts"
 import { plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
-import type { Message, ToolPermissions } from "@/api/types"
+import type { Message, Provider, ToolPermissions } from "@/api/types"
 import { Markdown } from "@/components/chat/Markdown"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
@@ -63,7 +64,11 @@ export function ChatPage() {
   // Providers feed the "suggested models" list (their default_model values)
   // and tell us which provider is active (first active, non-fallback row) so we
   // can load its live /models list for the model picker + context-window badge.
-  const { data: providers = [] } = useQuery({
+  const {
+    data: providers = [],
+    isLoading: providersLoading,
+    isError: providersError,
+  } = useQuery({
     queryKey: ["providers"],
     queryFn: providersApi.list,
   })
@@ -400,7 +405,15 @@ export function ChatPage() {
     return null
   }, [detail])
 
-  if (!convId) return <EmptyState />
+  if (!convId) {
+    return (
+      <EmptyState
+        providers={providers}
+        providersLoading={providersLoading}
+        providersError={providersError}
+      />
+    )
+  }
 
   const currentModel = detail?.model || ""
 
@@ -614,10 +627,23 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
   return out
 }
 
-function EmptyState() {
+function EmptyState({
+  providers,
+  providersLoading,
+  providersError,
+}: {
+  providers: Provider[]
+  providersLoading: boolean
+  providersError: boolean
+}) {
   const { openDrawer } = useMobileNav()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
+  const resumedDraft = searchParams.get("draft")
+  const resumedDraftStarted = useRef(false)
+  const activeProvider = providers.find((provider) => provider.is_active)
+  const providerReady = Boolean(activeProvider)
   const createMutation = useMutation({
     mutationFn: async (draft: string | null) => {
       const defaults = loadAgentDefaults()
@@ -635,12 +661,18 @@ function EmptyState() {
       const query = draft ? `?draft=${encodeURIComponent(draft)}` : ""
       navigate(`/chat/${conversation.id}${query}`)
     },
-    onError: () =>
+    onError: (_error, draft) =>
       toast.error("Conversation could not be created", {
         description: "Check that the local harness is running, then try again.",
-        action: { label: "Retry", onClick: () => createMutation.mutate(null) },
+        action: { label: "Retry", onClick: () => createMutation.mutate(draft) },
       }),
   })
+
+  useEffect(() => {
+    if (!resumedDraft || !providerReady || resumedDraftStarted.current) return
+    resumedDraftStarted.current = true
+    createMutation.mutate(resumedDraft)
+  }, [createMutation, providerReady, resumedDraft])
 
   const starters = [
     {
@@ -666,6 +698,16 @@ function EmptyState() {
     },
   ]
 
+  const startWithDraft = (prompt: string) => {
+    if (providerReady || providersLoading || providersError) {
+      createMutation.mutate(prompt)
+      return
+    }
+    const returnTo = `/?draft=${encodeURIComponent(prompt)}`
+    const query = new URLSearchParams({ setup: "provider", returnTo })
+    navigate(`/settings?${query.toString()}`)
+  }
+
   return (
     <div className="relative h-full overflow-y-auto px-4 py-10 sm:px-8 sm:py-14">
       <Button
@@ -678,39 +720,97 @@ function EmptyState() {
         <Menu className="h-5 w-5" />
       </Button>
       <div className="mx-auto flex w-full max-w-2xl flex-col items-center text-center">
-        <div className="flex items-center gap-3" aria-label="Harness run cycle: plan, act, verify">
-          {["Plan", "Act", "Verify"].map((step, index) => (
+        <div
+          className="flex items-center gap-2 text-xs font-medium text-muted-foreground sm:gap-3"
+          aria-label="First run steps: connect a model, choose an outcome, review and run"
+        >
+          {["Connect", "Choose", "Run"].map((step, index) => (
             <div key={step} className="flex items-center gap-3">
-              <span
-                className={cn(
-                  "grid h-9 w-9 place-items-center rounded-full text-xs font-semibold",
-                  index === 2
-                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-                    : "bg-primary text-primary-foreground"
-                )}
-              >
-                {index === 2 ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "grid h-7 w-7 place-items-center rounded-full text-[11px] font-semibold",
+                    index === 0 && providerReady
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                      : index === (providerReady ? 1 : 0)
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {index === 0 && providerReady ? (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  ) : (
+                    index + 1
+                  )}
+                </span>
+                <span className="hidden sm:inline">{step}</span>
               </span>
-              {index < 2 && <span className="h-px w-7 bg-border sm:w-12" aria-hidden />}
+              {index < 2 && <span className="h-px w-6 bg-border sm:w-9" aria-hidden />}
             </div>
           ))}
         </div>
 
         <h1 className="mt-7 max-w-xl text-balance text-3xl font-semibold tracking-[-0.025em] sm:text-4xl">
-          Turn an outcome into a verified run.
+          What should Harness help you finish?
         </h1>
         <p className="mt-3 max-w-[60ch] text-pretty text-base leading-7 text-muted-foreground">
-          Keep the model, tools, approvals, memory, and run history together. Start with a real
-          goal; adjust the draft before anything runs.
+          Choose a real outcome. Harness opens an editable draft, then keeps the model, tools,
+          approvals, and verification in one run.
         </p>
 
-        <div className="mt-8 w-full space-y-2 text-left">
+        {!providersLoading && !providerReady && !providersError && (
+          <div className="mt-8 flex w-full flex-col gap-4 border-y py-5 text-left sm:flex-row sm:items-center">
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-muted text-foreground">
+              <KeyRound className="h-5 w-5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 className="font-medium">Connect a model before your first run</h2>
+              <p className="mt-1 text-sm leading-5 text-muted-foreground">
+                Add an OpenAI-compatible or Anthropic connection. Your API key is encrypted at
+                rest and never shown in full.
+              </p>
+            </div>
+            <Button
+              className="shrink-0"
+              onClick={() => navigate("/settings?setup=provider&returnTo=%2F")}
+            >
+              Connect model
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
+
+        {providersLoading && (
+          <p className="mt-7 text-sm text-muted-foreground" role="status" aria-live="polite">
+            Checking your model connection…
+          </p>
+        )}
+
+        {providersError && (
+          <div className="mt-7 flex w-full items-center justify-between gap-4 border-y py-4 text-left">
+            <p className="text-sm text-muted-foreground">
+              Harness couldn’t verify your model connection. You can still prepare a draft.
+            </p>
+            <Button variant="outline" onClick={() => navigate("/settings")}>
+              Check settings
+            </Button>
+          </div>
+        )}
+
+        {resumedDraft && providerReady && (
+          <p className="mt-7 flex items-center gap-2 text-sm text-muted-foreground" role="status">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Model connected. Preparing your first draft…
+          </p>
+        )}
+
+        <div className={cn("w-full space-y-2 text-left", !resumedDraft && "mt-8")}>
           {starters.map(({ title, hint, prompt, icon: Icon }) => (
             <button
               key={title}
               type="button"
               disabled={createMutation.isPending}
-              onClick={() => createMutation.mutate(prompt)}
+              onClick={() => startWithDraft(prompt)}
               className="group flex min-h-16 w-full items-center gap-4 rounded-xl border bg-background px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
             >
               <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-muted text-foreground">
@@ -732,7 +832,7 @@ function EmptyState() {
           onClick={() => createMutation.mutate(null)}
         >
           {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-          Start with a blank conversation
+          I’ll start with a blank conversation
         </Button>
       </div>
     </div>
