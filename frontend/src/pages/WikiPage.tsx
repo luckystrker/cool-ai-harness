@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { BookOpen, Plus, Search, Pencil, Trash2, Pin, Loader2 } from "lucide-react"
+import { BookOpen, Plus, Search, Pencil, Trash2, Pin } from "lucide-react"
 import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { wikiApi } from "@/api/wiki"
@@ -23,6 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 
 export function WikiPage() {
   const queryClient = useQueryClient()
@@ -31,7 +32,7 @@ export function WikiPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
 
-  const { data: articles = [], isLoading } = useQuery({
+  const { data: articles = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["wiki", categoryFilter],
     queryFn: () => wikiApi.list({ category: categoryFilter ?? undefined }),
   })
@@ -140,9 +141,13 @@ export function WikiPage() {
 
       {/* Articles list */}
       {isLoading ? (
-        <div className="flex justify-center py-12">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </div>
+        <QueryLoadingState label="Loading knowledge base…" />
+      ) : isError ? (
+        <QueryErrorState
+          title="Knowledge base could not be loaded"
+          description="Check that the local harness is running, then try again."
+          onRetry={() => void refetch()}
+        />
       ) : displayArticles.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">
           {searchQuery.length >= 2

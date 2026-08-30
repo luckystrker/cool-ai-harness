@@ -44,6 +44,7 @@ import {
 } from "@/lib/agentConfig"
 import { getProjectForConversation } from "@/lib/projects"
 import { Button } from "@/components/ui/button"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 export function ChatPage() {
@@ -53,7 +54,7 @@ export function ChatPage() {
   const queryClient = useQueryClient()
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const { data: detail, isLoading } = useQuery({
+  const { data: detail, isLoading, isError, refetch } = useQuery({
     queryKey: ["conversation", convId],
     queryFn: () => (convId ? conversationsApi.get(convId) : null),
     enabled: convId !== null,
@@ -440,7 +441,13 @@ export function ChatPage() {
         <div className="flex flex-1 flex-col overflow-hidden">
           <div ref={scrollRef} className="flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl py-4">
-              {isLoading ? (
+              {isError ? (
+                <QueryErrorState
+                  title="Conversation could not be loaded"
+                  description="Check that the local harness is running, then try again."
+                  onRetry={() => void refetch()}
+                />
+              ) : isLoading ? (
                 <div className="py-16 text-center text-sm text-muted-foreground">
                   Loading conversation…
                 </div>

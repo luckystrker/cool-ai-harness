@@ -5,7 +5,6 @@ import {
   Bot,
   Copy,
   GripVertical,
-  Loader2,
   Pencil,
   Play,
   Plus,
@@ -27,6 +26,7 @@ import type {
 } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -40,7 +40,7 @@ export function ProfilesPage() {
   const [editing, setEditing] = useState<AgentProfile | null>(null)
   const [macroDialogOpen, setMacroDialogOpen] = useState(false)
 
-  const { data: profiles = [], isLoading } = useQuery({
+  const { data: profiles = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["profiles"],
     queryFn: () => profilesApi.list(true),
   })
@@ -114,10 +114,17 @@ export function ProfilesPage() {
   })
 
   if (isLoading) {
+    return <QueryLoadingState label="Loading agent blueprints…" className="h-64" />
+  }
+
+  if (isError) {
     return (
-      <div className="grid h-64 place-items-center">
-        <Loader2 className="animate-spin" />
-      </div>
+      <QueryErrorState
+        title="Agent blueprints could not be loaded"
+        description="Check that the local harness is running, then try again."
+        onRetry={() => void refetch()}
+        className="h-64 justify-center"
+      />
     )
   }
 

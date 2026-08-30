@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { BarChart3, Loader2 } from "lucide-react"
+import { BarChart3 } from "lucide-react"
 import { analyticsApi } from "@/api/analytics"
 import type {
   AnalyticsSummary,
@@ -18,6 +18,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
@@ -33,7 +34,7 @@ const DAYS_OPTIONS = [7, 14, 30, 90] as const
 export function AnalyticsPage() {
   const [days, setDays] = useState<number>(30)
 
-  const { data: summary, isLoading } = useQuery({
+  const { data: summary, isLoading, isError, refetch } = useQuery({
     queryKey: ["analytics", "summary", days],
     queryFn: () => analyticsApi.summary(days),
   })
@@ -104,10 +105,14 @@ export function AnalyticsPage() {
           </div>
         </header>
 
-        {isLoading || !summary ? (
-          <div className="flex justify-center py-12">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
+        {isLoading ? (
+          <QueryLoadingState label="Loading analytics…" />
+        ) : isError || !summary ? (
+          <QueryErrorState
+            title="Analytics could not be loaded"
+            description="Check that the local harness is running, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : (
           <>
             <SummaryCards summary={summary} />

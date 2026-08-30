@@ -32,6 +32,7 @@ import {
   saveAgentDefaults,
 } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Input } from "@/components/ui/input"
 import { ChatModelsPicker } from "@/components/settings/ChatModelsPicker"
 import { Label } from "@/components/ui/label"
@@ -76,7 +77,7 @@ export function SettingsPage() {
   const [editing, setEditing] = useState<Provider | null>(null)
   const [deletingProvider, setDeletingProvider] = useState<Provider | null>(null)
 
-  const { data: providers = [], isLoading } = useQuery({
+  const { data: providers = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["providers"],
     queryFn: providersApi.list,
   })
@@ -198,9 +199,13 @@ export function SettingsPage() {
             </div>
 
             {isLoading ? (
-              <div className="flex justify-center py-12">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-              </div>
+              <QueryLoadingState label="Loading model providers…" />
+            ) : isError ? (
+              <QueryErrorState
+                title="Model providers could not be loaded"
+                description="Check that the local harness is running, then try again."
+                onRetry={() => void refetch()}
+              />
             ) : providers.length === 0 ? (
               <div className="rounded-xl border border-dashed px-5 py-10 text-center">
                 <h3 className="font-medium">Connect a model provider</h3>

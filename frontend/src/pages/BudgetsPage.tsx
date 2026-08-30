@@ -16,6 +16,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
@@ -24,7 +25,7 @@ const fmtUsd = (n: number) =>
 export function BudgetsPage() {
   const queryClient = useQueryClient()
 
-  const { data: status, isLoading } = useQuery({
+  const { data: status, isLoading, isError, refetch } = useQuery({
     queryKey: ["budgets"],
     queryFn: budgetsApi.getStatus,
   })
@@ -86,10 +87,14 @@ export function BudgetsPage() {
           </div>
         </header>
 
-        {isLoading || !status ? (
-          <div className="flex justify-center py-12">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
+        {isLoading ? (
+          <QueryLoadingState label="Loading budget status…" />
+        ) : isError || !status ? (
+          <QueryErrorState
+            title="Budget status could not be loaded"
+            description="Check that the local harness is running, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : (
           <>
             <StatusBanner status={status} />

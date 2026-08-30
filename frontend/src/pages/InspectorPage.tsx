@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { ComparisonView } from "@/components/inspector/ComparisonView"
 import { RunTimeline } from "@/components/inspector/RunTimeline"
 import { api, getErrorDescription } from "@/api/client"
@@ -30,7 +31,12 @@ export function InspectorPage() {
   const [replayModel, setReplayModel] = useState("")
 
   // Load conversations for the selector.
-  const { data: conversations = [] } = useQuery({
+  const {
+    data: conversations = [],
+    isLoading: conversationsLoading,
+    isError: conversationsError,
+    refetch: refetchConversations,
+  } = useQuery({
     queryKey: ["conversations"],
     queryFn: conversationsApi.list,
   })
@@ -70,6 +76,21 @@ export function InspectorPage() {
         description: getErrorDescription(error, "Select a run and try again."),
       }),
   })
+
+  if (conversationsLoading) {
+    return <QueryLoadingState label="Loading run inspector…" className="h-64" />
+  }
+
+  if (conversationsError) {
+    return (
+      <QueryErrorState
+        title="Run inspector could not be loaded"
+        description="Check that the local harness is running, then try again."
+        onRetry={() => void refetchConversations()}
+        className="h-64 justify-center"
+      />
+    )
+  }
 
   return (
     <div className="flex h-full flex-col">

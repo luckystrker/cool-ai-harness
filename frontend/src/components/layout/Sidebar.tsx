@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 const CONVERSATION_BATCH_SIZE = 60
@@ -50,7 +51,7 @@ export function Sidebar({
   const { conversationId } = useParams()
   const queryClient = useQueryClient()
 
-  const { data: conversations = [], isLoading } = useQuery({
+  const { data: conversations = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["conversations"],
     queryFn: conversationsApi.list,
   })
@@ -410,7 +411,14 @@ export function Sidebar({
             Conversations
           </span>
         </div>
-        {isLoading ? (
+        {isError ? (
+          <QueryErrorState
+            title="Conversations could not be loaded"
+            description="Check that the local harness is running."
+            onRetry={() => void refetch()}
+            compact
+          />
+        ) : isLoading ? (
           <div className="flex items-center justify-center py-8 text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
           </div>

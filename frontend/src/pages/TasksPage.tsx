@@ -39,6 +39,7 @@ import type {
 } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
@@ -95,7 +96,7 @@ export function TasksPage() {
   const [editing, setEditing] = useState<ScheduledTask | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
 
-  const { data: tasks = [], isLoading } = useQuery({
+  const { data: tasks = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["tasks"],
     queryFn: () => tasksApi.list(),
     refetchInterval: 10_000,
@@ -173,10 +174,17 @@ export function TasksPage() {
   })
 
   if (isLoading) {
+    return <QueryLoadingState label="Loading scheduled tasks…" className="h-64" />
+  }
+
+  if (isError) {
     return (
-      <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
+      <QueryErrorState
+        title="Scheduled tasks could not be loaded"
+        description="Check that the local harness is running, then try again."
+        onRetry={() => void refetch()}
+        className="h-64 justify-center"
+      />
     )
   }
 

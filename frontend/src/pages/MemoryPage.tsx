@@ -45,6 +45,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 type TabKey = "global" | "agent" | "review" | "entities"
@@ -69,12 +70,22 @@ export function MemoryPage() {
   const [createOpen, setCreateOpen] = useState(false)
 
   // Fetch memories by scope
-  const { data: globalMemories = [], isLoading: globalLoading } = useQuery({
+  const {
+    data: globalMemories = [],
+    isLoading: globalLoading,
+    isError: globalError,
+    refetch: refetchGlobal,
+  } = useQuery({
     queryKey: ["memories", "global"],
     queryFn: () => memoryApi.list({ scope: "global", limit: 100 }),
   })
 
-  const { data: agentMemories = [], isLoading: agentLoading } = useQuery({
+  const {
+    data: agentMemories = [],
+    isLoading: agentLoading,
+    isError: agentError,
+    refetch: refetchAgent,
+  } = useQuery({
     queryKey: ["memories", "agent"],
     queryFn: () => memoryApi.list({ scope: "agent", limit: 100 }),
   })
@@ -107,6 +118,8 @@ export function MemoryPage() {
 
   const scopeLoading = activeTab === "global" ? globalLoading : agentLoading
   const scopeMemories = activeTab === "global" ? globalMemories : agentMemories
+  const scopeError = activeTab === "global" ? globalError : agentError
+  const refetchScope = activeTab === "global" ? refetchGlobal : refetchAgent
 
   return (
     <div className="flex h-full flex-col">
@@ -202,6 +215,8 @@ export function MemoryPage() {
         <MemoryList
           memories={scopeMemories}
           isLoading={scopeLoading}
+          isError={scopeError}
+          onRetry={() => void refetchScope()}
           onEdit={(m) => setEditingMemory(m)}
           onDelete={(id) => deleteMutation.mutate(id)}
         />
@@ -286,11 +301,15 @@ function TabButton({
 function MemoryList({
   memories,
   isLoading,
+  isError,
+  onRetry,
   onEdit,
   onDelete,
 }: {
   memories: MemoryItem[]
   isLoading: boolean
+  isError: boolean
+  onRetry: () => void
   onEdit: (m: MemoryItem) => void
   onDelete: (id: number) => void
 }) {
@@ -299,6 +318,15 @@ function MemoryList({
       <div className="flex items-center justify-center py-12 text-muted-foreground">
         <Loader2 className="h-5 w-5 animate-spin" />
       </div>
+    )
+  }
+  if (isError) {
+    return (
+      <QueryErrorState
+        title="Memories could not be loaded"
+        description="Check that the local harness is running, then try again."
+        onRetry={onRetry}
+      />
     )
   }
   if (memories.length === 0) {

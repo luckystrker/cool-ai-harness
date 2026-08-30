@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { useResearchStream } from "@/hooks/useResearchStream"
 import { useIsMobile } from "@/hooks/useMediaQuery"
 import { cn } from "@/lib/utils"
@@ -31,7 +32,7 @@ export function DeepResearchPage() {
   const [mobilePane, setMobilePane] = useState<"list" | "detail">("list")
   const isMobile = useIsMobile()
 
-  const { data: runs = [] } = useQuery({
+  const { data: runs = [], isError: runsError, refetch: refetchRuns } = useQuery({
     queryKey: ["research-runs"],
     queryFn: () => deepResearchApi.list(50),
     refetchInterval: (query) => {
@@ -212,23 +213,36 @@ export function DeepResearchPage() {
               </span>
             </div>
             <ul className="space-y-1.5">
-              {runs.map((run) => (
-                <li key={run.id}>
-                  <ResearchRunCard
-                    run={run}
-                    selected={run.id === selectedId}
-                    onClick={() => {
-                      setCompareWithId(null)
-                      setSelectedId(run.id)
-                      setMobilePane("detail")
-                    }}
+              {runsError ? (
+                <li>
+                  <QueryErrorState
+                    title="Research history could not be loaded"
+                    description="Check that the local harness is running."
+                    onRetry={() => void refetchRuns()}
+                    compact
                   />
                 </li>
-              ))}
-              {runs.length === 0 && !showLiveProgress && (
-                <p className="px-1 py-4 text-center text-sm text-muted-foreground">
-                  No research reports yet. Enter a question above to start one.
-                </p>
+              ) : (
+                <>
+                  {runs.map((run) => (
+                    <li key={run.id}>
+                      <ResearchRunCard
+                        run={run}
+                        selected={run.id === selectedId}
+                        onClick={() => {
+                          setCompareWithId(null)
+                          setSelectedId(run.id)
+                          setMobilePane("detail")
+                        }}
+                      />
+                    </li>
+                  ))}
+                  {runs.length === 0 && !showLiveProgress && (
+                    <li className="px-1 py-4 text-center text-sm text-muted-foreground">
+                      No research reports yet. Enter a question above to start one.
+                    </li>
+                  )}
+                </>
               )}
             </ul>
           </div>

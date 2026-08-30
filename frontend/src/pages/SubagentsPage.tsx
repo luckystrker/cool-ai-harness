@@ -11,6 +11,7 @@ import { RunCard } from "@/components/subagents/RunCard"
 import { LaunchForm } from "@/components/subagents/LaunchForm"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { useIsMobile } from "@/hooks/useMediaQuery"
 import { cn } from "@/lib/utils"
 
@@ -90,19 +91,34 @@ export function SubagentsPage() {
   const [editingRole, setEditingRole] = useState<SubagentRole | null>(null)
   const [showEditor, setShowEditor] = useState(false)
 
-  const { data: roles = [] } = useQuery({
+  const {
+    data: roles = [],
+    isLoading: rolesLoading,
+    isError: rolesError,
+    refetch: refetchRoles,
+  } = useQuery({
     queryKey: ["subagent-roles"],
     queryFn: subagentsApi.listRoles,
   })
 
-  const { data: runs = [] } = useQuery({
+  const {
+    data: runs = [],
+    isLoading: runsLoading,
+    isError: runsError,
+    refetch: refetchRuns,
+  } = useQuery({
     queryKey: ["subagent-runs"],
     queryFn: () => subagentsApi.listRuns(),
     refetchInterval: 3000,
   })
 
   // Fetch conversations to get a valid parent for standalone launches.
-  const { data: conversations = [] } = useQuery({
+  const {
+    data: conversations = [],
+    isLoading: conversationsLoading,
+    isError: conversationsError,
+    refetch: refetchConversations,
+  } = useQuery({
     queryKey: ["conversations"],
     queryFn: conversationsApi.list,
   })
@@ -118,6 +134,23 @@ export function SubagentsPage() {
         description: getErrorDescription(error, "Refresh the role list and try again."),
       }),
   })
+
+  if (rolesLoading || runsLoading || conversationsLoading) {
+    return <QueryLoadingState label="Loading subagents…" className="h-64" />
+  }
+
+  if (rolesError || runsError || conversationsError) {
+    return (
+      <QueryErrorState
+        title="Subagents could not be loaded"
+        description="Check that the local harness is running, then try again."
+        onRetry={() => {
+          void Promise.all([refetchRoles(), refetchRuns(), refetchConversations()])
+        }}
+        className="h-64 justify-center"
+      />
+    )
+  }
 
   const openNewRole = () => {
     setEditingRole(null)
