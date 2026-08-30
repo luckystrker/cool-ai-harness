@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, col, select
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.schemas import (
@@ -62,7 +62,7 @@ def _run_to_out(run) -> ResearchRunOut:
     )
 
 
-def _run_to_detail(run) -> ResearchRunDetail:
+def _run_to_detail(run, session: Session) -> ResearchRunDetail:
     detail = _run_to_out(run)
     return ResearchRunDetail(
         **detail.model_dump(),
@@ -72,7 +72,49 @@ def _run_to_detail(run) -> ResearchRunDetail:
         sources=[ResearchSourceOut(**s) for s in (run.sources or [])],
         citations=[ResearchCitationOut(**c) for c in (run.citations or [])],
         report_markdown=run.report_markdown,
+        browser_activity=_browser_activity(session, run.id),
     )
+
+
+def _browser_activity(session: Session, research_run_id: int | None) -> list[dict]:
+    """Reconstruct browser actions from researcher subagent run events."""
+    if research_run_id is None:
+        return []
+    from app.models import RunEvent, SubagentRun
+
+    child_runs = session.exec(
+        select(SubagentRun).where(SubagentRun.research_run_id == research_run_id)
+    ).all()
+    run_ids = [child.run_id for child in child_runs if child.run_id is not None]
+    if not run_ids:
+        return []
+    events = session.exec(
+        select(RunEvent)
+        .where(col(RunEvent.run_id).in_(run_ids))
+        .order_by(col(RunEvent.created_at), col(RunEvent.seq))
+    ).all()
+    pending: dict[str, dict] = {}
+    activity: list[dict] = []
+    for event in events:
+        payload = event.payload or {}
+        call_id = str(payload.get("id") or "")
+        name = str(payload.get("name") or "")
+        if event.kind == "tool_call_start" and name.startswith("browser_"):
+            item = {
+                "id": call_id,
+                "name": name,
+                "arguments": payload.get("arguments") or {},
+                "created_at": event.created_at.isoformat(),
+                "status": "running",
+            }
+            pending[call_id] = item
+            activity.append(item)
+        elif event.kind == "tool_result" and call_id in pending:
+            result = payload.get("result") or {}
+            pending[call_id]["status"] = "error" if result.get("is_error") else "completed"
+            pending[call_id]["result"] = result.get("output")
+            pending[call_id]["metadata"] = result.get("metadata") or {}
+    return activity[-100:]
 
 
 def _launch_background(run_id: int) -> None:
@@ -104,7 +146,7 @@ def get_research_run_detail(
     run = get_research_run(session, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Research run not found")
-    return _run_to_detail(run)
+    return _run_to_detail(run, session)
 
 
 @router.post("/research", response_model=ResearchRunOut, status_code=201)
@@ -123,6 +165,7 @@ def post_research(
         model=body.model,
         conversation_id=body.conversation_id,
     )
+    assert run.id is not None
     _launch_background(run.id)
     return _run_to_out(run)
 
@@ -149,6 +192,7 @@ async def stream_research(
         conversation_id=body.conversation_id,
     )
     run_id = run.id
+    assert run_id is not None
 
     queue: asyncio.Queue[dict] = asyncio.Queue()
     sink = EventSink.for_queue(queue)
@@ -167,17 +211,13 @@ async def stream_research(
                 # pipeline crash outside execute_research still yields a
                 # terminal event instead of hanging the stream.
                 get_task = asyncio.create_task(queue.get())
-                done, _ = await asyncio.wait(
-                    {get_task, task}, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait({get_task, task}, return_when=asyncio.FIRST_COMPLETED)
                 if get_task not in done:
                     exc = task.exception()
                     if exc is not None:
                         yield {
                             "event": "research",
-                            "data": json.dumps(
-                                {"type": "failed", "payload": {"error": str(exc)}}
-                            ),
+                            "data": json.dumps({"type": "failed", "payload": {"error": str(exc)}}),
                         }
                     break
                 event = get_task.result()
@@ -209,6 +249,7 @@ def rerun_research_endpoint(
     if get_research_run(session, run_id) is None:
         raise HTTPException(status_code=404, detail="Research run not found")
     run = rerun_research(session, run_id=run_id, model=body.model)
+    assert run.id is not None
     _launch_background(run.id)
     return _run_to_out(run)
 
@@ -226,18 +267,33 @@ def export_research(
     format: str = "md",
     session: Session = Depends(get_session),
 ):
-    """Export the report as markdown or self-contained HTML."""
+    """Export the report as markdown, HTML, PDF, or DOCX."""
     run = get_research_run(session, run_id)
     if run is None or not run.report_markdown:
         raise HTTPException(status_code=404, detail="Report not available")
+    content: str | bytes
     if format == "html":
         content = _md_to_html(run.report_markdown)
         media = "text/html; charset=utf-8"
         filename = f"research-{run.id}.html"
-    else:
+    elif format == "pdf":
+        from app.research.export import report_to_pdf
+
+        content = report_to_pdf(run.report_markdown, title=run.topic)
+        media = "application/pdf"
+        filename = f"research-{run.id}.pdf"
+    elif format == "docx":
+        from app.research.export import report_to_docx
+
+        content = report_to_docx(run.report_markdown, title=run.topic)
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = f"research-{run.id}.docx"
+    elif format == "md":
         content = run.report_markdown
         media = "text/markdown; charset=utf-8"
         filename = f"research-{run.id}.md"
+    else:
+        raise HTTPException(status_code=400, detail="format must be md, html, pdf, or docx")
     from fastapi.responses import Response
 
     return Response(

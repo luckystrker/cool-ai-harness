@@ -11,7 +11,7 @@ import hashlib
 import mimetypes
 from pathlib import Path
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -70,10 +70,35 @@ _EXT_KIND_MAP: dict[str, str] = {
 
 # Extensions that are plain-text and can be read directly for extracted_text.
 _TEXT_EXTENSIONS: set[str] = {
-    ".txt", ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java",
-    ".c", ".cpp", ".h", ".rb", ".sh", ".sql", ".md", ".json", ".yaml",
-    ".yml", ".toml", ".ini", ".cfg", ".csv", ".xml", ".html", ".css",
-    ".log", ".env", ".gitignore",
+    ".txt",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".rs",
+    ".go",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".rb",
+    ".sh",
+    ".sql",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".csv",
+    ".xml",
+    ".html",
+    ".css",
+    ".log",
+    ".env",
+    ".gitignore",
 }
 
 
@@ -125,9 +150,29 @@ def store_artifact(
     # Enforce upload size limit.
     max_bytes = settings.artifact_max_upload_bytes
     if max_bytes and len(content) > max_bytes:
-        raise ValueError(
-            f"File exceeds max upload size ({len(content)} > {max_bytes} bytes)"
-        )
+        raise ValueError(f"File exceeds max upload size ({len(content)} > {max_bytes} bytes)")
+
+    # Infer MIME/kind before writing so oversized decompressed images are
+    # rejected without leaving a blob behind.
+    if not media_type or media_type == "application/octet-stream":
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    if not kind:
+        kind = infer_kind(filename, media_type)
+    if kind == ARTIFACT_KIND_IMAGE and media_type != "image/svg+xml":
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(BytesIO(content)) as image:
+                if image.width * image.height > settings.artifact_max_image_pixels:
+                    raise ValueError("Image dimensions exceed the configured pixel limit")
+        except ValueError:
+            raise
+        except Exception:
+            # Preserve generic artifact upload semantics for mislabeled or
+            # partial image files; OCR/vision will reject them when opened.
+            pass
 
     # Compute hash and storage path.
     sha256_hex = hashlib.sha256(content).hexdigest()
@@ -140,14 +185,6 @@ def store_artifact(
         abs_path.write_bytes(content)
         log.debug("artifact.stored", sha256=sha256_hex, size=len(content), path=str(rel_path))
 
-    # Infer MIME type if not provided.
-    if not media_type:
-        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
-    # Infer kind if not provided.
-    if not kind:
-        kind = infer_kind(filename, media_type)
-
     # Extract text for text-based files.
     extracted_text: str | None = None
     if _is_text_file(filename):
@@ -157,6 +194,65 @@ def store_artifact(
             if len(text) > max_chars:
                 text = text[:max_chars]
             extracted_text = text
+        except Exception:
+            pass
+    elif Path(filename).suffix.lower() == ".pdf":
+        try:
+            from io import BytesIO
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(content))
+            chunks: list[str] = []
+            length = 0
+            max_chars = settings.artifact_max_extracted_chars
+            pages = reader.pages[: settings.artifact_max_document_pages]
+            for page in pages:
+                chunk = page.extract_text() or ""
+                chunks.append(chunk)
+                length += len(chunk) + 2
+                if length >= max_chars:
+                    break
+            extracted_text = "\n\n".join(chunks)[:max_chars]
+            metadata = {
+                **(metadata or {}),
+                "page_count": len(reader.pages),
+                "pages_extracted": len(chunks),
+            }
+        except Exception:
+            pass
+    elif Path(filename).suffix.lower() == ".docx":
+        try:
+            from io import BytesIO
+
+            from docx import Document
+
+            document = Document(BytesIO(content))
+            chunks = []
+            length = 0
+            max_chars = settings.artifact_max_extracted_chars
+            for paragraph in document.paragraphs:
+                chunks.append(paragraph.text)
+                length += len(paragraph.text) + 1
+                if length >= max_chars:
+                    break
+            extracted_text = "\n".join(chunks)[:max_chars]
+        except Exception:
+            pass
+
+    if kind == ARTIFACT_KIND_IMAGE:
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(BytesIO(content)) as image:
+                metadata = {
+                    **(metadata or {}),
+                    "width": image.width,
+                    "height": image.height,
+                    "format": image.format,
+                }
         except Exception:
             pass
 
@@ -223,7 +319,7 @@ def list_artifacts(
     stmt = (
         select(Artifact)
         .where(Artifact.conversation_id == conversation_id, Artifact.is_deleted == False)  # noqa: E712
-        .order_by(Artifact.id.desc())
+        .order_by(col(Artifact.id).desc())
         .limit(min(limit, 500))
     )
     if run_id is not None:

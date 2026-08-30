@@ -22,12 +22,28 @@ class Message:
     """A single chat message in the harness's canonical format."""
 
     role: MessageRole
-    content: str | None = None
+    # Canonical multimodal parts use {type: "text", text: ...} and
+    # {type: "image", media_type: ..., data: <base64>}. Provider adapters
+    # translate those parts to their native wire formats.
+    content: str | list[dict[str, Any]] | None = None
     # Assistant tool calls (when role == "assistant").
     tool_calls: list[dict[str, Any]] | None = None
     # Tool result reference (when role == "tool").
     tool_call_id: str | None = None
     name: str | None = None  # tool name, for role == "tool"
+
+
+def message_text(content: str | list[dict[str, Any]] | None) -> str:
+    """Return only the textual portion of canonical message content."""
+    if isinstance(content, str):
+        return content
+    if not content:
+        return ""
+    return "\n".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
 
 
 @dataclass
@@ -127,7 +143,7 @@ class LLMProvider(ABC):
         """Return a full (non-streaming) completion."""
 
     @abstractmethod
-    async def chat_completion_stream(
+    def chat_completion_stream(
         self,
         messages: list[Message],
         *,

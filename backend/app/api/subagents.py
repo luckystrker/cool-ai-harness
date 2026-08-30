@@ -82,6 +82,7 @@ def _msg_to_out(m) -> MessageOut:
         conversation_id=m.conversation_id,
         role=m.role,
         content=m.content,
+        artifact_ids=m.artifact_ids,
         tool_calls=m.tool_calls,
         usage=m.usage,
         thinking=m.thinking,
@@ -192,9 +193,7 @@ def launch_subagent_batch(
         if item.role_id is not None:
             role = get_role(session, item.role_id)
             if role is None:
-                raise HTTPException(
-                    status_code=404, detail=f"Role {item.role_id} not found"
-                )
+                raise HTTPException(status_code=404, detail=f"Role {item.role_id} not found")
         sa_run = launch_subagent(
             session,
             prompt=item.prompt,
@@ -214,9 +213,7 @@ def list_subagent_runs_endpoint(
     session: Session = Depends(get_session),
 ):
     """List subagent runs, optionally filtered."""
-    runs = list_subagent_runs(
-        session, parent_conversation_id=parent_conversation_id, status=status
-    )
+    runs = list_subagent_runs(session, parent_conversation_id=parent_conversation_id, status=status)
     return [_run_to_out(r) for r in runs]
 
 
@@ -252,7 +249,9 @@ def delete_subagent_run_endpoint(run_id: int, session: Session = Depends(get_ses
 
 
 @router.get("/subagents/runs/{run_id}/stream")
-async def stream_subagent_run(run_id: int, request: Request, session: Session = Depends(get_session)):
+async def stream_subagent_run(
+    run_id: int, request: Request, session: Session = Depends(get_session)
+):
     """SSE stream of live events for a subagent run (via inspector registry)."""
     sa_run = get_subagent_run(session, run_id)
     if sa_run is None:

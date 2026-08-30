@@ -8,12 +8,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install the backend package.
-COPY pyproject.toml ./
-COPY app ./app
-COPY ../README.md /tmp/README.md || true
+# OCR engine used by ocr_extract. Playwright installs the remaining Chromium
+# shared libraries in the next layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip && pip install -e ".[dev]" || pip install -e "."
+# Install the backend package and the browser runtime.
+COPY pyproject.toml README.md ./
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+
+RUN pip install --upgrade pip \
+    && pip install -e "." \
+    && python -m playwright install --with-deps chromium
 
 EXPOSE 8000
 

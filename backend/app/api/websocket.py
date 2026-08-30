@@ -70,16 +70,39 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                     await _send_error(websocket, f"Conversation {conv_id} not found")
                     continue
 
+                from app.multimodal import validate_artifact_ids
+
+                try:
+                    attachments = validate_artifact_ids(
+                        session,
+                        conversation_id=conv_id,
+                        artifact_ids=body.artifact_ids,
+                    )
+                except ValueError as exc:
+                    await _send_error(websocket, str(exc))
+                    continue
+
                 # Persist the user's message before the run.
                 append_message(
                     session,
                     conversation_id=conv_id,
                     role="user",
                     content=body.content,
+                    artifact_ids=[
+                        artifact.id for artifact in attachments if artifact.id is not None
+                    ],
                 )
 
-                model = body.model or conv.model
-                provider = get_provider_for_model(model)
+                from app.agent.personalities.service import get_profile
+                from app.providers.registry import resolve_provider_model
+
+                profile = get_profile(session, conv.profile_id) if conv.profile_id else None
+                requested_model = body.model or (profile.model if profile else None) or conv.model
+                provider = get_provider_for_model(requested_model)
+                model = resolve_provider_model(provider, requested_model)
+                if model is None:
+                    await _send_error(websocket, "No default model is configured")
+                    continue
 
                 # Durable run: one row per turn, observable + cancellable.
                 run = create_run(session, conversation_id=conv_id, model=model)
@@ -95,8 +118,11 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                         tool_names=body.tool_names,
                         working_directory=conv.working_directory,
                         conversation_permissions=conv.permissions,
+                        conversation_capability_policy=conv.capability_policy,
+                        conversation_breakpoints=(conv.metadata_ or {}).get("breakpoints"),
                         run_id=run.id,
                         cancellable=True,
+                        profile_id=conv.profile_id,
                     ):
                         await websocket.send_text(event.to_dict_json())
                 except Exception as exc:

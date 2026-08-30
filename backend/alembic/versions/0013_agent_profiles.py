@@ -46,42 +46,40 @@ def upgrade() -> None:
     op.create_index("ix_agent_profiles_is_active", "agent_profiles", ["is_active"])
 
     # --- conversations.profile_id FK ---
-    op.add_column(
-        "conversations",
-        sa.Column("profile_id", sa.Integer(), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_conversations_profile_id",
-        "conversations",
-        "agent_profiles",
-        ["profile_id"],
-        ["id"],
-    )
-    op.create_index("ix_conversations_profile_id", "conversations", ["profile_id"])
+    # SQLite cannot add a foreign-key constraint with ALTER TABLE. Batch mode
+    # rebuilds the table and also works on PostgreSQL/MySQL.
+    with op.batch_alter_table("conversations") as batch_op:
+        batch_op.add_column(sa.Column("profile_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_conversations_profile_id",
+            "agent_profiles",
+            ["profile_id"],
+            ["id"],
+        )
+        batch_op.create_index("ix_conversations_profile_id", ["profile_id"])
 
     # --- subagent_runs.profile_id FK (cross-profile invocation) ---
-    op.add_column(
-        "subagent_runs",
-        sa.Column("profile_id", sa.Integer(), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_subagent_runs_profile_id",
-        "subagent_runs",
-        "agent_profiles",
-        ["profile_id"],
-        ["id"],
-    )
-    op.create_index("ix_subagent_runs_profile_id", "subagent_runs", ["profile_id"])
+    with op.batch_alter_table("subagent_runs") as batch_op:
+        batch_op.add_column(sa.Column("profile_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_subagent_runs_profile_id",
+            "agent_profiles",
+            ["profile_id"],
+            ["id"],
+        )
+        batch_op.create_index("ix_subagent_runs_profile_id", ["profile_id"])
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.drop_index("ix_subagent_runs_profile_id", table_name="subagent_runs")
-    op.drop_constraint("fk_subagent_runs_profile_id", "subagent_runs", type_="foreignkey")
-    op.drop_column("subagent_runs", "profile_id")
-    op.drop_index("ix_conversations_profile_id", table_name="conversations")
-    op.drop_constraint("fk_conversations_profile_id", "conversations", type_="foreignkey")
-    op.drop_column("conversations", "profile_id")
+    with op.batch_alter_table("subagent_runs") as batch_op:
+        batch_op.drop_index("ix_subagent_runs_profile_id")
+        batch_op.drop_constraint("fk_subagent_runs_profile_id", type_="foreignkey")
+        batch_op.drop_column("profile_id")
+    with op.batch_alter_table("conversations") as batch_op:
+        batch_op.drop_index("ix_conversations_profile_id")
+        batch_op.drop_constraint("fk_conversations_profile_id", type_="foreignkey")
+        batch_op.drop_column("profile_id")
     op.drop_index("ix_agent_profiles_is_active", table_name="agent_profiles")
     op.drop_index("ix_agent_profiles_slug", table_name="agent_profiles")
     op.drop_index("ix_agent_profiles_name", table_name="agent_profiles")

@@ -64,7 +64,7 @@ class PermissionsConfig:
             # No policy applies. Safe tools run by default; dangerous ones
             # (code execution, destructive ops) still prompt.
             decision = "ask" if dangerous else "allow"
-        return _coerce_decision(decision, tool_name)  # type: ignore[return-value]
+        return _coerce_decision(decision, tool_name)
 
     def to_dict(self) -> dict[str, str]:
         return dict(self.tools)
@@ -85,7 +85,7 @@ def normalize(raw: dict | None) -> dict[str, str]:
     Drops entries with invalid decisions (logging them) rather than raising,
     so a bad conversation.permissions value can't break the run.
     """
-    if not raw or not isinstance(raw, dict):  # type: ignore[unreachable]
+    if not raw or not isinstance(raw, dict):
         return {}
     clean: dict[str, str] = {}
     for key, value in raw.items():

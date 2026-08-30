@@ -39,7 +39,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     id: "agents",
     label: "Agents",
     items: [
-      { to: "/profiles", label: "Profiles", icon: Settings2 },
+      { to: "/profiles", label: "Agent Constructor", icon: Settings2 },
       { to: "/subagents", label: "Subagents", icon: Bot },
     ],
   },

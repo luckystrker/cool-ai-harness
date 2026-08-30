@@ -90,6 +90,7 @@ async def _spawn_subagent(
         import asyncio
 
         # Register and execute synchronously (await the result).
+        assert sa_run.id is not None
         task = asyncio.ensure_future(execute_subagent(sa_run.id))
         subagent_registry.register(sa_run.id, task)
 

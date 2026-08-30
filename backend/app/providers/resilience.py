@@ -215,6 +215,11 @@ class ResilientProvider(LLMProvider):
     def chain(self) -> list[LLMProvider]:
         return [self.primary, *self.fallbacks]
 
+    @property
+    def default_model(self) -> str | None:
+        """Expose the primary model so route-level resolution survives wrapping."""
+        return getattr(self.primary, "default_model", None)
+
     # The non-streaming path mirrors the streaming one but is simpler (no
     # partial-output concern). It's not used by the agent loop today (which
     # streams), but completing the ABC contract keeps the decorator honest.

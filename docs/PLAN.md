@@ -14,7 +14,7 @@
 | [Фаза 2 — Skills + MCP + Subagents + Planning](phases/phase-2.md) | ✅ Завершено |
 | [Фаза 3a — Memory + Personalities + Observability](phases/phase-3a.md) | ✅ Завершено |
 | [Фаза 3b — Recurring Tasks + RSS + Webhook](phases/phase-3b.md) | ✅ Завершено |
-| [Фаза 4 — Workflows + Multimodal + Browser/Code tools](phases/phase-4.md) | 🔄 **В процессе** (Code Task + Git/GitHub tools готовы; **deep research готов** (оркестратор + цитаты + экспорт + страница + tool + cron); multimodal, browser, Agent Constructor pending) |
+| [Фаза 4 — Workflows + Multimodal + Browser/Code tools](phases/phase-4.md) | ✅ Завершено |
 | [Фаза 5 — Telegram + Voice](phases/phase-5.md) | ⏳ Ожидает |
 | [Фаза 6 — Product Readiness + Backlog](phases/phase-6.md) | ⏳ Ожидает |
 | [Фаза 7 — UX Polish + DevX](phases/phase-7.md) | ⏳ Ожидает |
@@ -27,7 +27,7 @@ AI-агентский harness, который:
 - В комплекте: **agent loop**, **tools**, **skills**, **MCP**, **subagents**
 - Управление через **веб-интерфейс** и через **Telegram** (Bot + Web App)
 - Уникальные фичи: **long-term memory**, **multi-personality agents**, **observability/analytics**, **recurring tasks (cron jobs)**
-- Специализированные workflows: **deep research**, **D&D сюжеты**, **кодовые задачи**, **мультимодальный анализ**
+- Специализированные workflows: **deep research**, **кодовые задачи**, **мультимодальный анализ**
 
 ## Архитектурные принципы
 
@@ -50,7 +50,7 @@ AI-агентский harness, который:
 4. **Фаза 2** — skills + MCP + subagents + planning mode ✅
 5. **Фаза 3a** — memory + personalities + analytics + knowledge base ✅
 6. **Фаза 3b** — recurring tasks / cron jobs + RSS + webhook ✅
-7. **Фаза 4** 🔄 — deep research + D&D + code + multimodal + browser automation (code + git/github tools + deep research готовы)
+7. **Фаза 4** ✅ — deep research + code/git + multimodal + browser automation + Agent Constructor
 8. **Фаза 5** — Telegram + voice interface
 9. **Фаза 6** — product readiness + backlog (document AI, data analysis, export)
 10. **Фаза 7** — UX polish (command palette, split view, prompt playground)

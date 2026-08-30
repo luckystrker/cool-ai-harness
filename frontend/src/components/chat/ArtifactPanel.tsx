@@ -103,7 +103,16 @@ function ArtifactRow({
 
   return (
     <li className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/60">
-      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      {artifact.kind === "image" ? (
+        <img
+          src={downloadHref}
+          alt=""
+          className="h-10 w-10 shrink-0 rounded border object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      )}
       <div className="min-w-0 flex-1">
         <a
           href={downloadHref}

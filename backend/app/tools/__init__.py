@@ -23,11 +23,13 @@ def register_builtins() -> None:
     """Register all bundled tools. Idempotent — last registration wins."""
     from app.memory.tools import register_memory_tools
     from app.tools.bash_tools import register_bash_tools
+    from app.tools.browser_tools import register_browser_tools
     from app.tools.code_tools import register_code_tools
     from app.tools.file_tools import register_file_tools
     from app.tools.git_tools import register_git_tools
     from app.tools.github_tools import register_github_tools
     from app.tools.mcp_tools import register_mcp_management_tools
+    from app.tools.multimodal_tools import register_multimodal_tools
     from app.tools.plan_tools import register_plan_tools
     from app.tools.research_tools import register_research_tools
     from app.tools.rss_tools import register_rss_tools
@@ -40,12 +42,14 @@ def register_builtins() -> None:
     register_file_tools()
     register_code_tools()
     register_bash_tools()
+    register_browser_tools()
     register_web_tools()
     register_git_tools()
     register_github_tools()
     register_plan_tools()
     register_skill_tools()
     register_mcp_management_tools()
+    register_multimodal_tools()
     register_subagent_tools()
     register_memory_tools()
     register_task_tools()

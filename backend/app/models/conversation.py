@@ -26,9 +26,7 @@ class Conversation(TimestampMixin, table=True):
     # Per-conversation tool permissions, overriding the global defaults.
     # Shape: {"*": "ask", "read_file": "allow", "python_execute": "deny"}
     # (tool name -> "allow" | "ask" | "deny"). See app/agent/permissions.py.
-    permissions: dict[str, Any] | None = Field(
-        default=None, sa_column=Column("permissions", JSON)
-    )
+    permissions: dict[str, Any] | None = Field(default=None, sa_column=Column("permissions", JSON))
     # Per-conversation capability policy, overriding the global defaults.
     # Shape: {"execute": "ask", "network": "ask", "write": "allow"}
     # (capability name -> "allow" | "ask" | "deny"). See app/security/capabilities.py.
@@ -47,9 +45,7 @@ class Conversation(TimestampMixin, table=True):
     # Archived conversations are hidden from the default list.
     is_archived: bool = Field(default=False, index=True)
     # Free-form metadata (e.g. breakpoints, is_subagent flag).
-    metadata_: dict[str, Any] | None = Field(
-        default=None, sa_column=Column("metadata_", JSON)
-    )
+    metadata_: dict[str, Any] | None = Field(default=None, sa_column=Column("metadata_", JSON))
 
 
 class Message(TimestampMixin, table=True):
@@ -59,10 +55,12 @@ class Message(TimestampMixin, table=True):
     conversation_id: int = Field(foreign_key="conversations.id", index=True)
     role: str  # user | assistant | system | tool
     content: str | None = Field(default=None, sa_column=Column(Text))
+    # Artifacts explicitly attached to this user message. Keeping the link on
+    # the message (rather than guessing from upload time) makes multimodal
+    # turns replayable and lets provider adapters rebuild vision content.
+    artifact_ids: list[int] | None = Field(default=None, sa_column=Column("artifact_ids", JSON))
     # Tool calls requested by the assistant (list of {id, name, arguments}).
-    tool_calls: list[dict[str, Any]] | None = Field(
-        default=None, sa_column=Column(JSON)
-    )
+    tool_calls: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON))
     # Tool result payload (for role="tool").
     tool_result: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     # Token usage recorded for assistant messages (prompt/completion/total + cost).

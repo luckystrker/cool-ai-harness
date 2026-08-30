@@ -4,9 +4,8 @@ Blocks requests to private/internal IP ranges (RFC 1918, loopback, link-local)
 and enforces a domain allowlist. Used by web_fetch and any future network tool.
 
 The check is URL-based: we parse the URL, extract the hostname, resolve it to
-IPs, and reject if any resolved IP is private. This prevents DNS rebinding
-attacks where a domain resolves to a public IP at check time but a private IP
-at fetch time (we resolve once and pass the IP to the client).
+IPs, and reject if any resolved IP is private. Callers that require DNS-
+rebinding protection must pin their network client to ``resolved_ips``.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ class UrlSafetyResult:
     safe: bool
     reason: str = ""
     blocked_ip: str | None = None
+    resolved_ips: tuple[str, ...] = ()
 
 
 def is_private_ip(ip_str: str) -> bool:
@@ -105,31 +105,30 @@ def is_safe_url(
                 blocked_ip=hostname,
             )
         # Public IP literal — safe (no DNS resolution needed).
-        return UrlSafetyResult(safe=True)
+        return UrlSafetyResult(safe=True, resolved_ips=(hostname,))
     except ValueError:
         pass  # Not an IP literal — proceed to DNS resolution.
 
-    # SSRF check: resolve the hostname and reject if any IP is private.
-    if block_private_ips:
-        try:
-            infos = socket.getaddrinfo(hostname, None)
-        except socket.gaierror:
-            # Can't resolve — block to be safe (prevents bypasses via DNS
-            # failures that a subsequent HTTP client might handle differently).
+    # Resolve exactly once. Security-sensitive clients connect to one of these
+    # checked addresses instead of allowing a second DNS answer at fetch time.
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return UrlSafetyResult(
+            safe=False,
+            reason=f"Cannot resolve hostname {hostname!r} (DNS failure)",
+        )
+    resolved_ips = tuple(dict.fromkeys(str(info[4][0]) for info in infos))
+    for ip_str in resolved_ips:
+        if block_private_ips and is_private_ip(ip_str):
             return UrlSafetyResult(
                 safe=False,
-                reason=f"Cannot resolve hostname {hostname!r} (DNS failure)",
+                reason=f"Hostname {hostname!r} resolves to private IP {ip_str}",
+                blocked_ip=ip_str,
+                resolved_ips=resolved_ips,
             )
-        for info in infos:
-            ip_str = info[4][0]
-            if is_private_ip(ip_str):
-                return UrlSafetyResult(
-                    safe=False,
-                    reason=f"Hostname {hostname!r} resolves to private IP {ip_str}",
-                    blocked_ip=ip_str,
-                )
 
-    return UrlSafetyResult(safe=True)
+    return UrlSafetyResult(safe=True, resolved_ips=resolved_ips)
 
 
 def check_url_safety(

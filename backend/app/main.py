@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.analytics import router as analytics_router
 from app.api.artifacts import router as artifacts_router
 from app.api.budgets import router as budgets_router
+from app.api.constructor import router as constructor_router
 from app.api.conversations import router as conversations_router
 from app.api.inspector import router as inspector_router
 from app.api.mcp import router as mcp_router
@@ -62,6 +63,9 @@ async def lifespan(app: FastAPI):
 
     with Session(engine) as session:
         ensure_builtin_roles(session)
+        from app.agent.constructor import load_macro_tools
+
+        load_macro_tools(session)
     log.info("app.subagent_roles_ready")
 
     # Load MCP server configs and connect (Фаза 2 §4).
@@ -85,6 +89,10 @@ async def lifespan(app: FastAPI):
     yield
 
     await shutdown_scheduler()
+
+    from app.tools.browser_tools import browser_sessions
+
+    await browser_sessions.close_all()
 
     # Shutdown MCP connections.
     from app.mcp import get_mcp_registry as _get_mcp_reg
@@ -153,6 +161,7 @@ def create_app() -> FastAPI:
 
     app.include_router(api_router, prefix="/api", dependencies=_auth)
     app.include_router(conversations_router, prefix="/api", dependencies=_auth)
+    app.include_router(constructor_router, prefix="/api", dependencies=_auth)
     app.include_router(runs_router, prefix="/api", dependencies=_auth)
     app.include_router(inspector_router, prefix="/api", dependencies=_auth)
     app.include_router(plans_router, prefix="/api", dependencies=_auth)

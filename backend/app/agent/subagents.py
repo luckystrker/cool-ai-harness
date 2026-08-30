@@ -15,8 +15,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.agent.runners import run_conversation_turn
 from app.agent.service import (
@@ -154,7 +155,7 @@ def list_subagent_runs(
     parent_conversation_id: int | None = None,
     status: str | None = None,
 ) -> Sequence[SubagentRun]:
-    stmt = select(SubagentRun).order_by(SubagentRun.id.desc())
+    stmt = select(SubagentRun).order_by(col(SubagentRun.id).desc())
     if parent_conversation_id is not None:
         stmt = stmt.where(SubagentRun.parent_conversation_id == parent_conversation_id)
     if status is not None:
@@ -172,6 +173,7 @@ def create_subagent_run(
     name: str | None = None,
     model_override: str | None = None,
     profile_id: int | None = None,
+    research_run_id: int | None = None,
 ) -> SubagentRun:
     """Create an isolated conversation + durable run + SubagentRun row.
 
@@ -179,6 +181,7 @@ def create_subagent_run(
     ensuring history isolation.
     """
     user = get_or_create_default_user(session)
+    assert user.id is not None
 
     # Resolve profile config if profile_id is set (Фаза 3a §2).
     _profile = None
@@ -211,8 +214,10 @@ def create_subagent_run(
     # Create isolated conversation for the subagent. Marked with is_subagent
     # metadata so it is hidden from the regular conversation list.
     display_name = name or (
-        f"subagent:{_profile.name}" if _profile
-        else f"subagent:{role.name}" if role
+        f"subagent:{_profile.name}"
+        if _profile
+        else f"subagent:{role.name}"
+        if role
         else "subagent:adhoc"
     )
     conv = create_conversation(
@@ -227,6 +232,7 @@ def create_subagent_run(
     session.add(conv)
     session.commit()
     session.refresh(conv)
+    assert conv.id is not None
 
     # Create the durable run row.
     run = create_run(
@@ -246,6 +252,7 @@ def create_subagent_run(
         profile_id=profile_id,
         parent_conversation_id=parent_conversation_id,
         parent_run_id=parent_run_id,
+        research_run_id=research_run_id,
         conversation_id=conv.id,
         run_id=run.id,
         name=display_name,
@@ -255,6 +262,7 @@ def create_subagent_run(
     session.add(subagent_run)
     session.commit()
     session.refresh(subagent_run)
+    assert subagent_run.id is not None
     return subagent_run
 
 
@@ -284,6 +292,7 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
             _profile = get_profile(session, sa_run.profile_id)
 
         # Effective settings from profile > role > defaults.
+        system_prompt: str | None
         if _profile and _profile.system_prompt:
             system_prompt = _profile.system_prompt
         else:
@@ -294,15 +303,27 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
         run_row = get_run(session, sa_run.run_id) if sa_run.run_id else None
         effective_model = (
             (run_row.model if run_row else None)
+            or (_profile.model if _profile else None)
             or (role.model if role else None)
             or resolve_default_model(session)
         )
+        provider = get_provider_for_model(effective_model)
+        from app.providers.registry import resolve_provider_model
+
+        effective_model = resolve_provider_model(provider, effective_model)
         if effective_model is None:
-            effective_model = "gpt-4o"
+            sa_run.status = SUBAGENT_STATUS_FAILED
+            sa_run.error = "No default model is configured"
+            session.add(sa_run)
+            session.commit()
+            return None
 
         tool_names = (
-            (_profile.tool_names if _profile else None)
-            or (role.tool_names if role else None)
+            _profile.tool_names
+            if _profile and _profile.tool_names is not None
+            else role.tool_names
+            if role
+            else None
         )
         max_iterations = role.max_iterations if role else 10
         max_cost_usd = role.max_cost_usd if role else None
@@ -323,9 +344,6 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
         sa_run.status = SUBAGENT_STATUS_RUNNING
         session.add(sa_run)
         session.commit()
-
-        # Resolve provider.
-        provider = get_provider_for_model(effective_model)
 
         # Resolve working directory from the subagent's conversation.
         from app.models import Conversation
@@ -389,9 +407,7 @@ async def execute_subagent(subagent_run_id: int) -> str | None:
                 sa_run.finished_at = datetime.now(UTC)
                 session.add(sa_run)
                 session.commit()
-                log.error(
-                    "subagent.failed", subagent_run_id=subagent_run_id, error=error_message
-                )
+                log.error("subagent.failed", subagent_run_id=subagent_run_id, error=error_message)
                 return None
 
             # Mark completed.
@@ -449,6 +465,7 @@ def launch_subagent(
         name=name,
         model_override=model_override,
     )
+    assert sa_run.id is not None
 
     # Schedule execution as a background task if an event loop is running.
     try:
@@ -502,7 +519,7 @@ def get_subagent_messages(session: Session, subagent_run_id: int) -> list:
 
 def ensure_builtin_roles(session: Session) -> None:
     """Seed built-in roles if they don't exist yet. Called on app startup."""
-    builtins = [
+    builtins: list[dict[str, Any]] = [
         {
             "name": "researcher",
             "description": "Deep research agent that gathers and synthesizes information from multiple sources.",
@@ -511,8 +528,27 @@ def ensure_builtin_roles(session: Session) -> None:
                 "a topic, gather information from available sources, and produce a "
                 "comprehensive, well-structured summary. Cite sources where possible."
             ),
-            "tool_names": ["web_fetch", "web_search", "read_file", "list_files"],
-            "capability_policy": {"read": "allow", "network": "allow", "write": "deny", "execute": "deny"},
+            "tool_names": [
+                "web_fetch",
+                "web_search",
+                "browser_navigate",
+                "browser_click",
+                "browser_extract",
+                "browser_scroll",
+                "browser_screenshot",
+                "browser_close",
+                "image_analyze",
+                "read_file",
+                "list_files",
+            ],
+            "capability_policy": {
+                "read": "allow",
+                "network": "allow",
+                # Browser screenshots are durable Artifact writes; file-write
+                # tools are not in this role's whitelist.
+                "write": "allow",
+                "execute": "deny",
+            },
             "max_iterations": 15,
         },
         {
@@ -524,7 +560,12 @@ def ensure_builtin_roles(session: Session) -> None:
                 "violations. Provide specific, actionable feedback with code examples."
             ),
             "tool_names": ["read_file", "list_files"],
-            "capability_policy": {"read": "allow", "write": "deny", "execute": "deny", "network": "deny"},
+            "capability_policy": {
+                "read": "allow",
+                "write": "deny",
+                "execute": "deny",
+                "network": "deny",
+            },
             "max_iterations": 10,
         },
         {
@@ -536,7 +577,12 @@ def ensure_builtin_roles(session: Session) -> None:
                 "summary with headings and bullet points for readability."
             ),
             "tool_names": ["read_file", "list_files"],
-            "capability_policy": {"read": "allow", "write": "deny", "execute": "deny", "network": "deny"},
+            "capability_policy": {
+                "read": "allow",
+                "write": "deny",
+                "execute": "deny",
+                "network": "deny",
+            },
             "max_iterations": 5,
         },
     ]
@@ -546,3 +592,14 @@ def ensure_builtin_roles(session: Session) -> None:
         ).first()
         if existing is None:
             create_role(session, is_builtin=True, **role_def)
+        elif (
+            existing.is_builtin
+            and existing.name == "researcher"
+            and existing.tool_names == ["web_fetch", "web_search", "read_file", "list_files"]
+        ):
+            # One-time forward migration for the legacy built-in role. Custom
+            # user edits are preserved because only the exact old list matches.
+            existing.tool_names = role_def["tool_names"]
+            existing.capability_policy = role_def["capability_policy"]
+            session.add(existing)
+            session.commit()

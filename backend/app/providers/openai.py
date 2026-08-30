@@ -64,7 +64,7 @@ class OpenAIProvider(LLMProvider):
     def _message_to_payload(m: Message) -> dict[str, Any]:
         out: dict[str, Any] = {"role": m.role}
         if m.content is not None:
-            out["content"] = m.content
+            out["content"] = _openai_content(m.content)
         if m.tool_calls is not None:
             # The harness stores tool_calls in a flat canonical shape:
             #   {"id", "type", "name", "arguments": <dict>}
@@ -327,6 +327,28 @@ def _to_openai_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
         "type": tc.get("type", "function"),
         "function": {"name": name, "arguments": args_str},
     }
+
+
+def _openai_content(content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    """Translate canonical multimodal parts to Chat Completions content."""
+    if isinstance(content, str):
+        return content
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append({"type": "text", "text": str(part.get("text", ""))})
+        elif part.get("type") == "image" and part.get("data"):
+            media_type = str(part.get("media_type") or "image/png")
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{media_type};base64,{part['data']}",
+                        "detail": part.get("detail", "auto"),
+                    },
+                }
+            )
+    return parts
 
 
 def _extract_context_window(item: dict[str, Any]) -> int | None:

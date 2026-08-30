@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.config import get_settings
 from app.core.db import engine
@@ -267,7 +267,7 @@ def list_spend(
     stmt = (
         select(SpendLog)
         .where(SpendLog.user_id == user_id)
-        .order_by(SpendLog.ts.desc(), SpendLog.id.desc())
+        .order_by(col(SpendLog.ts).desc(), col(SpendLog.id).desc())
         .limit(limit)
     )
     if since is not None:

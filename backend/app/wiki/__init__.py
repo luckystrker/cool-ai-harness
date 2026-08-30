@@ -63,7 +63,7 @@ def list_articles(
     offset: int = 0,
 ) -> Sequence[WikiArticle]:
     """List articles with optional filters."""
-    stmt = select(WikiArticle).order_by(col(WikiArticle.updated_at).desc())  # type: ignore[union-attr]
+    stmt = select(WikiArticle).order_by(col(WikiArticle.updated_at).desc())
     if not include_archived:
         stmt = stmt.where(WikiArticle.is_archived == False)  # noqa: E712
     if category:
@@ -73,7 +73,7 @@ def list_articles(
     if tag:
         # JSON array contains check — SQLite json_each approach is complex;
         # use a simple LIKE for now (tags stored as JSON array string).
-        stmt = stmt.where(col(WikiArticle.tags).contains(tag))  # type: ignore[union-attr]
+        stmt = stmt.where(col(WikiArticle.tags).contains(tag))
     stmt = stmt.limit(limit).offset(offset)
     return session.exec(stmt).all()
 
@@ -94,10 +94,10 @@ def search_articles(
         select(WikiArticle)
         .where(WikiArticle.is_archived == False)  # noqa: E712
         .where(
-            col(WikiArticle.title).contains(query)  # type: ignore[union-attr]
-            | col(WikiArticle.content).contains(query)  # type: ignore[union-attr]
+            col(WikiArticle.title).contains(query)
+            | col(WikiArticle.content).contains(query)
         )
-        .order_by(col(WikiArticle.updated_at).desc())  # type: ignore[union-attr]
+        .order_by(col(WikiArticle.updated_at).desc())
         .limit(limit)
     )
     if project_key:
@@ -182,20 +182,20 @@ def promote_from_memory(
 def get_categories(session: Session) -> list[str]:
     """List all distinct categories."""
     rows = session.exec(
-        select(WikiArticle.category).distinct().order_by(WikiArticle.category)  # type: ignore[union-attr]
+        select(WikiArticle.category).distinct().order_by(col(WikiArticle.category))
     ).all()
-    return list(rows)  # type: ignore[arg-type]
+    return list(rows)
 
 
 def get_stats(session: Session) -> dict:
     """Wiki statistics for the dashboard."""
     from sqlalchemy import func
 
-    total = session.exec(select(func.count(WikiArticle.id))).one()
+    total = session.exec(select(func.count())).one()
     by_category = session.exec(
-        select(WikiArticle.category, func.count(WikiArticle.id)).group_by(WikiArticle.category)  # type: ignore[union-attr]
+        select(col(WikiArticle.category), func.count()).group_by(col(WikiArticle.category))
     ).all()
     return {
         "total_articles": total,
-        "by_category": {row[0]: row[1] for row in by_category},  # type: ignore[index]
+        "by_category": {row[0]: row[1] for row in by_category},
     }

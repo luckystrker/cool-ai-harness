@@ -61,6 +61,7 @@ class TestIsSafeUrl:
     def test_allows_https(self) -> None:
         result = is_safe_url("https://example.com/page")
         assert result.safe
+        assert result.resolved_ips == ("93.184.216.34",)
 
     def test_allows_http(self) -> None:
         result = is_safe_url("http://example.com/page")

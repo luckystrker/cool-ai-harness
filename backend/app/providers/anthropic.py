@@ -36,6 +36,7 @@ from app.providers.base import (
     ModelInfo,
     ToolSpec,
     Usage,
+    message_text,
 )
 from app.providers.pricing import estimate_cost_usd, get_model_pricing
 
@@ -89,7 +90,7 @@ class AnthropicProvider(LLMProvider):
         for m in messages:
             if m.role == "system":
                 if m.content:
-                    parts.append(m.content)
+                    parts.append(message_text(m.content))
             else:
                 rest.append(m)
         system = "\n\n".join(parts) if parts else None
@@ -122,7 +123,7 @@ class AnthropicProvider(LLMProvider):
         if m.role == "assistant" and m.tool_calls:
             blocks: list[dict[str, Any]] = []
             if m.content:
-                blocks.append({"type": "text", "text": m.content})
+                blocks.extend(AnthropicProvider._content_blocks(m.content))
             for tc in m.tool_calls:
                 fn = tc.get("function")
                 if isinstance(fn, dict):
@@ -150,7 +151,29 @@ class AnthropicProvider(LLMProvider):
             return "assistant", blocks
 
         # Plain user/assistant text.
-        return m.role, [{"type": "text", "text": m.content or ""}]
+        return m.role, AnthropicProvider._content_blocks(m.content)
+
+    @staticmethod
+    def _content_blocks(content: str | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Translate canonical text/image parts to Anthropic blocks."""
+        if isinstance(content, str) or content is None:
+            return [{"type": "text", "text": content or ""}]
+        blocks: list[dict[str, Any]] = []
+        for part in content:
+            if part.get("type") == "text":
+                blocks.append({"type": "text", "text": str(part.get("text", ""))})
+            elif part.get("type") == "image" and part.get("data"):
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": str(part.get("media_type") or "image/png"),
+                            "data": part["data"],
+                        },
+                    }
+                )
+        return blocks
 
     @staticmethod
     def _tools_to_payload(tools: list[ToolSpec] | None) -> list[dict[str, Any]] | None:
@@ -198,16 +221,12 @@ class AnthropicProvider(LLMProvider):
         return payload
 
     @staticmethod
-    def _parse_usage(
-        raw_usage: dict[str, Any] | None, *, model: str | None = None
-    ) -> Usage | None:
+    def _parse_usage(raw_usage: dict[str, Any] | None, *, model: str | None = None) -> Usage | None:
         if not raw_usage:
             return None
         prompt = raw_usage.get("input_tokens", 0)
         completion = raw_usage.get("output_tokens", 0)
-        cost = (
-            estimate_cost_usd(model, prompt, completion) if model else None
-        )
+        cost = estimate_cost_usd(model, prompt, completion) if model else None
         return Usage(
             prompt_tokens=prompt,
             completion_tokens=completion,
@@ -238,9 +257,7 @@ class AnthropicProvider(LLMProvider):
                         "type": "function",
                         "function": {
                             "name": block.get("name", ""),
-                            "arguments": json.dumps(
-                                block.get("input") or {}, ensure_ascii=False
-                            ),
+                            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
                         },
                     }
                 )
@@ -356,9 +373,10 @@ class AnthropicProvider(LLMProvider):
         # block index -> {"id": tool_use_id, "name": name}
         tool_blocks: dict[int, dict[str, Any]] = {}
 
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self._transport) as client, client.stream(
-            "POST", url, headers=self._headers(), json=payload
-        ) as resp:
+        async with (
+            httpx.AsyncClient(timeout=self.timeout, transport=self._transport) as client,
+            client.stream("POST", url, headers=self._headers(), json=payload) as resp,
+        ):
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):

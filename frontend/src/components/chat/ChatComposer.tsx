@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Paperclip, Send, Square, X } from "lucide-react"
+import { FileText, Image as ImageIcon, Paperclip, Send, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 
@@ -37,6 +37,7 @@ export function ChatComposer({
   leading,
 }: ChatComposerProps) {
   const [value, setValue] = useState(initialValue)
+  const [dragging, setDragging] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -50,8 +51,8 @@ export function ChatComposer({
 
   const submit = () => {
     const trimmed = value.trim()
-    if (!trimmed || disabled || streaming) return
-    onSend(trimmed)
+    if ((!trimmed && pendingFiles.length === 0) || disabled || streaming) return
+    onSend(trimmed || "Analyze the attached file(s).")
     setValue("")
   }
 
@@ -63,7 +64,25 @@ export function ChatComposer({
   }
 
   return (
-    <div className="border-t bg-background p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+    <div
+      className={`border-t bg-background p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] ${
+        dragging ? "ring-2 ring-inset ring-primary" : ""
+      }`}
+      onDragEnter={(event) => {
+        event.preventDefault()
+        if (!disabled && !streaming) setDragging(true)
+      }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) setDragging(false)
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        setDragging(false)
+        const files = Array.from(event.dataTransfer.files)
+        if (files.length && onAttach && !disabled && !streaming) onAttach(files)
+      }}
+    >
       <div className="mx-auto max-w-3xl">
         {/* Pending file chips */}
         {pendingFiles.length > 0 && (
@@ -73,7 +92,7 @@ export function ChatComposer({
                 key={`${f.name}-${i}`}
                 className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground"
               >
-                <Paperclip className="h-3 w-3" />
+                <FilePreviewIcon file={f} />
                 <span className="max-w-[140px] truncate">{f.name}</span>
                 <span className="text-muted-foreground/60">
                   ({formatSize(f.size)})
@@ -100,6 +119,7 @@ export function ChatComposer({
                   ref={fileInputRef}
                   type="file"
                   multiple
+                  accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/*,.docx"
                   className="hidden"
                   onChange={handleFileSelect}
                 />
@@ -145,7 +165,7 @@ export function ChatComposer({
             <Button
               size="icon"
               onClick={submit}
-              disabled={!value.trim() || disabled}
+              disabled={(!value.trim() && pendingFiles.length === 0) || disabled}
               title="Send"
               className="absolute bottom-0 right-0 h-11 w-11"
             >
@@ -157,6 +177,26 @@ export function ChatComposer({
         {toolbar}
       </div>
     </div>
+  )
+}
+
+function FilePreviewIcon({ file }: { file: File }) {
+  const [url, setUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!file.type.startsWith("image/")) return
+    const objectUrl = URL.createObjectURL(file)
+    setUrl(objectUrl)
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [file])
+
+  if (url) {
+    return <img src={url} alt="" className="h-8 w-8 rounded object-cover" />
+  }
+  return file.type.startsWith("image/") ? (
+    <ImageIcon className="h-3 w-3" />
+  ) : (
+    <FileText className="h-3 w-3" />
   )
 }
 

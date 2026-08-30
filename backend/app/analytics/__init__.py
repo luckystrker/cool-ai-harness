@@ -10,9 +10,11 @@ All functions are pure queries (read-only) and accept a SQLModel Session.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlalchemy import select as sa_select
+from sqlmodel import Session, col, select
 
 from app.core.logging import get_logger
 from app.models import RunEvent, SpendLog, ToolCall
@@ -45,14 +47,14 @@ def spend_over_time(
         # SQLite: strftime('%Y-%m-%d', ts)
         period_expr = func.strftime("%Y-%m-%d", SpendLog.ts)
 
-    rows = session.exec(
-        select(
-            period_expr.label("period"),  # type: ignore[union-attr]
+    rows = session.execute(
+        sa_select(
+            period_expr.label("period"),
             func.sum(SpendLog.cost_usd).label("cost_usd"),
             func.sum(SpendLog.total_tokens).label("total_tokens"),
-            func.count(SpendLog.id).label("calls"),
+            func.count().label("calls"),
         )
-        .where(SpendLog.ts >= since)
+        .where(col(SpendLog.ts) >= since)
         .group_by(period_expr)
         .order_by(period_expr)
     ).all()
@@ -79,15 +81,15 @@ def spend_by_model(
     """
     since = datetime.now(UTC) - timedelta(days=days)
 
-    rows = session.exec(
-        select(
-            SpendLog.model,
+    rows = session.execute(
+        sa_select(
+            col(SpendLog.model),
             func.sum(SpendLog.cost_usd).label("cost_usd"),
             func.sum(SpendLog.total_tokens).label("total_tokens"),
-            func.count(SpendLog.id).label("calls"),
+            func.count().label("calls"),
         )
-        .where(SpendLog.ts >= since)
-        .group_by(SpendLog.model)
+        .where(col(SpendLog.ts) >= since)
+        .group_by(col(SpendLog.model))
         .order_by(func.sum(SpendLog.cost_usd).desc())
     ).all()
 
@@ -117,19 +119,19 @@ def top_tools(
     """
     since = datetime.now(UTC) - timedelta(days=days)
 
-    rows = session.exec(
-        select(
-            ToolCall.name,
-            func.count(ToolCall.id).label("calls"),
+    rows = session.execute(
+        sa_select(
+            col(ToolCall.name),
+            func.count().label("calls"),
             func.avg(ToolCall.duration_ms).label("avg_duration_ms"),
         )
-        .where(ToolCall.created_at >= since)
-        .group_by(ToolCall.name)
-        .order_by(func.count(ToolCall.id).desc())
+        .where(col(ToolCall.created_at) >= since)
+        .group_by(col(ToolCall.name))
+        .order_by(func.count().desc())
         .limit(limit)
     ).all()
 
-    results = []
+    results: list[dict[str, Any]] = []
     for r in rows:
         calls = int(r[1] or 0)
         results.append({
@@ -140,13 +142,13 @@ def top_tools(
 
     # Compute success rate separately (SQLite boolean handling)
     for item in results:
-        success_rows = session.exec(
-            select(func.count(ToolCall.id)).where(
-                ToolCall.created_at >= since,
-                ToolCall.name == item["name"],
-                ToolCall.success == True,  # noqa: E712
+        success_rows = session.execute(
+            sa_select(func.count()).where(
+                col(ToolCall.created_at) >= since,
+                col(ToolCall.name) == item["name"],
+                col(ToolCall.success).is_(True),
             )
-        ).one()
+        ).scalar_one()
         total = item["calls"]
         success = int(success_rows or 0)
         item["success_rate"] = round(success / total, 3) if total > 0 else 0.0
@@ -179,17 +181,17 @@ def llm_latency(
     # SQLite json_extract works on the JSON column.
     duration_expr = func.json_extract(RunEvent.payload, "$.duration_ms")
 
-    rows = session.exec(
-        select(
-            period_expr.label("period"),  # type: ignore[union-attr]
+    rows = session.execute(
+        sa_select(
+            period_expr.label("period"),
             func.avg(duration_expr).label("avg_ms"),
             func.min(duration_expr).label("min_ms"),
             func.max(duration_expr).label("max_ms"),
-            func.count(RunEvent.id).label("calls"),
+            func.count().label("calls"),
         )
         .where(
-            RunEvent.kind == "llm_call_complete",
-            RunEvent.created_at >= since,
+            col(RunEvent.kind) == "llm_call_complete",
+            col(RunEvent.created_at) >= since,
         )
         .group_by(period_expr)
         .order_by(period_expr)
@@ -222,17 +224,17 @@ def call_history(
 
     Returns (rows, total_count) for pagination.
     """
-    base = select(SpendLog).order_by(SpendLog.ts.desc(), SpendLog.id.desc())
-    count_base = select(func.count(SpendLog.id))
+    base = select(SpendLog).order_by(col(SpendLog.ts).desc(), col(SpendLog.id).desc())
+    count_base = sa_select(func.count()).select_from(SpendLog)
 
     if model:
         base = base.where(SpendLog.model == model)
-        count_base = count_base.where(SpendLog.model == model)
+        count_base = count_base.where(col(SpendLog.model) == model)
     if provider:
         base = base.where(SpendLog.provider_name == provider)
-        count_base = count_base.where(SpendLog.provider_name == provider)
+        count_base = count_base.where(col(SpendLog.provider_name) == provider)
 
-    total = int(session.exec(count_base).one() or 0)
+    total = int(session.execute(count_base).scalar_one() or 0)
     rows = session.exec(base.offset(offset).limit(limit)).all()
 
     return [
@@ -274,14 +276,14 @@ def memory_activity(
     else:
         period_expr = func.strftime("%Y-%m-%d", MemoryItem.created_at)
 
-    rows = session.exec(
-        select(
-            period_expr.label("period"),  # type: ignore[union-attr]
-            MemoryItem.memory_type,
-            func.count(MemoryItem.id).label("cnt"),
+    rows = session.execute(
+        sa_select(
+            period_expr.label("period"),
+            col(MemoryItem.memory_type),
+            func.count().label("cnt"),
         )
-        .where(MemoryItem.created_at >= since)
-        .group_by(period_expr, MemoryItem.memory_type)
+        .where(col(MemoryItem.created_at) >= since)
+        .group_by(period_expr, col(MemoryItem.memory_type))
         .order_by(period_expr)
     ).all()
 
@@ -311,31 +313,37 @@ def summary_stats(
     since = datetime.now(UTC) - timedelta(days=days)
 
     total_spend = float(
-        session.exec(
-            select(func.coalesce(func.sum(SpendLog.cost_usd), 0.0)).where(SpendLog.ts >= since)
-        ).one()
+        session.execute(
+            sa_select(func.coalesce(func.sum(SpendLog.cost_usd), 0.0)).where(
+                col(SpendLog.ts) >= since
+            )
+        ).scalar_one()
         or 0
     )
     total_calls = int(
-        session.exec(select(func.count(SpendLog.id)).where(SpendLog.ts >= since)).one() or 0
+        session.execute(sa_select(func.count()).where(col(SpendLog.ts) >= since)).scalar_one()
+        or 0
     )
     total_tokens = int(
-        session.exec(
-            select(func.coalesce(func.sum(SpendLog.total_tokens), 0)).where(SpendLog.ts >= since)
-        ).one()
+        session.execute(
+            sa_select(func.coalesce(func.sum(SpendLog.total_tokens), 0)).where(
+                col(SpendLog.ts) >= since
+            )
+        ).scalar_one()
         or 0
     )
     total_tool_calls = int(
-        session.exec(select(func.count(ToolCall.id)).where(ToolCall.created_at >= since)).one()
+        session.execute(sa_select(func.count()).where(col(ToolCall.created_at) >= since))
+        .scalar_one()
         or 0
     )
     tool_errors = int(
-        session.exec(
-            select(func.count(ToolCall.id)).where(
-                ToolCall.created_at >= since,
-                ToolCall.success == False,  # noqa: E712
+        session.execute(
+            sa_select(func.count()).where(
+                col(ToolCall.created_at) >= since,
+                col(ToolCall.success).is_(False),
             )
-        ).one()
+        ).scalar_one()
         or 0
     )
 

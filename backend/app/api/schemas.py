@@ -107,6 +107,7 @@ class MessageOut(BaseModel):
     conversation_id: int
     role: str
     content: str | None = None
+    artifact_ids: list[int] | None = None
     tool_calls: list[dict[str, Any]] | None = None
     usage: dict[str, Any] | None = None
     thinking: str | None = None
@@ -128,6 +129,9 @@ class ConversationDetail(ConversationOut):
 
 class SendMessageRequest(BaseModel):
     content: str
+    # Explicit attachments for this turn. The backend verifies conversation
+    # ownership before exposing image bytes to a vision-capable provider.
+    artifact_ids: list[int] = []
     # Optional per-message overrides.
     model: str | None = None
     system_prompt: str | None = None
@@ -488,6 +492,7 @@ class ProfileCreate(BaseModel):
     skill_names: list[str] | None = None
     settings: dict[str, Any] | None = None
     avatar_color: str | None = None
+    is_shared: bool = False
 
 
 class ProfileUpdate(BaseModel):
@@ -501,6 +506,7 @@ class ProfileUpdate(BaseModel):
     settings: dict[str, Any] | None = None
     avatar_color: str | None = None
     is_active: bool | None = None
+    is_shared: bool | None = None
 
 
 class ProfileOut(BaseModel):
@@ -516,8 +522,51 @@ class ProfileOut(BaseModel):
     avatar_color: str | None = None
     is_builtin: bool = False
     is_active: bool = True
+    is_shared: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+# --- Agent Constructor (Phase 4) ---
+
+
+class ToolCatalogItem(BaseModel):
+    name: str
+    description: str
+    dangerous: bool
+    capabilities: list[str]
+    parameters: dict[str, Any]
+    is_macro: bool = False
+
+
+class MacroToolCreate(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = {"type": "object", "properties": {}}
+    steps: list[dict[str, Any]]
+
+
+class MacroToolUpdate(BaseModel):
+    description: str | None = None
+    input_schema: dict[str, Any] | None = None
+    steps: list[dict[str, Any]] | None = None
+    is_active: bool | None = None
+
+
+class MacroToolOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    steps: list[dict[str, Any]]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class BlueprintPlaygroundRequest(BaseModel):
+    title: str | None = None
+    initial_prompt: str | None = None
 
 
 # --- workspace / git (Фаза 4) ---
@@ -634,3 +683,4 @@ class ResearchRunDetail(ResearchRunOut):
     sources: list[ResearchSourceOut] = Field(default_factory=list)
     citations: list[ResearchCitationOut] = Field(default_factory=list)
     report_markdown: str | None = None
+    browser_activity: list[dict[str, Any]] = Field(default_factory=list)

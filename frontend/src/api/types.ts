@@ -100,6 +100,7 @@ export interface Message {
   conversation_id: number
   role: "system" | "user" | "assistant" | "tool"
   content: string | null
+  artifact_ids?: number[] | null
   tool_calls?: ToolCall[] | null
   usage?: Record<string, unknown> | null
   /** Reasoning / chain-of-thought (assistant messages), when the provider exposes one. */
@@ -138,6 +139,7 @@ export interface ConversationDetail extends Conversation {
 
 export interface SendMessageRequest {
   content: string
+  artifact_ids?: number[]
   model?: string
   system_prompt?: string
   tool_names?: string[]
@@ -1039,6 +1041,7 @@ export interface AgentProfile {
   avatar_color: string | null
   is_builtin: boolean
   is_active: boolean
+  is_shared: boolean
   created_at: string
   updated_at: string
 }
@@ -1053,6 +1056,7 @@ export interface ProfileCreate {
   skill_names?: string[]
   settings?: Record<string, unknown>
   avatar_color?: string
+  is_shared?: boolean
 }
 
 export interface ProfileUpdate {
@@ -1066,6 +1070,40 @@ export interface ProfileUpdate {
   settings?: Record<string, unknown>
   avatar_color?: string
   is_active?: boolean
+  is_shared?: boolean
+}
+
+export interface ToolCatalogItem {
+  name: string
+  description: string
+  dangerous: boolean
+  capabilities: string[]
+  parameters: Record<string, unknown>
+  is_macro: boolean
+}
+
+export interface MacroStep {
+  id: string
+  tool_name: string
+  arguments: Record<string, unknown>
+}
+
+export interface MacroTool {
+  id: number
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+  steps: MacroStep[]
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface MacroToolCreate {
+  name: string
+  description?: string
+  input_schema?: Record<string, unknown>
+  steps: MacroStep[]
 }
 
 // --- Wiki / Knowledge Base (Фаза 3a §3) ---
@@ -1406,6 +1444,15 @@ export interface ResearchRunDetail extends ResearchRun {
   sources: ResearchSource[]
   citations: ResearchCitation[]
   report_markdown: string | null
+  browser_activity: {
+    id: string
+    name: string
+    arguments: Record<string, unknown>
+    created_at: string
+    status: "running" | "completed" | "error"
+    result?: string
+    metadata?: Record<string, unknown>
+  }[]
 }
 
 export type ResearchProgressEventType =

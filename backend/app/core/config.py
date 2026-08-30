@@ -57,9 +57,11 @@ class Settings(BaseSettings):
     # Default OpenAI-compatible endpoint. Override for OpenRouter/DeepSeek/Groq/Ollama.
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
+    openai_default_model: str = ""
     # Native Anthropic (Claude) Messages API.
     anthropic_base_url: str = "https://api.anthropic.com"
     anthropic_api_key: str = ""
+    anthropic_default_model: str = ""
 
     # --- Telegram ---
     telegram_bot_token: str = ""
@@ -92,6 +94,9 @@ class Settings(BaseSettings):
         default=100_000,
         description="Max chars of extracted text stored per artifact",
     )
+    artifact_max_document_pages: int = 200
+    artifact_max_image_pixels: int = 40_000_000
+    artifact_extract_timeout_s: float = 15.0
 
     # --- Agent system prompt ---
     # Path to a custom system prompt file. If empty, uses the built-in default.
@@ -234,6 +239,16 @@ class Settings(BaseSettings):
         default=500_000,
         description="Max response body size for web_fetch; 0 = no limit",
     )
+    browser_headless: bool = Field(
+        default=True,
+        description="Run Playwright Chromium without a visible window",
+    )
+    browser_timeout_ms: int = Field(
+        default=30_000,
+        description="Timeout for browser navigation and DOM actions",
+    )
+    browser_max_resource_bytes: int = 2_000_000
+    browser_max_session_bytes: int = 10_000_000
     # When True, mask secrets (API keys, tokens, passwords) in tool outputs,
     # log messages, and LLM-visible tool results.
     mask_secrets: bool = Field(

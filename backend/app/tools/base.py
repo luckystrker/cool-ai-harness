@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from jsonschema import ValidationError, validate
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -71,9 +72,18 @@ class Tool:
     # send_external). Used by the capability security layer to gate access.
     # None/empty = no capability gating (per-tool permissions still apply).
     capabilities: frozenset[Capability] | None = None
+    # Optional explicit JSON Schema. Dynamic macro tools cannot express their
+    # user-authored fields as a static Pydantic class, so they provide the
+    # validated schema directly while still using ToolArgs for runtime input.
+    parameters: dict[str, Any] | None = None
+    # Base tools invoked by a composed tool. The executor uses this for a
+    # single, auditable preflight of every nested capability/permission.
+    composed_tools: tuple[str, ...] = ()
 
     def parameters_schema(self) -> dict[str, Any]:
         """JSON Schema for this tool's arguments (OpenAI function-calling shape)."""
+        if self.parameters is not None:
+            return self.parameters
         schema = self.args_model.model_json_schema()
         schema.pop("title", None)
         # Inline $defs: OpenAI accepts $defs, but flatter schemas are friendlier
@@ -84,8 +94,10 @@ class Tool:
         """Validate arguments against the model and invoke the tool."""
         arguments = arguments or {}
         try:
+            if self.parameters is not None:
+                validate(instance=arguments, schema=self.parameters)
             parsed = self.args_model.model_validate(arguments)
-        except Exception as exc:
+        except (ValidationError, ValueError, TypeError) as exc:
             return ToolResult.err(f"Invalid arguments: {exc}")
         try:
             return await self.func(**parsed.model_dump())
@@ -106,6 +118,8 @@ def register_tool(
     func: ToolFunc,
     dangerous: bool = False,
     capabilities: frozenset[Capability] | None = None,
+    parameters: dict[str, Any] | None = None,
+    composed_tools: tuple[str, ...] = (),
     registry: dict[str, Tool] | None = None,
 ) -> Tool:
     """Register a tool. Returns the Tool instance for chaining."""
@@ -119,6 +133,8 @@ def register_tool(
         args_model=args_model,
         dangerous=dangerous,
         capabilities=capabilities,
+        parameters=parameters,
+        composed_tools=composed_tools,
     )
     _reg[name] = instance
     return instance

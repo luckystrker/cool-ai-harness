@@ -17,7 +17,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from sqlmodel import Session
+from sqlmodel import Session, col
 
 from app.agent import AgentConfig, AgentEvent, AgentExecutor, AgentLimits, get_default_system_prompt
 from app.agent.permissions import PermissionsConfig
@@ -39,7 +39,7 @@ from app.models import Message as MessageRow
 from app.models import ToolCall as ToolCallRow
 from app.models.run import RUN_STATUS_RUNNING
 from app.observability import inspector_registry
-from app.providers import LLMProvider
+from app.providers import LLMProvider, message_text
 from app.security.breakpoints import BreakpointsConfig, merge_breakpoints
 from app.security.capabilities import CapabilityPolicy
 from app.security.capabilities import merge_policy as merge_capability_policy
@@ -123,11 +123,15 @@ class _ResolvedTurn:
     """
 
     system_prompt: str | None
+    model: str
     tool_names: list[str] | None
     permissions: PermissionsConfig
     capability_policy: CapabilityPolicy
     breakpoints: BreakpointsConfig
     limits: AgentLimits
+    temperature: float
+    max_tokens: int | None
+    skill_names: list[str] | None
     # Resolved profile id (for memory agent_id); None when no profile active.
     profile_id: int | None
 
@@ -145,6 +149,7 @@ def _resolve_turn_config(
     conversation_breakpoints: list[dict] | None,
     limits: AgentLimits | None,
     profile_id: int | None,
+    model: str,
     query_embedding: list[float] | None = None,
 ) -> _ResolvedTurn:
     """Resolve all per-turn configuration from layered sources.
@@ -173,8 +178,12 @@ def _resolve_turn_config(
 
     # --- Stage 3: resolve tool whitelist (per-request > profile > all) ---
     effective_tools = tool_names
-    if effective_tools is None and _profile and _profile.tool_names:
+    if effective_tools is None and _profile and _profile.tool_names is not None:
         effective_tools = _profile.tool_names
+
+    # A blueprint owns its preferred model. Callers may still select another
+    # model by changing the conversation or detaching the blueprint.
+    effective_model = (_profile.model if _profile and _profile.model else None) or model
 
     # --- Stage 4: collect + assemble injected context (budget-aware) ---
     _sections: dict[str, str | None] = {}
@@ -187,7 +196,9 @@ def _resolve_turn_config(
     if user_input:
         from app.skills.context import build_skills_context
 
-        _sections["skills"] = build_skills_context(user_input)
+        _sections["skills"] = build_skills_context(
+            user_input, _profile.skill_names if _profile else None
+        )
     else:
         _sections["skills"] = None
 
@@ -229,15 +240,24 @@ def _resolve_turn_config(
         effective_capability_policy.caps, conversation_capability_policy
     )
     effective_breakpoints = merge_breakpoints(None, conversation_breakpoints)
-    effective_limits = limits or _default_limits(settings)
+    profile_settings = _profile.settings if _profile and isinstance(_profile.settings, dict) else {}
+    effective_limits = limits or AgentLimits(
+        max_iterations=int(profile_settings.get("max_iterations", settings.agent_max_iterations)),
+        max_total_tokens=profile_settings.get("max_total_tokens", settings.agent_max_total_tokens),
+        max_cost_usd=profile_settings.get("max_cost_usd", settings.agent_max_cost_usd),
+    )
 
     return _ResolvedTurn(
         system_prompt=effective_prompt,
+        model=effective_model,
         tool_names=effective_tools,
         permissions=effective_permissions,
         capability_policy=effective_capability_policy,
         breakpoints=effective_breakpoints,
         limits=effective_limits,
+        temperature=float(profile_settings.get("temperature", 0.7)),
+        max_tokens=profile_settings.get("max_tokens"),
+        skill_names=_profile.skill_names if _profile else None,
         profile_id=_profile.id if _profile else None,
     )
 
@@ -279,7 +299,7 @@ def _persist_tool_result(
 
     # 2. Observability row.
     metadata = result.get("metadata") or {}
-    tool_args = pending_tool_args.pop(call_id, None)
+    tool_args = pending_tool_args.pop(call_id, None) if isinstance(call_id, str) else None
     session.add(
         ToolCallRow(
             conversation_id=conversation_id,
@@ -297,7 +317,11 @@ def _persist_tool_result(
     is_denied = bool(metadata.get("denied"))
     is_breakpoint = bool(metadata.get("breakpoint"))
     bp_type = metadata.get("breakpoint")
-    audit_name, audit_t0 = pending_approval_meta.pop(call_id, (payload.get("name", ""), 0.0))
+    audit_name, audit_t0 = (
+        pending_approval_meta.pop(call_id, (payload.get("name", ""), 0.0))
+        if isinstance(call_id, str)
+        else (payload.get("name", ""), 0.0)
+    )
     audit_duration_ms = int((time.monotonic() - audit_t0) * 1000) if audit_t0 else None
     if is_denied and call_id in approval_requested:
         decision_source = "timeout"
@@ -393,18 +417,28 @@ async def run_conversation_turn(
     """
     settings = get_settings()
     history = load_history(session, conversation_id)
+    context_input = user_input
+    if context_input is None:
+        context_input = next(
+            (
+                message_text(message.content)
+                for message in reversed(history)
+                if message.role == "user"
+            ),
+            None,
+        )
 
     # Hybrid retrieval: embed the user's query once per turn so the vector leg
     # of memory search works (best-effort; providers without embed() support
     # make retrieval fall back to FTS5).
     query_embedding: list[float] | None = None
-    if user_input and settings.memory_enabled and settings.memory_hybrid_enabled:
+    if context_input and settings.memory_enabled and settings.memory_hybrid_enabled:
         try:
             from app.memory.embeddings import VEC_AVAILABLE, vec_table_ready
 
             if VEC_AVAILABLE and vec_table_ready():
                 embeddings = await provider.embed(
-                    [user_input], model=settings.memory_embedding_model
+                    [context_input], model=settings.memory_embedding_model
                 )
                 if embeddings:
                     query_embedding = embeddings[0]
@@ -418,22 +452,31 @@ async def run_conversation_turn(
         system_prompt=system_prompt,
         tool_names=tool_names,
         working_directory=working_directory,
-        user_input=user_input,
+        user_input=context_input,
         conversation_permissions=conversation_permissions,
         conversation_capability_policy=conversation_capability_policy,
         conversation_breakpoints=conversation_breakpoints,
         limits=limits,
         profile_id=profile_id,
+        model=model,
         query_embedding=query_embedding,
     )
 
+    effective_provider = provider
+    if resolved.model != model:
+        from app.providers import get_provider_for_model
+
+        effective_provider = get_provider_for_model(resolved.model)
+
     executor = AgentExecutor(
-        provider=provider,
+        provider=effective_provider,
         config=AgentConfig(
-            model=model,
+            model=resolved.model,
             system_prompt=resolved.system_prompt,
             tool_names=resolved.tool_names,
             limits=resolved.limits,
+            temperature=resolved.temperature,
+            max_tokens=resolved.max_tokens,
             working_directory=working_directory,
             permissions=resolved.permissions,
             capability_policy=resolved.capability_policy,
@@ -444,6 +487,7 @@ async def run_conversation_turn(
             user_id=get_or_create_default_user(session).id,
             conversation_id=conversation_id,
             agent_id=resolved.profile_id,
+            skill_names=resolved.skill_names,
         ),
         history=history,
     )
@@ -459,7 +503,8 @@ async def run_conversation_turn(
             session,
             run_id,
             status=RUN_STATUS_RUNNING,
-            config=_limits_to_config(resolved.limits, tool_names),
+            model=resolved.model,
+            config=_limits_to_config(resolved.limits, resolved.tool_names),
         )
 
     # --- Mutable loop state ---
@@ -531,13 +576,13 @@ async def run_conversation_turn(
                 terminal_reason = event.payload.get("reason")
                 usage = event.payload.get("usage")
                 if persisted_last_assistant_id is not None:
-                    row = session.get(MessageRow, persisted_last_assistant_id)
-                    if row is not None:
+                    persisted_row = session.get(MessageRow, persisted_last_assistant_id)
+                    if persisted_row is not None:
                         if usage:
-                            row.usage = usage
-                        row.model = model
-                        row.duration_ms = int((time.monotonic() - turn_t0) * 1000)
-                        session.add(row)
+                            persisted_row.usage = usage
+                        persisted_row.model = resolved.model
+                        persisted_row.duration_ms = int((time.monotonic() - turn_t0) * 1000)
+                        session.add(persisted_row)
                         session.commit()
                 if run_id is not None:
                     if event_log is not None:
@@ -750,7 +795,7 @@ def _backfill_missing_tool_results(
     subsequent_tool_rows = session.exec(
         select(MessageRow)
         .where(MessageRow.conversation_id == conversation_id)
-        .where(MessageRow.id > assistant_msg_id)
+        .where(col(MessageRow.id) > assistant_msg_id)
         .where(MessageRow.role == "tool")
     ).all()
     answered_call_ids: set[str] = set()

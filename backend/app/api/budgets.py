@@ -161,7 +161,7 @@ def list_spend(
     rows = budgets.list_spend(session, since=since, limit=limit)
     return [
         SpendRowOut(
-            id=r.id,
+            id=r.id if r.id is not None else 0,
             run_id=r.run_id,
             conversation_id=r.conversation_id,
             provider_name=r.provider_name,

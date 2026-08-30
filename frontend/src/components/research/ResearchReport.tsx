@@ -1,4 +1,4 @@
-import { AlertTriangle, Download, ExternalLink, FileText } from "lucide-react"
+import { AlertTriangle, Camera, Download, ExternalLink, FileText } from "lucide-react"
 import { deepResearchApi } from "@/api/research"
 import type { ResearchRunDetail } from "@/api/types"
 import { Markdown } from "@/components/chat/Markdown"
@@ -36,12 +36,53 @@ export function ResearchReport({ run }: { run: ResearchRunDetail }) {
             </a>
           </Button>
           <Button asChild variant="outline" size="sm">
+            <a href={deepResearchApi.exportUrl(run.id, "pdf")}>
+              <Download className="h-3.5 w-3.5" /> PDF
+            </a>
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <a href={deepResearchApi.exportUrl(run.id, "docx")}>
+              <Download className="h-3.5 w-3.5" /> DOCX
+            </a>
+          </Button>
+          <Button asChild variant="outline" size="sm">
             <a href={deepResearchApi.exportUrl(run.id, "html")}>
               <Download className="h-3.5 w-3.5" /> HTML
             </a>
           </Button>
         </div>
       </div>
+
+      {run.browser_activity.length > 0 && (
+        <details className="rounded-md border bg-muted/20">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            Browser activity ({run.browser_activity.length} actions)
+          </summary>
+          <ol className="max-h-72 space-y-2 overflow-y-auto border-t p-3">
+            {run.browser_activity.map((action, index) => (
+              <li key={`${action.id}-${index}`} className="rounded bg-background p-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-medium">{action.name}</span>
+                  <Badge variant={action.status === "error" ? "destructive" : "secondary"}>
+                    {action.status}
+                  </Badge>
+                  <span className="ml-auto text-muted-foreground">
+                    {new Date(action.created_at).toLocaleTimeString()}
+                  </span>
+                </div>
+                <pre className="mt-1 overflow-x-auto text-[11px] text-muted-foreground">
+                  {JSON.stringify(action.arguments)}
+                </pre>
+                {typeof action.metadata?.screenshot_url === "string" && (
+                  <a className="mt-2 inline-flex items-center gap-1 text-blue-600 underline" href={action.metadata.screenshot_url} target="_blank" rel="noreferrer">
+                    <Camera className="h-3 w-3" /> View screenshot
+                  </a>
+                )}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
 
       <Markdown content={markdown} />
 

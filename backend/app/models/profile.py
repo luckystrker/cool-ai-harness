@@ -46,3 +46,6 @@ class AgentProfile(TimestampMixin, table=True):
     is_builtin: bool = False
     # Soft-disable: inactive profiles are hidden from the switcher.
     is_active: bool = Field(default=True, index=True)
+    # Shared blueprints are visible to every user in the instance. The MVP is
+    # single-user, but persisting the flag keeps the constructor multi-user ready.
+    is_shared: bool = Field(default=False, index=True)

@@ -49,7 +49,7 @@ from app.security.breakpoints import BreakpointsConfig, BreakpointType, is_write
 from app.security.capabilities import CapabilityPolicy, stricter
 from app.security.secrets import mask_secrets_in_value
 from app.tools import ToolResult, get_tool
-from app.tools.context import RunContext, reset_run_context, set_run_context
+from app.tools.context import RunContext, get_run_context, reset_run_context, set_run_context
 
 log = get_logger(__name__)
 
@@ -105,6 +105,8 @@ class AgentConfig:
     # Active agent role/personality id — drives agent-scoped memory visibility
     # for tools (memory_recall) and subagent attribution.
     agent_id: int | None = None
+    # Skill whitelist from an Agent Constructor blueprint. None = all.
+    skill_names: list[str] | None = None
 
 
 class AgentExecutor:
@@ -131,7 +133,11 @@ class AgentExecutor:
 
     def available_tools(self) -> list[ToolSpec]:
         """ToolSpecs for whitelisted (or all) registered tools."""
-        names = self.config.tool_names or list(_all_tool_names())
+        names = (
+            list(_all_tool_names())
+            if self.config.tool_names is None
+            else self.config.tool_names
+        )
         specs: list[ToolSpec] = []
         for name in names:
             tool = get_tool(name)
@@ -373,6 +379,7 @@ class AgentExecutor:
                         call_id=call.get("id") or call.get("name") or "call",
                     )
                     async for ev in self._run_tool_call(call):
+                        tool_limit_reason: str | None = None
                         # --- ReAct: emit Observation after tool_result ---
                         if ev.kind == "tool_result":
                             result_data = ev.payload.get("result") or {}
@@ -384,7 +391,56 @@ class AgentExecutor:
                                 result_summary=summary,
                                 is_error=bool(result_data.get("is_error")),
                             )
+                            metadata = result_data.get("metadata") or {}
+                            usage_data = metadata.get("llm_usage")
+                            if isinstance(usage_data, dict):
+                                tool_usage = Usage(
+                                    prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
+                                    completion_tokens=int(
+                                        usage_data.get("completion_tokens", 0)
+                                    ),
+                                    total_tokens=int(usage_data.get("total_tokens", 0)),
+                                    cost_usd=usage_data.get("cost_usd"),
+                                )
+                                _accumulate(total_usage, tool_usage)
+                                if self.config.user_id is not None:
+                                    for alert in self._record_spend_and_maybe_alert(
+                                        tool_usage,
+                                        model=str(
+                                            metadata.get("llm_model") or self.config.model
+                                        ),
+                                        provider_name=str(
+                                            metadata.get("llm_provider")
+                                            or getattr(self.provider, "name", "")
+                                        ),
+                                    ):
+                                        yield alert
+                                yield AgentEvent.llm_call_complete(
+                                    iteration=iteration,
+                                    model=str(metadata.get("llm_model") or self.config.model),
+                                    usage=vars(tool_usage),
+                                    duration_ms=int(metadata.get("llm_duration_ms") or 0),
+                                )
+                                if (
+                                    limits.max_total_tokens is not None
+                                    and total_usage.total_tokens >= limits.max_total_tokens
+                                ):
+                                    tool_limit_reason = "token_limit"
+                                elif (
+                                    limits.max_cost_usd is not None
+                                    and (total_usage.cost_usd or 0.0)
+                                    >= limits.max_cost_usd
+                                ):
+                                    tool_limit_reason = "cost_limit"
                         yield ev
+                        if tool_limit_reason is not None:
+                            yield AgentEvent.finish(
+                                reason=tool_limit_reason,
+                                usage=total_usage,
+                                iterations=iteration,
+                                elapsed_ms=_elapsed_ms(run_started),
+                            )
+                            return
 
             # The model spent every allowed iteration calling tools. Instead of
             # stopping silently mid-task (leaving a bare tool result as the last
@@ -478,7 +534,13 @@ class AgentExecutor:
             return False
         return run_registry.is_cancelled(self.config.run_id)
 
-    def _record_spend_and_maybe_alert(self, call_usage: Usage) -> list[AgentEvent]:
+    def _record_spend_and_maybe_alert(
+        self,
+        call_usage: Usage,
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+    ) -> list[AgentEvent]:
         """Persist this LLM call's spend and emit a budget_alert if warranted.
 
         Returns a (possibly empty) list of events for the loop to yield. Uses a
@@ -486,7 +548,7 @@ class AgentExecutor:
         (item 8: eliminates the redundant second session open). Errors are logged
         and swallowed — spend accounting must not break a turn.
         """
-        provider_name = getattr(self.provider, "name", "") or ""
+        resolved_provider_name = provider_name or getattr(self.provider, "name", "") or ""
         events: list[AgentEvent] = []
         user_id = self.config.user_id
         if user_id is None:
@@ -497,8 +559,8 @@ class AgentExecutor:
                 record_spend(
                     session,
                     user_id=user_id,
-                    model=self.config.model,
-                    provider_name=provider_name,
+                    model=model or self.config.model,
+                    provider_name=resolved_provider_name,
                     usage=call_usage,
                     run_id=self.config.run_id,
                     conversation_id=self.config.conversation_id,
@@ -550,6 +612,8 @@ class AgentExecutor:
             conversation_id=self.config.conversation_id,
             run_id=self.config.run_id,
             agent_id=self.config.agent_id,
+            model=self.config.model,
+            skill_names=self.config.skill_names,
         )
 
     def _resolve_decision(self, name: str, dangerous: bool) -> Decision:
@@ -563,19 +627,28 @@ class AgentExecutor:
         single-user and trusted, matching pre-permission behavior. As soon as
         ANY permission or capability config is supplied, that config decides.
         """
-        # Layer 1: capability policy (coarse-grained).
-        cap_decision: Decision = "allow"
-        if self.config.capability_policy is not None:
-            cap_decision = self.config.capability_policy.resolve_tool(name)
+        tool = get_tool(name)
+        checks = [(name, dangerous)]
+        if tool is not None:
+            checks.extend(
+                (nested_name, bool(nested and nested.dangerous))
+                for nested_name in tool.composed_tools
+                for nested in [get_tool(nested_name)]
+            )
 
-        # Layer 2: per-tool permission map (fine-grained).
-        if self.config.permissions is None:
-            tool_decision: Decision = "allow"
-        else:
-            tool_decision = self.config.permissions.resolve(name, dangerous=dangerous)
-
-        # The more restrictive of the two layers wins.
-        decision = stricter(cap_decision, tool_decision)
+        decision: Decision = "allow"
+        for checked_name, checked_dangerous in checks:
+            cap_decision: Decision = "allow"
+            if self.config.capability_policy is not None:
+                cap_decision = self.config.capability_policy.resolve_tool(checked_name)
+            tool_decision: Decision = (
+                "allow"
+                if self.config.permissions is None
+                else self.config.permissions.resolve(
+                    checked_name, dangerous=checked_dangerous
+                )
+            )
+            decision = stricter(decision, stricter(cap_decision, tool_decision))
 
         # Non-interactive runners (cron, subagents) treat "ask" as "allow".
         if decision == "ask" and self.config.auto_approve:
@@ -664,6 +737,7 @@ class AgentExecutor:
                     "arguments": args,
                     "reason": f"Tool {name!r} requires approval",
                     "requires_decision": True,
+                    "composed_tools": list(tool.composed_tools) if tool else [],
                     **extra,
                 },
             )
@@ -685,7 +759,13 @@ class AgentExecutor:
             result = ToolResult.err(f"Unknown tool: {name}")
         else:
             log.info("agent.tool.start", name=name, args=args, decision=decision)
-            result = await tool.run(args)
+            run_context = get_run_context()
+            previous_composed = run_context.approved_composed_tools
+            run_context.approved_composed_tools = frozenset(tool.composed_tools)
+            try:
+                result = await tool.run(args)
+            finally:
+                run_context.approved_composed_tools = previous_composed
             log.info(
                 "agent.tool.done",
                 name=name,
@@ -717,7 +797,17 @@ class AgentExecutor:
         # Non-interactive runners skip breakpoints (same as auto_approve for ask).
         if self.config.auto_approve:
             return False
-        return self.config.breakpoints.should_break(bp_type, tool_name=tool_name) is not None
+        if self.config.breakpoints.should_break(bp_type, tool_name=tool_name) is not None:
+            return True
+        tool = get_tool(tool_name or "")
+        return bool(
+            tool
+            and any(
+                self.config.breakpoints.should_break(bp_type, tool_name=nested_name)
+                is not None
+                for nested_name in tool.composed_tools
+            )
+        )
 
     def _read_file_for_preview(self, args: dict[str, Any]) -> str | None:
         """Read the current content of a file targeted by a write tool.

@@ -5,9 +5,8 @@ subagents, long-term + working memory, personalities, planning mode, recurring
 tasks (cron), RSS aggregation, webhooks, wiki, cost budgets, analytics, an
 inspector/replay console, and durable agent runs. Control via the web UI.
 
-> Status: **Фаза 3a + 3b shipped** (memory, personalities, observability,
-> analytics, recurring tasks, RSS, webhook); **Фаза 4 in progress** (Code Task
-> + Git/GitHub tools done, deep research / multimodal / browser pending) 🔄 —
+> Status: **Фазы 0–4 shipped**. Phase 4 delivers Deep Research, Code/Git/GitHub,
+> multimodal chat and OCR, browser automation, and Agent Constructor ✅ —
 > see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
 <img width="1718" height="1273" alt="image" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
 
@@ -90,7 +89,7 @@ curl -X POST http://localhost:8000/api/conversations/1/runs/1/cancel
 Schema changes are managed with **Alembic** (`backend/alembic`). In production
 the app applies `alembic upgrade head` on startup; in development/tests it uses
 `SQLModel.create_all` (models are the source of truth there). Current head:
-`0020_webhooks`.
+`0022_phase4_completion`.
 
 ```bash
 cd backend
@@ -215,9 +214,17 @@ Beyond the core agent loop, these subsystems are implemented:
   from external services (signed, idempotent).
 - **Wiki** — markdown article store (`wiki_articles`) with agent search/write
   tools and a browsing UI.
-- **Code & Git tools** (Фаза 4, in progress) — sandboxed `bash`/Python
+- **Code & Git tools** (Фаза 4) — sandboxed `bash`/Python
   execution, git status/diff/log/commit/push via the local CLI, and GitHub
   integration (issues/PRs/actions).
+- **Deep Research** (Фаза 4) — durable research runs with parallel subagents,
+  source citations, browser activity, and Markdown/HTML/PDF/DOCX export.
+- **Multimodal chat** (Фаза 4) — image/document attachments, provider-native
+  vision payloads, OCR/PDF extraction, thumbnails, and analysis tools.
+- **Browser automation** (Фаза 4) — isolated Playwright sessions with SSRF
+  protection, navigation, interaction, extraction, and screenshot artifacts.
+- **Agent Constructor** (Фаза 4) — reusable blueprints, per-agent limits,
+  tool/skill selection, playground runs, sharing/cloning, and macro-tools.
 
 ## Project layout
 
@@ -250,7 +257,7 @@ cool-ai-harness/
 │   │   ├── models/              # SQLModel tables
 │   │   └── telegram/            # bot + web app (planned, Фаза 5)
 │   ├── evals/                   # agent eval scenarios + CI gate (21 scenarios)
-│   ├── alembic/                 # database migrations (head: 0020_webhooks)
+│   ├── alembic/                 # database migrations (head: 0022_phase4_completion)
 │   ├── tests/                   # pytest suite (~725 tests)
 │   └── pyproject.toml
 ├── frontend/                    # React 19 SPA (Vite + TypeScript + Tailwind 4)
@@ -280,7 +287,7 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 | **Фаза 2** — Skills + MCP + subagents + planning mode | ✅ Done |
 | **Фаза 3a** — Memory + personalities + observability | ✅ Done |
 | **Фаза 3b** — Recurring tasks + RSS + webhook | ✅ Done |
-| **Фаза 4** — Workflows + multimodal + browser/code tools | 🔄 **Current** (Code Task + Git/GitHub tools shipped; deep research, multimodal, browser pending) |
+| **Фаза 4** — Workflows + multimodal + browser/code tools | ✅ Done |
 | **Фаза 5** — Telegram + voice interface | ⏳ |
 | **Фаза 6** — Product readiness + backlog | ⏳ |
 | **Фаза 7** — UX polish + DevX | ⏳ |

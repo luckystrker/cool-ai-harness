@@ -24,7 +24,7 @@ export const deepResearchApi = {
   cancel: (id: number) => api.post<{ cancelled: number }>(`/api/research/${id}/cancel`),
   rerun: (id: number, body: ResearchRerunRequest = {}) =>
     api.post<ResearchRun>(`/api/research/${id}/rerun`, body),
-  exportUrl: (id: number, format: "md" | "html") =>
+  exportUrl: (id: number, format: "md" | "html" | "pdf" | "docx") =>
     `/api/research/${id}/export?format=${format}`,
 }
 

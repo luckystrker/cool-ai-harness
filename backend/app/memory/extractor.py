@@ -22,7 +22,7 @@ from sqlmodel import Session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.memory.models import MEMORY_SOURCE_AGENT_EXTRACTION, SCOPE_GLOBAL
-from app.providers import LLMProvider, Message
+from app.providers import LLMProvider, Message, message_text
 
 log = get_logger(__name__)
 
@@ -264,7 +264,7 @@ def _build_transcript(messages: list[Message], max_chars: int = 8000) -> str:
 
     for msg in relevant:
         role = msg.role
-        content = msg.content or ""
+        content = message_text(msg.content)
         # Truncate long tool outputs.
         if role == "tool" and len(content) > 300:
             content = content[:300] + "… (truncated)"

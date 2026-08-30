@@ -29,6 +29,7 @@ from app.providers.base import (
     Message,
     ModelInfo,
     ToolSpec,
+    message_text,
 )
 from app.providers.subscription.base import SubscriptionProvider
 
@@ -97,14 +98,16 @@ class ChatGPTPlusProvider(SubscriptionProvider):
             if msg.role == "system":
                 # System messages handled via system_hints in the internal API.
                 continue
-            chat_messages.append({
-                "id": str(uuid.uuid4()),
-                "author": {"role": msg.role},
-                "content": {
-                    "content_type": "text",
-                    "parts": [msg.content or ""],
-                },
-            })
+            chat_messages.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "author": {"role": msg.role},
+                    "content": {
+                        "content_type": "text",
+                        "parts": [message_text(msg.content)],
+                    },
+                }
+            )
 
         payload: dict[str, Any] = {
             "action": "next",
@@ -117,7 +120,7 @@ class ChatGPTPlusProvider(SubscriptionProvider):
         # Extract system prompt if present.
         system_msgs = [m for m in messages if m.role == "system"]
         if system_msgs:
-            system_text = "\n".join(m.content or "" for m in system_msgs)
+            system_text = "\n".join(message_text(m.content) for m in system_msgs)
             payload["system_hints"] = [{"text": system_text}]
 
         return payload
@@ -140,9 +143,7 @@ class ChatGPTPlusProvider(SubscriptionProvider):
             finish_reason="end_turn",
         )
 
-    async def _parse_stream(
-        self, response: httpx.Response
-    ) -> AsyncIterator[ChatStreamEvent]:
+    async def _parse_stream(self, response: httpx.Response) -> AsyncIterator[ChatStreamEvent]:
         """Parse SSE stream from ChatGPT backend-api.
 
         The stream format is:
@@ -178,7 +179,7 @@ class ChatGPTPlusProvider(SubscriptionProvider):
 
             # Emit only the delta (new content since last event).
             if len(full_text) > len(last_content):
-                delta = full_text[len(last_content):]
+                delta = full_text[len(last_content) :]
                 last_content = full_text
                 yield ChatStreamEvent(delta=delta)
 

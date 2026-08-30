@@ -104,7 +104,11 @@ _WRITE_TOOLS: frozenset[str] = frozenset({"write_file"})
 
 def is_write_tool(tool_name: str) -> bool:
     """True if the tool modifies files (triggers before_write breakpoints)."""
-    return tool_name in _WRITE_TOOLS
+    if tool_name in _WRITE_TOOLS:
+        return True
+    from app.security.capabilities import Capability, tool_capabilities
+
+    return Capability.WRITE in tool_capabilities(tool_name)
 
 
 def parse_breakpoints(raw: list[dict] | None) -> BreakpointsConfig:

@@ -199,16 +199,23 @@ export function ChatPage() {
 
   const handleSend = async (content: string) => {
     if (!convId) return
+    const artifactIds: number[] = []
     // Upload any pending file attachments first.
     if (pendingFiles.length > 0) {
       try {
         for (const file of pendingFiles) {
-          await artifactsApi.upload(convId, file)
+          const uploaded = await artifactsApi.upload(convId, file)
+          artifactIds.push(uploaded.artifact.id)
         }
         queryClient.invalidateQueries({ queryKey: ["artifacts", convId] })
         toast.success(`${pendingFiles.length} file(s) attached`)
       } catch (e) {
+        await Promise.allSettled(
+          artifactIds.map((artifactId) => artifactsApi.delete(convId, artifactId))
+        )
+        queryClient.invalidateQueries({ queryKey: ["artifacts", convId] })
         toast.error("Upload failed", { description: String(e) })
+        return
       }
       setPendingFiles([])
     }
@@ -229,7 +236,8 @@ export function ChatPage() {
       content,
       detail?.model || undefined,
       planMode,
-      systemPrompt
+      systemPrompt,
+      artifactIds
     )
     // Reset plan mode after sending (one-shot toggle).
     const wasPlanMode = planMode
@@ -247,7 +255,12 @@ export function ChatPage() {
   }
 
   const handleAttach = (files: File[]) => {
-    setPendingFiles((prev) => [...prev, ...files])
+    const available = Math.max(0, 10 - pendingFiles.length)
+    const accepted = files.slice(0, available)
+    setPendingFiles((prev) => [...prev, ...accepted].slice(0, 10))
+    if (accepted.length < files.length) {
+      toast.warning("Up to 10 files can be attached to one message")
+    }
     // Open the artifacts panel so the user sees the context.
     setArtifactsOpen(true)
   }

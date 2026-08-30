@@ -83,9 +83,12 @@ _LIGHTWEIGHT_MIGRATIONS: list[tuple[str, str, str]] = [
     # 0008 — per-message model + turn duration.
     ("messages", "model", "TEXT"),
     ("messages", "duration_ms", "INTEGER"),
+    ("messages", "artifact_ids", "JSON"),
     # 0013 — agent profiles (Фаза 3a §2).
     ("conversations", "profile_id", "INTEGER"),
     ("subagent_runs", "profile_id", "INTEGER"),
+    ("subagent_runs", "research_run_id", "INTEGER"),
+    ("agent_profiles", "is_shared", "BOOLEAN DEFAULT 0"),
 ]
 
 

@@ -110,6 +110,20 @@ export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolC
               </pre>
             </div>
           )}
+          {typeof result?.metadata?.screenshot_url === "string" && (
+            <a
+              href={result.metadata.screenshot_url}
+              target="_blank"
+              rel="noreferrer"
+              className="block overflow-hidden rounded border bg-background"
+            >
+              <img
+                src={result.metadata.screenshot_url}
+                alt="Browser screenshot"
+                className="max-h-80 w-full object-contain"
+              />
+            </a>
+          )}
           {/* Subagent output viewer button */}
           {isSubagentTool && subagentRunId && (
             <Button

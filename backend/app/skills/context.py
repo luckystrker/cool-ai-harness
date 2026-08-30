@@ -23,7 +23,7 @@ log = get_logger(__name__)
 _MAX_SUGGESTED = 3
 
 
-def build_skills_context(user_input: str) -> str | None:
+def build_skills_context(user_input: str, allowed_names: list[str] | None = None) -> str | None:
     """Build a skills context string for system-prompt injection.
 
     Respects ``settings.skills_context_mode``:
@@ -34,6 +34,9 @@ def build_skills_context(user_input: str) -> str | None:
     """
     registry = get_skill_registry()
     all_skills = registry.list_all()
+    if allowed_names is not None:
+        allowed = set(allowed_names)
+        all_skills = [skill for skill in all_skills if skill.name in allowed]
     if not all_skills:
         return None
 

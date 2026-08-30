@@ -13,7 +13,7 @@ avoid 400 errors and runaway costs, not exact billing.
 from __future__ import annotations
 
 from app.core.logging import get_logger
-from app.providers import Message
+from app.providers import Message, message_text
 
 log = get_logger(__name__)
 
@@ -30,7 +30,9 @@ def estimate_tokens(text: str | None) -> int:
 
 def estimate_message_tokens(msg: Message) -> int:
     """Estimate tokens for a single message (content + tool overhead)."""
-    tokens = estimate_tokens(msg.content)
+    tokens = estimate_tokens(message_text(msg.content))
+    if isinstance(msg.content, list):
+        tokens += 1_000 * sum(1 for part in msg.content if part.get("type") == "image")
     # Tool calls add overhead (name, arguments JSON, structure).
     if msg.tool_calls:
         for tc in msg.tool_calls:

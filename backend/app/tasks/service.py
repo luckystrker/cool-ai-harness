@@ -412,6 +412,7 @@ def create_task_run(
     session.add(conv)
     session.commit()
     session.refresh(conv)
+    assert conv.id is not None
 
     agent_run = create_run(
         session,
@@ -581,6 +582,7 @@ async def execute_task_run(task_run_id: int) -> str | None:
                 # Фаза 4 — deep research workflow as a recurring task.
                 from app.research import run_research_for_task
 
+                assert run.id is not None and run.conversation_id is not None
                 return await run_research_for_task(
                     session=session,
                     task_run_id=run.id,
@@ -593,6 +595,7 @@ async def execute_task_run(task_run_id: int) -> str | None:
             tokens: list[str] = []
             usage: dict | None = None
             error: str | None = None
+            assert run.conversation_id is not None
             async for event in run_conversation_turn(
                 session=session,
                 conversation_id=run.conversation_id,
@@ -800,6 +803,7 @@ def schedule_task_execution(
     )
     if run.status == TASK_RUN_SKIPPED:
         return run
+    assert run.id is not None
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -837,6 +841,7 @@ async def fire_task(
         )
         if run.status == TASK_RUN_SKIPPED:
             return run
+        assert run.id is not None
         run_id = run.id
 
     current = asyncio.current_task()
@@ -863,6 +868,7 @@ async def run_task_now(
     run = prepare_task_run(
         session, task, trigger_source=trigger_source, ignore_quiet_hours=True
     )
+    assert run.id is not None
     await execute_task_run(run.id)
     session.expire_all()
     return session.get(TaskRun, run.id)

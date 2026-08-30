@@ -121,6 +121,7 @@ def get_artifact_detail(
     art = get_artifact(session, artifact_id)
     if art is None or art.conversation_id != conv_id:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    assert art.id is not None
     versions = get_artifact_versions(session, artifact_id)
     return ArtifactDetail(
         id=art.id,

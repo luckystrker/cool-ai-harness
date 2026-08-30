@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.skills.registry import get_skill_registry
 from app.tools.base import ToolArgs, ToolResult, register_tool
+from app.tools.context import get_run_context
 
 log = get_logger(__name__)
 
@@ -43,6 +44,9 @@ async def _list_skills(source: str = "") -> ToolResult:
     registry = get_skill_registry()
 
     skills = registry.list_by_source(source) if source else registry.list_all()
+    allowed = get_run_context().skill_names
+    if allowed is not None:
+        skills = [skill for skill in skills if skill.name in set(allowed)]
 
     if not skills:
         return ToolResult.ok("No skills available." + (f" (source={source})" if source else ""))
@@ -68,6 +72,9 @@ async def _use_skill(name: str) -> ToolResult:
     """Activate a skill by name, returning its full instruction prompt."""
     registry = get_skill_registry()
     skill = registry.get(name)
+    allowed = get_run_context().skill_names
+    if allowed is not None and name not in allowed:
+        return ToolResult.err(f"Skill '{name}' is not enabled for this agent blueprint")
 
     if skill is None:
         available = registry.names()
@@ -97,7 +104,9 @@ async def _use_skill(name: str) -> ToolResult:
 class CreateSkillArgs(ToolArgs):
     """Arguments for the create_skill tool."""
 
-    name: str = Field(description="Skill name: lowercase alphanumeric with hyphens (e.g. 'my-skill')")
+    name: str = Field(
+        description="Skill name: lowercase alphanumeric with hyphens (e.g. 'my-skill')"
+    )
     description: str = Field(default="", description="Short description of what the skill does")
     tags: list[str] = Field(default_factory=list, description="Keywords for relevance matching")
     tools: list[str] = Field(default_factory=list, description="Recommended tools for the skill")
@@ -134,7 +143,9 @@ async def _create_skill(
         return ToolResult.err(f"Invalid scope '{scope}'. Must be 'global' or 'user'.")
 
     settings = get_settings()
-    base_dir = Path(settings.skills_dir) if scope == "global" else Path(settings.data_dir) / "skills"
+    base_dir = (
+        Path(settings.skills_dir) if scope == "global" else Path(settings.data_dir) / "skills"
+    )
     skill_dir = base_dir / name
 
     if skill_dir.exists():

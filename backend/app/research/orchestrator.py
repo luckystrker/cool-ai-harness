@@ -31,7 +31,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.agent.service import (
     create_conversation,
@@ -110,6 +110,7 @@ def start_research(
     artifact library intact for standalone research.
     """
     user = get_or_create_default_user(session)
+    assert user.id is not None
 
     if conversation_id is None:
         conv = create_conversation(
@@ -122,6 +123,7 @@ def start_research(
         session.add(conv)
         session.commit()
         session.refresh(conv)
+        assert conv.id is not None
         research_conversation_id = conv.id
     else:
         research_conversation_id = conversation_id
@@ -149,7 +151,7 @@ def get_research_run(session: Session, run_id: int) -> ResearchRun | None:
 
 def list_research_runs(session: Session, *, limit: int = 50) -> list[ResearchRun]:
     return list(
-        session.exec(select(ResearchRun).order_by(ResearchRun.id.desc()).limit(limit)).all()
+        session.exec(select(ResearchRun).order_by(col(ResearchRun.id).desc()).limit(limit)).all()
     )
 
 
@@ -246,9 +248,7 @@ async def execute_research(
 
             # --- Stage 1: decompose ---------------------------------------
             await sink.emit("stage", stage="decompose")
-            sub_questions, decompose_usage = await _decompose(
-                provider, model, run.topic, run.depth
-            )
+            sub_questions, decompose_usage = await _decompose(provider, model, run.topic, run.depth)
             _accumulate_usage(usage_total, decompose_usage)
             if not sub_questions:
                 raise RuntimeError("Topic decomposition returned no sub-questions")
@@ -266,6 +266,7 @@ async def execute_research(
                 sub_questions=sub_questions,
                 conversation_id=run.conversation_id,
                 model=model,
+                research_run_id=run.id,
             )
 
             # --- Stage 3: collect sources ---------------------------------
@@ -374,9 +375,7 @@ def _accumulate_usage(total: dict[str, Any], usage: Any | None) -> None:
 # --- Stage 1: decomposition ------------------------------------------------
 
 
-async def _decompose(
-    provider: Any, model: str, topic: str, depth: int
-) -> tuple[list[str], Any]:
+async def _decompose(provider: Any, model: str, topic: str, depth: int) -> tuple[list[str], Any]:
     """Ask the LLM to split the topic into ``depth`` sub-questions.
 
     Returns (questions, usage).
@@ -416,6 +415,7 @@ async def _gather(
     sub_questions: list[str],
     conversation_id: int | None,
     model: str | None,
+    research_run_id: int | None,
 ) -> list[str]:
     """Run one researcher subagent per sub-question (bounded concurrency)."""
     semaphore = asyncio.Semaphore(RESEARCH_MAX_CONCURRENT_SUBAGENTS)
@@ -432,6 +432,7 @@ async def _gather(
                     total=len(sub_questions),
                     conversation_id=conversation_id,
                     model=model,
+                    research_run_id=research_run_id,
                 )
                 await sink.emit(
                     "subquestion_completed",
@@ -465,6 +466,7 @@ async def _run_researcher_subagent(
     total: int,
     conversation_id: int | None,
     model: str | None,
+    research_run_id: int | None,
 ) -> str | None:
     """Spawn + await one researcher subagent; returns its findings text."""
     prompt = (
@@ -472,7 +474,10 @@ async def _run_researcher_subagent(
         f"Context: this is sub-question {index + 1} of {total} for the topic:\n"
         f"{topic}\n\n"
         "Use web_search to find relevant sources and web_fetch to read the "
-        "most promising ones. Then write your findings:\n"
+        "most promising ones. For dynamic or script-rendered pages, use "
+        "browser_navigate and browser_extract; capture a browser_screenshot "
+        "and analyze it when a chart or diagram carries evidence. Then write "
+        "your findings:\n"
         "- Present 3-8 distinct findings as numbered claims.\n"
         "- Immediately after each claim, put the supporting URL(s) in "
         "[brackets].\n"
@@ -489,7 +494,9 @@ async def _run_researcher_subagent(
         parent_conversation_id=conversation_id or 1,
         role=role,
         model_override=model,
+        research_run_id=research_run_id,
     )
+    assert sa_run.id is not None
     try:
         return await execute_subagent(sa_run.id)
     except asyncio.CancelledError:
@@ -737,6 +744,7 @@ async def run_research_inline(
             conversation_id=conversation_id,
         )
         run_id = run.id
+        assert run_id is not None
     report = await execute_research(run_id, sink=None)
     return report, run_id
 
@@ -763,6 +771,7 @@ async def run_research_for_task(
         conversation_id=conversation_id,
         parent_task_run_id=task_run_id,
     )
+    assert run.id is not None
     report = await execute_research(run.id, sink=None)
     usage = run.usage if run else None
     error = run.error if run and run.status == RESEARCH_STATUS_FAILED else None

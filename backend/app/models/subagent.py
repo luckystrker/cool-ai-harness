@@ -82,6 +82,9 @@ class SubagentRun(TimestampMixin, table=True):
     parent_conversation_id: int = Field(foreign_key="conversations.id", index=True)
     # The parent run that spawned this subagent (if spawned by the agent loop).
     parent_run_id: int | None = Field(default=None, foreign_key="agent_runs.id", index=True)
+    # Exact Deep Research workflow that spawned this researcher. Unlike the
+    # parent conversation, this remains unique across reruns.
+    research_run_id: int | None = Field(default=None, foreign_key="research_runs.id", index=True)
     # Isolated conversation owned by this subagent (separate history).
     conversation_id: int = Field(foreign_key="conversations.id")
     # Durable run row tracking the subagent's agent loop execution.

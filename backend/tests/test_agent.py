@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -187,6 +188,86 @@ async def test_tool_whitelist_filters_tools(scripted_provider, workspace) -> Non
     )
     specs = ex.available_tools()
     assert [s.name for s in specs] == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_tool_whitelist_disables_all_tools(scripted_provider) -> None:
+    ex = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(model="m", tool_names=[]),
+    )
+    assert ex.available_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_vision_tool_usage_is_included_in_run_totals(
+    scripted_provider, monkeypatch, tmp_path
+) -> None:
+    from sqlmodel import Session
+
+    from app.agent.service import create_conversation, get_or_create_default_user
+    from app.artifacts import store_artifact
+    from app.core.db import engine
+
+    class VisionProvider(LLMProvider):
+        name = "vision-test"
+
+        async def chat_completion(self, messages, *, model, tools=None, **kwargs):
+            return ChatResult(
+                content="one pixel",
+                usage=Usage(prompt_tokens=4, completion_tokens=3, total_tokens=7),
+            )
+
+        async def chat_completion_stream(self, messages, *, model, tools=None, **kwargs):
+            raise NotImplementedError
+            yield  # pragma: no cover
+
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "artifacts_dir", tmp_path / "artifacts")
+    with Session(engine) as session:
+        user = get_or_create_default_user(session)
+        assert user.id is not None
+        conv = create_conversation(session, user_id=user.id, title="vision accounting")
+        assert conv.id is not None
+        artifact = store_artifact(
+            session,
+            conversation_id=conv.id,
+            filename="pixel.png",
+            content=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ),
+            media_type="image/png",
+        )
+        assert artifact.id is not None
+        conv_id = conv.id
+        artifact_id = artifact.id
+
+    monkeypatch.setattr(
+        "app.tools.multimodal_tools.get_provider_for_model", lambda model: VisionProvider()
+    )
+    scripted_provider.set_script(
+        [
+            [
+                {
+                    "id": "vision_1",
+                    "name": "image_analyze",
+                    "arguments": {"artifact_id": artifact_id},
+                }
+            ],
+            "done",
+        ]
+    )
+    executor = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(model="vision-model", conversation_id=conv_id),
+    )
+    events = [event async for event in executor.stream("analyze")]
+
+    calls = [event for event in events if event.kind == "llm_call_complete"]
+    assert len(calls) == 3
+    assert any(event.payload["usage"]["total_tokens"] == 7 for event in calls)
+    assert events[-1].payload["usage"]["total_tokens"] == 37
 
 
 @pytest.mark.asyncio

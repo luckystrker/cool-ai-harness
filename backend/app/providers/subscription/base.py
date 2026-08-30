@@ -89,7 +89,8 @@ class SubscriptionProvider(LLMProvider):
     ) -> AsyncIterator[ChatStreamEvent]:
         """Parse a streaming response into ChatStreamEvent objects."""
         ...
-        yield  # pragma: no cover
+        if False:  # pragma: no cover - marks this abstract method as an async generator
+            yield ChatStreamEvent(finish=True)
 
     async def chat_completion(
         self,

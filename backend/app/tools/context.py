@@ -59,6 +59,11 @@ class RunContext:
     # Active agent role/personality (profile) for memory scope visibility.
     # Tools (e.g. memory_recall) use it to see agent-scoped memories.
     agent_id: int | None = None
+    model: str | None = None
+    skill_names: list[str] | None = None
+    # Set only by AgentExecutor while a composed tool is running after the
+    # outer permission/capability approval has succeeded.
+    approved_composed_tools: frozenset[str] = frozenset()
 
     def resolve_workdir(self) -> Path:
         """Return workdir, ensuring it exists."""

@@ -17,7 +17,7 @@ import re
 from collections.abc import AsyncIterator
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.agent.events import AgentEvent
 from app.core.logging import get_logger
@@ -122,8 +122,8 @@ def get_active_plan(session: Session, conversation_id: int) -> Plan | None:
     return session.exec(
         select(Plan)
         .where(Plan.conversation_id == conversation_id)
-        .where(Plan.status.in_([PLAN_STATUS_APPROVED, PLAN_STATUS_EXECUTING]))  # type: ignore[union-attr]
-        .order_by(Plan.id.desc())  # type: ignore[union-attr]
+        .where(col(Plan.status).in_([PLAN_STATUS_APPROVED, PLAN_STATUS_EXECUTING]))
+        .order_by(col(Plan.id).desc())
     ).first()
 
 

@@ -302,6 +302,62 @@ def test_rerun_keeps_inputs_and_new_id() -> None:
         ).input_hash
 
 
+def test_browser_activity_is_scoped_to_exact_research_run() -> None:
+    from app.agent.service import append_run_events
+    from app.agent.subagents import create_subagent_run
+    from app.api.research import _browser_activity
+
+    with Session(engine) as session:
+        first = start_research(session, topic="First", depth=3, model="test-model")
+        assert first.id is not None and first.conversation_id is not None
+        second = start_research(
+            session,
+            topic="Second",
+            depth=3,
+            model="test-model",
+            conversation_id=first.conversation_id,
+        )
+        assert second.id is not None
+        first_child = create_subagent_run(
+            session,
+            prompt="first",
+            parent_conversation_id=first.conversation_id,
+            model_override="test-model",
+            research_run_id=first.id,
+        )
+        second_child = create_subagent_run(
+            session,
+            prompt="second",
+            parent_conversation_id=first.conversation_id,
+            model_override="test-model",
+            research_run_id=second.id,
+        )
+        assert first_child.run_id is not None and second_child.run_id is not None
+        append_run_events(
+            session,
+            run_id=first_child.run_id,
+            events=[
+                (
+                    "tool_call_start",
+                    {"id": "first-call", "name": "browser_navigate", "arguments": {}},
+                )
+            ],
+        )
+        append_run_events(
+            session,
+            run_id=second_child.run_id,
+            events=[
+                (
+                    "tool_call_start",
+                    {"id": "second-call", "name": "browser_navigate", "arguments": {}},
+                )
+            ],
+        )
+
+        activity = _browser_activity(session, first.id)
+        assert [item["id"] for item in activity] == ["first-call"]
+
+
 def test_cancel_terminal_run_returns_false() -> None:
     with Session(engine) as session:
         run = start_research(session, topic="X", depth=3)

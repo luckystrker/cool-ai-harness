@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.approvals import approval_registry
@@ -70,6 +70,7 @@ def _msg_to_out(m) -> MessageOut:
         conversation_id=m.conversation_id,
         role=m.role,
         content=m.content,
+        artifact_ids=m.artifact_ids,
         tool_calls=m.tool_calls,
         usage=m.usage,
         thinking=m.thinking,
@@ -95,7 +96,7 @@ def _resolve_default_model(session: Session) -> str | None:
         select(ProviderRow)
         .where(ProviderRow.user_id == 1)
         .where(ProviderRow.is_active == True)  # noqa: E712
-        .order_by(ProviderRow.id)
+        .order_by(col(ProviderRow.id))
     ).all()
     pool = [r for r in rows if r.is_default and not r.is_fallback] or [
         r for r in rows if not r.is_fallback
@@ -119,6 +120,7 @@ def post_conversation(
     if errors := validate_capability_policy(body.capability_policy):
         raise HTTPException(status_code=400, detail="; ".join(errors))
     user = get_or_create_default_user(session)
+    assert user.id is not None
     # Seed the conversation's model from the default provider when the caller
     # didn't name one, so a freshly created chat already has a working model.
     model = body.model or _resolve_default_model(session)
@@ -139,15 +141,12 @@ def post_conversation(
 @router.get("/conversations", response_model=list[ConversationOut])
 def get_conversations(session: Session = Depends(get_session)) -> list[ConversationOut]:
     user = get_or_create_default_user(session)
+    assert user.id is not None
     convs = list_conversations(session, user_id=user.id)
     # Hide conversations flagged as test artifacts (metadata_.is_test). These
     # are rows left behind by old test runs that pre-date the isolated test
     # database; they should never clutter the real chat list.
-    return [
-        _conv_to_out(c)
-        for c in convs
-        if not (c.metadata_ or {}).get("is_test")
-    ]
+    return [_conv_to_out(c) for c in convs if not (c.metadata_ or {}).get("is_test")]
 
 
 @router.get("/conversations/{conv_id}", response_model=ConversationDetail)
@@ -157,6 +156,7 @@ def get_conversation_detail(
     conv = get_conversation(session, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    assert conv.id is not None
     msgs = list_messages(session, conv_id)
     meta = conv.metadata_ or {}
     # Compaction state: the rolling summary + cutoff let the UI collapse the
@@ -224,9 +224,7 @@ def patch_conversation(
 
 
 @router.post("/conversations/{conv_id}/compact")
-async def compact_conversation(
-    conv_id: int, session: Session = Depends(get_session)
-) -> dict:
+async def compact_conversation(conv_id: int, session: Session = Depends(get_session)) -> dict:
     """Compact the conversation context by summarizing older messages.
 
     Triggers the working memory summarization: older messages are compressed
@@ -317,9 +315,7 @@ async def compact_conversation(
     # Store the summary in working memory. The cutoff covers the whole
     # compacted prefix (previous + newly compacted messages).
     last_compacted_msg_id = older_msgs[-1].id if older_msgs else None
-    update_working_memory_summary(
-        session, conv_id, summary, up_to_message_id=last_compacted_msg_id
-    )
+    update_working_memory_summary(session, conv_id, summary, up_to_message_id=last_compacted_msg_id)
 
     return {
         "status": "compacted",
@@ -349,25 +345,45 @@ async def post_message(
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    from app.multimodal import validate_artifact_ids
+
+    try:
+        attachments = validate_artifact_ids(
+            session, conversation_id=conv_id, artifact_ids=body.artifact_ids
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Persist the user message immediately (before the run starts).
     append_message(
         session,
         conversation_id=conv_id,
         role="user",
         content=body.content,
+        artifact_ids=[artifact.id for artifact in attachments if artifact.id is not None],
     )
 
-    model = body.model or conv.model
-    provider = get_provider_for_model(model)
+    from app.agent.personalities.service import get_profile
+    from app.providers.registry import resolve_provider_model
+
+    profile = get_profile(session, conv.profile_id) if conv.profile_id else None
+    requested_model = body.model or (profile.model if profile else None) or conv.model
+    provider = get_provider_for_model(requested_model)
+    model = resolve_provider_model(provider, requested_model)
+    if model is None:
+        raise HTTPException(status_code=400, detail="No default model is configured")
 
     # Create a durable run row so this turn is observable, resumable-aware, and
     # cancellable. The run_id flows into the agent loop via the runner.
     run = create_run(session, conversation_id=conv_id, model=model)
+    assert run.id is not None
 
     # --- Planning Mode (Фаза 2 §1) ---
     if body.plan_mode:
         return EventSourceResponse(
-            _plan_generation_stream(session, conv_id, run.id, provider, model or "", body.content, conv)  # type: ignore[arg-type]
+            _plan_generation_stream(
+                session, conv_id, run.id, provider, model, body.content, conv
+            )
         )
 
     async def event_stream() -> AsyncIterator[dict]:
@@ -427,6 +443,7 @@ async def _plan_generation_stream(
             conversation_breakpoints=(conv.metadata_ or {}).get("breakpoints"),
             run_id=run_id,
             cancellable=True,
+            profile_id=conv.profile_id,
         ):
             # Capture the last assistant message content for plan extraction.
             if event.kind == "message":
@@ -501,7 +518,7 @@ def get_approval_audits(
     stmt = (
         select(ApprovalAudit)
         .where(ApprovalAudit.conversation_id == conv_id)
-        .order_by(ApprovalAudit.id.desc())
+        .order_by(col(ApprovalAudit.id).desc())
         .limit(limit)
     )
     if run_id is not None:
@@ -509,7 +526,7 @@ def get_approval_audits(
     rows = session.exec(stmt).all()
     return [
         ApprovalAuditOut(
-            id=r.id,
+            id=r.id if r.id is not None else 0,
             conversation_id=r.conversation_id,
             run_id=r.run_id,
             call_id=r.call_id,
@@ -552,9 +569,7 @@ def search_conversation_content(
     conv_ids = list(session.exec(msg_stmt).all())
     if not conv_ids:
         return []
-    convs = session.exec(
-        select(Conversation).where(col(Conversation.id).in_(conv_ids))
-    ).all()
+    convs = session.exec(select(Conversation).where(col(Conversation.id).in_(conv_ids))).all()
     return [_conv_to_out(c) for c in convs]
 
 

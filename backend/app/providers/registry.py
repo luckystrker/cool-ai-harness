@@ -16,7 +16,7 @@ The database lookup is optional (works without a session in pure unit tests);
 
 from __future__ import annotations
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.config import get_settings
 from app.core.db import engine
@@ -142,7 +142,7 @@ def get_provider_from_db(session: Session) -> LLMProvider | None:
             select(ProviderRow)
             .where(ProviderRow.user_id == 1)
             .where(ProviderRow.is_active == True)  # noqa: E712
-            .order_by(ProviderRow.id)
+            .order_by(col(ProviderRow.id))
         ).all()
     )
     if not rows:
@@ -199,7 +199,7 @@ def get_provider_for_model(model: str | None) -> LLMProvider:
                         select(ProviderRow)
                         .where(ProviderRow.user_id == 1)
                         .where(ProviderRow.is_active == True)  # noqa: E712
-                        .order_by(ProviderRow.id)
+                        .order_by(col(ProviderRow.id))
                     ).all()
                 )
                 for row in rows:
@@ -216,6 +216,22 @@ def get_provider_for_model(model: str | None) -> LLMProvider:
             log.warning("providers.model_routing_failed", error=str(exc))
 
     return get_default_provider()
+
+
+def resolve_provider_model(provider: LLMProvider, requested: str | None) -> str | None:
+    """Resolve a model without routing an unrelated hard-coded id to a provider."""
+    if requested:
+        return requested
+    configured = getattr(provider, "default_model", None)
+    primary = getattr(provider, "primary", provider)
+    if not configured:
+        configured = getattr(primary, "default_model", None)
+    if configured:
+        return str(configured)
+    settings = get_settings()
+    if getattr(primary, "name", getattr(provider, "name", "")) == "anthropic":
+        return settings.anthropic_default_model or None
+    return settings.openai_default_model or None
 
 
 def get_default_provider() -> LLMProvider:
@@ -250,7 +266,7 @@ def _from_settings() -> LLMProvider:
         return AnthropicProvider(
             base_url=settings.anthropic_base_url,
             api_key=settings.anthropic_api_key,
-            default_model=None,
+            default_model=settings.anthropic_default_model or None,
         )
 
     if not settings.openai_api_key:
@@ -262,7 +278,7 @@ def _from_settings() -> LLMProvider:
     return OpenAIProvider(
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key or "ollama",  # ollama ignores the key
-        default_model=None,
+        default_model=settings.openai_default_model or None,
     )
 
 

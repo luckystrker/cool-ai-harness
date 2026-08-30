@@ -94,6 +94,7 @@ def _mask(secret: str) -> str:
 
 
 def _to_out(p: Provider) -> ProviderOut:
+    assert p.id is not None
     hint = None
     if p.api_key_encrypted:
         try:

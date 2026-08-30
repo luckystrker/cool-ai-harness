@@ -10,6 +10,7 @@ from app.providers.base import (
     ModelInfo,
     ToolSpec,
     Usage,
+    message_text,
 )
 from app.providers.openai import OpenAIProvider
 from app.providers.registry import (
@@ -36,4 +37,5 @@ __all__ = [
     "get_default_provider_cached",
     "get_provider_for_model",
     "get_provider_from_db",
+    "message_text",
 ]

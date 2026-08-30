@@ -38,6 +38,7 @@ def create_profile(
     avatar_color: str | None = None,
     is_builtin: bool = False,
     is_active: bool = True,
+    is_shared: bool = False,
 ) -> AgentProfile:
     profile = AgentProfile(
         name=name,
@@ -51,6 +52,7 @@ def create_profile(
         avatar_color=avatar_color,
         is_builtin=is_builtin,
         is_active=is_active,
+        is_shared=is_shared,
     )
     session.add(profile)
     session.commit()
@@ -72,6 +74,7 @@ def update_profile(
     settings: dict | None = None,
     avatar_color: str | None = None,
     is_active: bool | None = None,
+    is_shared: bool | None = None,
 ) -> AgentProfile | None:
     """Patch updatable fields. None means 'leave unchanged'."""
     profile = session.get(AgentProfile, profile_id)
@@ -88,15 +91,18 @@ def update_profile(
     if model is not None:
         profile.model = model or None
     if tool_names is not None:
-        profile.tool_names = tool_names or None
+        # [] is an explicit "no tools" whitelist; None means inherit/all.
+        profile.tool_names = list(tool_names)
     if skill_names is not None:
-        profile.skill_names = skill_names or None
+        profile.skill_names = list(skill_names)
     if settings is not None:
         profile.settings = settings or None
     if avatar_color is not None:
         profile.avatar_color = avatar_color
     if is_active is not None:
         profile.is_active = is_active
+    if is_shared is not None:
+        profile.is_shared = is_shared
     session.add(profile)
     session.commit()
     session.refresh(profile)

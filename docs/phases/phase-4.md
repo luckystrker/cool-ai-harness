@@ -1,9 +1,10 @@
 # Фаза 4: Специализированные Workflows + Multimodal + Agent Constructor
 
-> **Статус:** 🔄 В процессе (Code Task + Git/GitHub tools готовы; **Deep Research готов** (итерация 1: оркестратор + цитаты + экспорт md/html + страница + tool + cron; Playwright browser automation и PDF/DOCX экспорт отложены); multimodal, browser, Agent Constructor pending)
+> **Статус:** ✅ Завершено
 > **Длительность:** 2.5-3 недели
 
-Цель: три мощных специализированных инструмента + мультимодальный ввод + продвинутые tools.
+Цель: специализированные research/code workflows, мультимодальный ввод,
+браузерная автоматизация и визуальный конструктор агентов.
 
 ---
 
@@ -15,11 +16,11 @@
 
 ## 1. Deep Research skill (`app/skills/builtin/deep-research/`)
 
-> **Статус: ✅ Итерация 1 готова.** Выделенный workflow в `backend/app/research/`
+> **Статус: ✅ Готово.** Выделенный workflow в `backend/app/research/`
 > (модель `ResearchRun` + оркестратор + API + SSE-прогресс), страница
 > `/deep-research`, tool `deep_research`, интеграция с recurring tasks
-> (`workflow_type="deep_research"`). Playwright browser automation и экспорт
-> PDF/DOCX — следующая итерация.
+> (`workflow_type="deep_research"`), журнал браузерной активности и экспорт
+> Markdown/HTML/PDF/DOCX.
 
 - Декомпозиция запроса → параллельный поиск (subagents) → fetch/extract/оценка → синтез с цитированием
 - Структурированный отчёт + библиография
@@ -32,16 +33,9 @@
 - Скроллинг страниц, клики, заполнение форм, авторизация
 - Скриншоты динамических сайтов (SPA, login-walled content)
 - Извлечение structured data через селекторы/XPATH
-- `browser_navigate`, `browser_click`, `browser_extract`, `browser_screenshot` tools
+- `browser_navigate`, `browser_click`, `browser_fill`, `browser_scroll`,
+  `browser_extract`, `browser_screenshot`, `browser_close` tools
 - Headless-режим в Docker, session management, stealth-режим
-
-## 2. D&D Story Crafter skill (`app/skills/builtin/dnd-story/`)
-
-- DM-агент со знанием 5e, хранение campaign state (мир/NPC/локации/квесты) в memory
-- Генерация one-shot'ов, кампаний, NPC, энкаунтеров (с балансом по CR), лора
-- Dice rolling tool
-- Экспорт в PDF
-- Связь с Фазой 3b: weekly prep recurring task
 
 ## 3. Code Task skill (`app/skills/builtin/code-task/`)
 
@@ -60,14 +54,16 @@
 
 ## 4. Multimodal Input (Vision) 🆕
 
-- Загрузка изображений в чат через UI/Telegram
+- Загрузка изображений и документов в web chat. Telegram использует тот же
+  контракт вложений после реализации Фазы 5.
 - OCR (Tesseract / LLM-based)
 - Описание и анализ изображений (LLM with vision capability)
 - Анализ скриншотов, диаграмм, графиков, UI-макетов
 - `image_analyze` tool: передача изображения в vision-capable модель
 - `ocr_extract` tool: извлечение текста из изображений/PDF
 - **Multimodal в research**: агент анализирует скриншоты страниц, диаграммы из источников
-- Провайдеры: OpenAI Vision, Claude Vision, Gemini Vision
+- Провайдеры: OpenAI-compatible vision endpoints (включая Gemini-compatible)
+  и Claude Vision
 
 ## 5. Agent Constructor 🆕
 
@@ -75,19 +71,21 @@
 - Визуальный конструктор агентов: выбор personality, tools, skills, модели, лимитов
 - **Agent blueprints**: сохранённые конфигурации агентов под разные задачи
 - **Tool composition**: создание "макро-tools" их комбинации базовых tools с валидацией
-- **Share внутри инстанса**: возможность скопировать blueprint другому пользователю (в multi-user)
+- **Share внутри инстанса**: blueprint можно пометить общим и клонировать
 - **Agent playground**: быстрый запуск агента с blueprint'ом прямо из конструктора
 
 ## Frontend
 
 - Спец-страницы для каждого workflow:
   - Deep research с прогресс-баром, цитатами, browser activity log
-  - D&D менеджер кампаний (карта мира, NPC, квесты)
-  - Code IDE-подобный вид с workspace, файловым деревом, терминалом
+  - Code workflow в основном чате через sandboxed workspace и git tools
 - **Multimodal**: drag-and-drop загрузка изображений, превью, результаты анализа
 - **Browser automation**: лог действий браузера, скриншоты в реальном времени
-- **Agent Constructor**: визуальный builder агентов с drag-and-drop tools/skills
+- **Agent Constructor**: визуальный builder blueprint'ов и drag-and-drop
+  композиция шагов macro-tools
 
 ## Деливерабл
 
-Три мощных специализированных инструмента, мультимодальный ввод с анализом изображений, браузерная автоматизация для глубокого research, полноценный git/GitHub workflow, конструктор агентов.
+Deep Research и Code Task workflows, мультимодальный ввод с анализом изображений
+и документов, браузерная автоматизация, полноценный git/GitHub workflow и
+конструктор агентов.

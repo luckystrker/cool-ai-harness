@@ -8,6 +8,7 @@ loop itself stays persistence-agnostic: it works on an in-memory
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal, cast
 
 from sqlmodel import Session, col, select
 
@@ -44,7 +45,7 @@ def resolve_default_model(session: Session) -> str | None:
         select(ProviderRow)
         .where(ProviderRow.user_id == 1)
         .where(ProviderRow.is_active == True)  # noqa: E712
-        .order_by(ProviderRow.id)
+        .order_by(col(ProviderRow.id))
     ).all()
     pool = [r for r in rows if r.is_default and not r.is_fallback] or [
         r for r in rows if not r.is_fallback
@@ -91,7 +92,7 @@ def list_conversations(session: Session, *, user_id: int) -> Sequence[Conversati
     rows = session.exec(
         select(Conversation)
         .where(Conversation.user_id == user_id)
-        .order_by(Conversation.updated_at.desc())
+        .order_by(col(Conversation.updated_at).desc())
     ).all()
     # Hide machine-owned conversations (subagent and scheduled-task runs) from
     # the regular chat list.
@@ -197,11 +198,18 @@ def load_history(session: Session, conv_id: int) -> list[Message]:
     wm = get_working_memory(session, conv_id)
     if wm is not None and wm.summary and wm.summary_up_to_message_id is not None:
         query = query.where(col(MessageRow.id) > wm.summary_up_to_message_id)
-    rows = session.exec(query.order_by(MessageRow.id)).all()
+    rows = session.exec(query.order_by(col(MessageRow.id))).all()
+    from app.multimodal import build_multimodal_content
+
     return [
         Message(
-            role=row.role,
-            content=row.content,
+            role=cast(Literal["system", "user", "assistant", "tool"], row.role),
+            content=build_multimodal_content(
+                session,
+                conversation_id=conv_id,
+                text=row.content,
+                artifact_ids=row.artifact_ids,
+            ),
             tool_calls=row.tool_calls,
             tool_call_id=row.tool_result.get("tool_call_id") if row.tool_result else None,
             name=row.tool_result.get("name") if row.tool_result else None,
@@ -216,6 +224,7 @@ def append_message(
     conversation_id: int,
     role: str,
     content: str | None = None,
+    artifact_ids: list[int] | None = None,
     tool_calls: list[dict] | None = None,
     usage: dict | None = None,
     thinking: str | None = None,
@@ -226,6 +235,7 @@ def append_message(
         conversation_id=conversation_id,
         role=role,
         content=content,
+        artifact_ids=artifact_ids,
         tool_calls=tool_calls,
         usage=usage,
         thinking=thinking,
@@ -244,7 +254,7 @@ def append_message(
 
 def list_messages(session: Session, conv_id: int) -> Sequence[MessageRow]:
     return session.exec(
-        select(MessageRow).where(MessageRow.conversation_id == conv_id).order_by(MessageRow.id)
+        select(MessageRow).where(MessageRow.conversation_id == conv_id).order_by(col(MessageRow.id))
     ).all()
 
 
@@ -341,7 +351,7 @@ def list_runs(session: Session, *, conversation_id: int) -> Sequence[AgentRun]:
     return session.exec(
         select(AgentRun)
         .where(AgentRun.conversation_id == conversation_id)
-        .order_by(AgentRun.id.desc())
+        .order_by(col(AgentRun.id).desc())
     ).all()
 
 
@@ -357,7 +367,7 @@ def append_run_events(
     if not events:
         return []
     current_max = session.exec(
-        select(RunEvent.seq).where(RunEvent.run_id == run_id).order_by(RunEvent.seq.desc())
+        select(RunEvent.seq).where(RunEvent.run_id == run_id).order_by(col(RunEvent.seq).desc())
     ).first()
     # ``current_max`` is None when the run has no events yet, else an int (which
     # may legitimately be 0 — so use an explicit None check, not ``or``).
@@ -376,5 +386,5 @@ def append_run_events(
 def list_run_events(session: Session, *, run_id: int) -> Sequence[RunEvent]:
     """All events for a run, in seq order (the order the loop emitted them)."""
     return session.exec(
-        select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)
+        select(RunEvent).where(RunEvent.run_id == run_id).order_by(col(RunEvent.seq))
     ).all()

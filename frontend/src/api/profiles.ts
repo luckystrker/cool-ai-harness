@@ -17,4 +17,9 @@ export const profilesApi = {
   delete: (id: number) => api.delete<{ deleted: number }>(`/api/profiles/${id}`),
 
   seed: () => api.post<{ created: number }>("/api/profiles/seed"),
+
+  clone: (id: number) => api.post<AgentProfile>(`/api/profiles/${id}/clone`),
+
+  playground: (id: number, body: { title?: string; initial_prompt?: string } = {}) =>
+    api.post<{ conversation_id: number }>(`/api/profiles/${id}/playground`, body),
 }

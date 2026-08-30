@@ -28,6 +28,7 @@ from app.providers.base import (
     ModelInfo,
     ToolSpec,
     Usage,
+    message_text,
 )
 from app.providers.subscription.base import SubscriptionProvider
 
@@ -103,12 +104,14 @@ class ClaudeProProvider(SubscriptionProvider):
         system_text = ""
         for msg in messages:
             if msg.role == "system":
-                system_text += (msg.content or "") + "\n"
+                system_text += message_text(msg.content) + "\n"
             else:
-                prompt_messages.append({
-                    "role": msg.role,
-                    "content": msg.content or "",
-                })
+                prompt_messages.append(
+                    {
+                        "role": msg.role,
+                        "content": message_text(msg.content),
+                    }
+                )
 
         payload: dict[str, Any] = {
             "model": model,
@@ -132,9 +135,7 @@ class ClaudeProProvider(SubscriptionProvider):
             # Array of content blocks.
             blocks = data["content"]
             if isinstance(blocks, list):
-                content = "".join(
-                    b.get("text", "") for b in blocks if b.get("type") == "text"
-                )
+                content = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
             elif isinstance(blocks, str):
                 content = blocks
 
@@ -153,9 +154,7 @@ class ClaudeProProvider(SubscriptionProvider):
             finish_reason=data.get("stop_reason", "end_turn"),
         )
 
-    async def _parse_stream(
-        self, response: httpx.Response
-    ) -> AsyncIterator[ChatStreamEvent]:
+    async def _parse_stream(self, response: httpx.Response) -> AsyncIterator[ChatStreamEvent]:
         """Parse SSE stream from claude.ai."""
         async for line in response.aiter_lines():
             if not line.startswith("data: "):

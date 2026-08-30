@@ -4,9 +4,8 @@ Guidance for AI coding agents working in this repository. Read this before
 editing. Cool AI Harness is a personal AI agent harness: a Python/FastAPI
 backend plus a React/TypeScript SPA, following a phased roadmap in
 [`docs/PLAN.md`](docs/PLAN.md) and [`docs/phases/`](docs/phases/). Phases 0–3b
-are done; **Фаза 4** (workflows, multimodal, browser/code tools) is current —
-Code Task + Git/GitHub tools shipped, deep research / multimodal / browser
-pending. Telegram (Фаза 5) is still an empty placeholder.
+and **Фаза 4** (Deep Research, Code/Git, multimodal, browser automation,
+Agent Constructor) are done. Telegram (Фаза 5) is still an empty placeholder.
 
 ## Repository layout
 
@@ -190,7 +189,7 @@ alembic revision --autogenerate -m "describe change"   # new migration after mod
   sandboxing and capability checks).
 - `app/models/*.py` → add a `backend/alembic/versions/*.py` migration
   (autogenerate it; verify with `alembic upgrade head`). Current head is
-  `0020_webhooks`.
+  `0022_phase4_completion`.
 - `app/api/schemas.py` or `app/api/*_router.py` → update
   `frontend/src/api/types.ts` and the consuming hook/component.
 - `app/agent/events.py` + `app/api/websocket.py` → update

@@ -8,7 +8,9 @@ configured provider.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Literal, cast
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.agent import get_default_system_prompt
@@ -19,6 +21,7 @@ from app.api.schemas import (
     UsageOut,
 )
 from app.core.config import get_settings
+from app.core.db import get_session
 from app.core.logging import get_logger
 from app.providers import Message, get_provider_for_model
 
@@ -38,15 +41,28 @@ async def health() -> HealthResponse:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest, session=Depends(get_session)) -> ChatResponse:
     """Non-streaming chat smoke endpoint. No tool-calling, no persistence yet."""
-    provider = get_provider_for_model(req.model)
+    from app.agent.service import resolve_default_model
+    from app.providers.registry import resolve_provider_model
 
-    messages = [Message(role=m.role, content=m.content) for m in req.messages]
+    requested_model = req.model or resolve_default_model(session)
+    provider = get_provider_for_model(requested_model)
+    model = resolve_provider_model(provider, requested_model)
+    if model is None:
+        raise HTTPException(status_code=400, detail="No default model is configured")
+
+    messages = [
+        Message(
+            role=cast(Literal["system", "user", "assistant", "tool"], m.role),
+            content=m.content,
+        )
+        for m in req.messages
+    ]
     try:
         result = await provider.chat_completion(
             messages,
-            model=req.model,
+            model=model,
             temperature=req.temperature,
             max_tokens=req.max_tokens,
         )
@@ -64,7 +80,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     return ChatResponse(
         content=result.content,
-        model=req.model,
+        model=model,
         usage=usage,
         finish_reason=result.finish_reason,
     )

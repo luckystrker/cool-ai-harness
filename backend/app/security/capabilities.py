@@ -76,6 +76,15 @@ _DEFAULT_TOOL_CAPS: dict[str, frozenset[Capability]] = {
     "github_issue_list": frozenset({Capability.NETWORK, Capability.GIT}),
     "github_issue_create": frozenset({Capability.NETWORK, Capability.GIT}),
     "github_actions_status": frozenset({Capability.NETWORK, Capability.GIT}),
+    "image_analyze": frozenset({Capability.READ, Capability.NETWORK}),
+    "ocr_extract": frozenset({Capability.READ, Capability.WRITE}),
+    "browser_navigate": frozenset({Capability.NETWORK}),
+    "browser_click": frozenset({Capability.NETWORK, Capability.SEND_EXTERNAL}),
+    "browser_fill": frozenset({Capability.NETWORK, Capability.SEND_EXTERNAL}),
+    "browser_extract": frozenset({Capability.NETWORK}),
+    "browser_scroll": frozenset({Capability.NETWORK}),
+    "browser_screenshot": frozenset({Capability.NETWORK, Capability.WRITE}),
+    "browser_close": frozenset({Capability.NETWORK}),
 }
 
 
@@ -153,7 +162,7 @@ def _coerce_decision(value: str, name: str) -> Decision:
 
 def normalize_policy(raw: dict | None) -> dict[str, str]:
     """Coerce a raw capability policy into a clean {cap: decision} dict."""
-    if not raw or not isinstance(raw, dict):  # type: ignore[unreachable]
+    if not raw or not isinstance(raw, dict):
         return {}
     clean: dict[str, str] = {}
     for key, value in raw.items():
@@ -176,9 +185,7 @@ def validate_policy(raw: dict | None) -> list[str]:
     for key, value in raw.items():
         v = str(value).strip().lower()
         if v not in _VALID_DECISIONS:
-            errors.append(
-                f"capability_policy[{key!r}] = {value!r} is not one of allow|ask|deny"
-            )
+            errors.append(f"capability_policy[{key!r}] = {value!r} is not one of allow|ask|deny")
     return errors
 
 
