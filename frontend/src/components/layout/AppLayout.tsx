@@ -27,7 +27,7 @@ export function AppLayout() {
         {!isMobile && <Sidebar />}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {isMobile && !isChatRoute && <MobileAppBar />}
-          <main className="min-h-0 flex-1 overflow-hidden">
+          <main className="cool-ledger-canvas min-h-0 flex-1 overflow-hidden">
             <Outlet />
           </main>
         </div>

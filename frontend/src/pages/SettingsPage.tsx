@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store, Eye, EyeOff } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
@@ -67,6 +67,30 @@ const EMPTY_FORM: ProviderCreate = {
   is_fallback: false,
   chat_models: [],
 }
+
+const PROVIDER_PRESETS = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    description: "OpenAI API",
+    name: "openai",
+    baseUrl: "https://api.openai.com/v1",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    description: "Claude API",
+    name: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+  },
+  {
+    id: "compatible",
+    label: "Compatible",
+    description: "Custom endpoint",
+    name: "openai",
+    baseUrl: "",
+  },
+] as const
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
@@ -201,19 +225,23 @@ export function SettingsPage() {
                     <Plus className="h-4 w-4" /> Add provider
                   </Button>
                 </DialogTrigger>
-                <DialogContent>
+                <DialogContent className="max-w-xl">
                   <DialogHeader>
                     <DialogTitle>
                       {isProviderSetup ? "Connect your first model" : "Add provider"}
                     </DialogTitle>
                     {isProviderSetup && (
                       <DialogDescription>
-                        This is the only required setup. Add your connection now; everything else
-                        can be changed later.
+                        Choose a model service and paste its API key. Endpoint, model-list, and
+                        fallback options stay under Advanced.
                       </DialogDescription>
                     )}
                   </DialogHeader>
-                  <ProviderForm form={createForm} onChange={setCreateForm} />
+                  <ProviderForm
+                    form={createForm}
+                    onChange={setCreateForm}
+                    compact={isProviderSetup}
+                  />
                   <DialogFooter>
                     <Button variant="outline" onClick={() => handleCreateOpenChange(false)}>
                       {isProviderSetup ? "Not now" : "Cancel"}
@@ -232,7 +260,7 @@ export function SettingsPage() {
             ) : isError ? (
               <QueryErrorState
                 title="Model providers could not be loaded"
-                description="Check that the local harness is running, then try again."
+                description="Check that Cool is running locally, then try again."
                 onRetry={() => void refetch()}
               />
             ) : providers.length === 0 ? (
@@ -423,17 +451,98 @@ function ProviderRow({
 function ProviderForm({
   form,
   onChange,
+  compact = false,
 }: {
   form: ProviderCreate
   onChange: (next: ProviderCreate) => void
+  compact?: boolean
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(!compact)
+  const [revealKey, setRevealKey] = useState(false)
   const set = (patch: Partial<ProviderCreate>) => onChange({ ...form, ...patch })
+  const selectedPreset =
+    form.name === "anthropic"
+      ? "anthropic"
+      : form.name === "openai" && form.base_url === "https://api.openai.com/v1"
+        ? "openai"
+        : "compatible"
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-3">
+    <div className="space-y-4">
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium">Model service</legend>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {PROVIDER_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              aria-pressed={selectedPreset === preset.id}
+              onClick={() =>
+                set({
+                  name: preset.name,
+                  base_url: preset.baseUrl,
+                  label: preset.id === "compatible" ? "Compatible endpoint" : preset.label,
+                })
+              }
+              className={cn(
+                "rounded-md border bg-card px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                selectedPreset === preset.id
+                  ? "border-primary bg-primary/7 text-foreground"
+                  : "hover:bg-accent"
+              )}
+            >
+              <span className="block text-sm font-semibold">{preset.label}</span>
+              <span className="block text-xs text-muted-foreground">{preset.description}</span>
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="p-key">API key</Label>
+        <div className="relative">
+          <Input
+            id="p-key"
+            type={revealKey ? "text" : "password"}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Paste your API key"
+            value={form.api_key}
+            onChange={(e) => set({ api_key: e.target.value })}
+            className="pr-11 font-mono text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => setRevealKey((value) => !value)}
+            className="absolute inset-y-0 right-0 grid w-10 place-items-center rounded-r-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            aria-label={revealKey ? "Hide API key" : "Show API key"}
+          >
+            {revealKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <ShieldCheck className="h-3.5 w-3.5" /> Encrypted at rest and never shown again in full.
+        </p>
+      </div>
+
+      {compact && (
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((value) => !value)}
+          aria-expanded={advancedOpen}
+          className="flex min-h-10 w-full items-center gap-2 rounded-md text-sm font-semibold text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronRight
+            className={cn("h-4 w-4 transition-transform", advancedOpen && "rotate-90")}
+          />
+          Advanced connection options
+        </button>
+      )}
+
+      {advancedOpen && <div className="space-y-3 border-t pt-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor="p-name">Provider</Label>
+          <Label htmlFor="p-name">Provider identifier</Label>
           <Input
             id="p-name"
             placeholder="openai"
@@ -442,7 +551,7 @@ function ProviderForm({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="p-label">Label</Label>
+          <Label htmlFor="p-label">Connection label</Label>
           <Input
             id="p-label"
             placeholder="Personal"
@@ -458,17 +567,6 @@ function ProviderForm({
           placeholder="https://api.openai.com/v1"
           value={form.base_url ?? ""}
           onChange={(e) => set({ base_url: e.target.value })}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="p-key">API key</Label>
-        <Textarea
-          id="p-key"
-          placeholder="sk-…"
-          value={form.api_key}
-          onChange={(e) => set({ api_key: e.target.value })}
-          className="font-mono text-xs"
-          rows={2}
         />
       </div>
       <ChatModelsPicker
@@ -496,6 +594,7 @@ function ProviderForm({
           </span>
         </span>
       </label>
+      </div>}
     </div>
   )
 }

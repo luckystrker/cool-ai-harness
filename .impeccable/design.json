@@ -1,0 +1,304 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-31T00:42:44.7600682+07:00",
+  "title": "Design System: Cool",
+  "extensions": {
+    "colorMeta": {
+      "mineral-ground": {
+        "role": "neutral",
+        "displayName": "Mineral Ground",
+        "canonical": "hsl(86 20% 93%)",
+        "tonalRamp": ["hsl(86 20% 15%)", "hsl(86 20% 27%)", "hsl(86 20% 39%)", "hsl(86 20% 51%)", "hsl(86 20% 63%)", "hsl(86 20% 75%)", "hsl(86 20% 87%)", "hsl(86 20% 95%)"]
+      },
+      "ledger-paper": {
+        "role": "neutral",
+        "displayName": "Ledger Paper",
+        "canonical": "hsl(90 28% 97%)",
+        "tonalRamp": ["hsl(90 28% 15%)", "hsl(90 28% 27%)", "hsl(90 28% 39%)", "hsl(90 28% 51%)", "hsl(90 28% 63%)", "hsl(90 28% 75%)", "hsl(90 28% 87%)", "hsl(90 28% 95%)"]
+      },
+      "flight-ink": {
+        "role": "neutral",
+        "displayName": "Flight Ink",
+        "canonical": "hsl(160 16% 11%)",
+        "tonalRamp": ["hsl(160 16% 15%)", "hsl(160 16% 27%)", "hsl(160 16% 39%)", "hsl(160 16% 51%)", "hsl(160 16% 63%)", "hsl(160 16% 75%)", "hsl(160 16% 87%)", "hsl(160 16% 95%)"]
+      },
+      "recorder-green": {
+        "role": "primary",
+        "displayName": "Recorder Green",
+        "canonical": "hsl(169 62% 22%)",
+        "tonalRamp": ["hsl(169 62% 15%)", "hsl(169 62% 27%)", "hsl(169 62% 39%)", "hsl(169 62% 51%)", "hsl(169 62% 63%)", "hsl(169 62% 75%)", "hsl(169 62% 87%)", "hsl(169 62% 95%)"]
+      },
+      "recorder-paper": {
+        "role": "neutral",
+        "displayName": "Recorder Paper",
+        "canonical": "hsl(90 28% 97%)",
+        "tonalRamp": ["hsl(90 28% 15%)", "hsl(90 28% 27%)", "hsl(90 28% 39%)", "hsl(90 28% 51%)", "hsl(90 28% 63%)", "hsl(90 28% 75%)", "hsl(90 28% 87%)", "hsl(90 28% 95%)"]
+      },
+      "quiet-instrument": {
+        "role": "neutral",
+        "displayName": "Quiet Instrument",
+        "canonical": "hsl(111 13% 90%)",
+        "tonalRamp": ["hsl(111 13% 15%)", "hsl(111 13% 27%)", "hsl(111 13% 39%)", "hsl(111 13% 51%)", "hsl(111 13% 63%)", "hsl(111 13% 75%)", "hsl(111 13% 87%)", "hsl(111 13% 95%)"]
+      },
+      "muted-notation": {
+        "role": "neutral",
+        "displayName": "Muted Notation",
+        "canonical": "hsl(158 11% 38%)",
+        "tonalRamp": ["hsl(158 11% 15%)", "hsl(158 11% 27%)", "hsl(158 11% 39%)", "hsl(158 11% 51%)", "hsl(158 11% 63%)", "hsl(158 11% 75%)", "hsl(158 11% 87%)", "hsl(158 11% 95%)"]
+      },
+      "active-wash": {
+        "role": "neutral",
+        "displayName": "Active Wash",
+        "canonical": "hsl(150 18% 88%)",
+        "tonalRamp": ["hsl(150 18% 15%)", "hsl(150 18% 27%)", "hsl(150 18% 39%)", "hsl(150 18% 51%)", "hsl(150 18% 63%)", "hsl(150 18% 75%)", "hsl(150 18% 87%)", "hsl(150 18% 95%)"]
+      },
+      "ledger-rule": {
+        "role": "neutral",
+        "displayName": "Ledger Rule",
+        "canonical": "hsl(140 10% 77%)",
+        "tonalRamp": ["hsl(140 10% 15%)", "hsl(140 10% 27%)", "hsl(140 10% 39%)", "hsl(140 10% 51%)", "hsl(140 10% 63%)", "hsl(140 10% 75%)", "hsl(140 10% 87%)", "hsl(140 10% 95%)"]
+      },
+      "field-stroke": {
+        "role": "neutral",
+        "displayName": "Field Stroke",
+        "canonical": "hsl(140 10% 72%)",
+        "tonalRamp": ["hsl(140 10% 15%)", "hsl(140 10% 27%)", "hsl(140 10% 39%)", "hsl(140 10% 51%)", "hsl(140 10% 63%)", "hsl(140 10% 75%)", "hsl(140 10% 87%)", "hsl(140 10% 95%)"]
+      },
+      "authority-amber": {
+        "role": "secondary",
+        "displayName": "Authority Amber",
+        "canonical": "hsl(41 100% 39%)",
+        "tonalRamp": ["hsl(41 100% 15%)", "hsl(41 100% 27%)", "hsl(41 100% 39%)", "hsl(41 100% 51%)", "hsl(41 100% 63%)", "hsl(41 100% 75%)", "hsl(41 100% 87%)", "hsl(41 100% 95%)"]
+      },
+      "destructive-red": {
+        "role": "secondary",
+        "displayName": "Destructive Red",
+        "canonical": "hsl(0 84.2% 60.2%)",
+        "tonalRamp": ["hsl(0 84.2% 15%)", "hsl(0 84.2% 27%)", "hsl(0 84.2% 39%)", "hsl(0 84.2% 51%)", "hsl(0 84.2% 63%)", "hsl(0 84.2% 75%)", "hsl(0 84.2% 87%)", "hsl(0 84.2% 95%)"]
+      },
+      "recorder-header": {
+        "role": "neutral",
+        "displayName": "Recorder Header",
+        "canonical": "#17201d",
+        "tonalRamp": ["hsl(160 16% 15%)", "hsl(160 16% 27%)", "hsl(160 16% 39%)", "hsl(160 16% 51%)", "hsl(160 16% 63%)", "hsl(160 16% 75%)", "hsl(160 16% 87%)", "hsl(160 16% 95%)"]
+      },
+      "recorder-header-text": {
+        "role": "neutral",
+        "displayName": "Recorder Header Text",
+        "canonical": "#eef1ea",
+        "tonalRamp": ["hsl(90 20% 15%)", "hsl(90 20% 27%)", "hsl(90 20% 39%)", "hsl(90 20% 51%)", "hsl(90 20% 63%)", "hsl(90 20% 75%)", "hsl(90 20% 87%)", "hsl(90 20% 95%)"]
+      },
+      "recorder-header-muted": {
+        "role": "neutral",
+        "displayName": "Recorder Header Muted",
+        "canonical": "#aebcb6",
+        "tonalRamp": ["hsl(155 11% 15%)", "hsl(155 11% 27%)", "hsl(155 11% 39%)", "hsl(155 11% 51%)", "hsl(155 11% 63%)", "hsl(155 11% 75%)", "hsl(155 11% 87%)", "hsl(155 11% 95%)"]
+      },
+      "live-green": {
+        "role": "secondary",
+        "displayName": "Live Green",
+        "canonical": "#34d399",
+        "tonalRamp": ["hsl(158 64% 15%)", "hsl(158 64% 27%)", "hsl(158 64% 39%)", "hsl(158 64% 51%)", "hsl(158 64% 63%)", "hsl(158 64% 75%)", "hsl(158 64% 87%)", "hsl(158 64% 95%)"]
+      },
+      "dark-ground": {
+        "role": "neutral",
+        "displayName": "Dark Ground",
+        "canonical": "hsl(160 21% 6%)",
+        "tonalRamp": ["hsl(160 21% 15%)", "hsl(160 21% 27%)", "hsl(160 21% 39%)", "hsl(160 21% 51%)", "hsl(160 21% 63%)", "hsl(160 21% 75%)", "hsl(160 21% 87%)", "hsl(160 21% 95%)"]
+      },
+      "dark-paper": {
+        "role": "neutral",
+        "displayName": "Dark Paper",
+        "canonical": "hsl(160 21% 8%)",
+        "tonalRamp": ["hsl(160 21% 15%)", "hsl(160 21% 27%)", "hsl(160 21% 39%)", "hsl(160 21% 51%)", "hsl(160 21% 63%)", "hsl(160 21% 75%)", "hsl(160 21% 87%)", "hsl(160 21% 95%)"]
+      },
+      "dark-ink": {
+        "role": "neutral",
+        "displayName": "Dark Ink",
+        "canonical": "hsl(86 20% 93%)",
+        "tonalRamp": ["hsl(86 20% 15%)", "hsl(86 20% 27%)", "hsl(86 20% 39%)", "hsl(86 20% 51%)", "hsl(86 20% 63%)", "hsl(86 20% 75%)", "hsl(86 20% 87%)", "hsl(86 20% 95%)"]
+      },
+      "dark-recorder-green": {
+        "role": "primary",
+        "displayName": "Dark Recorder Green",
+        "canonical": "hsl(167 52% 67%)",
+        "tonalRamp": ["hsl(167 52% 15%)", "hsl(167 52% 27%)", "hsl(167 52% 39%)", "hsl(167 52% 51%)", "hsl(167 52% 63%)", "hsl(167 52% 75%)", "hsl(167 52% 87%)", "hsl(167 52% 95%)"]
+      },
+      "dark-instrument": {
+        "role": "neutral",
+        "displayName": "Dark Instrument",
+        "canonical": "hsl(160 19% 14%)",
+        "tonalRamp": ["hsl(160 19% 15%)", "hsl(160 19% 27%)", "hsl(160 19% 39%)", "hsl(160 19% 51%)", "hsl(160 19% 63%)", "hsl(160 19% 75%)", "hsl(160 19% 87%)", "hsl(160 19% 95%)"]
+      },
+      "dark-notation": {
+        "role": "neutral",
+        "displayName": "Dark Notation",
+        "canonical": "hsl(150 10% 67%)",
+        "tonalRamp": ["hsl(150 10% 15%)", "hsl(150 10% 27%)", "hsl(150 10% 39%)", "hsl(150 10% 51%)", "hsl(150 10% 63%)", "hsl(150 10% 75%)", "hsl(150 10% 87%)", "hsl(150 10% 95%)"]
+      },
+      "dark-active-wash": {
+        "role": "neutral",
+        "displayName": "Dark Active Wash",
+        "canonical": "hsl(160 20% 17%)",
+        "tonalRamp": ["hsl(160 20% 15%)", "hsl(160 20% 27%)", "hsl(160 20% 39%)", "hsl(160 20% 51%)", "hsl(160 20% 63%)", "hsl(160 20% 75%)", "hsl(160 20% 87%)", "hsl(160 20% 95%)"]
+      },
+      "dark-rule": {
+        "role": "neutral",
+        "displayName": "Dark Rule",
+        "canonical": "hsl(157 16% 20%)",
+        "tonalRamp": ["hsl(157 16% 15%)", "hsl(157 16% 27%)", "hsl(157 16% 39%)", "hsl(157 16% 51%)", "hsl(157 16% 63%)", "hsl(157 16% 75%)", "hsl(157 16% 87%)", "hsl(157 16% 95%)"]
+      },
+      "dark-field-stroke": {
+        "role": "neutral",
+        "displayName": "Dark Field Stroke",
+        "canonical": "hsl(157 16% 25%)",
+        "tonalRamp": ["hsl(157 16% 15%)", "hsl(157 16% 27%)", "hsl(157 16% 39%)", "hsl(157 16% 51%)", "hsl(157 16% 63%)", "hsl(157 16% 75%)", "hsl(157 16% 87%)", "hsl(157 16% 95%)"]
+      },
+      "dark-authority-amber": {
+        "role": "secondary",
+        "displayName": "Dark Authority Amber",
+        "canonical": "hsl(41 100% 62%)",
+        "tonalRamp": ["hsl(41 100% 15%)", "hsl(41 100% 27%)", "hsl(41 100% 39%)", "hsl(41 100% 51%)", "hsl(41 100% 63%)", "hsl(41 100% 75%)", "hsl(41 100% 87%)", "hsl(41 100% 95%)"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "First-run questions and major mission framing." },
+      "headline": { "displayName": "Headline", "purpose": "Primary operational page headings." },
+      "title": { "displayName": "Title", "purpose": "Panels, dialogs, recorder panel headings, and compact sections." },
+      "body": { "displayName": "Body", "purpose": "Explanations and readable output." },
+      "body-sm": { "displayName": "Small Body", "purpose": "Controls, rows, event values, and secondary descriptions." },
+      "instrument-label": { "displayName": "Instrument Label", "purpose": "Navigation groups, recorder stages, and compact operational labels." },
+      "mono": { "displayName": "Mono Identifier", "purpose": "Run numbers, model names, tokens, timings, tool names, and code-adjacent facts." }
+    },
+    "shadows": [
+      { "name": "control-lift", "value": "0 1px 2px rgb(0 0 0 / 0.05)", "purpose": "Primary, warning, and secondary controls." },
+      { "name": "floating-surface", "value": "0 10px 15px -3px rgb(0 0 0 / 0.10), 0 4px 6px -4px rgb(0 0 0 / 0.10)", "purpose": "Dialogs and compact panels above the working canvas." },
+      { "name": "transient-overlay", "value": "0 20px 25px -5px rgb(0 0 0 / 0.10), 0 8px 10px -6px rgb(0 0 0 / 0.10)", "purpose": "Temporary artifact overlays and similarly consequential floating surfaces." }
+    ],
+    "motion": [
+      { "name": "recorder-entry", "value": "260ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "A new recorder row settles upward by 4px while fading in; disabled under prefers-reduced-motion." },
+      { "name": "recorder-live", "value": "1.8s ease-in-out infinite", "purpose": "The live square pulses between 55% and 100% opacity; disabled under prefers-reduced-motion." },
+      { "name": "control-state", "value": "150ms ease", "purpose": "Background, color, border, and shadow changes on compact controls." },
+      { "name": "dialog-state", "value": "200ms ease-out", "purpose": "Radix dialog and recorder-panel entry and exit." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Operation Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Recorder-green forward action for routine operations.",
+      "html": "<button class=\"ds-btn-primary\"><span>Connect model</span><svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m13 6 6 6-6 6\"/></svg></button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:8px 16px;border:0;border-radius:8px;background:hsl(169 62% 22%);color:hsl(90 28% 97%);font:600 14px/20px ui-sans-serif,system-ui,sans-serif;box-shadow:0 1px 2px rgb(0 0 0/.05);transition:background-color 150ms,color 150ms,box-shadow 150ms;cursor:pointer}.ds-btn-primary:hover{background:hsl(169 62% 19%)}.ds-btn-primary:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-btn-primary:active{background:hsl(169 62% 17%)}"
+    },
+    {
+      "name": "Authority Button",
+      "kind": "button",
+      "refersTo": "button-warning",
+      "description": "Amber committing action for approval, budget, or consequential authority.",
+      "html": "<button class=\"ds-btn-authority\">Approve operation</button>",
+      "css": ".ds-btn-authority{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 16px;border:0;border-radius:8px;background:hsl(41 100% 39%);color:hsl(160 16% 11%);font:600 14px/20px ui-sans-serif,system-ui,sans-serif;box-shadow:0 1px 2px rgb(0 0 0/.05);transition:background-color 150ms,box-shadow 150ms;cursor:pointer}.ds-btn-authority:hover{background:hsl(41 100% 35%)}.ds-btn-authority:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-btn-authority:active{background:hsl(41 100% 32%)}"
+    },
+    {
+      "name": "Outline Review Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Quiet bordered companion action for review and cancellation.",
+      "html": "<button class=\"ds-btn-outline\">Review details</button>",
+      "css": ".ds-btn-outline{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 16px;border:1px solid hsl(140 10% 72%);border-radius:8px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font:600 14px/20px ui-sans-serif,system-ui,sans-serif;transition:background-color 150ms,border-color 150ms;cursor:pointer}.ds-btn-outline:hover{background:hsl(150 18% 88%)}.ds-btn-outline:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-btn-outline:active{background:hsl(111 13% 90%)}"
+    },
+    {
+      "name": "Ledger Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Compact paper field with a stronger operational stroke.",
+      "html": "<input class=\"ds-input\" placeholder=\"Search conversations\" aria-label=\"Search conversations\">",
+      "css": ".ds-input{width:100%;height:36px;padding:4px 12px;border:1px solid hsl(140 10% 72%);border-radius:8px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font:400 14px/20px ui-sans-serif,system-ui,sans-serif;transition:border-color 150ms,box-shadow 150ms,background-color 150ms}.ds-input::placeholder{color:hsl(158 11% 38%)}.ds-input:hover{border-color:hsl(169 30% 48%)}.ds-input:focus-visible{border-color:hsl(169 62% 22%);outline:0;box-shadow:0 0 0 1px hsl(169 62% 22%)}.ds-input:disabled{cursor:not-allowed;opacity:.5}"
+    },
+    {
+      "name": "Flight Navigation Group",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Instrument-labelled sidebar group with a compact active destination.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Operations\"><button class=\"ds-nav-group\">Operations<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"m9 18 6-6-6-6\"/></svg></button><button class=\"ds-nav-item ds-nav-item-active\"><svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M4 19V5\"/><path d=\"M4 19h16\"/><path d=\"m7 15 4-4 3 2 5-6\"/></svg><span>Inspector</span></button></nav>",
+      "css": ".ds-nav{width:256px;padding:8px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font-family:ui-sans-serif,system-ui,sans-serif}.ds-nav button{width:100%;border:0;cursor:pointer}.ds-nav-group{display:flex;align-items:center;justify-content:space-between;height:36px;padding:0 8px;border-radius:8px;background:transparent;color:hsl(158 11% 38%);font-size:11px;font-weight:700;line-height:16px;letter-spacing:.08em;text-transform:uppercase;transition:background-color 150ms,color 150ms}.ds-nav-group:hover{background:hsl(150 18% 88%);color:hsl(160 16% 11%)}.ds-nav-item{display:flex;align-items:center;gap:8px;height:40px;margin-top:4px;padding:8px;border-radius:8px;background:transparent;color:hsl(158 11% 38%);font:600 12px/16px ui-sans-serif,system-ui,sans-serif;text-align:left;transition:background-color 150ms,color 150ms}.ds-nav-item-active,.ds-nav-item:hover{background:hsl(150 18% 88%);color:hsl(160 16% 11%)}.ds-nav button:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-nav button:active{background:hsl(111 13% 90%)}"
+    },
+    {
+      "name": "Mission Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Flat persistent outcome card on the ruled mission canvas.",
+      "html": "<button class=\"ds-mission-card\"><span class=\"ds-mission-icon\"><svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M3 12h6m6 0h6M12 3v6m0 6v6\"/></svg></span><span class=\"ds-mission-copy\"><strong>Build or repair a feature</strong><small>Inspect the project, propose a plan, then implement and verify it.</small></span><span class=\"ds-mission-arrow\" aria-hidden=\"true\">→</span></button>",
+      "css": ".ds-mission-card{display:flex;align-items:center;gap:16px;width:100%;min-height:64px;padding:12px 16px;border:1px solid hsl(140 10% 77%);border-radius:12px;background:hsl(86 20% 93%);color:hsl(160 16% 11%);font-family:ui-sans-serif,system-ui,sans-serif;text-align:left;transition:background-color 150ms,border-color 150ms;cursor:pointer}.ds-mission-card:hover{background:hsl(150 18% 88%)}.ds-mission-card:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-mission-card:active{background:hsl(111 13% 90%)}.ds-mission-icon{display:grid;width:40px;height:40px;flex:none;place-items:center;border-radius:10px;background:hsl(111 13% 90%)}.ds-mission-copy{display:flex;min-width:0;flex:1;flex-direction:column}.ds-mission-copy strong{font-size:14px;line-height:20px}.ds-mission-copy small{margin-top:2px;color:hsl(158 11% 38%);font-size:14px;line-height:20px}.ds-mission-arrow{color:hsl(158 11% 38%);font-size:20px}"
+    },
+    {
+      "name": "First-Run Step Rail",
+      "kind": "custom",
+      "description": "Three-stage Connect / Choose / Run setup instrument with one explicit active step.",
+      "html": "<ol class=\"ds-steps\" aria-label=\"First run steps\"><li class=\"ds-step ds-step-active\"><span>1</span><strong>Connect</strong></li><li class=\"ds-step\"><span>2</span><strong>Choose</strong></li><li class=\"ds-step\"><span>3</span><strong>Run</strong></li></ol>",
+      "css": ".ds-steps{display:grid;grid-template-columns:repeat(3,1fr);margin:0;padding:0;overflow:hidden;border:1px solid hsl(140 10% 77%);border-radius:8px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font-family:ui-sans-serif,system-ui,sans-serif;list-style:none}.ds-step{display:flex;min-height:48px;align-items:center;gap:8px;padding:8px 16px;border-right:1px solid hsl(140 10% 77%);font-size:12px}.ds-step:last-child{border-right:0}.ds-step span{display:grid;width:24px;height:24px;place-items:center;border-radius:6px;background:hsl(111 13% 90%);color:hsl(158 11% 38%);font-size:11px;font-weight:700}.ds-step strong{font-weight:600}.ds-step-active{background:hsl(169 62% 22%);color:hsl(90 28% 97%)}.ds-step-active span{background:hsl(90 28% 97%/.15);color:hsl(90 28% 97%)}.ds-step:hover:not(.ds-step-active){background:hsl(150 18% 88%)}"
+    },
+    {
+      "name": "Authority Approval",
+      "kind": "custom",
+      "description": "Inline capability decision that states both the authority request and available actions.",
+      "html": "<section class=\"ds-approval\"><div class=\"ds-approval-edge\" aria-hidden=\"true\"></div><div class=\"ds-approval-body\"><div class=\"ds-approval-title\"><svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z\"/><path d=\"m9 12 2 2 4-4\"/></svg><strong>Approval required</strong><code>write_file</code></div><p>The agent needs write authority for this operation.</p><div class=\"ds-approval-actions\"><button class=\"ds-approval-allow\">Approve operation</button><button class=\"ds-approval-review\">Deny</button></div></div></section>",
+      "css": ".ds-approval{display:grid;grid-template-columns:4px 1fr;overflow:hidden;border:1px solid hsl(41 100% 39%/.5);border-radius:10px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font-family:ui-sans-serif,system-ui,sans-serif}.ds-approval-edge{background:hsl(41 100% 39%)}.ds-approval-body{padding:12px}.ds-approval-title{display:flex;align-items:center;gap:8px}.ds-approval-title svg{color:hsl(41 100% 39%)}.ds-approval-title strong{font-size:14px;line-height:20px}.ds-approval-title code{color:hsl(158 11% 38%);font:500 12px/16px ui-monospace,monospace}.ds-approval p{margin:4px 0 0;color:hsl(158 11% 38%);font-size:12px;line-height:16px}.ds-approval-actions{display:flex;gap:8px;margin-top:10px}.ds-approval button{min-height:36px;padding:8px 12px;border-radius:8px;font:600 12px/16px ui-sans-serif,system-ui,sans-serif;cursor:pointer}.ds-approval-allow{border:0;background:hsl(41 100% 39%);color:hsl(160 16% 11%)}.ds-approval-allow:hover{background:hsl(41 100% 35%)}.ds-approval-review{border:1px solid hsl(140 10% 72%);background:hsl(90 28% 97%);color:hsl(160 16% 11%)}.ds-approval-review:hover{background:hsl(150 18% 88%)}.ds-approval button:focus-visible{outline:2px solid hsl(169 62% 22%);outline-offset:2px}.ds-approval button:active{transform:translateY(1px)}"
+    },
+    {
+      "name": "Live Run Recorder",
+      "kind": "custom",
+      "refersTo": "run-recorder",
+      "description": "Signature operation record exposing Intent, Authority, Execution, Review, run identity, status, and model.",
+      "html": "<section class=\"ds-recorder\" aria-label=\"Live run recorder\"><header class=\"ds-recorder-head\"><div><span class=\"ds-instrument ds-recorder-kicker\">Cool recorder</span><code>RUN / 0042</code></div><strong><i aria-hidden=\"true\"></i>Live</strong></header><ol><li class=\"ds-recorder-row ds-recorder-ready\"><b aria-hidden=\"true\"></b><div><span class=\"ds-instrument\">Intent</span><strong>Audit the release candidate</strong></div></li><li class=\"ds-recorder-row ds-recorder-attention\"><b aria-hidden=\"true\"></b><div><span class=\"ds-instrument\">Authority</span><strong>Approval required</strong></div></li><li class=\"ds-recorder-row ds-recorder-active\"><b aria-hidden=\"true\"></b><div><span class=\"ds-instrument\">Execution</span><strong>Running · 3 tool events</strong></div></li><li class=\"ds-recorder-row ds-recorder-waiting\"><b aria-hidden=\"true\"></b><div><span class=\"ds-instrument\">Review</span><strong>Evidence pending</strong></div></li></ol><footer><span class=\"ds-instrument\">Model</span><code>gpt-5.6-sol</code></footer></section>",
+      "css": ".ds-recorder{width:240px;overflow:hidden;border:1px solid hsl(140 10% 77%);border-radius:10px;background:hsl(90 28% 97%);color:hsl(160 16% 11%);font-family:ui-sans-serif,system-ui,sans-serif;box-shadow:inset 0 1px 0 hsl(160 16% 11%/.04)}.ds-recorder-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#17201d;color:#eef1ea}.ds-recorder-head>div{display:flex;min-width:0;flex-direction:column}.ds-instrument{display:block;font-size:11px;font-weight:700;line-height:16px;letter-spacing:.08em;text-transform:uppercase}.ds-recorder-kicker{color:#aebcb6}.ds-recorder code{margin-top:2px;font:600 14px/20px ui-monospace,SFMono-Regular,Menlo,monospace}.ds-recorder-head>strong{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase}.ds-recorder-head i{width:10px;height:10px;border-radius:2px;background:#34d399;animation:ds-recorder-live 1.8s ease-in-out infinite}.ds-recorder ol{margin:0;padding:0;list-style:none}.ds-recorder-row{display:grid;grid-template-columns:4px 1fr;border-bottom:1px solid hsl(140 10% 77%);animation:ds-recorder-enter 260ms cubic-bezier(.16,1,.3,1) both}.ds-recorder-row>b{display:block}.ds-recorder-row>div{padding:12px}.ds-recorder-row span{color:hsl(158 11% 38%)}.ds-recorder-row strong{display:block;margin-top:2px;font-size:14px;line-height:20px}.ds-recorder-ready>b{background:#10b981}.ds-recorder-attention>b{background:hsl(41 100% 39%)}.ds-recorder-active>b{background:hsl(169 62% 22%)}.ds-recorder-waiting>b{background:hsl(140 10% 77%)}.ds-recorder footer{padding:8px 12px;background:hsl(111 13% 90%/.6)}.ds-recorder footer span{color:hsl(158 11% 38%)}.ds-recorder footer code{display:block;margin-top:2px;font-size:12px;line-height:16px}.ds-recorder:hover{border-color:hsl(169 30% 48%)}.ds-recorder:focus-within{outline:2px solid hsl(169 62% 22%);outline-offset:2px}@keyframes ds-recorder-enter{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@keyframes ds-recorder-live{0%,100%{opacity:.55}50%{opacity:1}}@media(prefers-reduced-motion:reduce){.ds-recorder-row,.ds-recorder-head i{animation:none}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Flight Ledger",
+    "overview": "Cool is a local AI operations console treated as a precise flight ledger. Tasks are missions, runs are recorded operations, and authority, budget, execution, and evidence remain visible without turning the workspace into theatre. The interface feels like a dependable recorder: grounded, legible, and ready for long technical sessions.\n\nThe world is built from mineral paper, recorder green, authority amber, condensed display headings, instrument labels, mono identifiers, and restrained ruled lines. Persistent surfaces stay flat; transient overlays earn stronger depth. The active task remains central while the live record exposes what the agent intends, may do, is doing, and has left for review.",
+    "keyCharacteristics": [
+      "Mineral-paper canvas with semantic 32px ledger ruling.",
+      "Recorder-green operational actions and amber consequential or authority states.",
+      "Condensed display headings, system-sans body copy, instrument labels, and mono identifiers.",
+      "Persistent desktop run recorder with Intent / Authority / Execution / Review.",
+      "Explicit draft, live, completed, failed, and approval language; color never carries state alone.",
+      "Compact Radix recorder panel and visible Record control below the `xl` breakpoint."
+    ],
+    "rules": [
+      { "name": "The Recorder Green Rule", "body": "Recorder Green means ordinary forward operation. Do not spend it on decorative panels, gradients, or generic emphasis.", "section": "colors" },
+      { "name": "The Amber Authority Rule", "body": "Amber marks consequence, approval, budget pressure, or attention; it never substitutes for routine primary action.", "section": "colors" },
+      { "name": "The Instrument, Not Costume Rule", "body": "Use condensed display type for hierarchy and instrument labels for structure. Do not turn ordinary prose into condensed, uppercase, or monospace copy.", "section": "typography" },
+      { "name": "The Working Width Rule", "body": "Give operations room, but keep reading, composing, and decisions bounded; never stretch the task simply because the viewport is wide.", "section": "layout" },
+      { "name": "The Record Never Disappears Rule", "body": "Keep the recorder persistent on wide desktop and directly reachable through the labelled Record control everywhere below `xl`.", "section": "layout" },
+      { "name": "The Flat Recorder Rule", "body": "Persistent operational surfaces stay flat. Strong shadows belong only to transient overlays that interrupt or temporarily cover the ledger.", "section": "elevation" },
+      { "name": "The Contained Radius Rule", "body": "Round the instrument, not the entire workspace. Nested controls must remain tighter than their containing surface.", "section": "shapes" },
+      { "name": "The State Reads Twice Rule", "body": "Critical state always pairs color with explicit text, and often an icon or position. Hue alone is never evidence.", "section": "components" },
+      { "name": "The Draft Is Not a Run Rule", "body": "Preserve the visual and verbal distinction between an editable draft and a registered durable run.", "section": "components" }
+    ],
+    "dos": [
+      "Do use Mineral Ground, Ledger Paper, Flight Ink, and restrained 32px rules as the quiet base of the system.",
+      "Do use Recorder Green for ordinary forward operation and Authority Amber for consequence, approval, budget pressure, or attention.",
+      "Do keep the user's task central while exposing Intent / Authority / Execution / Review beside it or behind the labelled Record control.",
+      "Do preserve the draft/run distinction with explicit wording and a durable run identifier.",
+      "Do use condensed display type for hierarchy, instrument labels for structure, and mono for exact machine identifiers.",
+      "Do keep persistent surfaces flat, transient overlays visibly elevated, and mobile targets at least 44px.",
+      "Do disable recorder entry and pulse motion when reduced motion is requested."
+    ],
+    "donts": [
+      "Don't replace the Flight Ledger with a generic neutral AI-console identity.",
+      "Don't make Cool look like a generic purple admin dashboard or theatrical sci-fi cockpit.",
+      "Don't use ledger ruling as ornamental texture on cards, dialogs, or every nested panel.",
+      "Don't hide the run record behind an icon-only control or remove the persistent desktop rail.",
+      "Don't collapse Draft, Live, Completed, Failed, and Approval required into color-only status.",
+      "Don't add strong shadows to persistent cards, the sidebar, or the desktop recorder.",
+      "Don't use condensed display or monospace for ordinary body copy."
+    ]
+  }
+}

@@ -324,7 +324,7 @@ function MemoryList({
     return (
       <QueryErrorState
         title="Memories could not be loaded"
-        description="Check that the local harness is running, then try again."
+        description="Check that Cool is running locally, then try again."
         onRetry={onRetry}
       />
     )

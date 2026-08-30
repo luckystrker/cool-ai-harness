@@ -22,7 +22,12 @@ import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
-  n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 })
+  n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "code",
+    maximumFractionDigits: 4,
+  })
 const fmtPercent = (n: number, maximumFractionDigits = 1) =>
   new Intl.NumberFormat(undefined, {
     style: "percent",
@@ -110,7 +115,7 @@ export function AnalyticsPage() {
         ) : isError || !summary ? (
           <QueryErrorState
             title="Analytics could not be loaded"
-            description="Check that the local harness is running, then try again."
+            description="Check that Cool is running locally, then try again."
             onRetry={() => void refetch()}
           />
         ) : (
@@ -139,17 +144,23 @@ function SummaryCards({ summary }: { summary: AnalyticsSummary }) {
     { label: "LLM calls", value: String(summary.total_llm_calls) },
     { label: "Tokens", value: summary.total_tokens.toLocaleString() },
     { label: "Tool calls", value: String(summary.total_tool_calls) },
-    { label: "Tool success", value: fmtPercent(summary.tool_success_rate) },
+    {
+      label: "Tool success",
+      value: summary.total_tool_calls === 0 ? "—" : fmtPercent(summary.tool_success_rate),
+      hint: summary.total_tool_calls === 0 ? "No samples" : undefined,
+    },
   ]
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+    <div className="cool-event-strip grid grid-cols-2 overflow-hidden rounded-lg sm:grid-cols-5">
       {cards.map((c) => (
-        <Card key={c.label} className="last:col-span-2 sm:last:col-span-1">
-          <CardContent className="py-3">
-            <p className="text-xs text-muted-foreground">{c.label}</p>
-            <p className="text-lg font-semibold tabular-nums">{c.value}</p>
-          </CardContent>
-        </Card>
+        <div
+          key={c.label}
+          className="min-h-20 border-b border-r p-3 even:border-r-0 last:col-span-2 last:border-b-0 last:border-r-0 sm:min-h-24 sm:border-b-0 sm:p-4 sm:even:border-r sm:last:col-span-1"
+        >
+          <p className="cool-instrument-label text-muted-foreground">{c.label}</p>
+          <p className="mt-2 text-xl font-semibold tabular-nums">{c.value}</p>
+          {c.hint && <p className="mt-0.5 text-[11px] text-muted-foreground">{c.hint}</p>}
+        </div>
       ))}
     </div>
   )

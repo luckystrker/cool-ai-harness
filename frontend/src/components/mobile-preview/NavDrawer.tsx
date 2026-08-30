@@ -70,7 +70,7 @@ export function NavDrawer({
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
               <span className="text-xs font-bold">H</span>
             </div>
-            <span className="text-sm font-semibold">Harness</span>
+            <span className="text-sm font-semibold">Cool</span>
           </div>
           <Button
             variant="ghost"

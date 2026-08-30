@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
 import { useLocation } from "react-router-dom"
+import { X } from "lucide-react"
 import { Sidebar } from "@/components/layout/Sidebar"
 
 /**
@@ -38,6 +39,12 @@ export function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => 
           <DialogPrimitive.Description className="sr-only">
             Open product areas, projects, and conversations.
           </DialogPrimitive.Description>
+          <DialogPrimitive.Close
+            className="absolute right-2 top-2 z-10 grid h-11 w-11 place-items-center rounded-md bg-card text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Close navigation"
+          >
+            <X className="h-4 w-4" />
+          </DialogPrimitive.Close>
           <Sidebar inDrawer className="h-full w-full rounded-r-2xl bg-background" />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

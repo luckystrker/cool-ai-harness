@@ -13,17 +13,18 @@ import {
   MessageSquare,
   Paperclip,
   Plus,
+  Radio,
   SearchCheck,
   ShieldCheck,
 } from "lucide-react"
 import { toast } from "sonner"
-import { getErrorDescription } from "@/api/client"
+import { api, getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
 import { plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
-import type { Message, Provider, ToolPermissions } from "@/api/types"
+import type { Message, Provider, RunOut, ToolPermissions } from "@/api/types"
 import { Markdown } from "@/components/chat/Markdown"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
@@ -45,6 +46,14 @@ import {
 } from "@/lib/agentConfig"
 import { getProjectForConversation } from "@/lib/projects"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
@@ -105,16 +114,25 @@ export function ChatPage() {
     respondApproval,
   } = useConversationStream()
 
+  const { data: conversationRuns = [] } = useQuery({
+    queryKey: ["conversation-runs", convId],
+    queryFn: () => api.get<RunOut[]>(`/api/conversations/${convId}/runs`),
+    enabled: convId !== null,
+    refetchInterval: isStreaming ? 1000 : false,
+  })
+
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [planMode, setPlanMode] = useState(false)
   const [sheetOpen, setSheetOpen] = useState(false)
+  const [recorderOpen, setRecorderOpen] = useState(false)
   const isMobile = useIsMobile()
   const { openDrawer } = useMobileNav()
 
   // When a different conversation is selected, drop any pending bubbles.
   useEffect(() => {
     clearPending()
+    setRecorderOpen(false)
   }, [convId, clearPending])
 
   // Compaction: messages covered by the working-memory rolling summary are
@@ -270,7 +288,10 @@ export function ChatPage() {
     // assistant error bubble so the user sees why there was no reply.
     // When plan mode was active, keep the pending PlanCard visible so the user
     // can approve/reject the plan.
-    await queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] }),
+      queryClient.invalidateQueries({ queryKey: ["conversation-runs", convId] }),
+    ])
     queryClient.invalidateQueries({ queryKey: ["conversations"] })
     await queryClient.refetchQueries({ queryKey: ["conversation", convId] })
     if (!errored && !wasPlanMode) clearPending()
@@ -416,6 +437,95 @@ export function ChatPage() {
   }
 
   const currentModel = detail?.model || ""
+  const recorderMessages = [...historyMsgs, ...pendingMsgs]
+  const lastUserMessage = [...recorderMessages].reverse().find((message) => message.role === "user")
+  const latestAssistant = [...recorderMessages]
+    .reverse()
+    .find((message) => message.role === "assistant")
+  const latestRun = [...conversationRuns].sort((a, b) => b.id - a.id)[0] ?? null
+  const latestIntentTime = lastUserMessage?.createdAt
+    ? Date.parse(lastUserMessage.createdAt)
+    : null
+  const currentRun =
+    latestRun &&
+    latestIntentTime !== null &&
+    Date.parse(latestRun.started_at) >= latestIntentTime - 1000
+      ? latestRun
+      : null
+  const currentTurnMessages = isStreaming
+    ? pendingMsgs
+    : latestAssistant
+      ? [latestAssistant]
+      : []
+  const toolEventCount = currentTurnMessages.reduce(
+    (total, message) => total + (message.toolCalls?.length ?? 0),
+    0
+  )
+  const approvalPending = pendingMsgs.some(
+    (message) => message.approval?.status === "pending" || message.approval?.status === "resolving"
+  )
+  const assistantFollowsIntent = Boolean(
+    lastUserMessage?.createdAt &&
+      latestAssistant?.createdAt &&
+      Date.parse(latestAssistant.createdAt) >= Date.parse(lastUserMessage.createdAt)
+  )
+  const permissionMode = modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})
+  const recorderEntries: RecorderEntry[] = [
+    {
+      label: "Intent",
+      value: lastUserMessage
+        ? summarizeRecorderText(lastUserMessage.content)
+        : "Awaiting first instruction",
+      state: lastUserMessage ? "ready" : "waiting",
+    },
+    {
+      label: "Authority",
+      value: approvalPending
+        ? "Approval required"
+        : `${formatPermissionMode(permissionMode)} authority`,
+      state: approvalPending ? "attention" : "ready",
+    },
+    {
+      label: "Execution",
+      value: isStreaming
+        ? toolEventCount > 0
+          ? `Running · ${toolEventCount} tool ${toolEventCount === 1 ? "event" : "events"}`
+          : "Model is responding"
+        : currentRun?.status === "completed" && toolEventCount > 0
+          ? `${toolEventCount} tool ${toolEventCount === 1 ? "event" : "events"} recorded`
+          : currentRun?.status === "completed"
+            ? "Completed without tools"
+            : currentRun
+              ? formatRunStatus(currentRun.status)
+              : isStreaming
+                ? "Run is being registered"
+                : "Not started",
+      state:
+        isStreaming || currentRun?.status === "running"
+          ? "active"
+          : currentRun?.status === "completed"
+            ? "ready"
+            : currentRun?.status === "failed" || currentRun?.status === "cancelled"
+              ? "attention"
+              : "waiting",
+    },
+    {
+      label: "Review",
+      value: isStreaming
+        ? "Evidence pending"
+        : currentRun?.status === "completed" && assistantFollowsIntent
+          ? "Response recorded"
+          : currentRun?.status === "failed"
+            ? "Failure recorded"
+          : "No evidence yet",
+      state:
+        currentRun?.status === "completed" && assistantFollowsIntent
+          ? "ready"
+          : currentRun?.status === "failed"
+            ? "attention"
+            : "waiting",
+    },
+  ]
 
   return (
     <div className="flex h-full flex-col">
@@ -447,6 +557,38 @@ export function ChatPage() {
         >
           <Paperclip className="h-4 w-4" />
         </Button>
+        <Dialog open={recorderOpen} onOpenChange={setRecorderOpen}>
+          <DialogTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="px-2 text-muted-foreground xl:hidden"
+              aria-controls="active-run-recorder"
+              title="Open run record"
+            >
+              <Radio className="h-4 w-4" />
+              <span>Record</span>
+            </Button>
+          </DialogTrigger>
+          <DialogContent
+            id="active-run-recorder"
+            className="left-auto right-0 top-0 h-dvh max-h-none w-[min(23rem,calc(100%-2rem))] max-w-none grid-rows-[auto_1fr] content-start translate-x-0 translate-y-0 gap-0 rounded-none border-y-0 border-r-0 bg-card p-0 xl:hidden"
+          >
+            <DialogHeader className="border-b px-4 py-4 pr-14 text-left">
+              <div className="cool-instrument-label text-muted-foreground">Active record</div>
+              <DialogTitle className="cool-display text-lg">Flight ledger</DialogTitle>
+              <DialogDescription className="sr-only">
+                Current intent, authority, execution, and review state for this conversation.
+              </DialogDescription>
+            </DialogHeader>
+            <RunRecorder
+              entries={recorderEntries}
+              run={currentRun}
+              streaming={isStreaming}
+              model={currentModel}
+            />
+          </DialogContent>
+        </Dialog>
         <BudgetIndicator />
       </header>
 
@@ -457,7 +599,7 @@ export function ChatPage() {
               {isError ? (
                 <QueryErrorState
                   title="Conversation could not be loaded"
-                  description="Check that the local harness is running, then try again."
+                  description="Check that Cool is running locally, then try again."
                   onRetry={() => void refetch()}
                 />
               ) : isLoading ? (
@@ -562,12 +704,112 @@ export function ChatPage() {
             <ArtifactPanel conversationId={convId} />
           </div>
         )}
+
+        <aside className="hidden w-60 shrink-0 border-l bg-card/95 xl:block">
+          <RunRecorder
+            entries={recorderEntries}
+            run={currentRun}
+            streaming={isStreaming}
+            model={currentModel}
+          />
+        </aside>
       </div>
     </div>
   )
 }
 
 // --- helpers ---
+
+type RecorderState = "active" | "attention" | "ready" | "waiting"
+
+interface RecorderEntry {
+  label: string
+  value: string
+  state: RecorderState
+}
+
+function summarizeRecorderText(value: string) {
+  const singleLine = value.replace(/\s+/g, " ").trim()
+  return singleLine.length > 54 ? `${singleLine.slice(0, 51)}…` : singleLine
+}
+
+function formatPermissionMode(mode: PermissionMode | null) {
+  if (!mode) return "Custom"
+  return mode.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase())
+}
+
+function formatRunStatus(status: string) {
+  return status.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase())
+}
+
+function RunRecorder({
+  entries,
+  run,
+  streaming,
+  model,
+}: {
+  entries: RecorderEntry[]
+  run: RunOut | null
+  streaming: boolean
+  model: string
+}) {
+  const live = streaming || run?.status === "running"
+  const statusLabel = run ? formatRunStatus(run.status) : "Draft"
+
+  return (
+    <div
+      className="cool-event-strip m-3 self-start overflow-hidden rounded-lg"
+      aria-label="Live run recorder"
+    >
+      <div className="flex items-center justify-between bg-[#17201d] px-4 py-3 text-[#eef1ea]">
+        <div className="min-w-0">
+          <div className="cool-instrument-label text-[#aebcb6]">Cool recorder</div>
+          <div className="mt-0.5 truncate font-mono text-sm font-semibold">
+            {run ? `RUN / ${run.id.toString().padStart(4, "0")}` : "RUN / DRAFT"}
+          </div>
+        </div>
+        <span className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
+          <span
+            className={cn(
+              "h-2.5 w-2.5 rounded-sm",
+              live ? "cool-recorder-live bg-emerald-400" : "bg-[#aebcb6]"
+            )}
+            aria-hidden
+          />
+          {live ? "Live" : statusLabel}
+        </span>
+      </div>
+      <ol className="divide-y bg-card">
+        {entries.map(({ label, value, state }) => (
+          <li
+            key={`${label}-${value}-${state}`}
+            className="cool-recorder-event grid grid-cols-[4px_1fr]"
+          >
+            <span
+              className={cn(
+                state === "active" && "bg-primary",
+                state === "attention" && "bg-warning",
+                state === "ready" && "bg-emerald-500",
+                state === "waiting" && "bg-border"
+              )}
+              aria-hidden
+            />
+            <div className="min-w-0 px-3 py-3">
+              <div className="cool-instrument-label text-muted-foreground">{label}</div>
+              <div className="mt-0.5 break-words text-sm font-semibold leading-5">{value}</div>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="border-t bg-muted/60 px-3 py-2">
+        <div className="cool-instrument-label text-muted-foreground">Model</div>
+        <div className="mt-0.5 truncate font-mono text-xs text-foreground">
+          {model || "Not selected"}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /**
  * Convert persisted messages into view models, stitching each role="tool"
@@ -663,7 +905,7 @@ function EmptyState({
     },
     onError: (_error, draft) =>
       toast.error("Conversation could not be created", {
-        description: "Check that the local harness is running, then try again.",
+        description: "Check that Cool is running locally, then try again.",
         action: { label: "Retry", onClick: () => createMutation.mutate(draft) },
       }),
   })
@@ -709,7 +951,7 @@ function EmptyState({
   }
 
   return (
-    <div className="relative h-full overflow-y-auto px-4 py-10 sm:px-8 sm:py-14">
+    <div className="relative h-full overflow-y-auto px-4 py-8 sm:px-8 sm:py-12">
       <Button
         variant="ghost"
         size="icon"
@@ -719,21 +961,27 @@ function EmptyState({
       >
         <Menu className="h-5 w-5" />
       </Button>
-      <div className="mx-auto flex w-full max-w-2xl flex-col items-center text-center">
+      <div className="mx-auto grid w-full max-w-5xl gap-8 lg:grid-cols-[minmax(0,1fr)_15rem] lg:gap-12">
+      <div className="flex min-w-0 flex-col items-stretch text-left">
         <div
-          className="flex items-center gap-2 text-xs font-medium text-muted-foreground sm:gap-3"
+          className="grid grid-cols-3 overflow-hidden rounded-md border bg-card text-xs"
           aria-label="First run steps: connect a model, choose an outcome, review and run"
         >
           {["Connect", "Choose", "Run"].map((step, index) => (
-            <div key={step} className="flex items-center gap-3">
-              <span className="flex items-center gap-1.5">
+            <div
+              key={step}
+              className={cn(
+                "flex min-h-12 items-center gap-2 border-r px-2.5 last:border-r-0 sm:px-4",
+                index === (providerReady ? 1 : 0) && "bg-primary text-primary-foreground"
+              )}
+            >
                 <span
                   className={cn(
-                    "grid h-7 w-7 place-items-center rounded-full text-[11px] font-semibold",
+                    "grid h-6 w-6 shrink-0 place-items-center rounded text-[11px] font-bold",
                     index === 0 && providerReady
-                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                      ? "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300"
                       : index === (providerReady ? 1 : 0)
-                        ? "bg-primary text-primary-foreground"
+                        ? "bg-primary-foreground/15 text-primary-foreground"
                         : "bg-muted text-muted-foreground"
                   )}
                 >
@@ -743,18 +991,16 @@ function EmptyState({
                     index + 1
                   )}
                 </span>
-                <span className="hidden sm:inline">{step}</span>
-              </span>
-              {index < 2 && <span className="h-px w-6 bg-border sm:w-9" aria-hidden />}
+                <span className="font-semibold">{step}</span>
             </div>
           ))}
         </div>
 
-        <h1 className="mt-7 max-w-xl text-balance text-3xl font-semibold tracking-[-0.025em] sm:text-4xl">
-          What should Harness help you finish?
+        <h1 className="mt-7 max-w-2xl text-balance text-3xl font-semibold tracking-[-0.025em] sm:text-4xl">
+          What should Cool help you finish?
         </h1>
-        <p className="mt-3 max-w-[60ch] text-pretty text-base leading-7 text-muted-foreground">
-          Choose a real outcome. Harness opens an editable draft, then keeps the model, tools,
+        <p className="mt-3 max-w-[65ch] text-pretty text-base leading-7 text-muted-foreground">
+          Choose a real outcome. Cool opens an editable draft, then keeps the model, tools,
           approvals, and verification in one run.
         </p>
 
@@ -789,7 +1035,7 @@ function EmptyState({
         {providersError && (
           <div className="mt-7 flex w-full items-center justify-between gap-4 border-y py-4 text-left">
             <p className="text-sm text-muted-foreground">
-              Harness couldn’t verify your model connection. You can still prepare a draft.
+              Cool couldn’t verify your model connection. You can still prepare a draft.
             </p>
             <Button variant="outline" onClick={() => navigate("/settings")}>
               Check settings
@@ -834,6 +1080,41 @@ function EmptyState({
           {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
           I’ll start with a blank conversation
         </Button>
+      </div>
+
+      <aside className="cool-event-strip self-start overflow-hidden rounded-lg lg:sticky lg:top-8" aria-label="Run record preview">
+        <div className="flex items-center justify-between bg-[#17201d] px-4 py-3 text-[#eef1ea]">
+          <div>
+            <div className="cool-instrument-label text-[#aebcb6]">Cool recorder</div>
+            <div className="mt-0.5 font-mono text-sm font-semibold">RUN / DRAFT</div>
+          </div>
+          <span className={cn("h-2.5 w-2.5 rounded-sm", providerReady ? "bg-emerald-400" : "bg-warning")} />
+        </div>
+        <ol className="divide-y bg-card">
+          {[
+            ["Intent", "Choose an outcome", "active"],
+            ["Authority", providerReady ? "Model connected" : "Model required", providerReady ? "ready" : "waiting"],
+            ["Execution", "Not started", "waiting"],
+            ["Review", "Evidence pending", "waiting"],
+          ].map(([label, value, state]) => (
+            <li key={label} className="grid grid-cols-[4px_1fr]">
+              <span
+                className={cn(
+                  state === "active" ? "bg-warning" : state === "ready" ? "bg-emerald-500" : "bg-border"
+                )}
+                aria-hidden
+              />
+              <div className="px-3 py-3">
+                <div className="cool-instrument-label text-muted-foreground">{label}</div>
+                <div className="mt-0.5 text-sm font-semibold">{value}</div>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p className="border-t bg-muted/60 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          Each tool call, approval, cost update, and checkpoint joins this record after the run starts.
+        </p>
+      </aside>
       </div>
     </div>
   )

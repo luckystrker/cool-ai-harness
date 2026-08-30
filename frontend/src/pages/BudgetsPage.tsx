@@ -17,10 +17,23 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
-  n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 })
+  n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "code",
+    maximumFractionDigits: 4,
+  })
 
 export function BudgetsPage() {
   const queryClient = useQueryClient()
@@ -81,7 +94,7 @@ export function BudgetsPage() {
           <div>
             <h1 className="text-lg font-semibold">Budgets</h1>
             <p className="text-sm text-muted-foreground">
-              Set daily, weekly, and monthly spending limits. Harness warns at
+               Set daily, weekly, and monthly spending limits. Cool warns at
               the threshold and can block new model calls after a limit is reached.
             </p>
           </div>
@@ -92,7 +105,7 @@ export function BudgetsPage() {
         ) : isError || !status ? (
           <QueryErrorState
             title="Budget status could not be loaded"
-            description="Check that the local harness is running, then try again."
+            description="Check that Cool is running locally, then try again."
             onRetry={() => void refetch()}
           />
         ) : (
@@ -214,12 +227,41 @@ function BudgetForm({
     return Number.isFinite(n) ? n : null
   }
 
+  const limitEntries = [
+    ["Daily", daily],
+    ["Weekly", weekly],
+    ["Monthly", monthly],
+  ] as const
+  const invalidLimit = limitEntries.find(([, raw]) => {
+    if (raw.trim() === "") return false
+    const value = Number(raw)
+    return !Number.isFinite(value) || value < 0
+  })
+  const parsedThreshold = Number(threshold)
+  const thresholdInvalid =
+    threshold.trim() === "" ||
+    !Number.isFinite(parsedThreshold) ||
+    parsedThreshold < 0 ||
+    parsedThreshold > 100
+  const formError = invalidLimit
+    ? `${invalidLimit[0]} limit must be zero or greater.`
+    : thresholdInvalid
+      ? "Alert threshold must be between 0 and 100."
+      : null
+  const dirty =
+    parseLimit(daily) !== status.daily_limit_usd ||
+    parseLimit(weekly) !== status.weekly_limit_usd ||
+    parseLimit(monthly) !== status.monthly_limit_usd ||
+    (!thresholdInvalid && parsedThreshold !== status.alert_threshold_pct) ||
+    block !== status.block_on_exceed
+
   const handleSubmit = () => {
+    if (formError) return
     onSubmit({
       daily_limit_usd: parseLimit(daily),
       weekly_limit_usd: parseLimit(weekly),
       monthly_limit_usd: parseLimit(monthly),
-      alert_threshold_pct: Number(threshold) || 80,
+      alert_threshold_pct: parsedThreshold,
       block_on_exceed: block,
     })
   }
@@ -237,21 +279,21 @@ function BudgetForm({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="space-y-1.5">
             <Label htmlFor="b-daily">Daily (USD)</Label>
-            <Input id="b-daily" type="number" min="0" step="0.01" placeholder="—" value={daily} onChange={(e) => setDaily(e.target.value)} />
+             <Input id="b-daily" type="number" min="0" step="0.01" placeholder="—" value={daily} onChange={(e) => setDaily(e.target.value)} aria-invalid={invalidLimit?.[0] === "Daily"} />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="b-weekly">Weekly (USD)</Label>
-            <Input id="b-weekly" type="number" min="0" step="0.01" placeholder="—" value={weekly} onChange={(e) => setWeekly(e.target.value)} />
+             <Input id="b-weekly" type="number" min="0" step="0.01" placeholder="—" value={weekly} onChange={(e) => setWeekly(e.target.value)} aria-invalid={invalidLimit?.[0] === "Weekly"} />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="b-monthly">Monthly (USD)</Label>
-            <Input id="b-monthly" type="number" min="0" step="0.01" placeholder="—" value={monthly} onChange={(e) => setMonthly(e.target.value)} />
+             <Input id="b-monthly" type="number" min="0" step="0.01" placeholder="—" value={monthly} onChange={(e) => setMonthly(e.target.value)} aria-invalid={invalidLimit?.[0] === "Monthly"} />
           </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="b-threshold">Alert threshold (%)</Label>
-            <Input id="b-threshold" type="number" min="0" max="100" step="1" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+             <Input id="b-threshold" type="number" min="0" max="100" step="1" value={threshold} onChange={(e) => setThreshold(e.target.value)} aria-invalid={thresholdInvalid} />
           </div>
           <div className="flex items-end">
             <label className="flex items-center gap-2 text-sm">
@@ -260,8 +302,19 @@ function BudgetForm({
             </label>
           </div>
         </div>
-        <div className="flex justify-end">
-          <Button onClick={handleSubmit} disabled={pending} className="gap-1.5">
+        <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-h-5 text-xs" role="status" aria-live="polite">
+            {formError ? (
+              <span className="text-destructive">{formError}</span>
+            ) : dirty ? (
+              <span className="text-muted-foreground">
+                Ready to save · alert at {parsedThreshold}% · blocking {block ? "on" : "off"}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">No unsaved changes.</span>
+            )}
+          </div>
+          <Button onClick={handleSubmit} disabled={pending || !!formError || !dirty} className="gap-1.5">
             {pending && <Loader2 className="h-4 w-4 animate-spin" />}
             Save limits
           </Button>
@@ -285,27 +338,42 @@ function OverrideControls({
   clearPending: boolean
 }) {
   const [hours, setHours] = useState("1")
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const parsedHours = Number(hours)
+  const hoursInvalid =
+    hours.trim() === "" || !Number.isFinite(parsedHours) || parsedHours < 1 || parsedHours > 168
+  const canOverride = status.status === "blocked" && status.block_on_exceed && !status.overridden
+  const affectedWindows = [
+    status.daily.limit_usd !== null ? "daily" : null,
+    status.weekly.limit_usd !== null ? "weekly" : null,
+    status.monthly.limit_usd !== null ? "monthly" : null,
+  ].filter(Boolean)
+  const untilPreview = hoursInvalid
+    ? null
+    : new Date(Date.now() + parsedHours * 3600_000)
   const handleOverride = () => {
-    const h = Number(hours) || 1
-    const until = new Date(Date.now() + h * 3600_000).toISOString()
+    if (hoursInvalid) return
+    const until = new Date(Date.now() + parsedHours * 3600_000).toISOString()
     onOverride(until)
+    setConfirmOpen(false)
   }
 
   return (
-    <Card>
+    <Card className="border-warning/45 bg-warning/5">
       <CardHeader>
         <CardTitle className="text-base">Temporarily allow model calls</CardTitle>
         <CardDescription>
           Pause budget blocking for a fixed time. When the override expires,
-          Harness applies the spending limits again.
+          Cool applies the spending limits again. Use this only to finish work you have already
+          reviewed.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="o-hours">Duration (hours)</Label>
-          <Input id="o-hours" type="number" min="1" step="1" value={hours} onChange={(e) => setHours(e.target.value)} className="w-32" />
+          <Input id="o-hours" type="number" min="1" max="168" step="1" value={hours} onChange={(e) => setHours(e.target.value)} className="w-32" aria-invalid={hoursInvalid} />
         </div>
-        <Button onClick={handleOverride} disabled={overridePending} variant="outline" className="gap-1.5">
+        <Button onClick={() => setConfirmOpen(true)} disabled={overridePending || hoursInvalid || !canOverride} variant="warning" className="gap-1.5">
           {overridePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
           Allow calls temporarily
         </Button>
@@ -318,7 +386,36 @@ function OverrideControls({
             Active until {new Date(status.override_until).toLocaleString()}
           </span>
         )}
+        {!status.overridden && !canOverride && (
+          <span className="w-full text-xs text-muted-foreground">
+            Available only after an enabled spending limit blocks model calls.
+          </span>
+        )}
       </CardContent>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Temporarily lift the spending block?</DialogTitle>
+            <DialogDescription>
+              Model calls will be allowed until {untilPreview?.toLocaleString() ?? "the selected time"}.
+              {affectedWindows.length > 0
+                ? ` This suspends the ${affectedWindows.join(", ")} limit${affectedWindows.length === 1 ? "" : "s"}.`
+                : " Your configured limits remain stored."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="cool-event-strip rounded-md p-3 text-sm">
+            <div className="cool-instrument-label text-warning">Authority change</div>
+            <p className="mt-1">Cool will continue recording cost while enforcement is paused.</p>
+          </div>
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>Keep block active</Button>
+            <Button variant="warning" onClick={handleOverride} disabled={overridePending}>
+              {overridePending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Lift block for {parsedHours}h
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

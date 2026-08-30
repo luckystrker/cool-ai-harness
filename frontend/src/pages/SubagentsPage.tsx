@@ -143,7 +143,7 @@ export function SubagentsPage() {
     return (
       <QueryErrorState
         title="Subagents could not be loaded"
-        description="Check that the local harness is running, then try again."
+        description="Check that Cool is running locally, then try again."
         onRetry={() => {
           void Promise.all([refetchRoles(), refetchRuns(), refetchConversations()])
         }}

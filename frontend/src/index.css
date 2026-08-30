@@ -1,54 +1,62 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Cool Flight Display";
+  src: url("/fonts/IBMPlexSansCondensed-SemiBold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
 /* shadcn-style theme tokens. Tailwind v4 reads these via @theme inline. */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
+    --background: 86 20% 93%;
+    --foreground: 160 16% 11%;
+    --card: 90 28% 97%;
+    --card-foreground: 160 16% 11%;
+    --popover: 90 28% 97%;
+    --popover-foreground: 160 16% 11%;
+    --primary: 169 62% 22%;
+    --primary-foreground: 90 28% 97%;
+    --secondary: 111 13% 90%;
+    --secondary-foreground: 160 16% 11%;
+    --muted: 111 13% 90%;
+    --muted-foreground: 158 11% 38%;
+    --accent: 150 18% 88%;
+    --accent-foreground: 160 16% 11%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 0 0% 98%;
-    --warning: 32 95% 33%;
-    --warning-foreground: 0 0% 100%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
+    --warning: 41 100% 39%;
+    --warning-foreground: 160 16% 11%;
+    --border: 140 10% 77%;
+    --input: 140 10% 72%;
+    --ring: 169 62% 22%;
+    --radius: 0.625rem;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
+    --background: 160 21% 6%;
+    --foreground: 86 20% 93%;
+    --card: 160 21% 8%;
+    --card-foreground: 86 20% 93%;
+    --popover: 160 21% 8%;
+    --popover-foreground: 86 20% 93%;
+    --primary: 167 52% 67%;
+    --primary-foreground: 160 21% 6%;
+    --secondary: 160 19% 14%;
+    --secondary-foreground: 86 20% 93%;
+    --muted: 160 19% 14%;
+    --muted-foreground: 150 10% 67%;
+    --accent: 160 20% 17%;
+    --accent-foreground: 86 20% 93%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 0 0% 98%;
-    --warning: 38 92% 60%;
-    --warning-foreground: 240 10% 3.9%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --warning: 41 100% 62%;
+    --warning-foreground: 160 21% 6%;
+    --border: 157 16% 20%;
+    --input: 157 16% 25%;
+    --ring: 167 52% 67%;
   }
 }
 
@@ -88,14 +96,30 @@
     color: hsl(var(--foreground));
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     caret-color: hsl(var(--foreground));
+    text-rendering: optimizeLegibility;
+  }
+
+  :where(h1, h2, .cool-display) {
+    font-family: "Cool Flight Display", "Arial Narrow", sans-serif;
+    font-weight: 600;
+    letter-spacing: -0.015em;
   }
   html, body, #root {
     height: 100%;
   }
 
   ::selection {
-    background: hsl(var(--foreground) / 0.16);
+    background: hsl(var(--primary) / 0.22);
     color: hsl(var(--foreground));
+  }
+
+  :where(a) {
+    text-underline-offset: 0.2em;
+    text-decoration-thickness: 1px;
+  }
+
+  :where(input[type="checkbox"], input[type="radio"]) {
+    accent-color: hsl(var(--primary));
   }
 
   * {
@@ -112,7 +136,7 @@
     border: 3px solid transparent;
     border-radius: 999px;
     background-clip: padding-box;
-    background-color: hsl(var(--muted-foreground) / 0.45);
+    background-color: hsl(var(--primary) / 0.42);
   }
 
   @media (max-width: 767px) {
@@ -139,5 +163,67 @@
     .animate-pulse {
       animation: none !important;
     }
+
+    .cool-recorder-event,
+    .cool-recorder-live {
+      animation: none !important;
+    }
+  }
+}
+
+@layer components {
+  .cool-ledger-canvas {
+    background-color: hsl(var(--background));
+    background-image: linear-gradient(
+      to bottom,
+      transparent 31px,
+      hsl(var(--border) / 0.3) 31px,
+      hsl(var(--border) / 0.3) 32px,
+      transparent 32px
+    );
+    background-size: 100% 32px;
+  }
+
+  .cool-instrument-label {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1rem;
+    text-transform: uppercase;
+  }
+
+  .cool-event-strip {
+    border: 1px solid hsl(var(--border));
+    background-color: hsl(var(--card) / 0.94);
+    box-shadow: inset 0 1px 0 hsl(var(--foreground) / 0.04);
+  }
+
+  .cool-recorder-event {
+    animation: cool-recorder-enter 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .cool-recorder-live {
+    animation: cool-recorder-live 1.8s ease-in-out infinite;
+  }
+}
+
+@keyframes cool-recorder-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cool-recorder-live {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
   }
 }

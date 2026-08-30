@@ -1,4 +1,4 @@
-# Cool AI Harness
+# Cool
 
 Personal AI agent harness with provider abstraction, tools, skills, MCP,
 subagents, long-term + working memory, personalities, planning mode, recurring

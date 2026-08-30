@@ -96,7 +96,7 @@ export function Sidebar({
       navigate(`/chat/${conv.id}`)
     },
     onError: () => toast.error("Conversation could not be created", {
-      description: "Check that the local harness is running, then try again.",
+      description: "Check that Cool is running locally, then try again.",
     }),
   })
 
@@ -143,7 +143,7 @@ export function Sidebar({
       navigate(`/chat/${conv.id}`)
     },
     onError: () => toast.error("Project conversation could not be created", {
-      description: "Check that the local harness is running, then try again.",
+      description: "Check that Cool is running locally, then try again.",
     }),
   })
 
@@ -245,14 +245,17 @@ export function Sidebar({
 
   return (
     <aside
-      className={cn("flex shrink-0 flex-col border-r bg-muted/30", className ?? "w-72")}
+      className={cn("flex shrink-0 flex-col border-r bg-card", className ?? "w-72")}
     >
       {/* Brand */}
-      <div className="flex h-14 items-center gap-2 border-b px-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-          <span className="text-sm font-bold">H</span>
+      <div className="flex h-16 items-center gap-3 border-b px-4">
+        <CoolMark />
+        <div className="min-w-0">
+          <span className="cool-display block text-lg">Cool</span>
+          <span className="cool-instrument-label block truncate text-muted-foreground">
+            Local flight ledger
+          </span>
         </div>
-        <span className="font-semibold tracking-tight">Harness</span>
       </div>
 
       {/* Pinned section nav (mobile drawer) — Material navigation drawers keep
@@ -414,7 +417,7 @@ export function Sidebar({
         {isError ? (
           <QueryErrorState
             title="Conversations could not be loaded"
-            description="Check that the local harness is running."
+            description="Check that Cool is running locally."
             onRetry={() => void refetch()}
             compact
           />
@@ -542,7 +545,7 @@ function NavigationGroups({
             <button
               type="button"
               className={cn(
-                "flex h-9 w-full items-center rounded-md px-2 text-xs font-semibold transition-colors hover:bg-accent",
+                "cool-instrument-label flex h-9 w-full items-center rounded-md px-2 transition-colors hover:bg-accent",
                 active ? "text-foreground" : "text-muted-foreground"
               )}
               aria-expanded={open}
@@ -580,5 +583,24 @@ function NavigationGroups({
         )
       })}
     </nav>
+  )
+}
+
+function CoolMark() {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      aria-hidden="true"
+      className="h-8 w-8 shrink-0 rounded-md shadow-sm"
+    >
+      <rect width="32" height="32" rx="6" className="fill-primary" />
+      <path
+        d="M7 9.5h18M7 16h11M7 22.5h18"
+        className="stroke-primary-foreground"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <circle cx="23" cy="16" r="2.5" className="fill-warning" />
+    </svg>
   )
 }

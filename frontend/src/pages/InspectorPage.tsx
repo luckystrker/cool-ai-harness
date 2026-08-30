@@ -5,7 +5,8 @@
 
 import { useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { Bug, GitCompareArrows, Loader2, Play } from "lucide-react"
+import { ArrowRight, Bug, GitCompareArrows, Loader2, Play } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 import { compareRuns, getRunTimeline, replayRun } from "@/api/inspector"
 import { conversationsApi } from "@/api/conversations"
@@ -24,6 +25,7 @@ import { api, getErrorDescription } from "@/api/client"
 type Mode = "timeline" | "compare"
 
 export function InspectorPage() {
+  const navigate = useNavigate()
   const [mode, setMode] = useState<Mode>("timeline")
   const [selectedConvId, setSelectedConvId] = useState<number | null>(null)
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
@@ -77,21 +79,6 @@ export function InspectorPage() {
       }),
   })
 
-  if (conversationsLoading) {
-    return <QueryLoadingState label="Loading run inspector…" className="h-64" />
-  }
-
-  if (conversationsError) {
-    return (
-      <QueryErrorState
-        title="Run inspector could not be loaded"
-        description="Check that the local harness is running, then try again."
-        onRetry={() => void refetchConversations()}
-        className="h-64 justify-center"
-      />
-    )
-  }
-
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -122,6 +109,16 @@ export function InspectorPage() {
         </div>
       </div>
 
+      {conversationsLoading ? (
+        <QueryLoadingState label="Loading run inspector…" className="min-h-0 flex-1" />
+      ) : conversationsError ? (
+        <QueryErrorState
+          title="Run inspector could not be loaded"
+          description="Check that Cool is running locally, then try again."
+          onRetry={() => void refetchConversations()}
+          className="min-h-0 flex-1 justify-center"
+        />
+      ) : (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         {/* Left panel: selectors */}
         <div className="w-full shrink-0 space-y-3 border-b p-3 md:w-64 md:border-b-0 md:border-r">
@@ -243,9 +240,39 @@ export function InspectorPage() {
                 />
               )}
               {!timelineLoading && !timeline && (
-                <p className="py-12 text-center text-sm text-muted-foreground">
-                  Select a conversation and run to inspect its timeline.
-                </p>
+                <div className="mx-auto flex max-w-xl flex-col items-center py-10 text-center sm:py-16">
+                  <div className="cool-event-strip grid h-12 w-12 place-items-center rounded-md text-primary">
+                    <Bug className="h-5 w-5" />
+                  </div>
+                  <h2 className="mt-5 text-xl font-semibold tracking-[-0.02em]">
+                    {conversations.length === 0
+                      ? "Start a conversation to create a run record"
+                      : selectedConvId === null
+                        ? "Choose a conversation to open its run record"
+                        : "Choose a run to inspect every checkpoint"}
+                  </h2>
+                  <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted-foreground">
+                    Cool records the model, tools, approvals, cost, and outcome as one durable
+                    timeline. Nothing appears here until a run starts.
+                  </p>
+                  <ol className="mt-6 grid w-full grid-cols-3 overflow-hidden rounded-md border bg-card text-left text-xs">
+                    {[
+                      ["Intent", "Conversation"],
+                      ["Execution", "Agent run"],
+                      ["Evidence", "Timeline"],
+                    ].map(([label, value], index) => (
+                      <li key={label} className="border-r p-3 last:border-r-0">
+                        <span className="cool-instrument-label text-muted-foreground">{index + 1} · {label}</span>
+                        <span className="mt-1 block font-semibold">{value}</span>
+                      </li>
+                    ))}
+                  </ol>
+                  {conversations.length === 0 && (
+                    <Button className="mt-6" onClick={() => navigate("/")}>
+                      Start a conversation <ArrowRight className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
               )}
             </>
           )}
@@ -267,6 +294,7 @@ export function InspectorPage() {
           )}
         </ScrollArea>
       </div>
+      )}
     </div>
   )
 }

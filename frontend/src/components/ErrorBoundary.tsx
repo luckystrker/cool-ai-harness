@@ -60,7 +60,7 @@ export class ErrorBoundary extends Component<Props, State> {
           </pre>
           <Button onClick={this.handleReload} className="gap-2">
             <RefreshCw className="h-4 w-4" />
-            Reload Harness
+            Reload Cool
           </Button>
         </div>
       )

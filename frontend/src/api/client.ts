@@ -46,13 +46,13 @@ export function getErrorDescription(error: unknown, fallback: string): string {
       return "This item changed before the action completed. Refresh and try again."
     }
     if (error.status >= 500) {
-      return "The local harness returned an unexpected error. Try again."
+      return "Cool returned an unexpected error. Try again."
     }
     return fallback
   }
 
   if (error instanceof TypeError && error.message.toLowerCase().includes("fetch")) {
-    return "Could not reach the local harness. Check that it is running, then try again."
+    return "Could not reach Cool. Check that it is running locally, then try again."
   }
   if (error instanceof Error && error.message.trim()) return error.message.trim()
   return fallback

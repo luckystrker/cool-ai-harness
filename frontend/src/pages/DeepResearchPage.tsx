@@ -217,7 +217,7 @@ export function DeepResearchPage() {
                 <li>
                   <QueryErrorState
                     title="Research history could not be loaded"
-                    description="Check that the local harness is running."
+                    description="Check that Cool is running locally."
                     onRetry={() => void refetchRuns()}
                     compact
                   />

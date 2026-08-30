@@ -181,7 +181,7 @@ export function TasksPage() {
     return (
       <QueryErrorState
         title="Scheduled tasks could not be loaded"
-        description="Check that the local harness is running, then try again."
+        description="Check that Cool is running locally, then try again."
         onRetry={() => void refetch()}
         className="h-64 justify-center"
       />
@@ -190,8 +190,8 @@ export function TasksPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <CalendarClock className="h-6 w-6" />
           <h1 className="text-2xl font-bold">Scheduled tasks</h1>
           {scheduler && (
@@ -345,6 +345,7 @@ function TaskCard({
       </CardHeader>
       <CardContent className="flex items-center gap-1 pt-0">
         <Button
+          className="w-full shrink-0 sm:w-auto"
           variant="ghost"
           size="sm"
           onClick={onRun}
@@ -683,7 +684,7 @@ function TaskDialog({
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="task-approval-policy">Actions outside Harness</Label>
+              <Label htmlFor="task-approval-policy">Actions outside Cool</Label>
               <select
                 id="task-approval-policy"
                 value={approvalPolicy}
@@ -708,7 +709,7 @@ function TaskDialog({
                     checked={channels.includes(ch)}
                     onChange={() => toggleChannel(ch)}
                   />
-                  {ch === "ui" ? "Harness inbox" : "Webhook"}
+                  {ch === "ui" ? "Cool inbox" : "Webhook"}
                 </label>
               ))}
             </div>

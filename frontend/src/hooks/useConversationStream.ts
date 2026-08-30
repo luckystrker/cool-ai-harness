@@ -462,7 +462,7 @@ export function useConversationStream() {
         if ((e as Error).name !== "AbortError") {
           acc.content += `\n\n**Reply interrupted.** ${getErrorDescription(
             e,
-            "Check that the local harness is running, then send your message again."
+            "Check that Cool is running locally, then send your message again."
           )}`
           acc.errored = true
           flush(acc)

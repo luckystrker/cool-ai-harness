@@ -1,11 +1,16 @@
 import { useQuery } from "@tanstack/react-query"
 import { Wallet } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { budgetsApi } from "@/api/budgets"
 import { cn } from "@/lib/utils"
 
 const fmtUsd = (n: number) =>
-  n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 })
+  n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "code",
+    maximumFractionDigits: 4,
+  })
 
 /**
  * A compact budget indicator shown in the chat header. Hover or click reveals
@@ -14,6 +19,8 @@ const fmtUsd = (n: number) =>
  */
 export function BudgetIndicator() {
   const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const popoverId = useId()
   const { data: status, isLoading } = useQuery({
     queryKey: ["budgets"],
     queryFn: budgetsApi.getStatus,
@@ -21,10 +28,27 @@ export function BudgetIndicator() {
     refetchInterval: 15_000,
   })
 
+  useEffect(() => {
+    if (!open) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener("keydown", handleKeyDown)
+    document.addEventListener("pointerdown", handlePointerDown)
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown)
+      document.removeEventListener("pointerdown", handlePointerDown)
+    }
+  }, [open])
+
   if (!status) {
     // No data yet (or no limits configured) — render a neutral icon.
     return (
       <div
+        ref={rootRef}
         className="relative inline-flex"
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
@@ -34,10 +58,14 @@ export function BudgetIndicator() {
           onClick={() => setOpen((o) => !o)}
           className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
           title="Cost budget"
+          aria-label="Cost budget"
+          aria-expanded={open}
+          aria-controls={popoverId}
+          aria-haspopup="dialog"
         >
           <Wallet className="h-4 w-4" />
         </button>
-        {open && <Popover isLoading={isLoading} status={null} />}
+        {open && <Popover id={popoverId} isLoading={isLoading} status={null} />}
       </div>
     )
   }
@@ -49,6 +77,7 @@ export function BudgetIndicator() {
 
   return (
     <div
+      ref={rootRef}
       className="relative inline-flex"
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
@@ -61,26 +90,37 @@ export function BudgetIndicator() {
           tone
         )}
         title={`Cost budget: ${status.status}`}
+        aria-label={`Cost budget: ${status.status}`}
+        aria-expanded={open}
+        aria-controls={popoverId}
+        aria-haspopup="dialog"
       >
         <Wallet className="h-4 w-4" />
         {status.status !== "ok" && (
           <span className="h-1.5 w-1.5 rounded-full bg-current" />
         )}
       </button>
-      {open && <Popover isLoading={isLoading} status={status} />}
+      {open && <Popover id={popoverId} isLoading={isLoading} status={status} />}
     </div>
   )
 }
 
 function Popover({
+  id,
   isLoading,
   status,
 }: {
+  id: string
   isLoading: boolean
   status: import("@/api/types").BudgetStatusResponse | null
 }) {
   return (
-    <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-md border bg-popover p-3 text-xs shadow-md">
+    <div
+      id={id}
+      role="dialog"
+      aria-label="Cost budget details"
+      className="absolute right-0 top-full z-50 mt-1 w-64 rounded-md border bg-popover p-3 text-xs shadow-md"
+    >
       {isLoading || !status ? (
         <div className="text-muted-foreground">Loading budget…</div>
       ) : (
