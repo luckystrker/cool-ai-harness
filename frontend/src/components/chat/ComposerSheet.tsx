@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
 import { Check, FolderOpen, Paperclip, X } from "lucide-react"
 import type { ModelInfo } from "@/api/types"
 import { DirectoryBrowserDialog } from "@/components/chat/DirectoryBrowserDialog"
@@ -49,6 +50,7 @@ export function ComposerSheet({
   onRemoveFile,
 }: ComposerSheetProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
   const [browserOpen, setBrowserOpen] = useState(false)
   const [customOpen, setCustomOpen] = useState(false)
   const [customValue, setCustomValue] = useState("")
@@ -75,36 +77,41 @@ export function ComposerSheet({
 
   return (
     <>
-      {/* Backdrop */}
-      <div
-        className={cn(
-          "absolute inset-0 z-40 bg-black/40 transition-opacity duration-200",
-          open ? "opacity-100" : "pointer-events-none opacity-0"
-        )}
-        onClick={onClose}
-      />
-
-      {/* Sheet */}
-      <div
-        className={cn(
-          "absolute inset-x-0 bottom-0 z-50 flex max-h-[78%] flex-col rounded-t-2xl border-t bg-background shadow-lg transition-transform duration-200",
-          open ? "translate-y-0" : "translate-y-full"
-        )}
-        aria-hidden={!open}
+      <DialogPrimitive.Root
+        open={open}
+        onOpenChange={(nextOpen) => !nextOpen && onClose()}
       >
-        <div className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-muted-foreground/30" />
-        <div className="flex h-12 shrink-0 items-center justify-between px-4">
-          <span className="text-sm font-semibold">Chat settings</span>
-          <button
-            className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
-            onClick={onClose}
-            title="Close"
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="motion-opacity fixed inset-0 z-40 bg-black/40 data-[state=closed]:opacity-0 data-[state=open]:opacity-100" />
+          <DialogPrimitive.Content
+            className="motion-spatial fixed inset-x-0 bottom-0 z-50 flex max-h-[78dvh] translate-y-full flex-col rounded-t-2xl border-t bg-background shadow-lg outline-none transition-transform duration-200 data-[state=open]:translate-y-0"
+            onOpenAutoFocus={() => {
+              returnFocusRef.current = document.activeElement as HTMLElement | null
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              returnFocusRef.current?.focus()
+            }}
           >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+            <div className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-muted-foreground/30" />
+            <div className="flex h-12 shrink-0 items-center justify-between px-4">
+              <DialogPrimitive.Title className="text-sm font-semibold">
+                Chat settings
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Description className="sr-only">
+                Configure attachments, workspace, agent mode, model, and run mode.
+              </DialogPrimitive.Description>
+              <DialogPrimitive.Close asChild>
+                <button
+                  className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label="Close chat settings"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </DialogPrimitive.Close>
+            </div>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 pb-6">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 pb-6">
           {/* --- Attachments --- */}
           <section>
             <SheetLabel>Attachments</SheetLabel>
@@ -134,7 +141,7 @@ export function ComposerSheet({
                     <button
                       className="rounded hover:text-destructive"
                       onClick={() => onRemoveFile(i)}
-                      title="Remove"
+                      aria-label={`Remove ${f.name}`}
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -213,6 +220,7 @@ export function ComposerSheet({
                 >
                   <input
                     autoFocus
+                    aria-label="Custom model name"
                     placeholder="model name"
                     value={customValue}
                     onChange={(e) => setCustomValue(e.target.value)}
@@ -245,6 +253,7 @@ export function ComposerSheet({
                     : "text-muted-foreground hover:text-foreground"
                 )}
                 onClick={() => onPlanModeChange(false)}
+                aria-pressed={!planMode}
               >
                 Build
               </button>
@@ -256,19 +265,22 @@ export function ComposerSheet({
                     : "text-muted-foreground hover:text-foreground"
                 )}
                 onClick={() => onPlanModeChange(true)}
+                aria-pressed={planMode}
               >
                 Plan
               </button>
             </div>
           </section>
-        </div>
+            </div>
 
-        <div className="shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <Button className="w-full" onClick={onClose}>
-            Done
-          </Button>
-        </div>
-      </div>
+            <div className="shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              <DialogPrimitive.Close asChild>
+                <Button className="w-full">Done</Button>
+              </DialogPrimitive.Close>
+            </div>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
 
       <DirectoryBrowserDialog
         open={browserOpen}
@@ -298,6 +310,7 @@ function ModelRow({
         active ? "border-primary/50 bg-accent" : "hover:bg-accent/50"
       )}
       onClick={onSelect}
+      aria-pressed={active}
     >
       <span className="min-w-0 flex-1">
         <span className="block truncate font-mono text-xs">{id}</span>

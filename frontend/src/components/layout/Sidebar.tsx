@@ -39,6 +39,8 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
+const CONVERSATION_BATCH_SIZE = 60
+
 export function Sidebar({
   className,
   inDrawer = false,
@@ -63,6 +65,9 @@ export function Sidebar({
   const [settingsProject, setSettingsProject] = useState<Project | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const [searchQuery, setSearchQuery] = useState("")
+  const [visibleConversationLimit, setVisibleConversationLimit] = useState(
+    CONVERSATION_BATCH_SIZE
+  )
   const [deleteTarget, setDeleteTarget] = useState<
     | { kind: "conversation"; conversation: Conversation }
     | { kind: "project"; project: Project }
@@ -78,6 +83,10 @@ export function Sidebar({
   useEffect(() => {
     if (activeNavGroup) setExpandedNavGroup(activeNavGroup)
   }, [activeNavGroup])
+
+  useEffect(() => {
+    setVisibleConversationLimit(CONVERSATION_BATCH_SIZE)
+  }, [searchQuery])
 
   const createMutation = useMutation({
     mutationFn: conversationsApi.create,
@@ -204,7 +213,8 @@ export function Sidebar({
         <div
           className={cn(
             "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-            active ? "bg-accent text-accent-foreground" : "hover:bg-accent/60"
+            active ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
+            inDrawer && "min-h-11"
           )}
         >
           <button
@@ -307,10 +317,17 @@ export function Sidebar({
           <ul className="mb-2 space-y-0.5">
             {visibleProjects.map((p) => {
               const chats = byProject.get(p.id) ?? []
+              const visibleChats = chats.slice(0, visibleConversationLimit)
+              const hiddenChatCount = chats.length - visibleChats.length
               const isCollapsed = collapsed.has(p.id)
               return (
                 <li key={p.id}>
-                  <div className="group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-accent/60">
+                  <div
+                    className={cn(
+                      "group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-accent/60",
+                      inDrawer && "min-h-11"
+                    )}
+                  >
                     <button
                       className="flex flex-1 items-center gap-2 overflow-hidden text-left"
                       onClick={() => toggleCollapsed(p.id)}
@@ -333,7 +350,7 @@ export function Sidebar({
                       </span>
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:focus-visible:opacity-100 md:group-hover:opacity-100"
                       title="New chat in this project"
                       aria-label={`New conversation in ${p.name}`}
                       onClick={() => createInProjectMutation.mutate(p)}
@@ -345,7 +362,7 @@ export function Sidebar({
                       )}
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:focus-visible:opacity-100 md:group-hover:opacity-100"
                       title="Project settings"
                       aria-label={`Settings for ${p.name}`}
                       onClick={() => setSettingsProject(p)}
@@ -353,7 +370,7 @@ export function Sidebar({
                       <Settings2 className="h-3.5 w-3.5" />
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:focus-visible:opacity-100 md:group-hover:opacity-100"
                       title="Delete project"
                       aria-label={`Remove project ${p.name}`}
                       onClick={() => setDeleteTarget({ kind: "project", project: p })}
@@ -363,7 +380,22 @@ export function Sidebar({
                   </div>
                   {!isCollapsed && chats.length > 0 && (
                     <ul className="ml-5 space-y-0.5 border-l pl-2">
-                      {chats.map(renderConversationRow)}
+                      {visibleChats.map(renderConversationRow)}
+                      {hiddenChatCount > 0 && (
+                        <li>
+                          <Button
+                            variant="ghost"
+                            className="h-11 w-full justify-start text-xs text-muted-foreground md:h-8"
+                            onClick={() =>
+                              setVisibleConversationLimit((limit) =>
+                                limit + CONVERSATION_BATCH_SIZE
+                              )
+                            }
+                          >
+                            Show more ({hiddenChatCount} remaining)
+                          </Button>
+                        </li>
+                      )}
                     </ul>
                   )}
                 </li>
@@ -391,7 +423,22 @@ export function Sidebar({
                 : "No other conversations."}
           </p>
         ) : (
-          <ul className="space-y-0.5">{unassigned.map(renderConversationRow)}</ul>
+          <ul className="space-y-0.5">
+            {unassigned.slice(0, visibleConversationLimit).map(renderConversationRow)}
+            {unassigned.length > visibleConversationLimit && (
+              <li>
+                <Button
+                  variant="ghost"
+                  className="h-11 w-full justify-start text-xs text-muted-foreground md:h-8"
+                  onClick={() =>
+                    setVisibleConversationLimit((limit) => limit + CONVERSATION_BATCH_SIZE)
+                  }
+                >
+                  Show more ({unassigned.length - visibleConversationLimit} remaining)
+                </Button>
+              </li>
+            )}
+          </ul>
         )}
       </ScrollArea>
 

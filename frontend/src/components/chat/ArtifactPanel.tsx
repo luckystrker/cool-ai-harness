@@ -120,7 +120,13 @@ function ArtifactRow({
       </div>
       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
         <a href={downloadHref} download={artifact.filename}>
-          <Button size="icon" variant="ghost" className="h-7 w-7" title="Download">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-7 w-7"
+            title="Download"
+            aria-label="Download artifact"
+          >
             <Download className="h-3.5 w-3.5" />
           </Button>
         </a>

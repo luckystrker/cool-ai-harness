@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { GitCompareArrows, Loader2, Plus, SearchCheck, X } from "lucide-react"
+import { ArrowLeft, GitCompareArrows, Loader2, Plus, SearchCheck, X } from "lucide-react"
 import { toast } from "sonner"
 import { deepResearchApi } from "@/api/research"
 import type { ResearchRun, ResearchRunDetail } from "@/api/types"
@@ -14,6 +14,8 @@ import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
 import { useResearchStream } from "@/hooks/useResearchStream"
+import { useIsMobile } from "@/hooks/useMediaQuery"
+import { cn } from "@/lib/utils"
 
 export function DeepResearchPage() {
   const queryClient = useQueryClient()
@@ -25,6 +27,8 @@ export function DeepResearchPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [compareWithId, setCompareWithId] = useState<number | null>(null)
   const [rerunModel, setRerunModel] = useState("")
+  const [mobilePane, setMobilePane] = useState<"list" | "detail">("list")
+  const isMobile = useIsMobile()
 
   const { data: runs = [] } = useQuery({
     queryKey: ["research-runs"],
@@ -60,6 +64,7 @@ export function DeepResearchPage() {
   useEffect(() => {
     if (progress.runId != null && progress.terminal) {
       setSelectedId(progress.runId)
+      setMobilePane("detail")
       queryClient.invalidateQueries({ queryKey: ["research-runs"] })
     }
   }, [progress.runId, progress.terminal, queryClient])
@@ -76,10 +81,12 @@ export function DeepResearchPage() {
     setCompareWithId(null)
     reset()
     setRerunModel("")
+    setMobilePane("detail")
     try {
       await start({ topic: topic.trim(), depth, model: model || undefined })
       toast.success("Research started")
     } catch (e) {
+      setMobilePane("list")
       toast.error("Research failed to start", { description: String(e) })
     }
   }, [topic, depth, model, start, reset])
@@ -99,6 +106,7 @@ export function DeepResearchPage() {
     onSuccess: (run) => {
       setCompareWithId(null)
       setSelectedId(run.id)
+      setMobilePane("detail")
       queryClient.invalidateQueries({ queryKey: ["research-runs"] })
       toast.success(`Rerun started (run #${run.id})`)
     },
@@ -117,13 +125,18 @@ export function DeepResearchPage() {
   const showLiveProgress = !progress.terminal && (progress.stage || progress.subQuestions.length > 0 || progress.runId != null)
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-w-0">
       {/* Left column: launch form + run history */}
-      <div className="flex w-80 shrink-0 flex-col border-r">
+      <div
+        className={cn(
+          "min-w-0 flex-1 flex-col border-r md:w-80 md:flex-none md:shrink-0",
+          isMobile && mobilePane === "detail" ? "hidden" : "flex"
+        )}
+      >
         <div className="flex items-center justify-between border-b px-3 py-2">
           <div className="flex items-center gap-2">
             <SearchCheck className="h-4 w-4" />
-            <span className="text-sm font-semibold">Deep Research</span>
+            <h1 className="text-sm font-semibold">Deep Research</h1>
           </div>
           {hasActive && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
         </div>
@@ -198,6 +211,7 @@ export function DeepResearchPage() {
                     onClick={() => {
                       setCompareWithId(null)
                       setSelectedId(run.id)
+                      setMobilePane("detail")
                     }}
                   />
                 </li>
@@ -213,7 +227,22 @@ export function DeepResearchPage() {
       </div>
 
       {/* Right column: progress / report / compare */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div
+        className={cn(
+          "min-w-0 flex-1 flex-col",
+          isMobile && mobilePane === "list" ? "hidden" : "flex"
+        )}
+      >
+        <div className="flex h-12 shrink-0 items-center border-b px-2 md:hidden">
+          <Button
+            variant="ghost"
+            className="h-11 gap-2 px-2"
+            onClick={() => setMobilePane("list")}
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Research runs
+          </Button>
+        </div>
         {showLiveProgress ? (
           <div className="flex-1 overflow-y-auto p-4">
             <div className="mb-3 flex items-center gap-2">
@@ -224,13 +253,16 @@ export function DeepResearchPage() {
           </div>
         ) : compareWith && selected ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
+            <div className="flex flex-col gap-2 border-b px-4 py-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <GitCompareArrows className="h-4 w-4" /> Comparison
               </div>
-              <div className="flex items-center gap-2">
-                <Label className="text-xs text-muted-foreground">vs</Label>
+              <div className="flex min-w-0 items-center gap-2">
+                <Label htmlFor="research-compare-run" className="text-xs text-muted-foreground">
+                  vs
+                </Label>
                 <select
+                  id="research-compare-run"
                   value={compareWith.id}
                   onChange={(e) => setCompareWithId(parseInt(e.target.value))}
                   className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
@@ -243,8 +275,9 @@ export function DeepResearchPage() {
                 </select>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
                   onClick={() => setCompareWithId(null)}
+                  aria-label="Close comparison"
                 >
                   <X className="h-4 w-4" />
                 </Button>
@@ -254,8 +287,8 @@ export function DeepResearchPage() {
           </div>
         ) : selected ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-2 border-b px-4 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span>run #{selected.id}</span>
                 <span>·</span>
                 <span>{selected.model ?? "default model"}</span>
@@ -274,7 +307,7 @@ export function DeepResearchPage() {
                   </>
                 )}
               </div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 {(selected.status === "queued" || selected.status === "running") && (
                   <Button
                     variant="destructive"
@@ -287,10 +320,11 @@ export function DeepResearchPage() {
                 {selected.status === "completed" && (
                   <>
                     <Input
+                      aria-label="Model override for rerun"
                       value={rerunModel}
                       onChange={(e) => setRerunModel(e.target.value)}
                       placeholder="Model override"
-                      className="h-8 w-40"
+                      className="h-11 min-w-0 flex-1 sm:h-8 sm:w-40 sm:flex-none"
                     />
                     <Button
                       variant="outline"

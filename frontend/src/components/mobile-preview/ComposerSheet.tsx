@@ -99,7 +99,14 @@ export function ComposerSheet({
 
         <div className="flex h-12 shrink-0 items-center justify-between px-4">
           <span className="text-sm font-semibold">Chat settings</span>
-          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={onClose} title="Close">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-10 w-10"
+            onClick={onClose}
+            title="Close"
+            aria-label="Close chat settings"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>

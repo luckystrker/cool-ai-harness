@@ -124,7 +124,7 @@ export function RoleEditor({ role, onSaved }: RoleEditorProps) {
         </div>
 
         <div className="grid gap-1.5">
-          <Label>Allowed Tools</Label>
+          <div className="text-sm font-medium">Allowed Tools</div>
           <p className="text-xs text-muted-foreground">
             {selectedTools.length === 0
               ? "No restriction — the subagent can use all tools."

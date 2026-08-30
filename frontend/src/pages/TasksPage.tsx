@@ -562,13 +562,19 @@ function TaskDialog({
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <div className="space-y-1">
-            <Label>Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily news digest" />
+            <Label htmlFor="task-name">Name</Label>
+            <Input
+              id="task-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Daily news digest"
+            />
           </div>
 
           <div className="space-y-1">
-            <Label>Prompt</Label>
+            <Label htmlFor="task-prompt">Prompt</Label>
             <Textarea
+              id="task-prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={4}
@@ -577,8 +583,9 @@ function TaskDialog({
           </div>
 
           <div className="space-y-1">
-            <Label>Schedule (cron or natural language)</Label>
+            <Label htmlFor="task-schedule">Schedule (cron or natural language)</Label>
             <Input
+              id="task-schedule"
               value={schedule}
               onChange={(e) => setSchedule(e.target.value)}
               onBlur={handleScheduleBlur}
@@ -595,18 +602,20 @@ function TaskDialog({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label>Timezone</Label>
+              <Label htmlFor="task-timezone">Timezone</Label>
               <Input
+                id="task-timezone"
                 value={timezone}
                 onChange={(e) => setTimezone(e.target.value)}
                 placeholder="UTC"
               />
             </div>
             <div className="space-y-1">
-              <Label>Model (optional)</Label>
+              <Label htmlFor="task-model">Model (optional)</Label>
               <Input
+                id="task-model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="gpt-4o"
@@ -614,10 +623,11 @@ function TaskDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label>Max iterations</Label>
+              <Label htmlFor="task-max-iterations">Max iterations</Label>
               <Input
+                id="task-max-iterations"
                 type="number"
                 value={maxIterations}
                 onChange={(e) => setMaxIterations(e.target.value)}
@@ -626,8 +636,9 @@ function TaskDialog({
               />
             </div>
             <div className="space-y-1">
-              <Label>External side effects</Label>
+              <Label htmlFor="task-approval-policy">External side effects</Label>
               <select
+                id="task-approval-policy"
                 value={approvalPolicy}
                 onChange={(e) =>
                   setApprovalPolicy(e.target.value as "deny_external" | "allow_all")
@@ -641,8 +652,8 @@ function TaskDialog({
           </div>
 
           <div className="space-y-1">
-            <Label>Delivery channels</Label>
-            <div className="flex gap-3">
+            <div className="text-sm font-medium">Delivery channels</div>
+            <div className="flex gap-3" role="group" aria-label="Delivery channels">
               {(["ui", "webhook"] as TaskDeliveryChannel[]).map((ch) => (
                 <label key={ch} className="flex items-center gap-1.5 text-sm">
                   <input
@@ -656,6 +667,7 @@ function TaskDialog({
             </div>
             {channels.includes("webhook") && (
               <Input
+                aria-label="Webhook delivery URL"
                 value={webhookUrl}
                 onChange={(e) => setWebhookUrl(e.target.value)}
                 placeholder="https://example.com/hook"
@@ -970,7 +982,15 @@ function EndpointCard({
             <Badge variant="outline">{endpoint.source_type}</Badge>
             {!endpoint.enabled && <Badge variant="secondary">disabled</Badge>}
           </div>
-          <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); onDelete() }}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Delete webhook event"
+            onClick={(e) => {
+              e.stopPropagation()
+              onDelete()
+            }}
+          >
             <Trash2 className="h-4 w-4" />
           </Button>
         </div>

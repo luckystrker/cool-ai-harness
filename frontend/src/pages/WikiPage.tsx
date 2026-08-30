@@ -110,6 +110,7 @@ export function WikiPage() {
           />
         </div>
         <select
+          aria-label="Filter articles by category"
           className="rounded-md border bg-background px-3 py-2 text-sm"
           value={categoryFilter ?? ""}
           onChange={(e) => setCategoryFilter(e.target.value || null)}
@@ -219,26 +220,41 @@ function ArticleDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <Label>Title</Label>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Article title" />
+            <Label htmlFor="wiki-article-title">Title</Label>
+            <Input
+              id="wiki-article-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Article title"
+            />
           </div>
           <div>
-            <Label>Content (Markdown)</Label>
+            <Label htmlFor="wiki-article-content">Content (Markdown)</Label>
             <Textarea
+              id="wiki-article-content"
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={10}
               placeholder="Write your article in Markdown..."
             />
           </div>
-          <div className="flex gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex-1">
-              <Label>Category</Label>
-              <Input value={category} onChange={(e) => setCategory(e.target.value)} />
+              <Label htmlFor="wiki-article-category">Category</Label>
+              <Input
+                id="wiki-article-category"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+              />
             </div>
             <div className="flex-1">
-              <Label>Tags (comma-separated)</Label>
-              <Input value={tagsStr} onChange={(e) => setTagsStr(e.target.value)} placeholder="tag1, tag2" />
+              <Label htmlFor="wiki-article-tags">Tags (comma-separated)</Label>
+              <Input
+                id="wiki-article-tags"
+                value={tagsStr}
+                onChange={(e) => setTagsStr(e.target.value)}
+                placeholder="tag1, tag2"
+              />
             </div>
           </div>
           <Button onClick={handleSubmit} className="w-full">

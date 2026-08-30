@@ -34,6 +34,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -99,17 +105,17 @@ export function MemoryPage() {
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between border-b px-6 py-4">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
           <Brain className="h-6 w-6 text-primary" />
-          <div>
+          <div className="min-w-0">
             <h1 className="text-lg font-semibold">Memory</h1>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm leading-5 text-muted-foreground">
               Long-term memory across sessions
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <ExportMenu onExport={handleExport} />
           {activeTab !== "entities" && activeTab !== "review" && (
             <Button onClick={() => setCreateOpen(true)} className="gap-2">
@@ -122,7 +128,7 @@ export function MemoryPage() {
 
       {/* Stats bar */}
       {stats && (
-        <div className="flex flex-wrap gap-4 border-b px-6 py-3 text-sm">
+        <div className="flex flex-wrap gap-x-4 gap-y-2 border-b px-4 py-3 text-sm sm:px-6">
           <span className="text-muted-foreground">
             Active: <strong className="text-foreground">{stats.total_active}</strong>
           </span>
@@ -149,7 +155,7 @@ export function MemoryPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b px-6 py-2">
+      <div className="flex min-h-14 gap-1 overflow-x-auto border-b px-4 py-2 sm:px-6">
         <TabButton
           active={activeTab === "global"}
           onClick={() => setActiveTab("global")}
@@ -212,39 +218,21 @@ export function MemoryPage() {
 }
 
 function ExportMenu({ onExport }: { onExport: (format: "json" | "markdown") => void }) {
-  const [open, setOpen] = useState(false)
   return (
-    <div className="relative">
-      <Button variant="outline" className="gap-2" onClick={() => setOpen((o) => !o)}>
-        <Download className="h-4 w-4" />
-        Export
-      </Button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border bg-popover p-1 shadow-md">
-            <button
-              className="block w-full rounded-sm px-3 py-1.5 text-left text-sm hover:bg-accent"
-              onClick={() => {
-                onExport("json")
-                setOpen(false)
-              }}
-            >
-              JSON
-            </button>
-            <button
-              className="block w-full rounded-sm px-3 py-1.5 text-left text-sm hover:bg-accent"
-              onClick={() => {
-                onExport("markdown")
-                setOpen(false)
-              }}
-            >
-              Markdown
-            </button>
-          </div>
-        </>
-      )}
-    </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" className="gap-2">
+          <Download className="h-4 w-4" />
+          Export
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-40">
+        <DropdownMenuItem onSelect={() => onExport("json")}>JSON</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onExport("markdown")}>
+          Markdown
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -266,7 +254,7 @@ function TabButton({
   return (
     <button
       className={cn(
-        "flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+        "flex min-h-11 shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
         active
           ? "bg-accent text-accent-foreground"
           : "text-muted-foreground hover:bg-accent/50"
@@ -397,13 +385,14 @@ function MemoryCard({
           </div>
           {expanded && <ExplainPanel memoryId={memory.id} />}
         </div>
-        <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex gap-1 opacity-100 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
           <Button
             size="icon"
             variant="ghost"
             className="h-8 w-8"
             onClick={() => pinMutation.mutate(!memory.pinned)}
             title={memory.pinned ? "Unpin" : "Pin (protect from decay)"}
+            aria-label={memory.pinned ? "Unpin memory" : "Pin memory"}
           >
             {memory.pinned ? (
               <PinOff className="h-4 w-4" />
@@ -411,7 +400,13 @@ function MemoryCard({
               <Pin className="h-4 w-4" />
             )}
           </Button>
-          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={onEdit}>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={onEdit}
+            aria-label="Edit memory"
+          >
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
@@ -420,6 +415,7 @@ function MemoryCard({
             className="h-8 w-8 text-destructive hover:text-destructive"
             onClick={onDelete}
             title="Archive"
+            aria-label="Archive memory"
           >
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -481,16 +477,20 @@ function MemoryEditDialog({
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label>Content</Label>
+            <Label htmlFor="memory-edit-content">Content</Label>
             <Textarea
+              id="memory-edit-content"
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={4}
             />
           </div>
           <div className="space-y-2">
-            <Label>Importance: {(importance * 100).toFixed(0)}%</Label>
+            <Label htmlFor="memory-edit-importance">
+              Importance: {(importance * 100).toFixed(0)}%
+            </Label>
             <input
+              id="memory-edit-importance"
               type="range"
               min={0}
               max={1}
@@ -501,8 +501,12 @@ function MemoryEditDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label>Tags (comma-separated)</Label>
-            <Input value={tags} onChange={(e) => setTags(e.target.value)} />
+            <Label htmlFor="memory-edit-tags">Tags (comma-separated)</Label>
+            <Input
+              id="memory-edit-tags"
+              value={tags}
+              onChange={(e) => setTags(e.target.value)}
+            />
           </div>
         </div>
         <DialogFooter>
@@ -574,8 +578,9 @@ function MemoryCreateDialog({
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label>Content</Label>
+            <Label htmlFor="memory-create-content">Content</Label>
             <Textarea
+              id="memory-create-content"
               value={content}
               onChange={(e) => setContent(e.target.value)}
               placeholder="What should the agent remember?"
@@ -584,8 +589,9 @@ function MemoryCreateDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Type</Label>
+              <Label htmlFor="memory-create-type">Type</Label>
               <select
+                id="memory-create-type"
                 value={memoryType}
                 onChange={(e) => setMemoryType(e.target.value as MemoryType)}
                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
@@ -597,8 +603,9 @@ function MemoryCreateDialog({
               </select>
             </div>
             <div className="space-y-2">
-              <Label>Scope</Label>
+              <Label htmlFor="memory-create-scope">Scope</Label>
               <select
+                id="memory-create-scope"
                 value={scope}
                 onChange={(e) => setScope(e.target.value as MemoryScope)}
                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
@@ -609,8 +616,11 @@ function MemoryCreateDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Importance: {(importance * 100).toFixed(0)}%</Label>
+            <Label htmlFor="memory-create-importance">
+              Importance: {(importance * 100).toFixed(0)}%
+            </Label>
             <input
+              id="memory-create-importance"
               type="range"
               min={0}
               max={1}
@@ -621,8 +631,9 @@ function MemoryCreateDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label>Tags (comma-separated)</Label>
+            <Label htmlFor="memory-create-tags">Tags (comma-separated)</Label>
             <Input
+              id="memory-create-tags"
               value={tags}
               onChange={(e) => setTags(e.target.value)}
               placeholder="python, testing, deployment"

@@ -93,12 +93,15 @@ export function InspectorPage() {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         {/* Left panel: selectors */}
-        <div className="w-64 shrink-0 space-y-3 border-r p-3">
+        <div className="w-full shrink-0 space-y-3 border-b p-3 md:w-64 md:border-b-0 md:border-r">
           <div className="space-y-1.5">
-            <Label className="text-xs">Conversation</Label>
+            <Label htmlFor="inspector-conversation" className="text-xs">
+              Conversation
+            </Label>
             <select
+              id="inspector-conversation"
               className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
               value={selectedConvId ?? ""}
               onChange={(e) => {
@@ -118,8 +121,11 @@ export function InspectorPage() {
 
           {selectedConvId !== null && (
             <div className="space-y-1.5">
-              <Label className="text-xs">Run {mode === "compare" ? "A" : ""}</Label>
+              <Label htmlFor="inspector-run-a" className="text-xs">
+                Run {mode === "compare" ? "A" : ""}
+              </Label>
               <select
+                id="inspector-run-a"
                 className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
                 value={selectedRunId ?? ""}
                 onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
@@ -136,8 +142,11 @@ export function InspectorPage() {
 
           {mode === "compare" && selectedConvId !== null && (
             <div className="space-y-1.5">
-              <Label className="text-xs">Run B</Label>
+              <Label htmlFor="inspector-run-b" className="text-xs">
+                Run B
+              </Label>
               <select
+                id="inspector-run-b"
                 className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
                 value={compareRunId ?? ""}
                 onChange={(e) => setCompareRunId(e.target.value ? Number(e.target.value) : null)}
@@ -157,8 +166,11 @@ export function InspectorPage() {
           {/* Replay controls (timeline mode only) */}
           {mode === "timeline" && selectedRunId !== null && (
             <div className="space-y-2 border-t pt-3">
-              <Label className="text-xs">Replay with model override</Label>
+              <Label htmlFor="inspector-replay-model" className="text-xs">
+                Replay with model override
+              </Label>
               <Input
+                id="inspector-replay-model"
                 placeholder="e.g. gpt-4o"
                 value={replayModel}
                 onChange={(e) => setReplayModel(e.target.value)}

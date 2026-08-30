@@ -72,7 +72,14 @@ export function NavDrawer({
             </div>
             <span className="text-sm font-semibold">Harness</span>
           </div>
-          <Button variant="ghost" size="icon" className="h-10 w-10" onClick={onClose} title="Close menu">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-10 w-10"
+            onClick={onClose}
+            title="Close menu"
+            aria-label="Close menu"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>

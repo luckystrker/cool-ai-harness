@@ -123,7 +123,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
           <div className="space-y-4">
             {/* Project type: local / remote */}
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Type</Label>
+              <div className="text-xs font-medium text-muted-foreground">Type</div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -162,7 +162,9 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
             {/* Folder selection (local only) */}
             {type === "local" && (
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Project folder</Label>
+                <div className="text-xs font-medium text-muted-foreground">
+                  Project folder
+                </div>
                 <button
                   type="button"
                   onClick={() => setBrowserOpen(true)}

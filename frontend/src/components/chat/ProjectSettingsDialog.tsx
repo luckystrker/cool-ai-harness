@@ -137,7 +137,7 @@ export function ProjectSettingsDialog({
 
           {/* Skills: toggle global skills on/off for this project */}
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Skills</Label>
+            <div className="text-xs font-medium text-muted-foreground">Skills</div>
             <p className="text-[11px] text-muted-foreground">
               Global skills are enabled by default. Toggle off to disable for
               this project.

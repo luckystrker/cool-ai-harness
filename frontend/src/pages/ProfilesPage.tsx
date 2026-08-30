@@ -218,14 +218,20 @@ function ProfileDialog({
           <DialogTitle>{profile ? "Edit Profile" : "New Profile"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label>Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Coder" />
+              <Label htmlFor="profile-name">Name</Label>
+              <Input
+                id="profile-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Coder"
+              />
             </div>
             <div className="space-y-1">
-              <Label>Slug</Label>
+              <Label htmlFor="profile-slug">Slug</Label>
               <Input
+                id="profile-slug"
                 value={slug}
                 onChange={(e) => setSlug(e.target.value)}
                 placeholder="coder"
@@ -234,16 +240,18 @@ function ProfileDialog({
             </div>
           </div>
           <div className="space-y-1">
-            <Label>Description</Label>
+            <Label htmlFor="profile-description">Description</Label>
             <Input
+              id="profile-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Focused software engineering agent"
             />
           </div>
           <div className="space-y-1">
-            <Label>System Prompt</Label>
+            <Label htmlFor="profile-system-prompt">System Prompt</Label>
             <Textarea
+              id="profile-system-prompt"
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={8}
@@ -251,19 +259,21 @@ function ProfileDialog({
               className="font-mono text-sm"
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label>Model (optional)</Label>
+              <Label htmlFor="profile-model">Model (optional)</Label>
               <Input
+                id="profile-model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="gpt-4o"
               />
             </div>
             <div className="space-y-1">
-              <Label>Avatar Color</Label>
+              <Label htmlFor="profile-avatar-color">Avatar Color</Label>
               <div className="flex items-center gap-2">
-                <input
+                  <input
+                    id="profile-avatar-color"
                   type="color"
                   value={avatarColor}
                   onChange={(e) => setAvatarColor(e.target.value)}

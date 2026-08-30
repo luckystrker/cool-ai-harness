@@ -666,7 +666,7 @@ function AgentConfigSection() {
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="space-y-2">
-          <Label>Safety preset</Label>
+          <div className="text-sm font-medium">Safety preset</div>
           <p className="text-xs text-muted-foreground">
             Choose the default posture for new conversations. You can still override individual
             tools below.
@@ -706,7 +706,7 @@ function AgentConfigSection() {
           <div className="space-y-5 border-t p-3 sm:p-4">
         {/* Tool permissions */}
         <div className="space-y-2">
-          <Label>Tool permissions</Label>
+          <div className="text-sm font-medium">Tool permissions</div>
           <p className="text-xs text-muted-foreground">
             Click a cell to cycle: allow → ask → deny. The “*” row is the
             default for any tool not listed.
@@ -770,7 +770,7 @@ function AgentConfigSection() {
 
         {/* Capability policy */}
         <div className="space-y-2">
-          <Label>Capability policy</Label>
+          <div className="text-sm font-medium">Capability policy</div>
           <p className="text-xs text-muted-foreground">
             Coarse-grained gates applied before per-tool permissions. The more
             restrictive of the two layers wins. Click to cycle.
@@ -809,7 +809,7 @@ function AgentConfigSection() {
 
         {/* Breakpoints */}
         <div className="space-y-2">
-          <Label>Breakpoints</Label>
+          <div className="text-sm font-medium">Breakpoints</div>
           <p className="text-xs text-muted-foreground">
             Pause the agent at key points for human review. The agent blocks
             until you approve or the timeout fires.

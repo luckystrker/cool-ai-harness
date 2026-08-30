@@ -67,17 +67,19 @@ export function EntitiesPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b px-6 py-3">
-        <div className="relative flex-1">
+      <div className="grid gap-2 border-b px-4 py-3 sm:flex sm:items-center sm:px-6">
+        <div className="relative min-w-0 flex-1">
           <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search entities by name or alias…"
+            aria-label="Search entities"
             className="pl-8"
           />
         </div>
         <select
+          aria-label="Filter entities by type"
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
           className="rounded-md border bg-background px-3 py-2 text-sm"
@@ -165,8 +167,14 @@ function EntityCard({
             </div>
           )}
         </div>
-        <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={onEdit}>
+        <div className="flex gap-1 opacity-100 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={onEdit}
+            aria-label={`Edit ${entity.name}`}
+          >
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
@@ -174,6 +182,7 @@ function EntityCard({
             variant="ghost"
             className="h-8 w-8 text-destructive hover:text-destructive"
             onClick={onDelete}
+            aria-label={`Delete ${entity.name}`}
           >
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -184,6 +193,7 @@ function EntityCard({
 }
 
 function EntityFormFields({
+  idPrefix,
   name,
   setName,
   entityType,
@@ -193,6 +203,7 @@ function EntityFormFields({
   description,
   setDescription,
 }: {
+  idPrefix: string
   name: string
   setName: (v: string) => void
   entityType: string
@@ -205,12 +216,17 @@ function EntityFormFields({
   return (
     <div className="space-y-4 py-4">
       <div className="space-y-2">
-        <Label>Name</Label>
-        <Input value={name} onChange={(e) => setName(e.target.value)} />
+        <Label htmlFor={`${idPrefix}-name`}>Name</Label>
+        <Input
+          id={`${idPrefix}-name`}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
       </div>
       <div className="space-y-2">
-        <Label>Type</Label>
+        <Label htmlFor={`${idPrefix}-type`}>Type</Label>
         <select
+          id={`${idPrefix}-type`}
           value={entityType}
           onChange={(e) => setEntityType(e.target.value)}
           className="w-full rounded-md border bg-background px-3 py-2 text-sm"
@@ -223,12 +239,17 @@ function EntityFormFields({
         </select>
       </div>
       <div className="space-y-2">
-        <Label>Aliases (comma-separated)</Label>
-        <Input value={aliases} onChange={(e) => setAliases(e.target.value)} />
+        <Label htmlFor={`${idPrefix}-aliases`}>Aliases (comma-separated)</Label>
+        <Input
+          id={`${idPrefix}-aliases`}
+          value={aliases}
+          onChange={(e) => setAliases(e.target.value)}
+        />
       </div>
       <div className="space-y-2">
-        <Label>Description</Label>
+        <Label htmlFor={`${idPrefix}-description`}>Description</Label>
         <Textarea
+          id={`${idPrefix}-description`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           rows={2}
@@ -295,6 +316,7 @@ function EntityEditDialog({
           <DialogTitle>Edit Entity</DialogTitle>
         </DialogHeader>
         <EntityFormFields
+          idPrefix="entity-edit"
           name={name}
           setName={setName}
           entityType={entityType}
@@ -372,6 +394,7 @@ function EntityCreateDialog({
           <DialogTitle>Add Entity</DialogTitle>
         </DialogHeader>
         <EntityFormFields
+          idPrefix="entity-create"
           name={name}
           setName={setName}
           entityType={entityType}
