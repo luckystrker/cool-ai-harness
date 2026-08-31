@@ -1,6 +1,6 @@
 # Cool — план миграции на Rust core
 
-> Статус: proposed  
+> Статус: active; M0 complete, M1 pending
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions
@@ -18,9 +18,14 @@
 4. Составить рабочий task plan только для выбранной фазы.
 5. Реализовать фазу небольшими проверяемыми изменениями, не начинать следующую досрочно.
 6. Выполнить exit criteria и обязательные проверки; исправить найденные регрессии.
-7. Создать или обновить `docs/migration/checkpoints/MX.md` с доказательствами выполнения.
-8. Поменять статус фазы только после прохождения всех gates.
-9. Если пользователь поручил весь roadmap, продолжить со следующей доступной фазой. Если поручена
+7. После завершения доработок передать фактический diff независимому reviewer/agent в read-only
+   режиме. Автор изменений не может засчитать self-review как этот gate. Все actionable findings
+   должны быть исправлены либо отклонены с проверяемым обоснованием; security/protocol/state fixes
+   проходят повторное независимое ревью.
+8. Создать или обновить `docs/migration/checkpoints/MX.md` с доказательствами выполнения и
+   результатом независимого ревью.
+9. Поменять статус фазы только после прохождения всех gates.
+10. Если пользователь поручил весь roadmap, продолжить со следующей доступной фазой. Если поручена
    одна фаза — остановиться после отчёта о ней.
 
 Агент обязан остановиться и запросить решение только при настоящем product/authority blocker:
@@ -37,12 +42,12 @@
 
 | Порядок | Фаза | Зависимости | Статус | Evidence |
 |---:|---|---|---|---|
-| 0 | M0 — Architecture ADR и vertical spike | — | [ ] pending | — |
-| 1 | M1 — Canonical protocol и golden corpus | M0 | [ ] pending | — |
+| 0 | M0 — Architecture ADR и vertical spike | — | [x] complete | [checkpoint](migration/checkpoints/M0.md) |
+| 1 | M1 — Rust protocol foundation и golden corpus | M0 | [ ] pending | — |
 | 2 | M2 — Единая поставка текущего приложения | M0 | [ ] pending | — |
 | 3 | M3 — Standard plugin contract | M1 | [ ] pending | — |
 | 4 | M4 — ACP adapter поверх Python runtime | M1 | [ ] pending | — |
-| 5 | M5 — Rust workspace и App Server skeleton | M0, M1 | [ ] pending | — |
+| 5 | M5 — App Server и CLI skeleton | M0, M1 | [ ] pending | — |
 | 6 | M6 — Durable state и security kernel | M5 | [ ] pending | — |
 | 7 | M7 — Agent loop и trusted tool runtime | M6 | [ ] pending | — |
 | 8 | M8 — MCP, plugins, hooks и workers | M3, M6, M7 | [ ] pending | — |
@@ -59,7 +64,8 @@
 
 Если фаза воспроизводимо не докажет несовместимость, агент использует следующие defaults:
 
-- Rust stable, edition 2024, Cargo workspace, Tokio async runtime;
+- Rust stable с зафиксированным в `rust-toolchain.toml` channel/MSRV, edition 2024, Cargo workspace,
+  Tokio async runtime;
 - `clippy -D warnings`, `rustfmt`, deny/allow policy для dependencies и unsafe-кода;
 - App Protocol: versioned bidirectional JSON-RPC 2.0 по stdio и local socket;
 - Rust protocol types являются источником истины для runtime contract; JSON Schema и TypeScript
@@ -151,6 +157,9 @@ Python сохраняется как optional worker для OCR, PDF/DOCX, data 
 - **Capability security:** `read`, `write`, `execute`, `network`, `git`, `send_external`.
 - **Central authorization:** workers предлагают действия, но Rust принимает policy/approval decision.
 - **Approvals и audit:** значимые решения имеют источник, actor и append-only запись.
+- **Identity boundary:** transport identity аутентифицируется один раз и привязывается к actor,
+  session и approval; payload не может подменить identity.
+- **Idempotent commands:** retry/reconnect не создаёт второй run, approval или внешний side effect.
 - **Workspace confinement:** файловые операции не выходят за разрешённые roots.
 - **SSRF protection:** DNS pinning, private/link-local deny, redirect/size/time limits.
 - **Secret masking:** секреты не попадают в messages, events, logs и extension context.
@@ -227,7 +236,8 @@ Worker не исполняет side effect самостоятельно, есл�
 
 Worker RPC обязан поддерживать protocol version, capability negotiation, request IDs, deadlines,
 cancellation, heartbeats, structured errors и graceful shutdown. Environment передаётся allowlist,
-а не наследуется целиком.
+а не наследуется целиком. Side-effecting worker requests имеют idempotency key; supervisor не
+повторяет запрос с неизвестным результатом автоматически.
 
 ### 4.5. Предлагаемая структура репозитория
 
@@ -281,6 +291,24 @@ legacy/
 Сервер использует bounded ingress/outbound queues и возвращает retryable overload error вместо
 неограниченного накопления сообщений.
 
+Нормативные deployment profiles:
+
+- `local` — default и первоочередной product path: один OS user, bind только на loopback,
+  stdio/local socket защищены правами пользователя, Web получает per-install/session credential и
+  строгую origin/CSRF policy. Текущий single-user `API_TOKEN` может оставаться compatibility mode;
+- `server` — явный opt-in для VPS: non-loopback bind запрещён без обязательной auth-конфигурации,
+  TLS или явно настроенного trusted reverse proxy, secure cookies/tokens, rate limits и audit actor.
+  App Protocol stdio/local socket наружу не публикуются; внешний доступ идёт через HTTP/WebSocket
+  facade;
+- `telegram` — adapter поверх `server`, а не отдельный agent runtime. Backend валидирует raw
+  `Telegram.WebApp.initData`, проверяет signature/hash и freshness `auth_date`, не доверяет
+  `initDataUnsafe`, отображает Telegram user id в стабильный internal actor и выдаёт короткоживущую
+  application session. Bot token остаётся server-side secret.
+
+Local release не обязан реализовывать полноценный multi-user management UI, но protocol/store с M1
+не используют неявный `user_id=1`: actor/owner присутствуют в durable records и authorization API,
+чтобы включение VPS/Telegram не потребовало ломать event schema или переносить agent loop.
+
 ### 5.2. Основные сущности
 
 - `Session` — долгоживущий диалог/рабочая сессия.
@@ -293,13 +321,20 @@ legacy/
 - `Plan` — durable план и состояния шагов.
 - `Plugin` — установленный capability bundle.
 
+Каждый durable `Event` имеет стабильный envelope минимум с `event_id`, `schema_version`,
+`session_id`, `run_id`, nullable `item_id`, монотонным `seq` в явно выбранной области,
+`occurred_at`, `actor`, `source`, optional `causation_id`/`correlation_id` и typed payload.
+Envelope, а не порядок доставки transport frames, является источником порядка и дедупликации.
+Persisted event записывается до публикации подписчикам; transient token deltas либо получают явно
+документированную durability semantics, либо отделяются от canonical durable facts.
+
 ### 5.3. Минимальные методы
 
 ```text
 initialize / initialized
 session.create / session.load / session.list / session.fork
-session.prompt / session.steer / session.cancel
-run.get / run.list / run.events
+session.prompt / session.steer
+run.get / run.list / run.cancel / run.events / run.subscribe / run.unsubscribe
 approval.resolve
 plugin.install / plugin.list / plugin.enable / plugin.disable / plugin.remove
 plugin.validate / plugin.doctor
@@ -307,6 +342,19 @@ mcp.list / mcp.reload / mcp.oauth
 hooks.list / hooks.trust / hooks.disable
 server.health / server.capabilities
 ```
+
+Мутирующие команды несут `idempotency_key`; повтор с тем же actor и key возвращает исходный
+результат, а не повторяет действие. `initialize` согласует protocol version, client instance,
+capabilities и limits. Structured errors используют JSON-RPC codes плюс стабильный Cool error code,
+`retryable` и безопасные details. `run.events` поддерживает bounded pagination по cursor/`after_seq`,
+а subscribe после reconnect сначала делает catch-up из event log и затем переключается на live tail
+без gap и duplicate side effects. `approval.resolve` адресует конкретный approval id/revision и
+отклоняет stale или уже terminal request.
+
+До Web cutover инвентаризируются и получают typed protocol command/query families все используемые
+React surface: providers/settings, workspace/projects, artifacts, plans, subagents, memory/entities,
+analytics/budgets, tasks/RSS/webhooks, wiki, research, skills/MCP/plugins/hooks и Agent Constructor.
+HTTP routes могут временно оставаться facade, но не определяют отдельную business model.
 
 ### 5.4. Группы событий
 
@@ -338,7 +386,7 @@ Schema and TypeScript definitions and fails on uncommitted drift. Stable и expe
 | `session.prompt` | `session/prompt` |
 | `Event` projection | `session/update` notifications |
 | `tool.approval_required` | permission request |
-| `session.cancel` | `session/cancel` |
+| `run.cancel` активного run | `session/cancel` |
 | `Plan` | agent plan updates |
 | trusted terminal tool | ACP terminal capability |
 
@@ -349,16 +397,18 @@ artifact internals не ограничиваются ACP surface.
 
 ### 6.1. Публичная модель расширений
 
-Публичный plugin не получает Rust objects и не загружается как dynamic library. Нативный bundle
-содержит декларативные capabilities:
+Публичный plugin не получает Rust objects и не загружается как dynamic library. Portable bundle
+Agent Plugins 1.0 содержит только стандартизованные locations, а Cool-specific capabilities живут
+в выбранном в M0 reverse-DNS extension namespace:
 
 ```text
 plugin/
   plugin.json
   skills/
   mcp.json
-  hooks/
-  assets/
+  io.github.luckystrker.cool/
+    hooks/
+    assets/
 ```
 
 Каноническая внутренняя модель описывается Rust types и включает:
@@ -370,6 +420,9 @@ plugin/
 - connector/app metadata;
 - optional compatibility metadata;
 - diagnostics для supported/transformed/ignored/unsafe fields.
+
+Hooks/assets не объявляются частью Tier 1 conformance: это Cool client extension. Core manifest
+остаётся закрытым по Agent Plugins 1.0, а неизвестные top-level fields не получают Cool semantics.
 
 ### 6.2. Уровни совместимости
 
@@ -547,11 +600,19 @@ Vendor SDK не должен диктовать внутреннюю event model
 3. Rust store сначала работает read-only против копий/fixtures БД.
 4. Каждая поддерживаемая schema revision имеет snapshot и compatibility test.
 5. Rust SQL layer не полагается на неявный ORM behavior текущих SQLModel models.
-6. Перед первым Rust write создаётся и проверяется backup/restore path.
+6. Перед первым Rust write в пользовательскую БД создаётся и проверяется backup/restore path.
 7. В cutover фиксируется последняя Alembic revision как Rust migration baseline.
 8. После ownership cutover новые migrations создаёт только Rust migration system.
 9. Python и Rust никогда не выполняют конкурирующие migrations при одном startup.
 10. SQLite write ownership в каждый момент принадлежит одному runtime; dual-write запрещён.
+11. M0/M1 spikes пишут только в disposable DB под test/temp root и никогда не открывают рабочую БД
+    на запись; это не считается store cutover.
+12. До cutover фиксируются SQLite pragmas, transaction/isolation semantics, busy handling,
+    foreign-key enforcement и уникальность event sequence, чтобы Rust и Python одинаково трактовали
+    concurrency и crash recovery.
+13. Формат зашифрованных provider credentials, derivation из `SECRET_KEY`, key rotation и failure
+    behavior получают compatibility fixtures. Rust не помечает secret migration успешной, пока не
+    доказаны decrypt старых ciphertext и rollback без появления plaintext в БД/log/events.
 
 Проверки минимум на:
 
@@ -561,7 +622,9 @@ Vendor SDK не должен диктовать внутреннюю event model
 - БД без доступного `sqlite-vec`;
 - corrupt/incomplete run fixture;
 - restart в середине migration;
-- rollback-копии перед необратимым изменением.
+- rollback-копии перед необратимым изменением;
+- существующих Fernet ciphertext с валидным, неверным и rotated key;
+- конкурентной вставки событий и повторной доставки mutating command.
 
 Memory/vector implementation может остаться optional worker/index, но canonical memory records,
 visibility и lifecycle state принадлежат Rust store после cutover.
@@ -577,37 +640,51 @@ Deliverables:
 - trust-boundary и threat-model diagram;
 - decision по Rust toolchain, async runtime, SQLite crate, schema/type generation;
 - decision по App Protocol transport/versioning/error model;
+- decision по event durability/envelope, sequence scope, reconnect/cursor и command idempotency;
+- deployment/auth ADR, закрепляющий default `local`/single-user и совместимые opt-in
+  `server`/VPS + `telegram` profiles, identity/session/origin/CSRF и trusted-proxy boundaries;
+- inventory всех HTTP/SSE/WebSocket surface и ownership их будущих protocol families;
+- compatibility plan для Fernet secrets, config/data/project identity и cross-platform paths;
 - provider parity inventory;
-- plugin compatibility scope и reverse-DNS namespace;
+- plugin compatibility scope и namespace `io.github.luckystrker.cool`;
 - feature flags: `python`, `rust`, `replay`; side-effecting `shadow` отсутствует;
 - vertical spike, не используемый как production shortcut.
 
-Spike обязан реализовать:
+Spike обязан быть isolated throwaway harness под `spikes/` и реализовать только наиболее рискованный
+end-to-end путь:
 
-1. Минимальную Rust session/run state machine и append-only SQLite events.
+1. Минимальную Rust session/run state machine и append-only events в disposable SQLite DB.
 2. Scripted external worker, который стримит model response и предлагает tool intent.
 3. Rust capability check, approval request, tool dispatch и terminal event.
 4. App Protocol client, получающий тот же event stream.
 5. Принудительное завершение worker во время run и recoverable terminal state/restart behavior.
-6. Загрузку одного Agent Skill/MCP bundle и одного минимального OpenCode hook через Bun worker.
+
+Agent Plugins/MCP/Bun/OpenCode не реализуются в M0: их contract и threat model фиксируются в ADR,
+а executable integration принадлежит M3/M8. Spike не открывает production-like DB на запись, не
+становится временным production runtime и может быть удалён после переноса доказанных решений.
 
 Exit criteria:
 
 - spike доказывает, что IPC не дублирует внутреннюю модель целиком;
 - crash worker не повреждает event log и не обходит approval;
 - replay строит одинаковое client state;
+- повтор mutating command с тем же idempotency key не дублирует run/tool side effect;
+- reconnect from cursor не теряет durable events;
 - ADR фиксирует, какие части spike должны быть переписаны для production;
 - создан `docs/migration/checkpoints/M0.md`.
 
-### M1 — Canonical protocol и golden corpus
+### M1 — Rust protocol foundation и golden corpus
 
 Deliverables:
 
-- versioned canonical command/event schemas;
-- Python adapter текущих `AgentEvent` к canonical events;
+- минимальный Cargo workspace с `cool-protocol` и закреплённым toolchain/MSRV;
+- versioned canonical command/event schemas, envelope, error и pagination/cursor types;
+- inventory и Python adapters всех client-visible streams, включая текущие `AgentEvent`, research,
+  inspector/subagent streams и approval/breakpoint flows;
 - Rust protocol types и schema generation proof;
 - generated TypeScript client types;
-- golden traces для chat, parallel tools, approval, cancel, plan, subagent, worker crash и error;
+- golden traces для chat, parallel tools, approval/breakpoint, cancel/reconnect, plan, subagent,
+  multimodal/artifact, budget, research, worker crash и error;
 - black-box contract runner и deterministic client reducer;
 - CI drift check для Python adapter, Rust types и frontend types.
 
@@ -616,6 +693,7 @@ Exit criteria:
 - текущий Web UI работает через canonical event adapter;
 - все существующие critical scenarios сериализуются без потери semantic fields;
 - replay одного trace даёт одинаковое client state в Rust и TypeScript reducer;
+- committed schema/TypeScript artifacts воспроизводимо генерируются из `cool-protocol` без diff;
 - protocol evolution rules зафиксированы в ADR/checkpoint.
 
 ### M2 — Единая поставка текущего приложения
@@ -670,15 +748,15 @@ Exit criteria:
 - ACP и Web видят один durable run/event log;
 - adapter не становится владельцем state или tool execution.
 
-### M5 — Rust workspace и App Server skeleton
+### M5 — App Server и CLI skeleton
 
 Deliverables:
 
-- Cargo workspace и crates skeleton из раздела 4.5;
+- расширение созданного в M1 Cargo workspace crates skeleton из раздела 4.5;
 - `cool` binary с `app-server`, `serve`, `run`, `doctor` command routing;
 - initialize handshake и protocol capability negotiation;
 - stdio и local-socket transports;
-- generated JSON Schema/TypeScript artifacts;
+- использование generated JSON Schema/TypeScript artifacts из M1 без ручных wire types;
 - bounded queues, cancellation tokens и structured errors;
 - cross-platform build/release CI;
 - Rust dependency/security policy.
@@ -688,6 +766,7 @@ Exit criteria:
 - TS sample client запускает `cool app-server`, создаёт ephemeral session и получает events;
 - protocol artifacts воспроизводимо генерируются без diff;
 - overload/cancel/disconnect tests проходят;
+- reconnect/catch-up test доказывает отсутствие gap и повторного side effect;
 - transport crates не содержат agent-loop business logic.
 
 ### M6 — Durable state и security kernel
@@ -703,6 +782,7 @@ Exit criteria:
 - workspace/path confinement;
 - SSRF/network policy primitives;
 - secret filtering;
+- Fernet/config secret compatibility reader, rotation path и versioned at-rest format;
 - worker supervisor lifecycle.
 
 Python временно остаётся execution backend через adapter.
@@ -789,6 +869,8 @@ Exit criteria:
 - tasks/scheduler/webhooks/RSS/wiki;
 - profiles и constructor metadata;
 - memory canonical records, FTS/vector adapters и lifecycle;
+- research runs/sources/export metadata и provider/settings records;
+- typed App Protocol command/query handlers для каждого React surface из inventory M0/M1;
 - crash recovery, catch-up, misfire и overlap policies.
 
 Exit criteria:
@@ -798,6 +880,8 @@ Exit criteria:
 - scheduler restart/catch-up/misfire/overlap tests проходят;
 - memory visibility/retrieval parity подтверждены;
 - inspector строит timeline из event log;
+- contract coverage test подтверждает, что каждый используемый frontend API operation имеет
+  generated SDK method или явно задокументированный static/blob transport exception;
 - Alembic и Rust migrations не конкурируют.
 
 ### M11 — Web cutover и compatibility workers
@@ -806,6 +890,9 @@ Deliverables:
 
 - React UI переключён на Rust HTTP/App Protocol facade;
 - generated TypeScript SDK используется как единственная typed boundary;
+- все chat, research, inspector и subagent live streams используют canonical cursor/reconnect model;
+- production-ready opt-in `server` profile для VPS и Telegram adapter, валидирующий Mini App
+  `initData` и использующий тот же actor/session/run contract;
 - React production assets обслуживаются Rust binary;
 - OpenCode Bun worker и experimental ABI subset;
 - optional Python OCR/document/ML workers;
@@ -815,6 +902,9 @@ Deliverables:
 Exit criteria:
 
 - Web, TUI и ACP используют один Rust runtime и durable event model;
+- все существующие React pages проходят route/contract smoke suite без обращения к Python API;
+- local mode остаётся loopback-only по умолчанию; server mode fail-closed без auth/TLS boundary;
+- Telegram identity forgery, stale `auth_date`, replay и cross-user access покрыты integration tests;
 - crash/timeout любого worker не завершает core и виден пользователю;
 - отсутствие Bun/Python не ломает базовую установку;
 - unsupported vendor semantics отображаются явно;
@@ -850,8 +940,10 @@ Exit criteria:
 - persistence-heavy feature требует решения, реализовать ли её один раз после Rust store cutover.
 
 Telegram/Voice следует отложить минимум до M1: новый channel должен использовать canonical App
-Protocol, а не FastAPI internals. После M5 новые clients строятся только через protocol/SDK. После
-M6 новые security-sensitive side effects сначала проектируются как core intents/policies.
+Protocol, а не FastAPI internals. Telegram Bot/Mini App реализуется как adapter профиля `server` и
+не содержит отдельного agent loop, approval store или policy engine. После M5 новые clients строятся
+только через protocol/SDK. После M6 новые security-sensitive side effects сначала проектируются как
+core intents/policies.
 
 ## 12. Тестовая стратегия
 
@@ -859,6 +951,7 @@ M6 новые security-sensitive side effects сначала проектиру�
 
 - Rust unit/integration/property/concurrency tests;
 - schema/serialization compatibility tests;
+- event envelope ordering, idempotency and reconnect/cursor tests;
 - Python ↔ Rust black-box parity;
 - Rust ↔ TypeScript reducer parity;
 - golden event replay;
@@ -871,12 +964,16 @@ M6 новые security-sensitive side effects сначала проектиру�
 - hook trust and mutation tests;
 - ACP integration tests;
 - Web/TUI client-state tests;
+- frontend API inventory/coverage test for generated SDK methods;
+- auth/identity/origin tests для local, loopback Web и declared remote mode;
+- encrypted-secret compatibility/rotation tests без plaintext snapshots;
 - cross-platform packaging smoke tests.
 
 ### 12.2. Метрики parity
 
 - terminal run status;
 - ordered event kinds и обязательные payload fields;
+- event ids/sequence/cursor и отсутствие duplicates после reconnect;
 - tool selection и normalized arguments;
 - approval decision/source;
 - persisted messages/tool results;
@@ -885,7 +982,8 @@ M6 новые security-sensitive side effects сначала проектиру�
 - artifact hashes;
 - plan/subagent terminal states;
 - worker crash/restart state;
-- replayed client state.
+- replayed client state;
+- CRUD/query parity для всех используемых React API surface.
 
 Model text/token deltas не сравниваются побайтово для реальных providers. Строгая
 детерминированность требуется для scripted providers и recorded fixtures.
@@ -910,7 +1008,7 @@ npm run lint
 npm run build
 ```
 
-После M5 для Rust workspace:
+Начиная с M1 для Rust workspace:
 
 ```bash
 cargo fmt --all -- --check
@@ -931,12 +1029,17 @@ cargo build --workspace --all-targets
 Агент выполняет команды для всех затронутых roots. Отсутствующая обязательная команда считается
 незавершённым deliverable, а не пропускается.
 
+До первого Rust commit baseline CI должен реально исполнять те же обязательные Python checks,
+включая `mypy app` и `python -m evals`, а не только перечислять их в документации. Начиная с M1 CI
+добавляет Rust gates на Linux, Windows и macOS; platform-specific transport/path tests не могут быть
+заменены одной Linux job.
+
 ## 13. Release, migrations и rollback
 
 - Нет долгоживущей rewrite-ветки; каждая фаза вливается небольшими PR.
 - Runtime выбирается feature flag до M12.
 - Schema migration и runtime-default cutover разделяются на разные releases/commits.
-- Перед первым Rust write создаётся проверяемая backup-копия.
+- Перед первым Rust write в пользовательскую БД создаётся проверяемая backup-копия.
 - Необратимая migration запрещена без restore test.
 - SQLite dual-write запрещён.
 - При parity/security regression release остаётся на Python runtime.

@@ -22,7 +22,8 @@ Two source roots live in one repo:
 
 Supporting roots: `backend/tests` (pytest suite), `backend/evals`
 (scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),
-`docs/` (roadmap + per-phase specs). Run the command for **every root you
+`docs/` (roadmap + per-phase specs), and `spikes/m0-rust-core` (the isolated,
+non-production Rust M0 evidence harness). Run the command for **every root you
 touched** before declaring a task done (see [Definition of done](#definition-of-done)).
 
 ## Cross-cutting architecture constraints
@@ -284,7 +285,19 @@ npm run preview           # preview the production build
 
 ## Definition of done
 
-Before declaring a task complete, run the commands for every root you touched:
+Before declaring a task complete:
+
+1. Run the commands for every root you touched.
+2. After implementation changes are finished, request an independent, read-only code review from
+   a reviewer/agent that did not author those changes. The review must inspect the actual diff and
+   relevant untracked files, not only the implementation summary.
+3. Resolve every actionable finding by fixing it or recording an evidence-backed rejection. After
+   review-driven fixes, re-run the affected checks and request another independent pass for changes
+   to security boundaries, protocol/state semantics, migrations, or other high-risk behavior.
+4. Record the independent review result and any accepted residual risks in the phase checkpoint or
+   final task report. A self-review does not satisfy this gate.
+
+Required root commands:
 
 - Touched `backend/`? From `backend/`:
   ```bash
@@ -293,6 +306,13 @@ Before declaring a task complete, run the commands for every root you touched:
 - Touched `frontend/`? From `frontend/`:
   ```bash
   npm run lint && npm run build
+  ```
+- Touched `spikes/m0-rust-core/`? From that directory:
+  ```bash
+  cargo fmt --all -- --check
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test --all-features
+  cargo build --all-targets
   ```
 - Touched the **API contract** (schemas/events/WebSocket)? Update **both**
   sides and re-run both root command sets.

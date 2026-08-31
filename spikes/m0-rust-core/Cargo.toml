@@ -1,0 +1,19 @@
+[package]
+name = "cool-m0-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+tokio = { version = "=1.53.1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "=1.24.1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"

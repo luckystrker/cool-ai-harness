@@ -11,8 +11,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-m0-spike:
+    name: Rust M0 spike (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: spikes/m0-rust-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust 1.98.0
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+
+      - name: Rustfmt
+        run: cargo +1.98.0 fmt --all -- --check
+
+      - name: Clippy
+        run: cargo +1.98.0 clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo +1.98.0 test --all-features
+
+      - name: Build
+        run: cargo +1.98.0 build --all-targets
+
   backend:
-    name: Backend (ruff + pytest)
+    name: Backend (ruff + mypy + pytest + evals)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,9 +61,17 @@ jobs:
         working-directory: backend
         run: ruff check .
 
+      - name: Mypy
+        working-directory: backend
+        run: mypy app
+
       - name: Pytest
         working-directory: backend
         run: pytest --tb=short -q -n auto --dist=loadfile
+
+      - name: Deterministic eval gate
+        working-directory: backend
+        run: python -m evals
 
   frontend:
     name: Frontend (oxlint + build)
