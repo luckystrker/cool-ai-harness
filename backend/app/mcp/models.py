@@ -71,6 +71,11 @@ class MCPServerConfig:
     command: str = ""  # e.g. "npx", "python", "node"
     args: list[str] = field(default_factory=list)  # e.g. ["-y", "@modelcontextprotocol/server-filesystem"]
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for the subprocess
+    cwd: str = ""  # explicit subprocess working directory
+    # Canonical plugin activation roots. Internal-only: native config.yaml must
+    # not gain authority to create arbitrary directories through these fields.
+    plugin_root: str = ""
+    plugin_data: str = ""
     # --- HTTP transport ---
     url: str = ""  # e.g. "http://localhost:8080/mcp"
     headers: dict[str, str] = field(default_factory=dict)  # auth headers
@@ -101,6 +106,8 @@ class MCPServerConfig:
             d["args"] = self.args
             if self.env:
                 d["env"] = self.env
+            if self.cwd:
+                d["cwd"] = self.cwd
         else:
             d["url"] = self.url
             if self.headers:
@@ -125,6 +132,7 @@ class MCPServerConfig:
             command=data.get("command", ""),
             args=data.get("args", []),
             env=data.get("env", {}),
+            cwd=data.get("cwd", ""),
             url=data.get("url", ""),
             headers=data.get("headers", {}),
             enabled=data.get("enabled", True),

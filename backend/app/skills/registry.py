@@ -55,12 +55,12 @@ class SkillRegistry:
         # 1. Builtin skills (repo root / skills/).
         builtin_dir = _BUILTIN_SKILLS_DIR
         if builtin_dir.is_dir():
-            self._load_from_dir(builtin_dir, source="builtin", target=skills)
+            self._load_builtin_via_plugin_contract(builtin_dir, target=skills)
 
         # Also check the configured skills_dir if different from repo root.
         configured_dir = Path(settings.skills_dir)
         if configured_dir != builtin_dir and configured_dir.is_dir():
-            self._load_from_dir(configured_dir, source="builtin", target=skills)
+            self._load_builtin_via_plugin_contract(configured_dir, target=skills)
 
         # 2. User skills (data/skills/).
         user_dir = Path(settings.data_dir) / "skills"
@@ -75,6 +75,24 @@ class SkillRegistry:
         self._skills = skills
         self._loaded = True
         log.info("skills.loaded", count=len(skills), names=list(skills.keys()))
+
+    def _load_builtin_via_plugin_contract(
+        self, base_dir: Path, *, target: dict[str, Skill]
+    ) -> None:
+        # Lazy import avoids the existing mcp -> tools -> skills package cycle.
+        from app.plugins.loader import PluginLoader
+
+        bundle = PluginLoader().load_builtin_skills(base_dir)
+        for diagnostic in bundle.diagnostics:
+            log.warning(
+                "skills.plugin_contract_diagnostic",
+                code=diagnostic.code,
+                path=diagnostic.path,
+                message=diagnostic.message,
+            )
+        for skill in bundle.skills:
+            target[skill.name] = skill
+            log.debug("skills.loaded_one", name=skill.name, source="builtin", path=str(skill.path))
 
     def _load_from_dir(
         self, base_dir: Path, *, source: str, target: dict[str, Skill]

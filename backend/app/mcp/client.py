@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -200,6 +201,13 @@ class MCPClient:
             raise MCPClientError(f"Server '{self.config.name}': no command configured for stdio")
 
         env = {**os.environ, **self.config.env}
+        if self.config.plugin_data:
+            plugin_data = Path(self.config.plugin_data).resolve()
+            plugin_data.mkdir(parents=True, exist_ok=True)
+            if self.config.cwd:
+                cwd = Path(self.config.cwd).resolve()
+                if cwd.is_relative_to(plugin_data):
+                    cwd.mkdir(parents=True, exist_ok=True)
         # Strip secret-looking env vars if sandbox_strip_env is enabled.
         from app.core.config import get_settings
         settings = get_settings()
@@ -216,6 +224,7 @@ class MCPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=self.config.cwd or None,
             )
         except (OSError, FileNotFoundError) as exc:
             raise MCPClientError(

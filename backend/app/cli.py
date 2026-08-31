@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from collections.abc import Sequence
+from pathlib import Path
 
 
 def _port(value: str) -> int:
@@ -52,11 +54,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("COOL_FORWARDED_ALLOW_IPS", "127.0.0.1"),
         help="trusted proxy IPs; only used with --proxy-headers",
     )
+
+    plugin = commands.add_parser("plugin", help="validate and inspect plugin bundles")
+    plugin_commands = plugin.add_subparsers(dest="plugin_command", required=True)
+    validate = plugin_commands.add_parser("validate", help="validate Agent Plugins conformance")
+    validate.add_argument("path", type=Path)
+    doctor = plugin_commands.add_parser("doctor", help="show components and compatibility diagnostics")
+    doctor.add_argument("path", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "plugin":
+        from app.plugins import PluginLoader
+
+        bundle = PluginLoader().load(args.path)
+        report = bundle.doctor_dict() if args.plugin_command == "doctor" else bundle.to_dict()
+        print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
+        if args.plugin_command == "validate":
+            return 0 if bundle.conformant else 1
+        return 0 if bundle.manifest is not None else 1
+
     if args.command != "serve":  # pragma: no cover - argparse enforces this
         raise AssertionError(f"unsupported command: {args.command}")
 
