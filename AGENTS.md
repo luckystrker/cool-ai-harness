@@ -324,6 +324,15 @@ Required root commands:
   cargo test --all-features
   cargo build --all-targets
   ```
+- Touched release packaging (`Dockerfile`, `docker-compose.yml`, `packaging/`, or the runtime path/
+  entrypoint contract)? From the repository root:
+  ```bash
+  docker compose config --quiet
+  docker build --tag cool-ai-harness:local .
+  ```
+  Then start the image and smoke `/`, `/api/health`, SSE, and WebSocket. If a local Docker daemon is
+  unavailable, run the backend packaging smoke test and record that the image build remains CI-only
+  evidence; do not report a local image build as passed.
 - Touched the **API contract** (schemas/events/WebSocket)? Update **both**
   sides and re-run both root command sets.
 - Touched `app/models/*.py`? Add the Alembic migration and verify

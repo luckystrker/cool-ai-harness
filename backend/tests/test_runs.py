@@ -305,11 +305,15 @@ def test_cancel_endpoint_signals_running_run(monkeypatch) -> None:
         def _cancel_when_known():
             while "id" not in run_id_holder:
                 pass
-            # Small delay so the loop is mid-flight.
             import time
 
-            time.sleep(0.05)
-            run_registry.cancel(run_id_holder["id"])
+            run_id = run_id_holder["id"]
+            while not run_registry.is_active(run_id):
+                time.sleep(0.001)
+            # Cancel while the registry entry is known to be active. Sleeping a
+            # fixed duration here let the scripted provider finish first on fast
+            # machines, making this cancellation test timing-dependent.
+            run_id_holder["cancelled"] = run_registry.cancel(run_id)
 
         t = threading.Thread(target=_cancel_when_known, daemon=True)
         t.start()
@@ -325,6 +329,7 @@ def test_cancel_endpoint_signals_running_run(monkeypatch) -> None:
                     # Drain the stream; the cancel happens in the background.
                     json.loads(line[len("data:") :].strip())
         t.join(timeout=2)
+        assert run_id_holder.get("cancelled") is True
 
         # The run should have been cancelled (status cancelled).
         runs = c.get(f"/api/conversations/{conv_id}/runs").json()

@@ -27,10 +27,11 @@ from app.providers import Message, get_provider_for_model
 
 log = get_logger(__name__)
 
+public_router = APIRouter()
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse)
+@public_router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
     return HealthResponse(

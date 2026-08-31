@@ -1,28 +1,30 @@
 services:
-  backend:
+  cool:
     build:
-      context: ./backend
-    container_name: harness-backend
+      context: .
+      dockerfile: Dockerfile
+    container_name: cool
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${COOL_PORT:-8000}:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
+    # Keep every mutable path inside the single persisted cool-state volume.
+    # Path overrides from .env are intentionally source/direct-image settings.
+    environment:
+      COOL_HOME: /var/lib/cool
+      COOL_CONFIG_FILE: /var/lib/cool/config.yaml
+      DATA_DIR: /var/lib/cool/data
+      WORKSPACES_DIR: /var/lib/cool/workspaces
+      SKILLS_DIR: /var/lib/cool/skills
+      ARTIFACTS_DIR: /var/lib/cool/data/artifacts
+      FRONTEND_DIST: /opt/cool/frontend/dist
+      ENVIRONMENT: production
+      DEBUG: "false"
     volumes:
-      # Persist SQLite DB and user workspaces across container rebuilds.
-      - ./data:/app/data
-      - ./workspaces:/app/workspaces
-      - ./skills:/app/skills
+      - cool-state:/var/lib/cool
     restart: unless-stopped
-    # For dev: enable reload. Override via docker-compose.override.yml.
-    # command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["cool", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
-  # Frontend (React SPA) — uncomment once frontend/ is scaffolded in Фаза 0.
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #   container_name: harness-frontend
-  #   ports:
-  #     - "5173:5173"
-  #   depends_on:
-  #     - backend
-  #   restart: unless-stopped
+volumes:
+  cool-state:

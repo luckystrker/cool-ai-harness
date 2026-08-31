@@ -191,7 +191,35 @@ def _run_alembic_upgrade() -> None:
     # The DB URL is resolved inside env.py from app settings; we only need to
     # point alembic at the versions directory it already knows about.
     cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    _guard_unversioned_schema()
     command.upgrade(cfg, "head")
+
+
+def _guard_unversioned_schema() -> None:
+    """Refuse to guess the revision of a non-empty application database.
+
+    Development historically used ``SQLModel.create_all`` without recording an
+    Alembic revision. A table/column comparison cannot prove that constraints,
+    triggers, virtual tables, or data transformations match the current head.
+    Stamping such a database would therefore hide an unknown schema state.
+    Empty databases are safe for Alembic to initialise; any database containing
+    model tables must instead use an explicit, version-aware migration/export.
+    """
+    inspector = inspect(engine)
+    if inspector.has_table("alembic_version"):
+        return
+
+    actual_tables = set(inspector.get_table_names())
+    present_model_tables = sorted(actual_tables.intersection(SQLModel.metadata.tables))
+    if not present_model_tables:
+        return
+
+    preview = ", ".join(present_model_tables[:8])
+    raise RuntimeError(
+        "Unversioned application database detected; refusing automatic Alembic baseline. "
+        "Back it up and use an explicit version-aware migration or export/import path before "
+        f"production startup. Detected tables: {preview}"
+    )
 
 
 def _apply_lightweight_migrations() -> None:

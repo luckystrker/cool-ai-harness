@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.core.config import REPO_ROOT
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.mcp.models import MCPServerConfig
 
@@ -57,10 +57,12 @@ def _interpolate_recursive(obj: Any) -> Any:
 
 def get_config_path() -> Path:
     """Determine the config.yaml path."""
+    # Preserve the pre-M2 override while making COOL_CONFIG_FILE / COOL_HOME
+    # the shared package contract for all mutable runtime paths.
     env_path = os.environ.get("MCP_CONFIG_FILE", "")
     if env_path:
         return Path(env_path)
-    return REPO_ROOT / "config.yaml"
+    return get_settings().cool_config_file
 
 
 def load_mcp_configs() -> list[MCPServerConfig]:

@@ -129,3 +129,71 @@ jobs:
       - name: TypeScript + Vite build
         working-directory: frontend
         run: npm run build
+
+  package:
+    name: Unified release image smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build React + backend release image
+        run: docker build --tag cool-ai-harness:ci .
+
+      - name: Smoke one-port UI and API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker logs cool-package-smoke || true
+            docker rm --force cool-package-smoke || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name cool-package-smoke \
+            --publish 127.0.0.1:18000:8000 \
+            --env SECRET_KEY=ci-only-secret-key \
+            cool-ai-harness:ci
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18000/api/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18000/api/health | grep '"status":"ok"'
+          curl --fail --silent http://127.0.0.1:18000/ | grep '<div id="root"></div>'
+          test "$(docker exec cool-package-smoke id --user)" = "10001"
+          docker exec cool-package-smoke git --version
+          docker exec cool-package-smoke sh -c \
+            'repository="$(mktemp -d)"; git -C "$repository" init --quiet; git -C "$repository" status --short'
+          docker exec cool-package-smoke python -c \
+            "from app.skills.registry import SkillRegistry; names = [s.name for s in SkillRegistry().list_all()]; expected = ['brainstorm', 'code-task', 'deep-research', 'skill-creation', 'summarize-document', 'translate']; assert names == expected, names"
+
+          conversation_id="$(curl --fail --silent \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data '{"title":"image transport smoke","model":"smoke-model"}' \
+            http://127.0.0.1:18000/api/conversations \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"
+
+          curl --fail --silent --show-error --max-time 20 \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'Accept: text/event-stream' \
+            --data '{"content":"transport smoke"}' \
+            "http://127.0.0.1:18000/api/conversations/${conversation_id}/messages" \
+            > /tmp/cool-sse-smoke.txt
+          python3 -c 'import json, pathlib; events = [json.loads(line[5:].strip()) for line in pathlib.Path("/tmp/cool-sse-smoke.txt").read_text().splitlines() if line.startswith("data:")]; assert any(event.get("kind") == "error" for event in events), events'
+
+          docker exec --env CONVERSATION_ID="$conversation_id" cool-package-smoke \
+            python -c 'import asyncio, json, os, websockets
+          async def smoke():
+              async with asyncio.timeout(10):
+                  conversation_id = os.environ["CONVERSATION_ID"]
+                  uri = f"ws://127.0.0.1:8000/ws/chat/{conversation_id}"
+                  async with websockets.connect(uri) as socket:
+                      await socket.send(json.dumps({"invalid": True}))
+                      event = json.loads(await socket.recv())
+                      assert event["kind"] == "error", event
+          asyncio.run(smoke())'

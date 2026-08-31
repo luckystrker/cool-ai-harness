@@ -38,23 +38,31 @@ cp .env.example .env
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 2. Run backend
+### 2. Run the packaged app (recommended)
 
 ```bash
-cd backend
-pip install -e ".[dev]"
-uvicorn app.main:app --reload --port 8000
+docker compose up --build
 ```
 
-### 3. Run frontend
+Open http://127.0.0.1:8000. The production image builds the React SPA and serves
+the UI, API, SSE, and WebSocket from one process and one port. State persists in
+the Docker-managed `cool-state` volume.
+
+### 3. Unified source install
 
 ```bash
 cd frontend
-npm install
-npm run dev          # Vite dev server (proxies /api to :8000)
+npm ci
+npm run build
+
+cd ../backend
+pip install -e ".[dev]"
+cool serve
 ```
 
-Open the URL Vite prints (default http://localhost:5173).
+This also opens the complete application at http://127.0.0.1:8000. For frontend
+hot reload, run `cool serve` in one terminal and `npm run dev` from `frontend/`
+in another; Vite remains the development-only split mode.
 
 ### 4. Smoke test
 
@@ -67,6 +75,15 @@ curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Say hello in one short sentence."}]}'
 ```
+
+The stable entrypoint, path layout, Docker persistence, VPS limitations, and
+future Rust replacement boundary are documented in
+[`docs/migration/M2_PACKAGING_CONTRACT.md`](docs/migration/M2_PACKAGING_CONTRACT.md).
+Docker Compose intentionally publishes only on loopback. The current M2 runtime
+is local/single-user only; do not expose it to the Internet. `API_TOKEN` remains
+a compatibility option for direct API clients, but the packaged SPA has no token
+bootstrap and setting it does not turn M2 into a supported VPS deployment. The
+authenticated server profile and Telegram identity adapter remain later phases.
 
 ## Durable runs & migrations
 
@@ -107,7 +124,7 @@ responses) — no API keys needed.
 ```bash
 cd backend
 
-# Run all 21 scenarios (gate fails if any critical scenario fails)
+# Run all 23 scenarios (gate fails if any critical scenario fails)
 python -m evals
 
 # Filter by tag (repeatable)
@@ -128,8 +145,8 @@ python -m evals --baseline default
 python -m evals --json
 ```
 
-Scenarios live in three suites under `backend/evals/scenarios/`: `safety` (8),
-`tool_selection` (8), `cost_limits` (5).
+Scenarios live in four suites under `backend/evals/scenarios/`: `safety` (8),
+`tool_selection` (8), `cost_limits` (5), and `research` (2).
 
 **Exit codes:** `0` = gate passed, `1` = critical regression/failure, `2` = config error.
 

@@ -202,6 +202,16 @@ class TestToolBridge:
 
 
 class TestMCPConfig:
+    def test_default_path_uses_package_config_contract(self, tmp_path: Path, monkeypatch):
+        from app.core.config import get_settings
+        from app.mcp.config import get_config_path
+
+        monkeypatch.delenv("MCP_CONFIG_FILE", raising=False)
+        package_config = tmp_path / "cool-home" / "config.yaml"
+        monkeypatch.setattr(get_settings(), "cool_config_file", package_config)
+
+        assert get_config_path() == package_config
+
     def test_load_from_yaml(self, tmp_path: Path, monkeypatch):
         config_file = tmp_path / "config.yaml"
         config_file.write_text(

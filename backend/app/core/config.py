@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Repo root (backend/..) — used for default paths.
 REPO_ROOT = Path(__file__).resolve().parents[3]
+_UNSET_PATH = Path("__cool_default__")
 
 
 class Settings(BaseSettings):
@@ -29,7 +32,7 @@ class Settings(BaseSettings):
     debug: bool = True
     # Comma-separated list of allowed CORS origins. "*" allows all.
     # Dev defaults cover Vite (5173), and common alt ports.
-    cors_origins: list[str] = Field(
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
@@ -39,7 +42,8 @@ class Settings(BaseSettings):
 
     # --- Database ---
     # SQLite by default. Use e.g. postgresql+psycopg://user:pass@host/db for product.
-    database_url: str = f"sqlite:///{REPO_ROOT / 'data' / 'harness.db'}"
+    # Empty means ``<data_dir>/harness.db`` so all default state follows COOL_HOME.
+    database_url: str = ""
 
     # --- Security ---
     # Used to encrypt stored API keys at rest (Fernet). Generate with:
@@ -75,13 +79,17 @@ class Settings(BaseSettings):
     searxng_url: str = ""  # e.g. http://localhost:8080
 
     # --- Paths ---
-    data_dir: Path = REPO_ROOT / "data"
-    workspaces_dir: Path = REPO_ROOT / "workspaces"
-    skills_dir: Path = REPO_ROOT / "skills"
-    artifacts_dir: Path = REPO_ROOT / "data" / "artifacts"
+    # Stable package/runtime contract. Local source runs default to the repository
+    # root; packaged deployments set COOL_HOME (the image uses /var/lib/cool).
+    cool_home: Path = REPO_ROOT
+    cool_config_file: Path = _UNSET_PATH
+    data_dir: Path = _UNSET_PATH
+    workspaces_dir: Path = _UNSET_PATH
+    skills_dir: Path = _UNSET_PATH
+    artifacts_dir: Path = _UNSET_PATH
     # Path to the built frontend (vite build output). Served by FastAPI in
     # production so a single process handles both API and UI.
-    frontend_dist: Path = REPO_ROOT / "frontend" / "dist"
+    frontend_dist: Path = _UNSET_PATH
 
     # --- Artifacts (Фаза 1.5 §3) ---
     # Max upload size per artifact file (bytes). 0 = no limit.
@@ -427,8 +435,54 @@ class Settings(BaseSettings):
         description="OTel service.name resource attribute",
     )
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        """Accept both the documented comma form and a JSON array from env."""
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        if raw.startswith("["):
+            decoded = json.loads(raw)
+            if not isinstance(decoded, list):
+                raise ValueError("CORS_ORIGINS JSON value must be an array")
+            return decoded
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def resolve_runtime_paths(self) -> Settings:
+        """Resolve all mutable runtime paths from the stable COOL_HOME root."""
+        self.cool_home = self.cool_home.expanduser().resolve()
+
+        def _runtime_path(value: Path, default: Path) -> Path:
+            candidate = default if value == _UNSET_PATH else value.expanduser()
+            if not candidate.is_absolute():
+                candidate = self.cool_home / candidate
+            return candidate.resolve()
+
+        self.cool_config_file = _runtime_path(
+            self.cool_config_file, self.cool_home / "config.yaml"
+        )
+        self.data_dir = _runtime_path(self.data_dir, self.cool_home / "data")
+        self.workspaces_dir = _runtime_path(
+            self.workspaces_dir, self.cool_home / "workspaces"
+        )
+        self.skills_dir = _runtime_path(self.skills_dir, self.cool_home / "skills")
+        self.artifacts_dir = _runtime_path(
+            self.artifacts_dir, self.data_dir / "artifacts"
+        )
+        self.frontend_dist = _runtime_path(
+            self.frontend_dist, REPO_ROOT / "frontend" / "dist"
+        )
+        database_url = self.database_url.strip()
+        if not database_url or database_url == "sqlite:///./data/harness.db":
+            self.database_url = f"sqlite:///{(self.data_dir / 'harness.db').as_posix()}"
+        return self
+
     def ensure_dirs(self) -> None:
         """Create runtime directories if they don't exist."""
+        self.cool_home.mkdir(parents=True, exist_ok=True)
+        self.cool_config_file.parent.mkdir(parents=True, exist_ok=True)
         for path in (self.data_dir, self.workspaces_dir, self.skills_dir, self.artifacts_dir):
             Path(path).mkdir(parents=True, exist_ok=True)
 

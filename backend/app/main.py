@@ -23,6 +23,7 @@ from app.api.plans import router as plans_router
 from app.api.profiles import router as profiles_router
 from app.api.providers import router as providers_router
 from app.api.research import router as research_router
+from app.api.routes import public_router as public_api_router
 from app.api.routes import router as api_router
 from app.api.rss import router as rss_router
 from app.api.runs import router as runs_router
@@ -159,6 +160,7 @@ def create_app() -> FastAPI:
     # when API_TOKEN is configured. Dev mode (empty token) passes through.
     _auth = [Depends(require_auth)]
 
+    app.include_router(public_api_router, prefix="/api")
     app.include_router(api_router, prefix="/api", dependencies=_auth)
     app.include_router(conversations_router, prefix="/api", dependencies=_auth)
     app.include_router(constructor_router, prefix="/api", dependencies=_auth)
