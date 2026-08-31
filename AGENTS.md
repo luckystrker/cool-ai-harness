@@ -7,6 +7,12 @@ backend plus a React/TypeScript SPA, following a phased roadmap in
 and **Фаза 4** (Deep Research, Code/Git, multimodal, browser automation,
 Agent Constructor) are done. Telegram (Фаза 5) is still an empty placeholder.
 
+The active architecture-migration roadmap is
+[`docs/RUST_CORE_MIGRATION_PLAN.md`](docs/RUST_CORE_MIGRATION_PLAN.md). It replaces the earlier
+TypeScript-core proposal with a Rust trusted core, versioned App Protocol, Rust TUI, native
+Skills/MCP/hooks, and isolated TypeScript/Python compatibility workers. Until a migration phase
+passes its checkpoint, the current Python constraints in this file remain authoritative.
+
 ## Repository layout
 
 Two source roots live in one repo:
