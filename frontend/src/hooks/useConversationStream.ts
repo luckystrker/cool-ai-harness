@@ -10,6 +10,7 @@ import type {
   PlanProgressPayload,
   PlanStepEventPayload,
   ToolApprovalRequestPayload,
+  ToolApprovalResolvedPayload,
   UsagePayload,
 } from "@/api/types"
 import type { ToolCallBlockProps } from "@/components/chat/ToolCallBlock"
@@ -275,6 +276,9 @@ export function useConversationStream() {
         // card renders directly in the chat flow (no modal popup).
         acc.approval = {
           callId: id,
+          approvalId: p.approval_id,
+          revision: p.revision,
+          runId: p.run_id,
           name: p.name,
           arguments: args,
           reason: p.reason,
@@ -284,6 +288,16 @@ export function useConversationStream() {
           currentContent: p.current_content,
           status: "pending",
         }
+        flush(acc)
+        break
+      }
+      case "tool_approval_resolved": {
+        const p = ev.payload as unknown as ToolApprovalResolvedPayload
+        if (acc.approval?.approvalId === p.approval_id) {
+          acc.approval = { ...acc.approval, status: p.decision }
+        }
+        const entry = acc.toolCalls.get(p.id)
+        if (entry) entry.awaitingApproval = false
         flush(acc)
         break
       }
@@ -370,10 +384,8 @@ export function useConversationStream() {
       }
       case "plan_progress": {
         const p = ev.payload as unknown as PlanProgressPayload
-        if (acc.plan && p.completed === p.total) {
-          // All steps done — mark plan completed (or failed if any step failed).
-          const hasFailed = acc.plan.steps.some((s) => s.status === "failed")
-          acc.plan = { ...acc.plan, status: hasFailed ? "failed" : "completed" }
+        if (acc.plan) {
+          acc.plan = { ...acc.plan, status: p.status }
           flush(acc)
         }
         break
@@ -515,7 +527,7 @@ export function useConversationStream() {
     const pending = acc?.approval
     if (!pending || pending.status !== "pending") return
 
-    const resolvedCallId = pending.callId
+    const resolvedApprovalId = pending.approvalId
 
     // Optimistically flip the card to "resolving".
     acc!.approval = { ...pending, status: "resolving" }
@@ -524,21 +536,23 @@ export function useConversationStream() {
     try {
       await conversationsApi.approveToolCall(
         convIdRef.current!,
-        resolvedCallId,
-        approved
+        resolvedApprovalId,
+        approved,
+        pending.revision,
+        pending.runId
       )
       // Only update if the current approval still refers to the same call.
       // A newer tool_approval_request may have arrived while we awaited the
       // API response (multiple tool calls in one batch); overwriting it would
       // hide the new approval card from the user.
-      if (accRef.current?.approval?.callId === resolvedCallId) {
+      if (accRef.current?.approval?.approvalId === resolvedApprovalId) {
         accRef.current.approval = { ...pending, status: approved ? "approved" : "denied" }
       }
     } catch {
       // If the resolve fails (e.g. 404 — already timed out), the server-side
       // timeout/auto-deny handles the loop. Show denied so the card doesn't
       // stay stuck in "resolving" — but only if still current.
-      if (accRef.current?.approval?.callId === resolvedCallId) {
+      if (accRef.current?.approval?.approvalId === resolvedApprovalId) {
         accRef.current.approval = { ...pending, status: "denied" }
       }
     }

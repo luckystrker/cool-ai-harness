@@ -41,6 +41,7 @@ _tmp_*.db
 .mypy_cache/
 .ruff_cache/
 target/
+/crates/cool-protocol/bindings/
 .dmypy.json
 dmypy.json
 .pyre/
@@ -78,6 +79,7 @@ logs/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.protocol-test-dist/
 frontend/node_modules/
 .npm/
 .pnpm-store/

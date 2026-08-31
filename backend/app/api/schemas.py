@@ -144,12 +144,14 @@ class SendMessageRequest(BaseModel):
 class ToolApprovalRequest(BaseModel):
     """Client decision for a pending tool-call approval.
 
-    ``call_id`` may also be supplied in the URL path; the body value wins if
-    both are present. ``approved=False`` denies the call (the loop continues
-    with a Permission-denied tool_result).
+    The server-issued approval id is supplied in the URL. ``expected_revision``
+    prevents a stale card from resolving a newer decision. ``approved=False``
+    denies the call and lets the loop continue with a denied tool result.
     """
 
     approved: bool
+    expected_revision: int = Field(ge=1)
+    run_id: int = Field(ge=1)
 
 
 # --- agent runs (Фаза 1.5 — durable runs) ---

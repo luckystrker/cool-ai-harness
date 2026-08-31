@@ -1,6 +1,6 @@
 # Cool — план миграции на Rust core
 
-> Статус: active; M0 complete, M1 pending
+> Статус: active; M0-M1 complete, M2 pending
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions
@@ -43,7 +43,7 @@
 | Порядок | Фаза | Зависимости | Статус | Evidence |
 |---:|---|---|---|---|
 | 0 | M0 — Architecture ADR и vertical spike | — | [x] complete | [checkpoint](migration/checkpoints/M0.md) |
-| 1 | M1 — Rust protocol foundation и golden corpus | M0 | [ ] pending | — |
+| 1 | M1 — Rust protocol foundation и golden corpus | M0 | [x] complete | [checkpoint](migration/checkpoints/M1.md) |
 | 2 | M2 — Единая поставка текущего приложения | M0 | [ ] pending | — |
 | 3 | M3 — Standard plugin contract | M1 | [ ] pending | — |
 | 4 | M4 — ACP adapter поверх Python runtime | M1 | [ ] pending | — |

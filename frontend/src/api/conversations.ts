@@ -36,10 +36,16 @@ export const conversationsApi = {
     api.post<CompactResponse>(`/api/conversations/${convId}/compact`),
 
   /** Resolve a pending tool-call approval (gated behind an "ask" permission). */
-  approveToolCall: (convId: number, callId: string, approved: boolean) =>
+  approveToolCall: (
+    convId: number,
+    approvalId: string,
+    approved: boolean,
+    expectedRevision: number,
+    runId: number
+  ) =>
     api.post<{ resolved: boolean; approved: boolean }>(
-      `/api/conversations/${convId}/tool_calls/${callId}/approval`,
-      { approved }
+      `/api/conversations/${convId}/tool_calls/${approvalId}/approval`,
+      { approved, expected_revision: expectedRevision, run_id: runId }
     ),
 
   /** List approval audit records for a conversation. */

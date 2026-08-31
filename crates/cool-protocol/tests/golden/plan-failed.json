@@ -1,0 +1,127 @@
+{
+  "name": "plan-failed",
+  "events": [
+    {
+      "eventId": "event-1",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 1,
+      "occurredAt": "2026-08-31T00:00:01Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "plan.created",
+        "payload": {
+          "planId": "plan-failed",
+          "title": "Fail",
+          "totalSteps": 1
+        }
+      }
+    },
+    {
+      "eventId": "event-2",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 2,
+      "occurredAt": "2026-08-31T00:00:02Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "plan.step_started",
+        "payload": {
+          "planId": "plan-failed",
+          "position": 1,
+          "title": "Break",
+          "status": "running",
+          "resultSummary": null
+        }
+      }
+    },
+    {
+      "eventId": "event-3",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 3,
+      "occurredAt": "2026-08-31T00:00:03Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "plan.step_completed",
+        "payload": {
+          "planId": "plan-failed",
+          "position": 1,
+          "title": "Break",
+          "status": "failed",
+          "resultSummary": "boom"
+        }
+      }
+    },
+    {
+      "eventId": "event-4",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 4,
+      "occurredAt": "2026-08-31T00:00:04Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "plan.progress",
+        "payload": {
+          "planId": "plan-failed",
+          "completedSteps": 0,
+          "totalSteps": 1,
+          "message": null,
+          "status": "failed"
+        }
+      }
+    }
+  ],
+  "expectedState": {
+    "runStatus": null,
+    "content": "",
+    "reasoning": "",
+    "tools": {},
+    "approvals": {},
+    "activePlanId": "plan-failed",
+    "planStatus": "failed",
+    "planSteps": {
+      "1": "failed"
+    },
+    "planCompletedSteps": 0,
+    "planTotalSteps": 1,
+    "artifacts": [],
+    "subagents": {},
+    "workers": {},
+    "budgetStatus": null,
+    "researchStatus": null,
+    "lastSeq": 4
+  }
+}

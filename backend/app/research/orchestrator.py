@@ -74,16 +74,36 @@ class EventSink:
     Pass ``None`` for background execution (tool / cron) to drop events.
     """
 
-    def __init__(self, queue: asyncio.Queue[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        queue: asyncio.Queue[dict[str, Any]] | None = None,
+        *,
+        session_id: str = "research",
+        run_id: str = "background-research",
+    ) -> None:
         self.queue = queue
+        from app.protocol import CanonicalEventAdapter
+
+        self.protocol_adapter = CanonicalEventAdapter(
+            session_id=session_id,
+            run_id=run_id,
+            source="python-research-compat",
+        )
 
     async def emit(self, type_: str, **payload: Any) -> None:
         if self.queue is not None:
-            await self.queue.put({"type": type_, "payload": payload})
+            envelope = self.protocol_adapter.adapt_research_event(type_, payload)
+            await self.queue.put(self.protocol_adapter.project_research_event(envelope))
 
     @classmethod
-    def for_queue(cls, queue: asyncio.Queue[dict[str, Any]]) -> EventSink:
-        return cls(queue)
+    def for_queue(
+        cls,
+        queue: asyncio.Queue[dict[str, Any]],
+        *,
+        session_id: str = "research",
+        run_id: str = "background-research",
+    ) -> EventSink:
+        return cls(queue, session_id=session_id, run_id=run_id)
 
 
 # --- Run lifecycle ---------------------------------------------------------

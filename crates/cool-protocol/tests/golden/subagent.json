@@ -1,0 +1,101 @@
+{
+  "name": "subagent",
+  "events": [
+    {
+      "eventId": "event-1",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 1,
+      "occurredAt": "2026-08-31T00:00:01Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "subagent.started",
+        "payload": {
+          "subagentRunId": "sub-1",
+          "name": "reviewer",
+          "status": "running",
+          "summary": null,
+          "error": null
+        }
+      }
+    },
+    {
+      "eventId": "event-2",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 2,
+      "occurredAt": "2026-08-31T00:00:02Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "subagent.progress",
+        "payload": {
+          "subagentRunId": "sub-1",
+          "message": "checking",
+          "percent": 50.0
+        }
+      }
+    },
+    {
+      "eventId": "event-3",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 3,
+      "occurredAt": "2026-08-31T00:00:03Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "subagent.completed",
+        "payload": {
+          "subagentRunId": "sub-1",
+          "name": "reviewer",
+          "status": "completed",
+          "summary": "clean",
+          "error": null
+        }
+      }
+    }
+  ],
+  "expectedState": {
+    "runStatus": null,
+    "content": "",
+    "reasoning": "",
+    "tools": {},
+    "approvals": {},
+    "activePlanId": null,
+    "planStatus": null,
+    "planSteps": {},
+    "planCompletedSteps": 0,
+    "planTotalSteps": 0,
+    "artifacts": [],
+    "subagents": {
+      "sub-1": "completed"
+    },
+    "workers": {},
+    "budgetStatus": null,
+    "researchStatus": null,
+    "lastSeq": 3
+  }
+}

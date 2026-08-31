@@ -428,6 +428,8 @@ async def _plan_generation_stream(
     from app.models.run import RUN_STATUS_AWAITING_APPROVAL
 
     last_content = ""
+    last_canonical_seq = 0
+    canonical_actor_id = "local-user"
 
     try:
         async for event in run_conversation_turn(
@@ -445,6 +447,9 @@ async def _plan_generation_stream(
             cancellable=True,
             profile_id=conv.profile_id,
         ):
+            canonical = event.to_canonical_dict()
+            last_canonical_seq = canonical["seq"]
+            canonical_actor_id = canonical["actor"]["id"]
             # Capture the last assistant message content for plan extraction.
             if event.kind == "message":
                 last_content = event.payload.get("content") or ""
@@ -466,6 +471,16 @@ async def _plan_generation_stream(
                 title=plan.title,
                 steps=plan_data["steps"],
             )
+            from app.protocol import CanonicalEventAdapter
+
+            plan_event.bind_canonical(
+                CanonicalEventAdapter(
+                    session_id=f"conversation:{conv_id}",
+                    run_id=f"run:{run_id}",
+                    actor_id=canonical_actor_id,
+                    start_seq=last_canonical_seq,
+                )
+            )
             yield {"event": plan_event.kind, "data": plan_event.to_dict_json()}
             # Mark the run as awaiting approval (user must approve the plan).
             update_run(session, run_id, status=RUN_STATUS_AWAITING_APPROVAL)
@@ -474,25 +489,37 @@ async def _plan_generation_stream(
         run_registry.cancel_for_conversation(conv_id)
 
 
-@router.post("/conversations/{conv_id}/tool_calls/{call_id}/approval")
-def post_tool_approval(
+@router.post("/conversations/{conv_id}/tool_calls/{approval_id}/approval")
+async def post_tool_approval(
     conv_id: int,
-    call_id: str,
+    approval_id: str,
     body: ToolApprovalRequest,
     session: Session = Depends(get_session),
 ) -> dict:
     """Resolve a pending tool-call approval.
 
     The agent loop, gated behind an ``ask`` permission, blocks on the approval
-    Future registered under ``call_id``. This endpoint resolves it: the loop
+    Future registered under a server-owned approval id. This endpoint resolves it: the loop
     runs the tool if approved, or continues with a denied tool_result if not.
     """
     conv = get_conversation(session, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if not approval_registry.has(call_id):
-        raise HTTPException(status_code=404, detail="No pending approval for that call_id")
-    resolved = approval_registry.resolve(call_id, body.approved)
+    scope = {
+        "actor_id": conv.user_id,
+        "conversation_id": conv_id,
+        "run_id": body.run_id,
+    }
+    if not approval_registry.has(approval_id, **scope):
+        raise HTTPException(status_code=404, detail="No pending approval for that approval_id")
+    resolved = approval_registry.resolve(
+        approval_id,
+        body.approved,
+        expected_revision=body.expected_revision,
+        **scope,
+    )
+    if not resolved:
+        raise HTTPException(status_code=409, detail="Approval revision is stale")
     return {"resolved": resolved, "approved": body.approved}
 
 

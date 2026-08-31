@@ -40,6 +40,41 @@ async def test_simple_text_response(scripted_provider) -> None:
 
 
 @pytest.mark.asyncio
+async def test_durable_runner_binds_one_monotonic_canonical_stream(scripted_provider) -> None:
+    from sqlmodel import Session
+
+    from app.agent.runners import run_conversation_turn
+    from app.agent.service import create_conversation, create_run, get_or_create_default_user
+    from app.core.db import engine
+
+    scripted_provider.set_script(["Hello there."])
+    with Session(engine) as session:
+        user = get_or_create_default_user(session)
+        assert user.id is not None
+        conversation = create_conversation(session, user_id=user.id, title="protocol stream")
+        assert conversation.id is not None
+        run = create_run(session, conversation_id=conversation.id, model="m")
+        assert run.id is not None
+        events = [
+            event
+            async for event in run_conversation_turn(
+                session=session,
+                conversation_id=conversation.id,
+                provider=scripted_provider,
+                model="m",
+                user_input="hello",
+                run_id=run.id,
+            )
+        ]
+
+    canonical = [event.to_canonical_dict() for event in events]
+    assert [event["seq"] for event in canonical] == list(range(1, len(events) + 1))
+    assert len({event["eventId"] for event in canonical}) == len(events)
+    assert {event["runId"] for event in canonical} == {f"run:{run.id}"}
+    assert [event.to_dict()["kind"] for event in events] == [event.kind for event in events]
+
+
+@pytest.mark.asyncio
 async def test_tool_call_then_answer(scripted_provider) -> None:
     """One tool round-trip: model requests a tool, then gives the final answer."""
     # The first turn: model asks to call a tool that's already registered
@@ -443,10 +478,60 @@ async def test_ask_times_out_into_deny(scripted_provider, monkeypatch) -> None:
     events = [e async for e in ex.stream("go")]
 
     # An approval request must have been emitted.
-    assert any(e.kind == "tool_approval_request" for e in events)
+    request = next(e for e in events if e.kind == "tool_approval_request")
+    assert request.payload["approval_id"].startswith("approval-")
+    assert request.payload["revision"] == 1
+    resolved = next(e for e in events if e.kind == "tool_approval_resolved")
+    assert resolved.payload == {
+        "id": "c1",
+        "approval_id": request.payload["approval_id"],
+        "revision": 1,
+        "decision": "timed_out",
+    }
     tool_result = next(e for e in events if e.kind == "tool_result")
     assert tool_result.payload["result"]["is_error"] is True
     assert "denied" in tool_result.payload["result"]["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_approval_id_resolves_and_emits_terminal_event(scripted_provider, workspace) -> None:
+    from app.agent.approvals import approval_registry
+    from app.agent.permissions import PermissionsConfig
+
+    scripted_provider.set_script(
+        [
+            [
+                {
+                    "id": "approved-call",
+                    "name": "write_file",
+                    "arguments": {"path": "approved.txt", "content": "ok"},
+                }
+            ],
+            "Done.",
+        ]
+    )
+    executor = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(
+            model="m",
+            permissions=PermissionsConfig(tools={"write_file": "ask"}),
+        ),
+    )
+    events = []
+    async for event in executor.stream("go"):
+        events.append(event)
+        if event.kind == "tool_approval_request":
+            assert approval_registry.resolve(
+                event.payload["approval_id"],
+                True,
+                expected_revision=event.payload["revision"],
+            )
+
+    request = next(event for event in events if event.kind == "tool_approval_request")
+    resolved = next(event for event in events if event.kind == "tool_approval_resolved")
+    assert resolved.payload["approval_id"] == request.payload["approval_id"]
+    assert resolved.payload["decision"] == "approved"
+    assert (workspace / "approved.txt").read_text() == "ok"
 
 
 @pytest.mark.asyncio

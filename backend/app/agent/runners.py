@@ -498,6 +498,13 @@ async def run_conversation_turn(
         run_registry.register(run_id, conversation_id=conversation_id)
 
     event_log = _EventLog(session, run_id) if run_id is not None else None
+    from app.protocol import CanonicalEventAdapter
+
+    protocol_adapter = CanonicalEventAdapter(
+        session_id=f"conversation:{conversation_id}",
+        run_id=f"run:{run_id}" if run_id is not None else f"conversation:{conversation_id}:unmanaged",
+        actor_id=f"user:{get_or_create_default_user(session).id}",
+    )
     if run_id is not None:
         update_run(
             session,
@@ -518,6 +525,7 @@ async def run_conversation_turn(
 
     try:
         async for event in executor.stream(user_input):
+            event.bind_canonical(protocol_adapter)
             if event_log is not None:
                 event_log.add(event.kind, dict(event.payload) if event.payload else None)
 

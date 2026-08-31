@@ -1,0 +1,218 @@
+{
+  "name": "parallel-tools",
+  "events": [
+    {
+      "eventId": "event-1",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 1,
+      "occurredAt": "2026-08-31T00:00:01Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "run.started",
+        "payload": {
+          "model": null,
+          "mode": "agent"
+        }
+      }
+    },
+    {
+      "eventId": "event-2",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 2,
+      "occurredAt": "2026-08-31T00:00:02Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.requested",
+        "payload": {
+          "callId": "a",
+          "name": "read_file",
+          "arguments": {
+            "path": "a.txt"
+          }
+        }
+      }
+    },
+    {
+      "eventId": "event-3",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 3,
+      "occurredAt": "2026-08-31T00:00:03Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.requested",
+        "payload": {
+          "callId": "b",
+          "name": "read_file",
+          "arguments": {
+            "path": "b.txt"
+          }
+        }
+      }
+    },
+    {
+      "eventId": "event-4",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 4,
+      "occurredAt": "2026-08-31T00:00:04Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.started",
+        "payload": {
+          "callId": "a",
+          "name": "read_file"
+        }
+      }
+    },
+    {
+      "eventId": "event-5",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 5,
+      "occurredAt": "2026-08-31T00:00:05Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.started",
+        "payload": {
+          "callId": "b",
+          "name": "read_file"
+        }
+      }
+    },
+    {
+      "eventId": "event-6",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 6,
+      "occurredAt": "2026-08-31T00:00:06Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.completed",
+        "payload": {
+          "callId": "b",
+          "name": "read_file",
+          "result": "B"
+        }
+      }
+    },
+    {
+      "eventId": "event-7",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 7,
+      "occurredAt": "2026-08-31T00:00:07Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "tool.completed",
+        "payload": {
+          "callId": "a",
+          "name": "read_file",
+          "result": "A"
+        }
+      }
+    },
+    {
+      "eventId": "event-8",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 8,
+      "occurredAt": "2026-08-31T00:00:08Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "run.completed",
+        "payload": {
+          "reason": "stop",
+          "errorCode": null
+        }
+      }
+    }
+  ],
+  "expectedState": {
+    "runStatus": "completed",
+    "content": "",
+    "reasoning": "",
+    "tools": {
+      "a": "completed",
+      "b": "completed"
+    },
+    "approvals": {},
+    "activePlanId": null,
+    "planStatus": null,
+    "planSteps": {},
+    "planCompletedSteps": 0,
+    "planTotalSteps": 0,
+    "artifacts": [],
+    "subagents": {},
+    "workers": {},
+    "budgetStatus": null,
+    "researchStatus": null,
+    "lastSeq": 8
+  }
+}

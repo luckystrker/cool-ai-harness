@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils"
 /** Approval request rendered inline in the chat flow (replaces the modal dialog). */
 export interface InlineApproval {
   callId: string
+  approvalId: string
+  revision: number
+  runId: number
   name: string
   arguments: Record<string, unknown>
   reason: string

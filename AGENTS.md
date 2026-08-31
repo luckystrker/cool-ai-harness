@@ -299,13 +299,23 @@ Before declaring a task complete:
 
 Required root commands:
 
+- Touched the production Rust workspace (`Cargo.toml`, `crates/`, protocol schema/generator)?
+  From the repository root:
+  ```bash
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace --all-features
+  cargo build --workspace --all-targets
+  cargo run -p cool-protocol --bin generate -- --check
+  ```
+
 - Touched `backend/`? From `backend/`:
   ```bash
   ruff check . && mypy app && pytest && python -m evals
   ```
 - Touched `frontend/`? From `frontend/`:
   ```bash
-  npm run lint && npm run build
+  npm run protocol:check && npm run lint && npm run build
   ```
 - Touched `spikes/m0-rust-core/`? From that directory:
   ```bash

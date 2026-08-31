@@ -1,0 +1,2188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProtocolSchemaDocument",
+  "type": "object",
+  "properties": {
+    "command": {
+      "$ref": "#/$defs/CommandEnvelope"
+    },
+    "error": {
+      "$ref": "#/$defs/ProtocolError"
+    },
+    "event": {
+      "$ref": "#/$defs/EventEnvelope"
+    },
+    "eventPage": {
+      "$ref": "#/$defs/EventPage"
+    },
+    "goldenTrace": {
+      "$ref": "#/$defs/GoldenTrace"
+    },
+    "streamFrame": {
+      "$ref": "#/$defs/StreamFrame"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "command",
+    "event",
+    "eventPage",
+    "error",
+    "goldenTrace",
+    "streamFrame"
+  ],
+  "$defs": {
+    "ActorKind": {
+      "type": "string",
+      "enum": [
+        "local_user",
+        "server_user",
+        "telegram_user",
+        "system",
+        "worker"
+      ]
+    },
+    "ActorRef": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActorKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "ApprovalDecision": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "denied"
+      ]
+    },
+    "ApprovalOutcome": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "denied",
+        "timed_out"
+      ]
+    },
+    "ApprovalResolveParams": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "approvalId",
+        "expectedRevision",
+        "decision"
+      ]
+    },
+    "ArtifactCreated": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "mediaType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "kind",
+        "name"
+      ]
+    },
+    "BudgetEvent": {
+      "type": "object",
+      "properties": {
+        "limitUsd": {
+          "type": "number",
+          "format": "double"
+        },
+        "percent": {
+          "type": "number",
+          "format": "double"
+        },
+        "spendUsd": {
+          "type": "number",
+          "format": "double"
+        },
+        "window": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "window",
+        "spendUsd",
+        "limitUsd",
+        "percent"
+      ]
+    },
+    "CanonicalEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session.created"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session.updated"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session.compacted"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionCompacted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunStarted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.failed"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.cancelled"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "item.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/ItemEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "item.updated"
+            },
+            "payload": {
+              "$ref": "#/$defs/ItemEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "item.completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ItemEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "content.delta"
+            },
+            "payload": {
+              "$ref": "#/$defs/TextDelta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reasoning.delta"
+            },
+            "payload": {
+              "$ref": "#/$defs/TextDelta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.requested"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolRequested"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.approval_required"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolApprovalRequired"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.approval_resolved"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolApprovalResolved"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolLifecycle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolCompleted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool.failed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolFailed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan.created"
+            },
+            "payload": {
+              "$ref": "#/$defs/PlanCreated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan.step_started"
+            },
+            "payload": {
+              "$ref": "#/$defs/PlanStep"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan.step_completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/PlanStep"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan.progress"
+            },
+            "payload": {
+              "$ref": "#/$defs/PlanProgress"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact.created"
+            },
+            "payload": {
+              "$ref": "#/$defs/ArtifactCreated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "usage.updated"
+            },
+            "payload": {
+              "$ref": "#/$defs/UsageUpdated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "budget.warning"
+            },
+            "payload": {
+              "$ref": "#/$defs/BudgetEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "budget.exceeded"
+            },
+            "payload": {
+              "$ref": "#/$defs/BudgetEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "subagent.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/SubagentEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "subagent.progress"
+            },
+            "payload": {
+              "$ref": "#/$defs/SubagentProgress"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "subagent.completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/SubagentEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "subagent.failed"
+            },
+            "payload": {
+              "$ref": "#/$defs/SubagentEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worker.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkerEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worker.failed"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkerEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worker.restarted"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkerEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.stage"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchStage"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchStarted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.source_found"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchSource"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.subquestion_started"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchSubquestion"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.subquestion_completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchSubquestion"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.failed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research.cancelled"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResearchTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    "ClientState": {
+      "type": "object",
+      "properties": {
+        "activePlanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approvals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "budgetStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "lastSeq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "planCompletedSteps": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "planStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planSteps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "planTotalSteps": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "researchStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subagents": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "workers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "reasoning"
+      ]
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "initialize"
+            },
+            "params": {
+              "$ref": "#/$defs/InitializeParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.create"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionCreateParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.load"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionLoadParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.prompt"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionPromptParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "run.cancel"
+            },
+            "params": {
+              "$ref": "#/$defs/RunCancelParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "run.events"
+            },
+            "params": {
+              "$ref": "#/$defs/RunEventsParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "approval.resolve"
+            },
+            "params": {
+              "$ref": "#/$defs/ApprovalResolveParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        }
+      ]
+    },
+    "CommandEnvelope": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Command"
+        },
+        "commandId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "$ref": "#/$defs/V1Version"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "commandId",
+        "command"
+      ]
+    },
+    "ContentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "artifact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "artifactId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "artifactId",
+            "mediaType"
+          ]
+        }
+      ]
+    },
+    "EventCursor": {
+      "type": "object",
+      "properties": {
+        "afterSeq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId"
+      ]
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "causationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "correlationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event": {
+          "$ref": "#/$defs/CanonicalEvent"
+        },
+        "eventId": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "occurredAt": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/V1Version"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "schemaVersion",
+        "sessionId",
+        "runId",
+        "seq",
+        "occurredAt",
+        "actor",
+        "source",
+        "event"
+      ]
+    },
+    "EventPage": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventEnvelope"
+          }
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "events",
+        "hasMore"
+      ]
+    },
+    "GoldenTrace": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventEnvelope"
+          }
+        },
+        "expectedState": {
+          "$ref": "#/$defs/ClientState"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "events",
+        "expectedState"
+      ]
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "InitializeParams": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "clientName": {
+          "type": "string"
+        },
+        "clientVersion": {
+          "type": "string"
+        },
+        "supportedProtocolVersions": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "clientName",
+        "clientVersion",
+        "supportedProtocolVersions"
+      ]
+    },
+    "ItemEvent": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCalls": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolRequested"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanCreated": {
+      "type": "object",
+      "properties": {
+        "planId": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "totalSteps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "totalSteps"
+      ]
+    },
+    "PlanProgress": {
+      "type": "object",
+      "properties": {
+        "completedSteps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/PlanProgressStatus"
+        },
+        "totalSteps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "completedSteps",
+        "totalSteps",
+        "status"
+      ]
+    },
+    "PlanProgressStatus": {
+      "type": "string",
+      "enum": [
+        "executing",
+        "completed",
+        "failed"
+      ]
+    },
+    "PlanStep": {
+      "type": "object",
+      "properties": {
+        "planId": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "resultSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "position",
+        "title",
+        "status"
+      ]
+    },
+    "ProtocolError": {
+      "type": "object",
+      "properties": {
+        "coolCode": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "rpcCode": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "safeDetails": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rpcCode",
+        "coolCode",
+        "message",
+        "retryable"
+      ]
+    },
+    "ResearchSource": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "snippet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "ResearchStage": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stage"
+      ]
+    },
+    "ResearchStarted": {
+      "type": "object",
+      "properties": {
+        "researchRunId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "researchRunId"
+      ]
+    },
+    "ResearchSubquestion": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "question": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "question",
+        "status"
+      ]
+    },
+    "ResearchTerminal": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sourceCount"
+      ]
+    },
+    "RunCancelParams": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "runId"
+      ]
+    },
+    "RunEventsParams": {
+      "type": "object",
+      "properties": {
+        "afterSeq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "limit"
+      ]
+    },
+    "RunStarted": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RunTerminal": {
+      "type": "object",
+      "properties": {
+        "errorCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ]
+    },
+    "SessionCompacted": {
+      "type": "object",
+      "properties": {
+        "retainedItems": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "summaryItemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "retainedItems"
+      ]
+    },
+    "SessionCreateParams": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "projectKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey"
+      ]
+    },
+    "SessionEvent": {
+      "type": "object",
+      "properties": {
+        "projectKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionLoadParams": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId"
+      ]
+    },
+    "SessionPromptParams": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          }
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "sessionId",
+        "content"
+      ]
+    },
+    "StreamEnd": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "reason"
+      ]
+    },
+    "StreamFrame": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "event"
+            },
+            "value": {
+              "$ref": "#/$defs/EventEnvelope"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "keepalive"
+            },
+            "value": {
+              "$ref": "#/$defs/StreamKeepalive"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "end"
+            },
+            "value": {
+              "$ref": "#/$defs/StreamEnd"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "StreamKeepalive": {
+      "type": "object",
+      "properties": {
+        "lastSeq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "lastSeq"
+      ]
+    },
+    "SubagentEvent": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "subagentRunId": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagentRunId",
+        "status"
+      ]
+    },
+    "SubagentProgress": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "subagentRunId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagentRunId",
+        "message"
+      ]
+    },
+    "TextDelta": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ]
+    },
+    "ToolApprovalRequired": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        },
+        "breakpointType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "callId": {
+          "type": "string"
+        },
+        "currentContent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "resultPreview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "name",
+        "reason",
+        "approvalId",
+        "revision"
+      ]
+    },
+    "ToolApprovalResolved": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalOutcome"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "approvalId",
+        "revision",
+        "decision"
+      ]
+    },
+    "ToolCompleted": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "result": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "name",
+        "result"
+      ]
+    },
+    "ToolFailed": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "errorCode": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "name",
+        "errorCode"
+      ]
+    },
+    "ToolLifecycle": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "name"
+      ]
+    },
+    "ToolRequested": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        },
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "name"
+      ]
+    },
+    "UsageUpdated": {
+      "type": "object",
+      "properties": {
+        "completionTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "promptTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "promptTokens",
+        "completionTokens",
+        "totalTokens"
+      ]
+    },
+    "V1Version": {
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "WorkerEvent": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workerId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "workerId",
+        "attempt"
+      ]
+    }
+  }
+}

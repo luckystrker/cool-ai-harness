@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "protocol:check": "tsc -p tsconfig.protocol.json && node .protocol-test-dist/protocol-tests/runner.js",
     "preview": "vite preview"
   },
   "dependencies": {

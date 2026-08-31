@@ -1,0 +1,73 @@
+{
+  "name": "budget",
+  "events": [
+    {
+      "eventId": "event-1",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 1,
+      "occurredAt": "2026-08-31T00:00:01Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "budget.warning",
+        "payload": {
+          "window": "daily",
+          "spendUsd": 8.0,
+          "limitUsd": 10.0,
+          "percent": 80.0
+        }
+      }
+    },
+    {
+      "eventId": "event-2",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 2,
+      "occurredAt": "2026-08-31T00:00:02Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "budget.exceeded",
+        "payload": {
+          "window": "daily",
+          "spendUsd": 10.1,
+          "limitUsd": 10.0,
+          "percent": 101.0
+        }
+      }
+    }
+  ],
+  "expectedState": {
+    "runStatus": null,
+    "content": "",
+    "reasoning": "",
+    "tools": {},
+    "approvals": {},
+    "activePlanId": null,
+    "planStatus": null,
+    "planSteps": {},
+    "planCompletedSteps": 0,
+    "planTotalSteps": 0,
+    "artifacts": [],
+    "subagents": {},
+    "workers": {},
+    "budgetStatus": "exceeded",
+    "researchStatus": null,
+    "lastSeq": 2
+  }
+}

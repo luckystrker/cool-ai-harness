@@ -183,6 +183,15 @@ async def post_plan_execute(
     history = load_history(session, conv_id)
 
     async def event_stream() -> AsyncIterator[dict]:
+        from app.agent.service import get_or_create_default_user
+        from app.protocol import CanonicalEventAdapter
+
+        actor = get_or_create_default_user(session)
+        protocol_adapter = CanonicalEventAdapter(
+            session_id=f"conversation:{conv_id}",
+            run_id=f"plan:{plan_id}",
+            actor_id=f"user:{actor.id}",
+        )
         async for event in execute_plan_steps(
             session,
             plan,
@@ -191,6 +200,7 @@ async def post_plan_execute(
             history=history,
             working_directory=conv.working_directory,
         ):
+            event.bind_canonical(protocol_adapter)
             yield {"event": event.kind, "data": event.to_dict_json()}
 
     return EventSourceResponse(event_stream())

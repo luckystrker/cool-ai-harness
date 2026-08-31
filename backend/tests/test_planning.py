@@ -22,6 +22,7 @@ from app.agent.planning import (
     create_plan,
     create_template,
     delete_template,
+    execute_plan_steps,
     extract_plan_from_response,
     get_plan,
     get_plan_steps,
@@ -40,6 +41,7 @@ from app.models.plan import (
     STEP_STATUS_COMPLETED,
     STEP_STATUS_PENDING,
 )
+from app.protocol import CanonicalEventAdapter
 
 client = TestClient(app)
 
@@ -152,6 +154,86 @@ class TestPlanCRUD:
         # Already cancelled — second cancel should fail.
         result = cancel_plan(session, plan.id)
         assert result is None
+
+
+@pytest.mark.asyncio
+async def test_execution_stream_binds_plan_before_progress(
+    session: Session, conv_id: int, scripted_provider
+) -> None:
+    plan = create_plan(
+        session,
+        conversation_id=conv_id,
+        title="Execute",
+        steps=[{"position": 0, "title": "One step"}],
+    )
+    assert plan.id is not None
+    assert approve_plan(session, plan.id) is not None
+    scripted_provider.set_script(["step complete"])
+
+    events = [
+        event
+        async for event in execute_plan_steps(
+            session,
+            plan,
+            provider=scripted_provider,
+            model="test-model",
+            history=[],
+        )
+    ]
+    assert events[0].kind == "plan_generated"
+    assert events[0].payload["plan_id"] == plan.id
+
+    adapter = CanonicalEventAdapter(run_id=f"plan:{plan.id}")
+    canonical = [adapter.adapt_agent_event(event.kind, event.payload) for event in events]
+    assert canonical[0]["event"]["kind"] == "plan.created"
+    plan_ids = {
+        envelope["event"]["payload"]["planId"]
+        for envelope in canonical
+        if envelope["event"]["kind"].startswith("plan.")
+    }
+    assert plan_ids == {str(plan.id)}
+    assert canonical[-1]["event"]["payload"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_stream_has_replayable_terminal_status(
+    session: Session, conv_id: int, scripted_provider
+) -> None:
+    plan = create_plan(
+        session,
+        conversation_id=conv_id,
+        title="Fail execution",
+        steps=[{"position": 0, "title": "Broken step"}],
+    )
+    assert plan.id is not None
+    assert approve_plan(session, plan.id) is not None
+    scripted_provider.set_script([None])
+
+    events = [
+        event
+        async for event in execute_plan_steps(
+            session,
+            plan,
+            provider=scripted_provider,
+            model="test-model",
+            history=[],
+        )
+    ]
+    adapter = CanonicalEventAdapter(run_id=f"plan:{plan.id}")
+    canonical = [adapter.adapt_agent_event(event.kind, event.payload) for event in events]
+
+    assert events[-2].kind == "plan_step_complete"
+    assert events[-2].payload["status"] == "failed"
+    assert canonical[-1]["event"] == {
+        "kind": "plan.progress",
+        "payload": {
+            "planId": str(plan.id),
+            "completedSteps": 0,
+            "totalSteps": 1,
+            "message": None,
+            "status": "failed",
+        },
+    }
 
 
 class TestExtractPlanFromResponse:

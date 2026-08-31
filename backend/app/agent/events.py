@@ -8,6 +8,7 @@ means the same loop drives chat, subagents, and cron jobs (Фаза 3b).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ EventKind = Literal[
     "tool_call_start",  # model requested a tool call (full call info)
     "tool_call_delta",  # incremental tool-call args fragment (rare; usually we batch)
     "tool_approval_request",  # tool needs human approval before running; client must respond
+    "tool_approval_resolved",  # server-owned approval reached approved/denied/timed_out
     "tool_result",  # tool finished with its ToolResult
     "message",  # a complete assistant message persisted
     "finish",  # loop finished (terminal); carries usage + reason
@@ -63,9 +65,24 @@ class AgentEvent:
     #                      "elapsed_ms": int | None}
     #   error:            {"message": str, "detail": str | None}
     payload: dict[str, Any] = field(default_factory=dict)
+    _canonical_envelope: dict[str, Any] | None = field(default=None, init=False, repr=False)
+
+    def bind_canonical(self, adapter: Any) -> AgentEvent:
+        """Bind this event to one run-scoped canonical sequencer."""
+        self._canonical_envelope = adapter.adapt_agent_event(self.kind, self.payload)
+        return self
+
+    def to_canonical_dict(self) -> dict[str, Any]:
+        if self._canonical_envelope is None:
+            raise RuntimeError("AgentEvent is not bound to a run-scoped canonical adapter")
+        return deepcopy(self._canonical_envelope)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "payload": self.payload}
+        if self._canonical_envelope is None:
+            return {"kind": self.kind, "payload": self.payload}
+        from app.protocol import CanonicalEventAdapter
+
+        return CanonicalEventAdapter.project_agent_event(self._canonical_envelope)
 
     def to_dict_json(self) -> str:
         """JSON-serialized to_dict(), defaulting unknown types to str."""
@@ -125,6 +142,25 @@ class AgentEvent:
                 "arguments": arguments,
                 "reason": reason,
                 "requires_decision": True,
+            },
+        )
+
+    @classmethod
+    def tool_approval_resolved(
+        cls,
+        *,
+        call_id: str,
+        approval_id: str,
+        revision: int,
+        decision: str,
+    ) -> AgentEvent:
+        return cls(
+            kind="tool_approval_resolved",
+            payload={
+                "id": call_id,
+                "approval_id": approval_id,
+                "revision": revision,
+                "decision": decision,
             },
         )
 
@@ -254,26 +290,48 @@ class AgentEvent:
         )
 
     @classmethod
-    def plan_step_start(cls, *, position: int, title: str) -> AgentEvent:
+    def plan_step_start(cls, *, plan_id: int, position: int, title: str) -> AgentEvent:
         """A plan step began execution."""
-        return cls(kind="plan_step_start", payload={"position": position, "title": title})
+        return cls(
+            kind="plan_step_start",
+            payload={"plan_id": plan_id, "position": position, "title": title},
+        )
 
     @classmethod
     def plan_step_complete(
-        cls, *, position: int, status: str, result_summary: str | None = None
+        cls, *, plan_id: int, position: int, status: str, result_summary: str | None = None
     ) -> AgentEvent:
         """A plan step finished execution."""
         return cls(
             kind="plan_step_complete",
-            payload={"position": position, "status": status, "result_summary": result_summary},
+            payload={
+                "plan_id": plan_id,
+                "position": position,
+                "status": status,
+                "result_summary": result_summary,
+            },
         )
 
     @classmethod
-    def plan_progress(cls, *, completed: int, total: int, current_step: int | None = None) -> AgentEvent:
+    def plan_progress(
+        cls,
+        *,
+        plan_id: int,
+        completed: int,
+        total: int,
+        status: str,
+        current_step: int | None = None,
+    ) -> AgentEvent:
         """Overall plan progress update."""
         return cls(
             kind="plan_progress",
-            payload={"completed": completed, "total": total, "current_step": current_step},
+            payload={
+                "plan_id": plan_id,
+                "completed": completed,
+                "total": total,
+                "current_step": current_step,
+                "status": status,
+            },
         )
 
     # --- Subagent constructors (Фаза 2 §5) ---

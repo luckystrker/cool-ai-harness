@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -157,18 +158,47 @@ def test_approval_resolves_pending_request() -> None:
     from app.agent.approvals import approval_registry
 
     with _client() as c:
-        cid = c.post("/api/conversations", json={}).json()["id"]
+        conv = c.post("/api/conversations", json={}).json()
+        cid = conv["id"]
+        actor_id = conv["user_id"]
+        other_cid = c.post("/api/conversations", json={}).json()["id"]
 
     # Simulate the executor having registered a pending approval.
+    approval_id = ""
+
     async def _setup() -> None:
-        approval_registry.register("call_xyz", conversation_id=cid)
+        nonlocal approval_id
+        approval_registry.register(
+            "call_xyz", actor_id=actor_id, conversation_id=cid, run_id=101
+        )
+        approval_id = approval_registry.ticket(
+            "call_xyz", actor_id=actor_id, conversation_id=cid, run_id=101
+        ).approval_id
 
     asyncio.run(_setup())
 
     with _client() as c:
+        wrong_owner = c.post(
+            f"/api/conversations/{other_cid}/tool_calls/{approval_id}/approval",
+            json={"approved": True, "expected_revision": 1, "run_id": 101},
+        )
+        assert wrong_owner.status_code == 404
+
+        wrong_run = c.post(
+            f"/api/conversations/{cid}/tool_calls/{approval_id}/approval",
+            json={"approved": True, "expected_revision": 1, "run_id": 999},
+        )
+        assert wrong_run.status_code == 404
+
+        stale = c.post(
+            f"/api/conversations/{cid}/tool_calls/{approval_id}/approval",
+            json={"approved": True, "expected_revision": 2, "run_id": 101},
+        )
+        assert stale.status_code == 409
+
         resp = c.post(
-            f"/api/conversations/{cid}/tool_calls/call_xyz/approval",
-            json={"approved": True},
+            f"/api/conversations/{cid}/tool_calls/{approval_id}/approval",
+            json={"approved": True, "expected_revision": 1, "run_id": 101},
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -177,8 +207,8 @@ def test_approval_resolves_pending_request() -> None:
 
         # A second resolve finds nothing pending → 404.
         resp = c.post(
-            f"/api/conversations/{cid}/tool_calls/call_xyz/approval",
-            json={"approved": True},
+            f"/api/conversations/{cid}/tool_calls/{approval_id}/approval",
+            json={"approved": True, "expected_revision": 1, "run_id": 101},
         )
         assert resp.status_code == 404
 
@@ -187,7 +217,7 @@ def test_approval_unknown_conversation_404() -> None:
     with _client() as c:
         resp = c.post(
             "/api/conversations/999999/tool_calls/whatever/approval",
-            json={"approved": True},
+            json={"approved": True, "expected_revision": 1, "run_id": 1},
         )
         assert resp.status_code == 404
 
@@ -199,25 +229,70 @@ def test_approval_deny() -> None:
     from app.agent.approvals import approval_registry
 
     with _client() as c:
-        cid = c.post("/api/conversations", json={}).json()["id"]
+        conv = c.post("/api/conversations", json={}).json()
+        cid = conv["id"]
+        actor_id = conv["user_id"]
 
     future_holder: dict = {}
 
     async def _setup() -> None:
-        future_holder["f"] = approval_registry.register("call_deny", conversation_id=cid)
+        future_holder["f"] = approval_registry.register(
+            "call_deny", actor_id=actor_id, conversation_id=cid, run_id=102
+        )
+        future_holder["ticket"] = approval_registry.ticket(
+            "call_deny", actor_id=actor_id, conversation_id=cid, run_id=102
+        )
 
     asyncio.run(_setup())
 
     with _client() as c:
         resp = c.post(
-            f"/api/conversations/{cid}/tool_calls/call_deny/approval",
-            json={"approved": False},
+            f"/api/conversations/{cid}/tool_calls/{future_holder['ticket'].approval_id}/approval",
+            json={"approved": False, "expected_revision": 1, "run_id": 102},
         )
         assert resp.status_code == 200
         assert resp.json()["approved"] is False
 
     # The Future the executor would be awaiting resolves to False.
     assert future_holder["f"].result() is False
+
+
+@pytest.mark.asyncio
+async def test_approval_registry_scopes_duplicate_model_call_ids() -> None:
+    from app.agent.approvals import approval_registry
+
+    approval_registry.register("same-call", actor_id=1, conversation_id=10, run_id=100)
+    first = approval_registry.ticket(
+        "same-call", actor_id=1, conversation_id=10, run_id=100
+    )
+    approval_registry.register("same-call", actor_id=1, conversation_id=20, run_id=200)
+    second = approval_registry.ticket(
+        "same-call", actor_id=1, conversation_id=20, run_id=200
+    )
+
+    assert first.approval_id != second.approval_id
+    assert not approval_registry.resolve(
+        first.approval_id,
+        True,
+        expected_revision=first.revision,
+        actor_id=1,
+        conversation_id=20,
+    )
+    assert approval_registry.resolve(
+        first.approval_id,
+        True,
+        expected_revision=first.revision,
+        actor_id=1,
+        conversation_id=10,
+        run_id=100,
+    )
+    assert approval_registry.has(
+        second.approval_id,
+        actor_id=1,
+        conversation_id=20,
+        run_id=200,
+    )
+    approval_registry.clear()
 
 
 # --- compact endpoint ---

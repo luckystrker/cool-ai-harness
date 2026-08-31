@@ -690,8 +690,10 @@ class AgentExecutor:
 
         # --- Breakpoint: before_tool (any tool) ---
         if self._should_break(BreakpointType.BEFORE_TOOL, tool_name=name):
-            yield self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_TOOL)
-            bp_approved = await self._wait_for_approval(call_id)
+            request = self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_TOOL)
+            yield request
+            bp_approved, bp_decision = await self._wait_for_approval(request)
+            yield self._approval_resolved_event(request, bp_decision)
             if not bp_approved:
                 result = ToolResult.err("Breakpoint denied: the action was rejected or timed out.")
                 result.metadata = {
@@ -705,8 +707,10 @@ class AgentExecutor:
 
         # --- Breakpoint: before_write (write tools only) ---
         if is_write_tool(name) and self._should_break(BreakpointType.BEFORE_WRITE, tool_name=name):
-            yield self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_WRITE)
-            bp_approved = await self._wait_for_approval(call_id)
+            request = self._breakpoint_event(call_id, name, args, BreakpointType.BEFORE_WRITE)
+            yield request
+            bp_approved, bp_decision = await self._wait_for_approval(request)
+            yield self._approval_resolved_event(request, bp_decision)
             if not bp_approved:
                 result = ToolResult.err("Breakpoint denied: the write was rejected or timed out.")
                 result.metadata = {
@@ -729,7 +733,8 @@ class AgentExecutor:
                 current = self._read_file_for_preview(args)
                 if current is not None:
                     extra["current_content"] = current
-            yield AgentEvent(
+            approval_identity = self._approval_identity(call_id)
+            request = AgentEvent(
                 kind="tool_approval_request",
                 payload={
                     "id": call_id,
@@ -737,11 +742,14 @@ class AgentExecutor:
                     "arguments": args,
                     "reason": f"Tool {name!r} requires approval",
                     "requires_decision": True,
+                    **approval_identity,
                     "composed_tools": list(tool.composed_tools) if tool else [],
                     **extra,
                 },
             )
-            approved = await self._wait_for_approval(call_id)
+            yield request
+            approved, approval_decision = await self._wait_for_approval(request)
+            yield self._approval_resolved_event(request, approval_decision)
             if not approved:
                 result = ToolResult.err("Permission denied: the request was rejected or timed out.")
                 result.metadata = {"denied": True, "duration_ms": _elapsed_ms(t0)}
@@ -781,14 +789,16 @@ class AgentExecutor:
 
         # --- Breakpoint: after_tool_result ---
         if self._should_break(BreakpointType.AFTER_TOOL_RESULT, tool_name=name):
-            yield self._breakpoint_event(
+            request = self._breakpoint_event(
                 call_id,
                 name,
                 args,
                 BreakpointType.AFTER_TOOL_RESULT,
                 extra_context={"result_preview": (result.output or "")[:500]},
             )
-            await self._wait_for_approval(call_id)
+            yield request
+            _, bp_decision = await self._wait_for_approval(request)
+            yield self._approval_resolved_event(request, bp_decision)
 
     def _should_break(self, bp_type: BreakpointType, *, tool_name: str | None = None) -> bool:
         """True if a breakpoint of ``bp_type`` should fire for ``tool_name``."""
@@ -853,6 +863,7 @@ class AgentExecutor:
             "requires_decision": True,
             "is_breakpoint": True,
             "breakpoint_type": bp_type.value,
+            **self._approval_identity(call_id),
         }
         # For write-tool breakpoints, include current file content for diff preview.
         if is_write_tool(name):
@@ -862,6 +873,29 @@ class AgentExecutor:
         if extra_context:
             payload.update(extra_context)
         return AgentEvent(kind="tool_approval_request", payload=payload)
+
+    def _approval_identity(self, call_id: str) -> dict[str, Any]:
+        scope = {
+            "actor_id": self.config.user_id,
+            "conversation_id": self.config.conversation_id,
+            "run_id": self.config.run_id,
+        }
+        approval_registry.register(call_id, **scope)
+        ticket = approval_registry.ticket(call_id, **scope)
+        return {
+            "approval_id": ticket.approval_id,
+            "revision": ticket.revision,
+            "run_id": self.config.run_id,
+        }
+
+    @staticmethod
+    def _approval_resolved_event(request: AgentEvent, decision: str) -> AgentEvent:
+        return AgentEvent.tool_approval_resolved(
+            call_id=str(request.payload["id"]),
+            approval_id=str(request.payload["approval_id"]),
+            revision=int(request.payload["revision"]),
+            decision=decision,
+        )
 
     def _masked_tool_result(self, call_id: str, name: str, result: ToolResult) -> AgentEvent:
         """Build a tool_result event with secret masking applied to the output."""
@@ -879,23 +913,35 @@ class AgentExecutor:
             },
         )
 
-    async def _wait_for_approval(self, call_id: str) -> bool:
+    async def _wait_for_approval(self, request: AgentEvent) -> tuple[bool, str]:
         """Block until the client resolves the approval (or timeout auto-denies)."""
         import asyncio
 
         from app.core.config import get_settings
 
-        future = approval_registry.register(call_id)
+        call_id = str(request.payload["id"])
+        approval_id = str(request.payload["approval_id"])
+        revision = int(request.payload["revision"])
+        future = approval_registry.future(
+            approval_id,
+            expected_revision=revision,
+            actor_id=self.config.user_id,
+            conversation_id=self.config.conversation_id,
+            run_id=self.config.run_id,
+        )
         # Configurable via Settings (default 30s). The module constant is kept
         # only so existing tests can monkeypatch it to shrink the wait.
         timeout = get_settings().approval_timeout_s or DEFAULT_APPROVAL_TIMEOUT_S
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            approved = await asyncio.wait_for(future, timeout=timeout)
+            return approved, "approved" if approved else "denied"
         except TimeoutError:
             # Auto-deny on timeout so a forgotten prompt never hangs the turn.
-            approval_registry.cancel(call_id)
+            approval_registry.cancel(approval_id)
             log.warning("approval.timeout", call_id=call_id, timeout_s=timeout)
-            return False
+            return False, "timed_out"
+        finally:
+            approval_registry.forget(approval_id)
 
     async def _finalize_tool_call(self, call_id: str, name: str, result: ToolResult) -> None:
         """Append the tool message to history (kept as a helper for clarity)."""

@@ -11,6 +11,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-protocol:
+    name: Rust protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust 1.98.0
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+
+      - name: Rustfmt
+        run: cargo +1.98.0 fmt --all -- --check
+
+      - name: Clippy
+        run: cargo +1.98.0 clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo +1.98.0 test --workspace --all-features
+
+      - name: Build
+        run: cargo +1.98.0 build --workspace --all-targets
+
+      - name: Generated schema, TypeScript and golden traces are current
+        run: cargo +1.98.0 run -p cool-protocol --bin generate -- --check
+
   rust-m0-spike:
     name: Rust M0 spike (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -93,6 +121,10 @@ jobs:
       - name: Oxlint
         working-directory: frontend
         run: npm run lint
+
+      - name: Canonical protocol replay
+        working-directory: frontend
+        run: npm run protocol:check
 
       - name: TypeScript + Vite build
         working-directory: frontend

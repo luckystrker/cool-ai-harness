@@ -216,6 +216,7 @@ export type AgentEventKind =
   | "tool_call_start"
   | "tool_call_delta"
   | "tool_approval_request"
+  | "tool_approval_resolved"
   | "tool_result"
   | "message"
   | "finish"
@@ -246,6 +247,9 @@ export interface ToolApprovalRequestPayload {
   arguments: Record<string, unknown>
   reason: string
   requires_decision: true
+  approval_id: string
+  revision: number
+  run_id: number
   /** True when this was triggered by a breakpoint (vs a regular "ask" tool). */
   is_breakpoint?: boolean
   /** Breakpoint type, if is_breakpoint is true. */
@@ -254,6 +258,13 @@ export interface ToolApprovalRequestPayload {
   result_preview?: string
   /** Current file content before the write (for diff/preview in write tools). */
   current_content?: string
+}
+
+export interface ToolApprovalResolvedPayload {
+  id: string
+  approval_id: string
+  revision: number
+  decision: "approved" | "denied" | "timed_out"
 }
 
 export interface AgentEvent {
@@ -568,6 +579,7 @@ export interface PlanProgressPayload {
   completed: number
   total: number
   current_step: number | null
+  status: "executing" | "completed" | "failed"
 }
 
 // --- skills ---

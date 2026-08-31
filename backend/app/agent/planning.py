@@ -408,7 +408,31 @@ async def execute_plan_steps(
     completed_count = 0
     failed = False
 
-    yield AgentEvent.plan_progress(completed=0, total=total, current_step=None)
+    assert plan.id is not None
+    yield AgentEvent.plan_generated(
+        plan_id=plan.id,
+        title=plan.title,
+        steps=[
+            {
+                "position": step.position,
+                "title": step.title,
+                "description": step.description,
+                "status": step.status,
+                "depends_on": step.depends_on,
+                "tools": step.tools,
+                "delegate_role": step.delegate_role,
+                "result_summary": step.result_summary,
+            }
+            for step in ordered
+        ],
+    )
+    yield AgentEvent.plan_progress(
+        plan_id=plan.id,
+        completed=0,
+        total=total,
+        status=PLAN_STATUS_EXECUTING,
+        current_step=None,
+    )
 
     # Working history accumulates step results for context.
     exec_history = list(history)
@@ -427,7 +451,10 @@ async def execute_plan_steps(
             session.add(step)
             session.commit()
             yield AgentEvent.plan_step_complete(
-                position=step.position, status=STEP_STATUS_SKIPPED, result_summary="Skipped: dependencies not met"
+                plan_id=plan.id,
+                position=step.position,
+                status=STEP_STATUS_SKIPPED,
+                result_summary="Skipped: dependencies not met",
             )
             continue
 
@@ -435,7 +462,7 @@ async def execute_plan_steps(
         step.status = STEP_STATUS_RUNNING
         session.add(step)
         session.commit()
-        yield AgentEvent.plan_step_start(position=step.position, title=step.title)
+        yield AgentEvent.plan_step_start(plan_id=plan.id, position=step.position, title=step.title)
 
         # Build the step prompt.
         step_prompt = f"Execute this plan step:\n\n**{step.title}**\n"
@@ -494,7 +521,10 @@ async def execute_plan_steps(
             session.commit()
             failed = True
             yield AgentEvent.plan_step_complete(
-                position=step.position, status=STEP_STATUS_FAILED, result_summary=summary
+                plan_id=plan.id,
+                position=step.position,
+                status=STEP_STATUS_FAILED,
+                result_summary=summary,
             )
             # Stop execution on failure.
             break
@@ -509,17 +539,32 @@ async def execute_plan_steps(
             exec_history.append(Message(role="assistant", content=f"[Step: {step.title}]\n{summary}"))
 
             yield AgentEvent.plan_step_complete(
-                position=step.position, status=STEP_STATUS_COMPLETED, result_summary=summary
+                plan_id=plan.id,
+                position=step.position,
+                status=STEP_STATUS_COMPLETED,
+                result_summary=summary,
             )
 
-        yield AgentEvent.plan_progress(completed=completed_count, total=total, current_step=step.position)
+        yield AgentEvent.plan_progress(
+            plan_id=plan.id,
+            completed=completed_count,
+            total=total,
+            status=PLAN_STATUS_EXECUTING,
+            current_step=step.position,
+        )
 
     # Finalize plan status.
     plan.status = PLAN_STATUS_FAILED if failed else PLAN_STATUS_COMPLETED
     session.add(plan)
     session.commit()
 
-    yield AgentEvent.plan_progress(completed=completed_count, total=total, current_step=None)
+    yield AgentEvent.plan_progress(
+        plan_id=plan.id,
+        completed=completed_count,
+        total=total,
+        status=plan.status,
+        current_step=None,
+    )
 
 
 # --- Plan templates ---

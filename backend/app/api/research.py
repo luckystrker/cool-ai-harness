@@ -195,9 +195,13 @@ async def stream_research(
     assert run_id is not None
 
     queue: asyncio.Queue[dict] = asyncio.Queue()
-    sink = EventSink.for_queue(queue)
+    sink = EventSink.for_queue(
+        queue,
+        session_id=f"conversation:{body.conversation_id or 'none'}",
+        run_id=f"research:{run_id}",
+    )
     # Announce the run id up front so the client can render progress and cancel.
-    await queue.put({"type": "started", "payload": {"run_id": run_id}})
+    await sink.emit("started", run_id=run_id)
 
     async def _drive() -> None:
         await execute_research(run_id, sink=sink)
