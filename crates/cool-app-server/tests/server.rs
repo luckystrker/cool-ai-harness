@@ -1,8 +1,13 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use cool_agent::{AgentRuntime, ModelEvent, ScriptedDriver, Usage, builtin_registry};
 use cool_app_server::{AppServer, ServerConfig};
 use cool_protocol::{ActorKind, CanonicalEvent, ResponsePayload, RpcId, ServerFrame, StreamFrame};
-use serde_json::{Value, json};
+use cool_security::{CapabilityPolicy, Decision, Workspace};
+use cool_state::DurableStore;
+use serde_json::{Map, Value, json};
+use tempfile::tempdir;
 use tokio::io::{
     AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadBuf,
     ReadHalf, WriteHalf,
@@ -156,7 +161,7 @@ async fn prompt(client: &mut Client, id: i64, session_id: &str, key: &str) -> St
 }
 
 #[tokio::test]
-async fn stdio_shape_creates_ephemeral_session_and_streams_events() {
+async fn stdio_shape_streams_the_rust_agent_event_history() {
     let server = AppServer::new(ServerConfig::default());
     let (mut client, task) = connection(server.clone());
     initialize(&mut client, 1).await;
@@ -167,14 +172,18 @@ async fn stdio_shape_creates_ephemeral_session_and_streams_events() {
         client.notification().await,
         client.notification().await,
         client.notification().await,
+        client.notification().await,
+        client.notification().await,
     ];
     assert_eq!(
         events.iter().map(|event| event.seq).collect::<Vec<_>>(),
-        [1, 2, 3]
+        [1, 2, 3, 4, 5]
     );
     assert!(matches!(events[0].event, CanonicalEvent::RunStarted(_)));
-    assert!(matches!(events[1].event, CanonicalEvent::ContentDelta(_)));
-    assert!(matches!(events[2].event, CanonicalEvent::RunCompleted(_)));
+    assert!(matches!(events[1].event, CanonicalEvent::ItemCompleted(_)));
+    assert!(matches!(events[2].event, CanonicalEvent::ContentDelta(_)));
+    assert!(matches!(events[3].event, CanonicalEvent::ItemCompleted(_)));
+    assert!(matches!(events[4].event, CanonicalEvent::RunCompleted(_)));
     assert!(events.iter().all(|event| {
         event.actor.kind == ActorKind::System && event.actor.id == "cool-app-server"
     }));
@@ -302,11 +311,11 @@ async fn approval_resolution_is_actor_bound_idempotent_and_durable() {
         ResponsePayload::ApprovalResolved(_)
     ));
     let events = server.events_for_run(&run_id).await.unwrap();
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[1].actor.kind, ActorKind::System);
-    assert_eq!(events[1].actor.id, "cool-core");
-    assert_eq!(events[2].actor.kind, ActorKind::LocalUser);
-    assert_eq!(events[2].actor.id, "local-user");
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[2].actor.kind, ActorKind::System);
+    assert_eq!(events[2].actor.id, "cool-core");
+    assert_eq!(events[3].actor.kind, ActorKind::LocalUser);
+    assert_eq!(events[3].actor.id, "local-user");
 
     client
         .send(
@@ -323,6 +332,139 @@ async fn approval_resolution_is_actor_bound_idempotent_and_durable() {
     ));
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn rust_agent_tool_approval_resumes_the_live_app_server_run() {
+    let directory = tempdir().unwrap();
+    let secret = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456";
+    let provider = ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::ToolCall(cool_agent::ToolCall {
+                call_id: "live-write".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: Map::from_iter([
+                    ("path".to_owned(), json!("approved.txt")),
+                    ("content".to_owned(), json!(secret)),
+                ]),
+            }),
+            ModelEvent::Finish {
+                reason: Some("tool_calls".to_owned()),
+            },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("finished".to_owned()),
+            ModelEvent::Usage(Usage {
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                total_tokens: 5,
+                cost_micro_usd: None,
+            }),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+    ]);
+    let server = AppServer::with_agent_runtime(
+        ServerConfig::default(),
+        DurableStore::in_memory().unwrap(),
+        AgentRuntime::new(Arc::new(provider), builtin_registry()),
+        Workspace::new(directory.path()).unwrap(),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted",
+    )
+    .unwrap();
+    let (mut client, task) = connection(server.clone());
+    initialize(&mut client, 1).await;
+    let session_id = create_session(&mut client, 2, "live-session").await;
+    let run_id = prompt(&mut client, 3, &session_id, "live-prompt").await;
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::RunStarted(_)
+    ));
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::ItemCompleted(_)
+    ));
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::ItemCompleted(_)
+    ));
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::ToolRequested(_)
+    ));
+    let approval = client.notification().await;
+    let CanonicalEvent::ToolApprovalRequired(required) = approval.event else {
+        panic!("expected tool approval")
+    };
+    assert_eq!(
+        required.arguments["content"],
+        "Authorization: Bearer [REDACTED:bearer]"
+    );
+    client
+        .send(
+            4,
+            json!({
+                "method": "approval.resolve",
+                "params": {
+                    "idempotencyKey": "live-resolve",
+                    "approvalId": required.approval_id,
+                    "expectedRevision": required.revision,
+                    "decision": "approved"
+                }
+            }),
+        )
+        .await;
+    assert!(matches!(
+        client.success(4).await,
+        ResponsePayload::ApprovalResolved(_)
+    ));
+    let mut kinds = Vec::new();
+    loop {
+        let event = client.notification().await;
+        let terminal = matches!(event.event, CanonicalEvent::RunCompleted(_));
+        kinds.push(match event.event {
+            CanonicalEvent::ToolApprovalResolved(_) => "approval.resolved",
+            CanonicalEvent::ToolStarted(_) => "tool.started",
+            CanonicalEvent::ToolCompleted(_) => "tool.completed",
+            CanonicalEvent::ContentDelta(_) => "content.delta",
+            CanonicalEvent::UsageUpdated(_) => "usage.updated",
+            CanonicalEvent::ItemCompleted(_) => "item.completed",
+            CanonicalEvent::RunCompleted(_) => "run.completed",
+            _ => "other",
+        });
+        if terminal {
+            break;
+        }
+    }
+    assert_eq!(
+        kinds,
+        [
+            "approval.resolved",
+            "tool.started",
+            "tool.completed",
+            "content.delta",
+            "usage.updated",
+            "item.completed",
+            "run.completed"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("approved.txt")).unwrap(),
+        secret
+    );
+    let durable_events =
+        serde_json::to_string(&server.store().all_events(&run_id, "local-user").unwrap()).unwrap();
+    assert!(!durable_events.contains("abcdefghijklmnopqrstuvwxyz123456"));
+    server.store().replay_run(&run_id, "local-user").unwrap();
+    let budget = server
+        .store()
+        .reserve_budget("local-user", &format!("run:{run_id}"), Default::default())
+        .unwrap();
+    assert_eq!(budget.tokens, 5);
+    drop(client);
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -555,7 +697,11 @@ async fn reconnect_catches_up_without_gap_or_duplicate_side_effect() {
 
     timeout(Duration::from_secs(1), async {
         loop {
-            if server.events_for_run(&run_id).await.unwrap().len() == 2 {
+            if server
+                .store()
+                .run(&run_id, "local-user")
+                .is_ok_and(|run| run.status == cool_state::RunStatus::Cancelled)
+            {
                 break;
             }
             sleep(Duration::from_millis(5)).await;
@@ -580,10 +726,15 @@ async fn reconnect_catches_up_without_gap_or_duplicate_side_effect() {
         .await;
     match second.success(12).await {
         ResponsePayload::EventPage(page) => {
-            assert_eq!(page.events.len(), 1);
+            assert_eq!(page.events.len(), 2);
             assert_eq!(page.events[0].seq, 2);
             assert!(matches!(
                 page.events[0].event,
+                CanonicalEvent::ItemCompleted(_)
+            ));
+            assert_eq!(page.events[1].seq, 3);
+            assert!(matches!(
+                page.events[1].event,
                 CanonicalEvent::RunCancelled(_)
             ));
             assert!(!page.has_more);

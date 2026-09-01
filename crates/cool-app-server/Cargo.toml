@@ -7,7 +7,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
+cool-agent = { path = "../cool-agent" }
 cool-protocol = { path = "../cool-protocol" }
+cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }
 serde.workspace = true
 serde_json.workspace = true

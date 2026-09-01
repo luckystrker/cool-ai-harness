@@ -4,15 +4,17 @@
 //! state/security semantics without dual-writing or taking ownership of the
 //! Python application's existing schema; that cutover belongs to M10.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalDecision, ApprovalOutcome, CanonicalEvent, EventEnvelope,
-    RunCancelledResult, RunTerminal, ToolApprovalRequired, ToolApprovalResolved, V1Version,
-    WorkerEvent,
+    RunCancelledResult, RunTerminal, ToolApprovalRequired, ToolApprovalResolved, ToolFailed,
+    V1Version, WorkerEvent,
 };
+use cool_security::mask_json;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
@@ -171,7 +173,7 @@ pub struct IdempotentOutcome<T> {
 pub struct CancelAcceptance {
     pub result: RunCancelledResult,
     pub created: bool,
-    pub event: Option<EventEnvelope>,
+    pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -193,7 +195,7 @@ pub struct BudgetLimits {
 #[serde(rename_all = "camelCase")]
 pub struct BudgetDelta {
     pub tokens: u64,
-    pub cost_microusd: u64,
+    pub cost_microusd: Option<u64>,
     pub iterations: u64,
     pub proactive_actions: u64,
 }
@@ -363,6 +365,31 @@ impl DurableStore {
         Ok(snapshot)
     }
 
+    pub fn session_events(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+    ) -> Result<Vec<EventEnvelope>, StoreError> {
+        let connection = self.connection()?;
+        let owner = connection
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let mut statement = connection.prepare(
+            "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+             WHERE r.session_id = ?1 ORDER BY r.rowid, e.seq",
+        )?;
+        let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     pub fn start_run(
         &self,
         actor_id: &str,
@@ -496,7 +523,8 @@ impl DurableStore {
     ) -> Result<(), StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        append_event_tx(&transaction, owner_actor_id, envelope)?;
+        let envelope = masked_envelope(envelope.clone())?;
+        append_event_tx(&transaction, owner_actor_id, &envelope)?;
         transaction.commit()?;
         Ok(())
     }
@@ -506,6 +534,7 @@ impl DurableStore {
         owner_actor_id: &str,
         mut envelope: EventEnvelope,
     ) -> Result<EventEnvelope, StoreError> {
+        envelope = masked_envelope(envelope)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let run = require_run(&transaction, &envelope.run_id, owner_actor_id)?;
@@ -537,7 +566,7 @@ impl DurableStore {
             return Ok(CancelAcceptance {
                 result: existing,
                 created: false,
-                event: None,
+                events: Vec::new(),
             });
         }
         let run = require_run(&transaction, run_id, actor_id)?;
@@ -560,13 +589,21 @@ impl DurableStore {
             "INSERT INTO rust_cancel_intents(run_id, actor_id, reason, accepted_at) VALUES (?1, ?2, ?3, ?4)",
             params![run_id, actor_id, reason, timestamp()],
         )?;
+        let mut events = append_interrupted_tool_failures(
+            &transaction,
+            actor_id,
+            &run.session_id,
+            run_id,
+            "run_cancelled",
+        )?;
+        let current = require_run(&transaction, run_id, actor_id)?;
         let event = EventEnvelope {
             event_id: format!("event-{}", Uuid::new_v4()),
             schema_version: V1Version::VALUE,
             session_id: run.session_id,
             run_id: run_id.to_owned(),
             item_id: None,
-            seq: run.last_seq + 1,
+            seq: current.last_seq + 1,
             occurred_at: timestamp(),
             actor: provenance.actor,
             source: provenance.source,
@@ -579,11 +616,12 @@ impl DurableStore {
             extensions: Default::default(),
         };
         append_event_tx(&transaction, actor_id, &event)?;
+        events.push(event);
         transaction.commit()?;
         Ok(CancelAcceptance {
             result,
             created: true,
-            event: Some(event),
+            events,
         })
     }
 
@@ -647,7 +685,7 @@ impl DurableStore {
         let runs = {
             let connection = self.connection()?;
             let mut statement = connection.prepare(
-                "SELECT r.id, r.session_id, r.actor_id, r.last_seq, c.reason \
+                "SELECT r.id, r.session_id, r.actor_id, c.reason \
                  FROM rust_runs r LEFT JOIN rust_cancel_intents c ON c.run_id = r.id \
                  WHERE r.status IN ('queued', 'running', 'awaiting_approval') ORDER BY r.id",
             )?;
@@ -656,14 +694,24 @@ impl DurableStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         let mut recovered = Vec::new();
-        for (run_id, session_id, actor_id, last_seq, cancel_reason) in runs {
+        for (run_id, session_id, actor_id, cancel_reason) in runs {
+            let mut connection = self.connection()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            append_interrupted_tool_failures(
+                &transaction,
+                &actor_id,
+                &session_id,
+                &run_id,
+                "run_interrupted",
+            )?;
+            let current = require_run(&transaction, &run_id, &actor_id)?;
             let event = if let Some(reason) = cancel_reason {
                 CanonicalEvent::RunCancelled(RunTerminal {
                     reason,
@@ -681,7 +729,7 @@ impl DurableStore {
                 session_id,
                 run_id,
                 item_id: None,
-                seq: last_seq as u64 + 1,
+                seq: current.last_seq + 1,
                 occurred_at: timestamp(),
                 actor: ActorRef {
                     id: "cool-core".to_owned(),
@@ -693,7 +741,8 @@ impl DurableStore {
                 event,
                 extensions: Default::default(),
             };
-            self.append_event(&actor_id, &envelope)?;
+            append_event_tx(&transaction, &actor_id, &envelope)?;
+            transaction.commit()?;
             recovered.push(envelope);
         }
         Ok(recovered)
@@ -706,6 +755,28 @@ impl DurableStore {
         run_id: &str,
         call_id: &str,
         tool_name: &str,
+        reason: &str,
+    ) -> Result<ApprovalTicket, StoreError> {
+        self.create_approval_with_arguments(
+            actor_id,
+            session_id,
+            run_id,
+            call_id,
+            tool_name,
+            &BTreeMap::new(),
+            reason,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_approval_with_arguments(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+        run_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &BTreeMap<String, serde_json::Value>,
         reason: &str,
     ) -> Result<ApprovalTicket, StoreError> {
         let mut connection = self.connection()?;
@@ -759,7 +830,7 @@ impl DurableStore {
             event: CanonicalEvent::ToolApprovalRequired(ToolApprovalRequired {
                 call_id: call_id.to_owned(),
                 name: tool_name.to_owned(),
-                arguments: Default::default(),
+                arguments: arguments.clone(),
                 reason: reason.to_owned(),
                 approval_id: approval_id.clone(),
                 revision: 1,
@@ -776,6 +847,33 @@ impl DurableStore {
             revision: 1,
             created: true,
         })
+    }
+
+    pub fn approval_outcome(
+        &self,
+        actor_id: &str,
+        approval_id: &str,
+    ) -> Result<Option<ApprovalOutcome>, StoreError> {
+        let connection = self.connection()?;
+        let (owner, state) = connection
+            .query_row(
+                "SELECT actor_id, state FROM rust_approvals WHERE id = ?1",
+                [approval_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("approval"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        match state.as_str() {
+            "pending" => Ok(None),
+            "approved" => Ok(Some(ApprovalOutcome::Approved)),
+            "denied" => Ok(Some(ApprovalOutcome::Denied)),
+            _ => Err(StoreError::Corrupt(format!(
+                "unknown approval state {state}"
+            ))),
+        }
     }
 
     pub fn resolve_approval(
@@ -947,7 +1045,7 @@ impl DurableStore {
                 .ok_or_else(|| StoreError::Corrupt("token counter overflow".to_owned()))?,
             cost_microusd: current
                 .cost_microusd
-                .checked_add(delta.cost_microusd)
+                .checked_add(delta.cost_microusd.unwrap_or(0))
                 .ok_or_else(|| StoreError::Corrupt("cost counter overflow".to_owned()))?,
             iterations: current
                 .iterations
@@ -959,7 +1057,8 @@ impl DurableStore {
                 .ok_or_else(|| StoreError::Corrupt("proactive counter overflow".to_owned()))?,
             revision: current.revision + 1,
         };
-        if exceeds(next.tokens, limits.tokens)
+        if (limits.cost_microusd.is_some() && delta.cost_microusd.is_none())
+            || exceeds(next.tokens, limits.tokens)
             || exceeds(next.cost_microusd, limits.cost_microusd)
             || exceeds(next.iterations, limits.iterations)
             || exceeds(next.proactive_actions, limits.proactive_actions)
@@ -1280,6 +1379,70 @@ fn event_status(event: &CanonicalEvent) -> Option<RunStatus> {
     }
 }
 
+fn append_interrupted_tool_failures(
+    transaction: &Transaction<'_>,
+    owner_actor_id: &str,
+    session_id: &str,
+    run_id: &str,
+    error_code: &str,
+) -> Result<Vec<EventEnvelope>, StoreError> {
+    let mut statement = transaction
+        .prepare("SELECT envelope_json FROM rust_events WHERE run_id = ?1 ORDER BY seq")?;
+    let rows = statement.query_map([run_id], |row| row.get::<_, String>(0))?;
+    let mut pending = BTreeMap::new();
+    for row in rows {
+        let envelope: EventEnvelope = serde_json::from_str(&row?)?;
+        match envelope.event {
+            CanonicalEvent::ItemCompleted(item) => {
+                for call in item.tool_calls {
+                    pending.insert(call.call_id, call.name);
+                }
+            }
+            CanonicalEvent::ToolRequested(call) => {
+                pending.insert(call.call_id, call.name);
+            }
+            CanonicalEvent::ToolCompleted(result) => {
+                pending.remove(&result.call_id);
+            }
+            CanonicalEvent::ToolFailed(result) => {
+                pending.remove(&result.call_id);
+            }
+            _ => {}
+        }
+    }
+    drop(statement);
+    let mut appended = Vec::new();
+    for (call_id, name) in pending {
+        let run = require_run(transaction, run_id, owner_actor_id)?;
+        let envelope = EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            item_id: None,
+            seq: run.last_seq + 1,
+            occurred_at: timestamp(),
+            actor: ActorRef {
+                id: "cool-core".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-core-interruption".to_owned(),
+            causation_id: Some(call_id.clone()),
+            correlation_id: None,
+            event: CanonicalEvent::ToolFailed(ToolFailed {
+                call_id,
+                name,
+                error_code: error_code.to_owned(),
+                message: Some("tool execution was interrupted before a durable result".to_owned()),
+            }),
+            extensions: Default::default(),
+        };
+        append_event_tx(transaction, owner_actor_id, &envelope)?;
+        appended.push(envelope);
+    }
+    Ok(appended)
+}
+
 fn append_event_tx(
     transaction: &Transaction<'_>,
     owner_actor_id: &str,
@@ -1321,13 +1484,14 @@ fn append_event_tx(
         "lastSeq": envelope.seq,
         "status": next_status,
     });
+    let persisted = masked_envelope(envelope.clone())?;
     transaction.execute(
         "INSERT INTO rust_events(event_id, run_id, seq, envelope_json) VALUES (?1, ?2, ?3, ?4)",
         params![
             envelope.event_id,
             envelope.run_id,
             envelope.seq as i64,
-            serde_json::to_string(envelope)?
+            serde_json::to_string(&persisted)?
         ],
     )?;
     transaction.execute(
@@ -1341,6 +1505,12 @@ fn append_event_tx(
         )?;
     }
     Ok(())
+}
+
+fn masked_envelope(envelope: EventEnvelope) -> Result<EventEnvelope, StoreError> {
+    let mut value = serde_json::to_value(envelope)?;
+    mask_json(&mut value);
+    Ok(serde_json::from_value(value)?)
 }
 
 fn exceeds(value: u64, limit: Option<u64>) -> bool {

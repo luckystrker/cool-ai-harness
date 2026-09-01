@@ -80,6 +80,23 @@ fn network_policy_pins_public_dns_and_rechecks_redirects() {
 }
 
 #[test]
+fn network_policy_can_allow_only_explicit_loopback_targets() {
+    let policy = NetworkPolicy::new(["localhost".to_owned()]).loopback_only();
+    let pinned = policy
+        .pin("http://localhost:11434/v1", ["127.0.0.1".parse().unwrap()])
+        .unwrap();
+    assert_eq!(pinned.host, "localhost");
+    assert!(matches!(
+        policy.pin("http://localhost/v1", ["192.168.1.10".parse().unwrap()]),
+        Err(SecurityError::AddressDenied(_))
+    ));
+    assert!(matches!(
+        policy.pin("http://localhost/v1", ["93.184.216.34".parse().unwrap()]),
+        Err(SecurityError::AddressDenied(_))
+    ));
+}
+
+#[test]
 fn secret_filter_masks_text_nested_json_and_environment() {
     let value = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456";
     assert_eq!(
@@ -87,9 +104,15 @@ fn secret_filter_masks_text_nested_json_and_environment() {
         "Authorization: Bearer [REDACTED:bearer]"
     );
     assert_eq!(mask_secrets(&mask_secrets(value)), mask_secrets(value));
-    let mut json = serde_json::json!({"nested": ["token=abcdefgh12345678"]});
+    let mut json = serde_json::json!({
+        "nested": ["token=abcdefgh12345678"],
+        "api_key": "short-plain-value",
+        "safe": {"password": "another-short-value"}
+    });
     mask_json(&mut json);
     assert_eq!(json["nested"][0], "token=[REDACTED]");
+    assert_eq!(json["api_key"], "[REDACTED]");
+    assert_eq!(json["safe"]["password"], "[REDACTED]");
     let allow = BTreeSet::from(["TOOL_TOKEN".to_owned()]);
     let env = sanitize_environment(
         [

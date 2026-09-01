@@ -1,0 +1,69 @@
+[
+  {
+    "id": "approved_write",
+    "calls": [
+      {
+        "callId": "write-approved",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "allowed"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": [
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.completed",
+      "run.completed"
+    ],
+    "expectedFile": true
+  },
+  {
+    "id": "capability_denied_write",
+    "calls": [
+      {
+        "callId": "write-denied",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "denied"}
+      }
+    ],
+    "capability": "write",
+    "decision": "deny",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "approval_denied_write",
+    "calls": [
+      {
+        "callId": "write-approval-denied",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "denied"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "approval": "denied",
+    "expectedEvents": [
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.failed",
+      "run.completed"
+    ],
+    "expectedFile": false
+  },
+  {
+    "id": "partial_read_batch",
+    "calls": [
+      {"callId": "missing-a", "name": "read_file", "arguments": {"path": "a.txt"}},
+      {"callId": "missing-b", "name": "read_file", "arguments": {"path": "b.txt"}}
+    ],
+    "capability": "read",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "tool.failed", "run.completed"],
+    "expectedFile": false
+  }
+]

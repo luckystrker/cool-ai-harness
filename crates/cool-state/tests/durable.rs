@@ -1,8 +1,8 @@
 use std::sync::{Arc, Barrier};
 
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalDecision, CanonicalEvent, EventEnvelope, RunStarted, RunTerminal,
-    TextDelta, V1Version,
+    ActorKind, ActorRef, ApprovalDecision, CanonicalEvent, EventEnvelope, ItemEvent, RunStarted,
+    RunTerminal, TextDelta, ToolRequested, V1Version,
 };
 use cool_state::{
     ArtifactReference, BudgetDelta, BudgetLimits, DurableStore, EventProvenance, RunStatus,
@@ -19,7 +19,7 @@ fn actor() -> ActorRef {
 
 fn event(session_id: &str, run_id: &str, seq: u64, event: CanonicalEvent) -> EventEnvelope {
     EventEnvelope {
-        event_id: format!("event-{seq}"),
+        event_id: format!("{run_id}-event-{seq}"),
         schema_version: V1Version::VALUE,
         session_id: session_id.to_owned(),
         run_id: run_id.to_owned(),
@@ -102,6 +102,25 @@ fn core_restart_recovers_one_unambiguous_terminal_state() {
                 ),
             )
             .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    2,
+                    CanonicalEvent::ItemCompleted(ItemEvent {
+                        role: Some("assistant".to_owned()),
+                        content: None,
+                        tool_calls: vec![ToolRequested {
+                            call_id: "interrupted-call".to_owned(),
+                            name: "write_file".to_owned(),
+                            arguments: Default::default(),
+                        }],
+                    }),
+                ),
+            )
+            .unwrap();
         (session, run)
     };
     let reopened = DurableStore::open(&path).unwrap();
@@ -112,7 +131,51 @@ fn core_restart_recovers_one_unambiguous_terminal_state() {
         reopened.replay_run(&run, "local-user").unwrap().status,
         RunStatus::Failed
     );
+    let events = reopened.all_events(&run, "local-user").unwrap();
+    assert!(matches!(events[2].event, CanonicalEvent::ToolFailed(_)));
+    assert!(matches!(events[3].event, CanonicalEvent::RunFailed(_)));
     assert!(reopened.recover_incomplete_runs().unwrap().is_empty());
+}
+
+#[test]
+fn accepted_cancel_closes_pending_tool_calls_before_the_terminal_event() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                1,
+                CanonicalEvent::ItemCompleted(ItemEvent {
+                    role: Some("assistant".to_owned()),
+                    content: None,
+                    tool_calls: vec![ToolRequested {
+                        call_id: "pending-call".to_owned(),
+                        name: "shell".to_owned(),
+                        arguments: Default::default(),
+                    }],
+                }),
+            ),
+        )
+        .unwrap();
+    store
+        .accept_cancel(
+            "local-user",
+            "cancel-open-batch",
+            "cancel-open-batch-fingerprint",
+            &run,
+            "user_requested",
+            EventProvenance {
+                actor: actor(),
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap();
+    let events = store.all_events(&run, "local-user").unwrap();
+    assert!(matches!(events[1].event, CanonicalEvent::ToolFailed(_)));
+    assert!(matches!(events[2].event, CanonicalEvent::RunCancelled(_)));
 }
 
 #[test]
@@ -246,6 +309,16 @@ fn one_approval_resolution_wins_the_race_and_is_audited_with_an_event() {
         .map(|handle| handle.join().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let winner = results
+        .iter()
+        .find_map(|result| result.as_ref().ok())
+        .unwrap();
+    assert_eq!(
+        store
+            .approval_outcome("local-user", &ticket.approval_id)
+            .unwrap(),
+        Some(winner.outcome.clone())
+    );
     assert_eq!(store.all_events(&run, "local-user").unwrap().len(), 2);
     store.replay_run(&run, "local-user").unwrap();
 }
@@ -294,6 +367,34 @@ fn budget_check_and_increment_is_atomic_under_contention() {
             .count()
             == 10
     );
+}
+
+#[test]
+fn unknown_cost_fails_closed_when_a_cost_ceiling_is_configured() {
+    let store = DurableStore::in_memory().unwrap();
+    store
+        .set_budget_limits(
+            "local-user",
+            "cost-limited",
+            BudgetLimits {
+                cost_microusd: Some(10),
+                ..BudgetLimits::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        store.reserve_budget(
+            "local-user",
+            "cost-limited",
+            BudgetDelta {
+                tokens: 1,
+                cost_microusd: None,
+                iterations: 1,
+                proactive_actions: 0,
+            }
+        ),
+        Err(StoreError::BudgetExceeded(_))
+    ));
 }
 
 #[test]
@@ -468,4 +569,114 @@ fn artifact_reference_is_actor_bound_content_addressed_and_relative() {
         store.add_artifact_reference(&wrong_actor),
         Err(StoreError::ActorMismatch)
     ));
+}
+
+#[test]
+fn session_history_is_ordered_across_runs_from_the_canonical_event_log() {
+    let store = DurableStore::in_memory().unwrap();
+    let session = store
+        .create_session("local-user", "session", "session", None, None)
+        .unwrap()
+        .value;
+    for index in 0..2 {
+        let run = store
+            .start_run(
+                "local-user",
+                &format!("run-{index}"),
+                &format!("run-{index}"),
+                &session,
+            )
+            .unwrap()
+            .value;
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    1,
+                    CanonicalEvent::RunStarted(RunStarted {
+                        model: None,
+                        mode: None,
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    2,
+                    CanonicalEvent::ItemCompleted(ItemEvent {
+                        role: Some("user".to_owned()),
+                        content: Some(format!("prompt-{index}")),
+                        tool_calls: Vec::new(),
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    3,
+                    CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "stop".to_owned(),
+                        error_code: None,
+                    }),
+                ),
+            )
+            .unwrap();
+    }
+    let events = store.session_events(&session, "local-user").unwrap();
+    assert_eq!(events.len(), 6);
+    let prompts = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["prompt-0", "prompt-1"]);
+    assert!(matches!(
+        store.session_events(&session, "another-user"),
+        Err(StoreError::ActorMismatch)
+    ));
+}
+
+#[test]
+fn durable_writer_masks_secrets_for_direct_event_callers() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                1,
+                CanonicalEvent::ItemCompleted(ItemEvent {
+                    role: Some("user".to_owned()),
+                    content: Some(
+                        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456".to_owned(),
+                    ),
+                    tool_calls: vec![ToolRequested {
+                        call_id: "masked-call".to_owned(),
+                        name: "example".to_owned(),
+                        arguments: [("api_key".to_owned(), serde_json::json!("short-secret"))]
+                            .into_iter()
+                            .collect(),
+                    }],
+                }),
+            ),
+        )
+        .unwrap();
+    let encoded = serde_json::to_string(&store.all_events(&run, "local-user").unwrap()).unwrap();
+    assert!(!encoded.contains("abcdefghijklmnopqrstuvwxyz123456"));
+    assert!(!encoded.contains("short-secret"));
+    assert!(encoded.contains("[REDACTED]"));
 }

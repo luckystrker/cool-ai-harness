@@ -266,6 +266,8 @@ fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
 #[derive(Clone, Debug)]
 pub struct NetworkPolicy {
     allowed_domains: BTreeSet<String>,
+    allow_loopback: bool,
+    allow_public: bool,
     pub max_redirects: u8,
     pub max_response_bytes: u64,
     pub timeout: std::time::Duration,
@@ -285,10 +287,20 @@ impl NetworkPolicy {
                 .into_iter()
                 .map(|domain| domain.trim_start_matches('.').to_ascii_lowercase())
                 .collect(),
+            allow_loopback: false,
+            allow_public: true,
             max_redirects: 5,
             max_response_bytes: 10 * 1024 * 1024,
             timeout: std::time::Duration::from_secs(30),
         }
+    }
+
+    /// Restricts an explicitly configured local service to loopback addresses.
+    /// Public, private, link-local, and reserved non-loopback addresses are denied.
+    pub fn loopback_only(mut self) -> Self {
+        self.allow_loopback = true;
+        self.allow_public = false;
+        self
     }
 
     /// Validates a URL against one DNS answer. The returned addresses are the
@@ -331,7 +343,10 @@ impl NetworkPolicy {
         if addresses.is_empty() {
             return Err(SecurityError::MissingPinnedAddress);
         }
-        if let Some(address) = addresses.iter().find(|address| !is_public_ip(**address)) {
+        if let Some(address) = addresses.iter().find(|address| {
+            !(self.allow_public && is_public_ip(**address))
+                && !(self.allow_loopback && address.is_loopback())
+        }) {
             return Err(SecurityError::AddressDenied(*address));
         }
         Ok(PinnedTarget {
@@ -417,9 +432,36 @@ pub fn mask_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => *text = mask_secrets(text),
         serde_json::Value::Array(values) => values.iter_mut().for_each(mask_json),
-        serde_json::Value::Object(values) => values.values_mut().for_each(mask_json),
+        serde_json::Value::Object(values) => {
+            for (name, value) in values {
+                if sensitive_json_key(name) && !value.is_null() {
+                    *value = serde_json::Value::String("[REDACTED]".to_owned());
+                } else {
+                    mask_json(value);
+                }
+            }
+        }
         _ => {}
     }
+}
+
+fn sensitive_json_key(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "api_key"
+            | "apikey"
+            | "access_token"
+            | "refresh_token"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "token"
+    ) || normalized.ends_with("_api_key")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_token")
 }
 
 #[derive(Clone)]

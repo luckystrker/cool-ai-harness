@@ -1,0 +1,34 @@
+[
+  {
+    "name": "empty-equivalent-allows-read",
+    "wildcard": "allow",
+    "capabilities": {},
+    "required": ["read"],
+    "toolDecision": "allow",
+    "expected": "allow"
+  },
+  {
+    "name": "tool-ask-is-not-widened-by-capability-allow",
+    "wildcard": "allow",
+    "capabilities": {"write": "allow"},
+    "required": ["write"],
+    "toolDecision": "ask",
+    "expected": "ask"
+  },
+  {
+    "name": "explicit-deny-wins",
+    "wildcard": "allow",
+    "capabilities": {"execute": "deny"},
+    "required": ["execute"],
+    "toolDecision": "allow",
+    "expected": "deny"
+  },
+  {
+    "name": "multi-capability-most-restrictive",
+    "wildcard": "allow",
+    "capabilities": {"git": "ask", "execute": "deny"},
+    "required": ["git", "execute"],
+    "toolDecision": "allow",
+    "expected": "deny"
+  }
+]

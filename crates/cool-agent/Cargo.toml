@@ -1,24 +1,25 @@
 [package]
-name = "cool-cli"
+name = "cool-agent"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
-publish = false
-
-[[bin]]
-name = "cool"
-path = "src/main.rs"
+license.workspace = true
 
 [dependencies]
-cool-agent = { path = "../cool-agent" }
-cool-app-server = { path = "../cool-app-server" }
+async-trait.workspace = true
 cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -95,9 +95,9 @@ class SampleClient {
     });
   }
 
-  async waitForThreeEvents(): Promise<void> {
+  async waitForPromptEvents(): Promise<void> {
     const deadline = Date.now() + 5_000;
-    while (this.events.length < 3) {
+    while (this.events.length < 5) {
       if (this.fatalError) throw this.fatalError;
       if (Date.now() >= deadline) throw new Error("event stream timed out");
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
@@ -122,7 +122,7 @@ try {
     method: "session.create",
     params: {
       idempotencyKey: "sample-session",
-      title: "M5 sample",
+      title: "M7 sample",
       projectKey: null,
     },
   });
@@ -133,17 +133,20 @@ try {
     params: {
       idempotencyKey: "sample-prompt",
       sessionId: created.value.sessionId,
-      content: [{ type: "text", text: "M5 handshake" }],
+      content: [{ type: "text", text: "M7 handshake" }],
       model: null,
     },
   });
   if (prompted.kind !== "prompt_accepted") throw new Error("session.prompt contract mismatch");
-  await client.waitForThreeEvents();
+  await client.waitForPromptEvents();
 
   const eventKinds = client.events.flatMap((frame) =>
     "params" in frame && frame.params.type === "event" ? [frame.params.value.event.kind] : [],
   );
-  if (eventKinds.join(",") !== "run.started,content.delta,run.completed") {
+  if (
+    eventKinds.join(",") !==
+    "run.started,item.completed,content.delta,item.completed,run.completed"
+  ) {
     throw new Error(`unexpected event sequence: ${eventKinds.join(",")}`);
   }
   console.log(

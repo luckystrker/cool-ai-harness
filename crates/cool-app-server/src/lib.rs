@@ -1,7 +1,7 @@
-//! M6 App Protocol server backed by durable Rust state.
+//! M7 App Protocol server backed by the durable Rust agent runtime.
 //!
-//! This crate owns transport/session plumbing only. The provider-neutral agent
-//! loop and trusted tool runtime deliberately remain outside M6.
+//! This crate owns transport/session plumbing only. Provider, tool and policy
+//! decisions remain delegated to `cool-agent`, `cool-security` and `cool-state`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -9,6 +9,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use cool_agent::{
+    AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, CancelSignal,
+    EventSink, Message, RunOutcome, RuntimeError, ScriptedDriver, ToolContext, Usage,
+    builtin_registry, history_from_events, mask_canonical_event,
+};
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
     EventEnvelope, EventPage, InitializeResult, JsonRpcV2, PromptAcceptedResult, ProtocolError,
@@ -16,7 +22,8 @@ use cool_protocol::{
     RunCancelledResult, RunEventMethod, RunStarted, RunTerminal, ServerFrame, SessionCreatedResult,
     SessionLoadedResult, StreamFrame, TextDelta, TransportLimits, V1Version,
 };
-use cool_state::{CancelAcceptance, DurableStore, EventProvenance, StoreError};
+use cool_security::{CapabilityPolicy, Decision, Workspace, mask_secrets};
+use cool_state::{BudgetDelta, CancelAcceptance, DurableStore, EventProvenance, StoreError};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
@@ -64,6 +71,11 @@ struct Inner {
     config: ServerConfig,
     store: DurableStore,
     state: Mutex<State>,
+    runtime: AgentRuntime,
+    workspace: Workspace,
+    policy: CapabilityPolicy,
+    default_model: String,
+    approval_waiters: Mutex<HashMap<String, watch::Sender<Option<cool_protocol::ApprovalOutcome>>>>,
 }
 
 #[derive(Default)]
@@ -106,7 +118,7 @@ impl AppServer {
     pub fn new(config: ServerConfig) -> Self {
         Self::build(
             config,
-            DurableStore::in_memory().expect("in-memory M6 store must initialize"),
+            DurableStore::in_memory().expect("in-memory Rust store must initialize"),
         )
     }
 
@@ -116,6 +128,51 @@ impl AppServer {
     }
 
     fn build(config: ServerConfig, store: DurableStore) -> Self {
+        let workspace = std::env::current_dir()
+            .ok()
+            .and_then(|path| Workspace::new(path).ok())
+            .expect("current directory must be a valid workspace");
+        let runtime = AgentRuntime::new(
+            Arc::new(ScriptedDriver::echo_with_delay(config.event_delay)),
+            builtin_registry(),
+        );
+        Self::build_with_runtime(
+            config,
+            store,
+            runtime,
+            workspace,
+            CapabilityPolicy::new(Some(Decision::Ask)),
+            "scripted-echo".to_owned(),
+        )
+    }
+
+    pub fn with_agent_runtime(
+        config: ServerConfig,
+        store: DurableStore,
+        runtime: AgentRuntime,
+        workspace: Workspace,
+        policy: CapabilityPolicy,
+        default_model: impl Into<String>,
+    ) -> Result<Self, StoreError> {
+        store.recover_incomplete_runs()?;
+        Ok(Self::build_with_runtime(
+            config,
+            store,
+            runtime,
+            workspace,
+            policy,
+            default_model.into(),
+        ))
+    }
+
+    fn build_with_runtime(
+        config: ServerConfig,
+        store: DurableStore,
+        runtime: AgentRuntime,
+        workspace: Workspace,
+        policy: CapabilityPolicy,
+        default_model: String,
+    ) -> Self {
         assert!(config.max_in_flight > 0, "max_in_flight must be positive");
         assert!(
             config.max_in_flight <= u16::MAX as usize,
@@ -151,6 +208,11 @@ impl AppServer {
                 config,
                 store,
                 state: Mutex::new(State::default()),
+                runtime,
+                workspace,
+                policy,
+                default_model,
+                approval_waiters: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -560,7 +622,7 @@ impl AppServer {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                if !self.ephemeral_prompt_frames_fit(
+                if !self.prompt_start_frames_fit(
                     &params.session_id,
                     &content,
                     params.model.as_deref(),
@@ -596,13 +658,7 @@ impl AppServer {
                             .await;
                         if is_new {
                             connection.lock().await.owned_runs.insert(run_id.clone());
-                            self.spawn_ephemeral_run(
-                                run_id,
-                                content,
-                                params.model,
-                                cancel,
-                                outbound,
-                            );
+                            self.spawn_agent_run(run_id, content, params.model, cancel, outbound);
                         }
                     }
                     Err(error) => {
@@ -660,10 +716,12 @@ impl AppServer {
                     Ok(acceptance) => {
                         let frame =
                             success(id, ResponsePayload::RunCancelled(acceptance.result.clone()));
-                        if self.send(&outbound, frame).await
-                            && let Some(event) = acceptance.event
-                        {
-                            let _ = self.send(&outbound, notification(event)).await;
+                        if self.send(&outbound, frame).await {
+                            for event in acceptance.events {
+                                if !self.send(&outbound, notification(event)).await {
+                                    break;
+                                }
+                            }
                         }
                         return;
                     }
@@ -694,10 +752,14 @@ impl AppServer {
                 );
                 match resolved {
                     Ok(resolution) => {
-                        if !matches!(resolution.outcome, cool_protocol::ApprovalOutcome::Approved) {
-                            let _ = self
-                                .signal_cancel(&resolution.run_id, "approval_denied")
-                                .await;
+                        if let Some(waiter) = self
+                            .inner
+                            .approval_waiters
+                            .lock()
+                            .await
+                            .remove(&resolution.approval_id)
+                        {
+                            let _ = waiter.send(Some(resolution.outcome.clone()));
                         }
                         let response = ApprovalResolvedResult {
                             approval_id: resolution.approval_id,
@@ -737,7 +799,7 @@ impl AppServer {
         outbound.send(frame).await
     }
 
-    fn ephemeral_prompt_frames_fit(
+    fn prompt_start_frames_fit(
         &self,
         session_id: &str,
         content: &str,
@@ -746,14 +808,14 @@ impl AppServer {
         [
             CanonicalEvent::RunStarted(RunStarted {
                 model: model.map(str::to_owned),
-                mode: Some("m5_ephemeral_echo".to_owned()),
+                mode: Some("m7_rust_agent".to_owned()),
             }),
             CanonicalEvent::ContentDelta(TextDelta {
                 text: content.to_owned(),
                 channel: Some("final".to_owned()),
             }),
             CanonicalEvent::RunCompleted(RunTerminal {
-                reason: "m5_ephemeral_echo".to_owned(),
+                reason: "stop".to_owned(),
                 error_code: None,
             }),
         ]
@@ -857,104 +919,116 @@ impl AppServer {
             .map_err(store_error)
     }
 
-    fn spawn_ephemeral_run(
+    fn spawn_agent_run(
         &self,
         run_id: String,
         content: String,
         model: Option<String>,
-        mut cancel: watch::Receiver<Option<String>>,
+        cancel: watch::Receiver<Option<String>>,
         outbound: Outbound,
     ) {
         let server = self.clone();
         tokio::spawn(async move {
-            if !server
-                .emit(
-                    &run_id,
-                    CanonicalEvent::RunStarted(RunStarted {
-                        model,
-                        mode: Some("m5_ephemeral_echo".to_owned()),
-                    }),
-                    &outbound,
-                )
-                .await
-            {
-                server.finish_cancelled(&run_id, "disconnect").await;
+            let Some(run) = server.inner.store.run(&run_id, &local_actor().id).ok() else {
                 return;
-            }
-            if let Some(reason) = wait_or_cancel(server.inner.config.event_delay, &mut cancel).await
-            {
-                server
-                    .finish_cancelled_and_notify(&run_id, &reason, &outbound)
-                    .await;
-                return;
-            }
-            if !server
-                .emit(
-                    &run_id,
-                    CanonicalEvent::ContentDelta(TextDelta {
-                        text: content,
-                        channel: Some("final".to_owned()),
-                    }),
-                    &outbound,
-                )
-                .await
-            {
-                server.finish_cancelled(&run_id, "disconnect").await;
-                return;
-            }
-            if let Some(reason) = wait_or_cancel(server.inner.config.event_delay, &mut cancel).await
-            {
-                server
-                    .finish_cancelled_and_notify(&run_id, &reason, &outbound)
-                    .await;
-                return;
-            }
-            server
-                .finish_and_notify(
-                    &run_id,
-                    CanonicalEvent::RunCompleted(RunTerminal {
-                        reason: "m5_ephemeral_echo".to_owned(),
-                        error_code: None,
-                    }),
-                    &outbound,
+            };
+            let sink = AppServerEventSink {
+                server: server.clone(),
+                run_id: run_id.clone(),
+                outbound: outbound.clone(),
+            };
+            let approvals = AppServerApprovalGate {
+                server: server.clone(),
+                run_id: run_id.clone(),
+                session_id: run.session_id,
+                outbound: outbound.clone(),
+            };
+            let request = AgentRequest {
+                model: model.unwrap_or_else(|| server.inner.default_model.clone()),
+                history: Vec::<Message>::new(),
+                user_input: content,
+                system_prompt: None,
+                temperature: 0.0,
+                max_tokens: None,
+                limits: AgentLimits::default(),
+                tool_names: None,
+                tool_context: ToolContext::new(
+                    server.inner.workspace.clone(),
+                    server.inner.policy.clone(),
+                ),
+            };
+            let result = server
+                .inner
+                .runtime
+                .run(
+                    request,
+                    &sink,
+                    &approvals,
+                    CancelSignal::from_receiver(cancel),
                 )
                 .await;
+            let terminal = server
+                .inner
+                .store
+                .run(&run_id, &local_actor().id)
+                .is_ok_and(|run| run.status.is_terminal());
+            if result.is_err() && !terminal {
+                server
+                    .finish_cancelled(&run_id, "disconnect", Some(&outbound))
+                    .await;
+            }
+            if matches!(
+                result,
+                Ok(RunOutcome::Completed { .. }
+                    | RunOutcome::Cancelled { .. }
+                    | RunOutcome::Failed { .. })
+            ) && let Some(record) = server.inner.state.lock().await.runs.get_mut(&run_id)
+            {
+                record.terminal = true;
+            }
         });
     }
 
-    async fn emit(&self, run_id: &str, event: CanonicalEvent, outbound: &Outbound) -> bool {
-        let Some(envelope) = self.append_event(run_id, event, false).await else {
-            return false;
-        };
-        self.send(outbound, notification(envelope)).await
-    }
-
-    async fn finish_and_notify(&self, run_id: &str, event: CanonicalEvent, outbound: &Outbound) {
-        if let Some(envelope) = self.append_event(run_id, event, true).await {
-            let _ = self.send(outbound, notification(envelope)).await;
-        }
-    }
-
-    async fn finish_cancelled_and_notify(&self, run_id: &str, reason: &str, outbound: &Outbound) {
-        if let Some(envelope) = self.cancelled_event(run_id, reason).await {
-            let _ = self.send(outbound, notification(envelope)).await;
-        }
-    }
-
-    async fn finish_cancelled(&self, run_id: &str, reason: &str) {
-        let _ = self.cancelled_event(run_id, reason).await;
-    }
-
-    async fn cancelled_event(&self, run_id: &str, reason: &str) -> Option<EventEnvelope> {
-        self.append_event(
+    async fn finish_cancelled(
+        &self,
+        run_id: &str,
+        reason: &str,
+        outbound: Option<&Outbound>,
+    ) -> bool {
+        let key = format!("internal-cancel:{run_id}");
+        let fingerprint = fingerprint(&(run_id, reason, "cool-app-server-internal-cancel"));
+        let acceptance = self.inner.store.accept_cancel(
+            &local_actor().id,
+            &key,
+            &fingerprint,
             run_id,
-            CanonicalEvent::RunCancelled(RunTerminal {
-                reason: reason.to_owned(),
-                error_code: None,
-            }),
-            true,
-        )
-        .await
+            reason,
+            EventProvenance {
+                actor: runtime_actor(),
+                source: "cool-app-server-m7".to_owned(),
+            },
+        );
+        let terminal = match acceptance {
+            Ok(acceptance) => {
+                if let Some(outbound) = outbound {
+                    for event in acceptance.events {
+                        if !self.send(outbound, notification(event)).await {
+                            break;
+                        }
+                    }
+                }
+                true
+            }
+            Err(_) => self
+                .inner
+                .store
+                .run(run_id, &local_actor().id)
+                .is_ok_and(|run| run.status.is_terminal()),
+        };
+        if terminal && let Some(record) = self.inner.state.lock().await.runs.get_mut(run_id) {
+            record.terminal = true;
+        }
+        terminal
     }
 
     async fn append_event(
@@ -982,7 +1056,7 @@ impl AppServer {
             seq: 0,
             occurred_at: rfc3339_now(),
             actor,
-            source: "cool-app-server-m6".to_owned(),
+            source: "cool-app-server-m7".to_owned(),
             causation_id: None,
             correlation_id: None,
             event,
@@ -1021,6 +1095,7 @@ impl AppServer {
         run_id: &str,
         reason: &str,
     ) -> Result<CancelAcceptance, ProtocolError> {
+        let reason = mask_secrets(reason);
         let outcome = self
             .inner
             .store
@@ -1029,15 +1104,15 @@ impl AppServer {
                 key,
                 &fingerprint,
                 run_id,
-                reason,
+                &reason,
                 EventProvenance {
                     actor: local_actor(),
-                    source: "cool-app-server-m6".to_owned(),
+                    source: "cool-app-server-m7".to_owned(),
                 },
             )
             .map_err(store_error)?;
         if outcome.created {
-            let _ = self.signal_cancel(run_id, reason).await;
+            let _ = self.signal_cancel(run_id, &reason).await;
         }
         Ok(outcome)
     }
@@ -1095,6 +1170,238 @@ impl AppServer {
     }
 }
 
+struct AppServerEventSink {
+    server: AppServer,
+    run_id: String,
+    outbound: Outbound,
+}
+
+#[async_trait]
+impl EventSink for AppServerEventSink {
+    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        let event = mask_canonical_event(event)?;
+        if matches!(event, CanonicalEvent::RunCancelled(_)) {
+            let run = self
+                .server
+                .inner
+                .store
+                .run(&self.run_id, &local_actor().id)?;
+            if run.status == cool_state::RunStatus::Cancelled
+                && let Some(existing) = self
+                    .server
+                    .inner
+                    .store
+                    .all_events(&self.run_id, &local_actor().id)?
+                    .into_iter()
+                    .last()
+                    .filter(|event| matches!(event.event, CanonicalEvent::RunCancelled(_)))
+            {
+                return Ok(existing);
+            }
+        }
+        if let CanonicalEvent::ToolFailed(requested) = &event {
+            let run = self
+                .server
+                .inner
+                .store
+                .run(&self.run_id, &local_actor().id)?;
+            if run.status.is_terminal()
+                && let Some(existing) = self
+                    .server
+                    .inner
+                    .store
+                    .all_events(&self.run_id, &local_actor().id)?
+                    .into_iter()
+                    .find(|event| {
+                        matches!(
+                            &event.event,
+                            CanonicalEvent::ToolFailed(stored)
+                                if stored.call_id == requested.call_id
+                        )
+                    })
+            {
+                return Ok(existing);
+            }
+        }
+        let run = self
+            .server
+            .inner
+            .store
+            .run(&self.run_id, &local_actor().id)?;
+        if !self
+            .server
+            .preview_event_frame_fits(&run.session_id, event.clone())
+        {
+            return Err(RuntimeError::Sink(
+                "event exceeds the negotiated transport frame limit".to_owned(),
+            ));
+        }
+        let terminal = matches!(
+            event,
+            CanonicalEvent::RunCompleted(_)
+                | CanonicalEvent::RunFailed(_)
+                | CanonicalEvent::RunCancelled(_)
+        );
+        let envelope = self
+            .server
+            .append_event(&self.run_id, event, terminal)
+            .await
+            .ok_or_else(|| RuntimeError::Sink("run no longer accepts events".to_owned()))?;
+        if !self
+            .server
+            .send(&self.outbound, notification(envelope.clone()))
+            .await
+        {
+            return Err(RuntimeError::Sink(
+                "client disconnected while publishing run event".to_owned(),
+            ));
+        }
+        Ok(envelope)
+    }
+
+    async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
+        let run = self
+            .server
+            .inner
+            .store
+            .run(&self.run_id, &local_actor().id)?;
+        history_from_events(
+            &self
+                .server
+                .inner
+                .store
+                .session_events(&run.session_id, &local_actor().id)?,
+        )
+    }
+
+    async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
+        self.server.inner.store.reserve_budget(
+            &local_actor().id,
+            &format!("run:{}", self.run_id),
+            BudgetDelta {
+                tokens: usage.total_tokens,
+                cost_microusd: usage.cost_micro_usd,
+                iterations: 1,
+                proactive_actions: 0,
+            },
+        )?;
+        Ok(())
+    }
+}
+
+struct AppServerApprovalGate {
+    server: AppServer,
+    run_id: String,
+    session_id: String,
+    outbound: Outbound,
+}
+
+#[async_trait]
+impl ApprovalGate for AppServerApprovalGate {
+    async fn request(
+        &self,
+        request: ApprovalRequest,
+        _sink: &dyn EventSink,
+        cancel: &mut CancelSignal,
+    ) -> Result<cool_protocol::ApprovalOutcome, RuntimeError> {
+        let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(
+            cool_protocol::ToolApprovalRequired {
+                call_id: request.call.call_id.clone(),
+                name: request.call.name.clone(),
+                arguments: request.call.arguments.clone().into_iter().collect(),
+                reason: request.reason.clone(),
+                approval_id: request.approval_id.clone(),
+                revision: 1,
+                breakpoint_type: None,
+                result_preview: None,
+                current_content: None,
+            },
+        ))?;
+        let CanonicalEvent::ToolApprovalRequired(masked) = masked else {
+            unreachable!("event variant is preserved by masking")
+        };
+        if !self.server.preview_event_frame_fits(
+            &self.session_id,
+            CanonicalEvent::ToolApprovalRequired(masked.clone()),
+        ) {
+            return Err(RuntimeError::Sink(
+                "approval event exceeds the negotiated transport frame limit".to_owned(),
+            ));
+        }
+        let ticket = self.server.inner.store.create_approval_with_arguments(
+            &local_actor().id,
+            &self.session_id,
+            &self.run_id,
+            &request.call.call_id,
+            &request.call.name,
+            &masked.arguments,
+            &masked.reason,
+        )?;
+        let (sender, mut receiver) = watch::channel(None);
+        self.server
+            .inner
+            .approval_waiters
+            .lock()
+            .await
+            .insert(ticket.approval_id.clone(), sender);
+        if ticket.created {
+            let event = self
+                .server
+                .inner
+                .store
+                .all_events(&self.run_id, &local_actor().id)?
+                .into_iter()
+                .last()
+                .ok_or_else(|| RuntimeError::Sink("approval event is missing".to_owned()))?;
+            if !self.server.send(&self.outbound, notification(event)).await {
+                self.server
+                    .inner
+                    .approval_waiters
+                    .lock()
+                    .await
+                    .remove(&ticket.approval_id);
+                return Err(RuntimeError::Sink(
+                    "client disconnected before approval delivery".to_owned(),
+                ));
+            }
+        }
+        if let Some(outcome) = self
+            .server
+            .inner
+            .store
+            .approval_outcome(&local_actor().id, &ticket.approval_id)?
+        {
+            self.server
+                .inner
+                .approval_waiters
+                .lock()
+                .await
+                .remove(&ticket.approval_id);
+            return Ok(outcome);
+        }
+        let result = tokio::select! {
+            outcome = async {
+                loop {
+                    receiver.changed().await.map_err(|_| RuntimeError::Sink("approval channel closed".to_owned()))?;
+                    if let Some(outcome) = receiver.borrow().clone() {
+                        return Ok(outcome);
+                    }
+                }
+            } => outcome,
+            reason = cancel.wait() => Err(RuntimeError::Sink(format!("approval cancelled: {reason}"))),
+        };
+        if result.is_err() {
+            self.server
+                .inner
+                .approval_waiters
+                .lock()
+                .await
+                .remove(&ticket.approval_id);
+        }
+        result
+    }
+}
+
 #[cfg(unix)]
 struct SocketCleanup(std::path::PathBuf);
 
@@ -1102,25 +1409,6 @@ struct SocketCleanup(std::path::PathBuf);
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-async fn wait_or_cancel(
-    delay: Duration,
-    cancel: &mut watch::Receiver<Option<String>>,
-) -> Option<String> {
-    if let Some(reason) = cancel.borrow().clone() {
-        return Some(reason);
-    }
-    tokio::select! {
-        () = sleep(delay) => None,
-        changed = cancel.changed() => {
-            if changed.is_ok() {
-                cancel.borrow().clone()
-            } else {
-                None
-            }
-        },
     }
 }
 
@@ -1148,7 +1436,7 @@ fn preview_event_envelope(session_id: &str, event: CanonicalEvent) -> EventEnvel
         seq: 1,
         occurred_at: "2000-01-01T00:00:00.000Z".to_owned(),
         actor: runtime_actor(),
-        source: "cool-app-server-m6".to_owned(),
+        source: "cool-app-server-m7".to_owned(),
         causation_id: None,
         correlation_id: None,
         event,
@@ -1385,12 +1673,15 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for StdioIo<R, W> {
 pub fn capabilities() -> BTreeSet<String> {
     [
         "approval_resolution",
+        "agent_loop",
         "durable_sessions",
         "event_catch_up",
         "local_socket",
         "recovery",
         "run_cancellation",
+        "streaming_models",
         "stdio",
+        "trusted_tools",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1434,7 +1725,9 @@ fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use std::time::Duration;
 
-    use cool_protocol::{CanonicalEvent, RpcId, RunTerminal};
+    use cool_protocol::{
+        CanonicalEvent, ItemEvent, RpcId, RunTerminal, ServerFrame, StreamFrame, ToolRequested,
+    };
 
     use super::{
         AppServer, Outbound, ServerConfig, civil_date, error, failure, notification,
@@ -1451,7 +1744,7 @@ mod tests {
     fn replay_preflight_uses_the_exact_boundary_for_a_terminal_page() {
         let session_id = "session-00000000-0000-0000-0000-000000000000";
         let event = CanonicalEvent::RunCompleted(RunTerminal {
-            reason: "m5_ephemeral_echo".to_owned(),
+            reason: "stop".to_owned(),
             error_code: None,
         });
         let envelope = preview_event_envelope(session_id, event.clone());
@@ -1496,5 +1789,74 @@ mod tests {
         );
         failed_rx.changed().await.unwrap();
         assert!(*failed_rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn internal_disconnect_closes_pending_tools_before_cancellation() {
+        let server = AppServer::new(ServerConfig::default());
+        let session = server
+            .inner
+            .store
+            .create_session(
+                "local-user",
+                "internal-session",
+                "internal-session",
+                None,
+                None,
+            )
+            .unwrap()
+            .value;
+        let run = server
+            .inner
+            .store
+            .start_run("local-user", "internal-run", "internal-run", &session)
+            .unwrap()
+            .value;
+        server
+            .append_event(
+                &run,
+                CanonicalEvent::ItemCompleted(ItemEvent {
+                    role: Some("assistant".to_owned()),
+                    content: None,
+                    tool_calls: vec![ToolRequested {
+                        call_id: "pending-on-disconnect".to_owned(),
+                        name: "write_file".to_owned(),
+                        arguments: Default::default(),
+                    }],
+                }),
+                false,
+            )
+            .await
+            .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let (failed, _) = tokio::sync::watch::channel(false);
+        let outbound = Outbound {
+            sender,
+            failed,
+            deadline: Duration::from_secs(1),
+        };
+        assert!(
+            server
+                .finish_cancelled(&run, "disconnect", Some(&outbound))
+                .await
+        );
+        let delivered = [
+            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap(),
+        ]
+        .into_iter()
+        .map(|frame| match frame {
+            ServerFrame::Notification(notification) => match notification.params {
+                StreamFrame::Event(event) => event.event,
+                other => panic!("expected event notification, got {other:?}"),
+            },
+            other => panic!("expected notification, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+        assert!(matches!(delivered[0], CanonicalEvent::ToolFailed(_)));
+        assert!(matches!(delivered[1], CanonicalEvent::RunCancelled(_)));
+        let events = server.inner.store.all_events(&run, "local-user").unwrap();
+        assert!(matches!(events[1].event, CanonicalEvent::ToolFailed(_)));
+        assert!(matches!(events[2].event, CanonicalEvent::RunCancelled(_)));
     }
 }

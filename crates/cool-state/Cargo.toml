@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 cool-protocol = { path = "../cool-protocol" }
+cool-security = { path = "../cool-security" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
