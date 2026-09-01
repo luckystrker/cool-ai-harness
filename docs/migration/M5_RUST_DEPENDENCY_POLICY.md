@@ -16,6 +16,9 @@ dependency graph.
 - Git dependencies require an explicit policy amendment, immutable revision and provenance review.
 - Unsafe Rust is forbidden workspace-wide. Exceptions require a narrowly scoped ADR and tests at
   the unsafe boundary before the lint policy can change.
+- MPL-2.0 is allowed for the M6 `fernet` implementation. It is used with the pure-Rust crypto
+  backend for Python-compatible at-rest secrets; changes to that dependency remain file-level
+  license obligations and require dependency-policy review.
 - Dependabot proposes a bounded weekly Cargo update group. CI remains the decision gate; automated
   opening of a pull request is not permission to merge it.
 

@@ -107,6 +107,28 @@
         "decision"
       ]
     },
+    "ApprovalResolvedResult": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ApprovalOutcome"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "approvalId",
+        "revision",
+        "outcome"
+      ]
+    },
     "ArtifactCreated": {
       "type": "object",
       "properties": {
@@ -1748,6 +1770,23 @@
             },
             "value": {
               "$ref": "#/$defs/RunCancelledResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "approval_resolved"
+            },
+            "value": {
+              "$ref": "#/$defs/ApprovalResolvedResult"
             }
           },
           "additionalProperties": false,

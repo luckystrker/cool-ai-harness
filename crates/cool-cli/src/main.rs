@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use cool_app_server::{AppServer, ServerConfig, capabilities};
+use cool_state::DurableStore;
 use serde_json::json;
 
 #[tokio::main]
@@ -25,6 +26,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
         "app-server" => {
             let mut transport = "stdio".to_owned();
             let mut endpoint: Option<PathBuf> = None;
+            let mut data_dir = env::var_os("COOL_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("data"));
             while let Some(argument) = args.next() {
                 match argument.as_str() {
                     "--transport" => {
@@ -37,10 +41,18 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                             args.next().ok_or_else(|| usage("missing endpoint value"))?,
                         ));
                     }
+                    "--data-dir" => {
+                        data_dir = PathBuf::from(
+                            args.next().ok_or_else(|| usage("missing data directory"))?,
+                        );
+                    }
                     _ => return Err(usage("unknown app-server argument")),
                 }
             }
-            let server = AppServer::new(ServerConfig::default());
+            let store = DurableStore::open(data_dir.join("rust-core.db"))
+                .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
+            let server = AppServer::with_store(ServerConfig::default(), store)
+                .map_err(|error| runtime("durable_recovery_failed", &error.to_string()))?;
             match transport.as_str() {
                 "stdio" if endpoint.is_none() => server
                     .serve_stdio()
@@ -62,11 +74,12 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "status": "ok",
-                    "phase": "M5",
-                    "runtime": "rust-app-server-skeleton",
+                    "phase": "M6",
+                    "runtime": "rust-durable-security-kernel",
                     "protocolVersion": 1,
                     "capabilities": capabilities(),
-                    "durableState": false,
+                    "durableState": true,
+                    "securityKernel": true,
                     "agentLoop": false
                 }))
                 .expect("doctor JSON serializes")
@@ -76,7 +89,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
         "serve" | "run" => Err((
             2,
             json!({
-                "coolCode": "m5_route_not_implemented",
+                "coolCode": "m7_route_not_implemented",
                 "message": format!("{command} is routed but becomes operational in a later phase"),
                 "retryable": false
             }),
@@ -109,6 +122,6 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI skeleton\n\nCommands:\n  app-server [--transport stdio|local] [--endpoint PATH]\n  serve\n  run\n  doctor"
+        "Cool Rust CLI\n\nCommands:\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run\n  doctor"
     );
 }

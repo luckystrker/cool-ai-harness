@@ -1022,6 +1022,16 @@ pub struct RunCancelledResult {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ApprovalResolvedResult {
+    pub approval_id: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub outcome: ApprovalOutcome,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -1035,6 +1045,7 @@ pub enum ResponsePayload {
     SessionLoaded(SessionLoadedResult),
     PromptAccepted(PromptAcceptedResult),
     RunCancelled(RunCancelledResult),
+    ApprovalResolved(ApprovalResolvedResult),
     EventPage(EventPage),
 }
 

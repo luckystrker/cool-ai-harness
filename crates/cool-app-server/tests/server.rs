@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use cool_app_server::{AppServer, ServerConfig};
-use cool_protocol::{CanonicalEvent, ResponsePayload, RpcId, ServerFrame, StreamFrame};
+use cool_protocol::{ActorKind, CanonicalEvent, ResponsePayload, RpcId, ServerFrame, StreamFrame};
 use serde_json::{Value, json};
 use tokio::io::{
     AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadBuf,
@@ -175,6 +175,9 @@ async fn stdio_shape_creates_ephemeral_session_and_streams_events() {
     assert!(matches!(events[0].event, CanonicalEvent::RunStarted(_)));
     assert!(matches!(events[1].event, CanonicalEvent::ContentDelta(_)));
     assert!(matches!(events[2].event, CanonicalEvent::RunCompleted(_)));
+    assert!(events.iter().all(|event| {
+        event.actor.kind == ActorKind::System && event.actor.id == "cool-app-server"
+    }));
     assert_eq!(server.events_for_run(&run_id).await.unwrap(), events);
 
     drop(client);
@@ -243,6 +246,81 @@ async fn cancellation_is_terminal_and_replayable() {
         result => panic!("unexpected repeated cancel result: {result:?}"),
     }
 
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn approval_resolution_is_actor_bound_idempotent_and_durable() {
+    let config = ServerConfig {
+        event_delay: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    let server = AppServer::new(config);
+    let (mut client, task) = connection(server.clone());
+    initialize(&mut client, 1).await;
+    let session_id = create_session(&mut client, 2, "approval-session").await;
+    let run_id = prompt(&mut client, 3, &session_id, "approval-prompt").await;
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::RunStarted(_)
+    ));
+    let ticket = server
+        .create_approval(
+            &session_id,
+            &run_id,
+            "call-1",
+            "write_file",
+            "write requires review",
+        )
+        .unwrap();
+
+    let resolve = json!({
+        "method": "approval.resolve",
+        "params": {
+            "idempotencyKey": "resolve-key",
+            "approvalId": ticket.approval_id,
+            "expectedRevision": ticket.revision,
+            "decision": "approved"
+        }
+    });
+    client.send(4, resolve.clone()).await;
+    match client.success(4).await {
+        ResponsePayload::ApprovalResolved(result) => {
+            assert_eq!(result.revision, 2);
+            assert_eq!(result.outcome, cool_protocol::ApprovalOutcome::Approved);
+        }
+        result => panic!("unexpected approval result: {result:?}"),
+    }
+    assert!(matches!(
+        client.notification().await.event,
+        CanonicalEvent::ToolApprovalResolved(_)
+    ));
+    client.send(5, resolve).await;
+    assert!(matches!(
+        client.success(5).await,
+        ResponsePayload::ApprovalResolved(_)
+    ));
+    let events = server.events_for_run(&run_id).await.unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1].actor.kind, ActorKind::System);
+    assert_eq!(events[1].actor.id, "cool-core");
+    assert_eq!(events[2].actor.kind, ActorKind::LocalUser);
+    assert_eq!(events[2].actor.id, "local-user");
+
+    client
+        .send(
+            6,
+            json!({
+                "method": "run.cancel",
+                "params": {"idempotencyKey": "cleanup", "runId": run_id, "reason": "test_cleanup"}
+            }),
+        )
+        .await;
+    assert!(matches!(
+        client.success(6).await,
+        ResponsePayload::RunCancelled(_)
+    ));
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }

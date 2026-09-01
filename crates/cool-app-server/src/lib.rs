@@ -1,7 +1,7 @@
-//! Ephemeral M5 App Protocol server skeleton.
+//! M6 App Protocol server backed by durable Rust state.
 //!
-//! This crate owns transport/session plumbing only. Durable state, security
-//! policy and the agent loop deliberately remain outside M5.
+//! This crate owns transport/session plumbing only. The provider-neutral agent
+//! loop and trusted tool runtime deliberately remain outside M6.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cool_protocol::{
-    ActorKind, ActorRef, CanonicalEvent, Command, ContentPart, EventCursor, EventEnvelope,
-    EventPage, InitializeResult, JsonRpcV2, PromptAcceptedResult, ProtocolError, ResponsePayload,
-    RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod,
-    RunStarted, RunTerminal, ServerFrame, SessionCreatedResult, SessionLoadedResult, StreamFrame,
-    TextDelta, TransportLimits, V1Version,
+    ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
+    EventEnvelope, EventPage, InitializeResult, JsonRpcV2, PromptAcceptedResult, ProtocolError,
+    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    RunCancelledResult, RunEventMethod, RunStarted, RunTerminal, ServerFrame, SessionCreatedResult,
+    SessionLoadedResult, StreamFrame, TextDelta, TransportLimits, V1Version,
 };
+use cool_state::{CancelAcceptance, DurableStore, EventProvenance, StoreError};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
@@ -61,35 +62,19 @@ pub struct AppServer {
 
 struct Inner {
     config: ServerConfig,
+    store: DurableStore,
     state: Mutex<State>,
 }
 
 #[derive(Default)]
 struct State {
-    sessions: HashMap<String, SessionRecord>,
     runs: HashMap<String, RunRecord>,
-    session_keys: HashMap<(String, String), Idempotent<String>>,
-    prompt_keys: HashMap<(String, String), Idempotent<String>>,
-    cancel_keys: HashMap<(String, String), Idempotent<RunCancelledResult>>,
     prompt_executions: u64,
 }
 
-struct SessionRecord {
-    title: Option<String>,
-    project_key: Option<String>,
-    active_run_id: Option<String>,
-}
-
 struct RunRecord {
-    session_id: String,
-    events: Vec<EventEnvelope>,
     cancel: watch::Sender<Option<String>>,
     terminal: bool,
-}
-
-struct Idempotent<T> {
-    fingerprint: String,
-    result: T,
 }
 
 #[derive(Default)]
@@ -119,6 +104,18 @@ impl Outbound {
 
 impl AppServer {
     pub fn new(config: ServerConfig) -> Self {
+        Self::build(
+            config,
+            DurableStore::in_memory().expect("in-memory M6 store must initialize"),
+        )
+    }
+
+    pub fn with_store(config: ServerConfig, store: DurableStore) -> Result<Self, StoreError> {
+        store.recover_incomplete_runs()?;
+        Ok(Self::build(config, store))
+    }
+
+    fn build(config: ServerConfig, store: DurableStore) -> Self {
         assert!(config.max_in_flight > 0, "max_in_flight must be positive");
         assert!(
             config.max_in_flight <= u16::MAX as usize,
@@ -152,6 +149,7 @@ impl AppServer {
         Self {
             inner: Arc::new(Inner {
                 config,
+                store,
                 state: Mutex::new(State::default()),
             }),
         }
@@ -410,13 +408,29 @@ impl AppServer {
     }
 
     pub async fn events_for_run(&self, run_id: &str) -> Option<Vec<EventEnvelope>> {
-        self.inner
-            .state
-            .lock()
-            .await
-            .runs
-            .get(run_id)
-            .map(|run| run.events.clone())
+        self.inner.store.all_events(run_id, &local_actor().id).ok()
+    }
+
+    pub fn store(&self) -> &DurableStore {
+        &self.inner.store
+    }
+
+    pub fn create_approval(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        reason: &str,
+    ) -> Result<cool_state::ApprovalTicket, StoreError> {
+        self.inner.store.create_approval(
+            &local_actor().id,
+            session_id,
+            run_id,
+            call_id,
+            tool_name,
+            reason,
+        )
     }
 
     pub async fn prompt_executions(&self) -> u64 {
@@ -599,43 +613,39 @@ impl AppServer {
             Command::RunCancel(params) => {
                 let actor = local_actor();
                 let fingerprint = fingerprint(&params);
-                match self
-                    .existing_cancel(&actor.id, params.idempotency_key.as_str(), &fingerprint)
-                    .await
-                {
-                    Ok(Some(result)) => {
+                let reason = params.reason.as_deref().unwrap_or("client");
+                let existing = self.inner.store.lookup_idempotent::<RunCancelledResult>(
+                    &actor.id,
+                    "run.cancel",
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                );
+                match existing {
+                    Err(store) => {
+                        let _ = self.send(&outbound, failure(id, store_error(store))).await;
+                        return;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None)
+                        if !self
+                            .run_event_frame_fits(
+                                &params.run_id,
+                                CanonicalEvent::RunCancelled(RunTerminal {
+                                    reason: reason.to_owned(),
+                                    error_code: None,
+                                }),
+                            )
+                            .await =>
+                    {
                         let _ = self
                             .send(
                                 &outbound,
-                                success(id, ResponsePayload::RunCancelled(result)),
+                                failure(id, error(-32008, "outbound_frame_too_large", false)),
                             )
                             .await;
                         return;
                     }
                     Ok(None) => {}
-                    Err(error) => {
-                        let _ = self.send(&outbound, failure(id, error)).await;
-                        return;
-                    }
-                }
-                let reason = params.reason.as_deref().unwrap_or("client");
-                if !self
-                    .run_event_frame_fits(
-                        &params.run_id,
-                        CanonicalEvent::RunCancelled(RunTerminal {
-                            reason: reason.to_owned(),
-                            error_code: None,
-                        }),
-                    )
-                    .await
-                {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32008, "outbound_frame_too_large", false)),
-                        )
-                        .await;
-                    return;
                 }
                 let frame = match self
                     .cancel_run(
@@ -647,7 +657,16 @@ impl AppServer {
                     )
                     .await
                 {
-                    Ok(result) => success(id, ResponsePayload::RunCancelled(result)),
+                    Ok(acceptance) => {
+                        let frame =
+                            success(id, ResponsePayload::RunCancelled(acceptance.result.clone()));
+                        if self.send(&outbound, frame).await
+                            && let Some(event) = acceptance.event
+                        {
+                            let _ = self.send(&outbound, notification(event)).await;
+                        }
+                        return;
+                    }
                     Err(error) => failure(id, error),
                 };
                 let _ = self.send(&outbound, frame).await;
@@ -662,13 +681,44 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
-            Command::ApprovalResolve(_) => {
-                let _ = self
-                    .send(
-                        &outbound,
-                        failure(id, error(-32010, "m6_not_implemented", false)),
-                    )
-                    .await;
+            Command::ApprovalResolve(params) => {
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let resolved = self.inner.store.resolve_approval(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.approval_id,
+                    params.expected_revision,
+                    params.decision,
+                );
+                match resolved {
+                    Ok(resolution) => {
+                        if !matches!(resolution.outcome, cool_protocol::ApprovalOutcome::Approved) {
+                            let _ = self
+                                .signal_cancel(&resolution.run_id, "approval_denied")
+                                .await;
+                        }
+                        let response = ApprovalResolvedResult {
+                            approval_id: resolution.approval_id,
+                            revision: resolution.revision,
+                            outcome: resolution.outcome,
+                        };
+                        if self
+                            .send(
+                                &outbound,
+                                success(id, ResponsePayload::ApprovalResolved(response)),
+                            )
+                            .await
+                            && resolution.created
+                        {
+                            let _ = self.send(&outbound, notification(resolution.event)).await;
+                        }
+                    }
+                    Err(store) => {
+                        let _ = self.send(&outbound, failure(id, store_error(store))).await;
+                    }
+                }
             }
         }
     }
@@ -712,8 +762,7 @@ impl AppServer {
     }
 
     async fn run_event_frame_fits(&self, run_id: &str, event: CanonicalEvent) -> bool {
-        let state = self.inner.state.lock().await;
-        let Some(run) = state.runs.get(run_id) else {
+        let Ok(run) = self.inner.store.run(run_id, &local_actor().id) else {
             return true;
         };
         self.preview_event_frame_fits(&run.session_id, event)
@@ -736,48 +785,29 @@ impl AppServer {
         title: Option<String>,
         project_key: Option<String>,
     ) -> Result<String, ProtocolError> {
-        let mut state = self.inner.state.lock().await;
-        let idempotency = (actor_id.to_owned(), key.to_owned());
-        if let Some(existing) = state.session_keys.get(&idempotency) {
-            return if existing.fingerprint == fingerprint {
-                Ok(existing.result.clone())
-            } else {
-                Err(error(-32006, "idempotency_conflict", false))
-            };
-        }
-        let session_id = format!("session-{}", Uuid::new_v4());
-        state.sessions.insert(
-            session_id.clone(),
-            SessionRecord {
-                title,
-                project_key,
-                active_run_id: None,
-            },
-        );
-        state.session_keys.insert(
-            idempotency,
-            Idempotent {
-                fingerprint,
-                result: session_id.clone(),
-            },
-        );
-        Ok(session_id)
+        self.inner
+            .store
+            .create_session(
+                actor_id,
+                key,
+                &fingerprint,
+                title.as_deref(),
+                project_key.as_deref(),
+            )
+            .map(|outcome| outcome.value)
+            .map_err(store_error)
     }
 
     async fn load_session(&self, session_id: &str) -> Option<SessionLoadedResult> {
-        let state = self.inner.state.lock().await;
-        let session = state.sessions.get(session_id)?;
-        let last_seq = session
-            .active_run_id
-            .as_ref()
-            .and_then(|run_id| state.runs.get(run_id))
-            .and_then(|run| run.events.last())
-            .map(|event| event.seq);
-        let _metadata_is_owned_here = (&session.title, &session.project_key);
+        let session = self
+            .inner
+            .store
+            .load_session(session_id, &local_actor().id)
+            .ok()?;
         Some(SessionLoadedResult {
             session_id: session_id.to_owned(),
-            active_run_id: session.active_run_id.clone(),
-            last_seq,
+            active_run_id: session.active_run_id,
+            last_seq: session.last_seq,
         })
     }
 
@@ -788,52 +818,30 @@ impl AppServer {
         fingerprint: String,
         session_id: &str,
     ) -> Result<(String, watch::Receiver<Option<String>>, bool), ProtocolError> {
-        let mut state = self.inner.state.lock().await;
-        let idempotency = (actor_id.to_owned(), key.to_owned());
-        if let Some(existing) = state.prompt_keys.get(&idempotency) {
-            if existing.fingerprint != fingerprint {
-                return Err(error(-32006, "idempotency_conflict", false));
+        let outcome = self
+            .inner
+            .store
+            .start_run(actor_id, key, &fingerprint, session_id)
+            .map_err(store_error)?;
+        let run_id = outcome.value;
+        if !outcome.created {
+            let state = self.inner.state.lock().await;
+            if let Some(run) = state.runs.get(&run_id) {
+                return Ok((run_id, run.cancel.subscribe(), false));
             }
-            let run = state
-                .runs
-                .get(&existing.result)
-                .ok_or_else(|| error(-32603, "idempotency_state_corrupt", false))?;
-            return Ok((existing.result.clone(), run.cancel.subscribe(), false));
+            let (_sender, receiver) = watch::channel(Some("durable_replay".to_owned()));
+            return Ok((run_id, receiver, false));
         }
-        let session = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| error(-32004, "session_not_found", false))?;
-        if let Some(active_run_id) = &session.active_run_id
-            && state
-                .runs
-                .get(active_run_id)
-                .is_some_and(|run| !run.terminal)
-        {
-            return Err(error(-32007, "session_run_active", true));
-        }
-        let run_id = format!("run-{}", Uuid::new_v4());
         let (cancel, receiver) = watch::channel(None);
+        let mut state = self.inner.state.lock().await;
         state.runs.insert(
             run_id.clone(),
             RunRecord {
-                session_id: session_id.to_owned(),
-                events: Vec::new(),
                 cancel,
                 terminal: false,
             },
         );
-        state.prompt_keys.insert(
-            idempotency,
-            Idempotent {
-                fingerprint,
-                result: run_id.clone(),
-            },
-        );
         state.prompt_executions += 1;
-        if let Some(session) = state.sessions.get_mut(session_id) {
-            session.active_run_id = Some(run_id.clone());
-        }
         Ok((run_id, receiver, true))
     }
 
@@ -843,18 +851,10 @@ impl AppServer {
         key: &str,
         fingerprint: &str,
     ) -> Result<Option<String>, ProtocolError> {
-        let state = self.inner.state.lock().await;
-        let idempotency = (actor_id.to_owned(), key.to_owned());
-        let Some(existing) = state.prompt_keys.get(&idempotency) else {
-            return Ok(None);
-        };
-        if existing.fingerprint != fingerprint {
-            return Err(error(-32006, "idempotency_conflict", false));
-        }
-        if !state.runs.contains_key(&existing.result) {
-            return Err(error(-32603, "idempotency_state_corrupt", false));
-        }
-        Ok(Some(existing.result.clone()))
+        self.inner
+            .store
+            .lookup_idempotent(actor_id, "session.prompt", key, fingerprint)
+            .map_err(store_error)
     }
 
     fn spawn_ephemeral_run(
@@ -963,39 +963,38 @@ impl AppServer {
         event: CanonicalEvent,
         terminal: bool,
     ) -> Option<EventEnvelope> {
-        let mut state = self.inner.state.lock().await;
-        let (envelope, session_id) = {
-            let run = state.runs.get_mut(run_id)?;
-            if run.terminal {
-                return None;
+        let durable_run = self.inner.store.run(run_id, &local_actor().id).ok()?;
+        if durable_run.status.is_terminal() {
+            return None;
+        }
+        let actor = match &event {
+            CanonicalEvent::RunCancelled(terminal) if terminal.reason != "disconnect" => {
+                local_actor()
             }
-            let seq = run.events.len() as u64 + 1;
-            let envelope = EventEnvelope {
-                event_id: format!("event-{}", Uuid::new_v4()),
-                schema_version: V1Version::VALUE,
-                session_id: run.session_id.clone(),
-                run_id: run_id.to_owned(),
-                item_id: None,
-                seq,
-                occurred_at: rfc3339_now(),
-                actor: local_actor(),
-                source: "cool-app-server-m5".to_owned(),
-                causation_id: None,
-                correlation_id: None,
-                event,
-                extensions: BTreeMap::new(),
-            };
-            run.events.push(envelope.clone());
-            if terminal {
-                run.terminal = true;
-            }
-            (envelope, run.session_id.clone())
+            _ => runtime_actor(),
         };
-        if terminal
-            && let Some(session) = state.sessions.get_mut(&session_id)
-            && session.active_run_id.as_deref() == Some(run_id)
-        {
-            session.active_run_id = None;
+        let envelope = EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: durable_run.session_id.clone(),
+            run_id: run_id.to_owned(),
+            item_id: None,
+            seq: 0,
+            occurred_at: rfc3339_now(),
+            actor,
+            source: "cool-app-server-m6".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event,
+            extensions: BTreeMap::new(),
+        };
+        let envelope = self
+            .inner
+            .store
+            .append_event_auto(&local_actor().id, envelope)
+            .ok()?;
+        if let Some(run) = self.inner.state.lock().await.runs.get_mut(run_id) {
+            run.terminal = terminal;
         }
         Some(envelope)
     }
@@ -1021,55 +1020,26 @@ impl AppServer {
         fingerprint: String,
         run_id: &str,
         reason: &str,
-    ) -> Result<RunCancelledResult, ProtocolError> {
-        let mut state = self.inner.state.lock().await;
-        let idempotency = (actor_id.to_owned(), key.to_owned());
-        if let Some(result) = state.cancel_keys.get(&idempotency) {
-            return if result.fingerprint == fingerprint {
-                Ok(result.result.clone())
-            } else {
-                Err(error(-32006, "idempotency_conflict", false))
-            };
+    ) -> Result<CancelAcceptance, ProtocolError> {
+        let outcome = self
+            .inner
+            .store
+            .accept_cancel(
+                actor_id,
+                key,
+                &fingerprint,
+                run_id,
+                reason,
+                EventProvenance {
+                    actor: local_actor(),
+                    source: "cool-app-server-m6".to_owned(),
+                },
+            )
+            .map_err(store_error)?;
+        if outcome.created {
+            let _ = self.signal_cancel(run_id, reason).await;
         }
-        let run = state
-            .runs
-            .get(run_id)
-            .ok_or_else(|| error(-32005, "run_not_found", false))?;
-        if run.terminal
-            || run.cancel.borrow().is_some()
-            || run.cancel.send(Some(reason.to_owned())).is_err()
-        {
-            return Err(error(-32005, "run_not_active", false));
-        }
-        let result = RunCancelledResult {
-            run_id: run_id.to_owned(),
-            accepted: true,
-        };
-        state.cancel_keys.insert(
-            idempotency,
-            Idempotent {
-                fingerprint,
-                result: result.clone(),
-            },
-        );
-        Ok(result)
-    }
-
-    async fn existing_cancel(
-        &self,
-        actor_id: &str,
-        key: &str,
-        fingerprint: &str,
-    ) -> Result<Option<RunCancelledResult>, ProtocolError> {
-        let state = self.inner.state.lock().await;
-        let idempotency = (actor_id.to_owned(), key.to_owned());
-        let Some(existing) = state.cancel_keys.get(&idempotency) else {
-            return Ok(None);
-        };
-        if existing.fingerprint != fingerprint {
-            return Err(error(-32006, "idempotency_conflict", false));
-        }
-        Ok(Some(existing.result.clone()))
+        Ok(outcome)
     }
 
     async fn event_page(
@@ -1082,18 +1052,11 @@ impl AppServer {
         if limit == 0 || limit > self.inner.config.event_page_limit {
             return Err(error(-32602, "invalid_event_page_limit", false));
         }
-        let state = self.inner.state.lock().await;
-        let run = state
-            .runs
-            .get(run_id)
-            .ok_or_else(|| error(-32005, "run_not_found", false))?;
-        let after = after_seq.unwrap_or(0);
-        let eligible = run
-            .events
-            .iter()
-            .filter(|event| event.seq > after)
-            .cloned()
-            .collect::<Vec<_>>();
+        let eligible = self
+            .inner
+            .store
+            .events(run_id, &local_actor().id, after_seq, usize::from(limit) + 1)
+            .map_err(store_error)?;
         let mut events = Vec::new();
         for event in eligible.iter().take(limit as usize) {
             let mut candidate = events.clone();
@@ -1168,6 +1131,13 @@ fn local_actor() -> ActorRef {
     }
 }
 
+fn runtime_actor() -> ActorRef {
+    ActorRef {
+        id: "cool-app-server".to_owned(),
+        kind: ActorKind::System,
+    }
+}
+
 fn preview_event_envelope(session_id: &str, event: CanonicalEvent) -> EventEnvelope {
     EventEnvelope {
         event_id: "event-00000000-0000-0000-0000-000000000000".to_owned(),
@@ -1177,8 +1147,8 @@ fn preview_event_envelope(session_id: &str, event: CanonicalEvent) -> EventEnvel
         item_id: None,
         seq: 1,
         occurred_at: "2000-01-01T00:00:00.000Z".to_owned(),
-        actor: local_actor(),
-        source: "cool-app-server-m5".to_owned(),
+        actor: runtime_actor(),
+        source: "cool-app-server-m6".to_owned(),
         causation_id: None,
         correlation_id: None,
         event,
@@ -1232,6 +1202,26 @@ fn error(rpc_code: i32, cool_code: &str, retryable: bool) -> ProtocolError {
         message: cool_code.replace('_', " "),
         retryable,
         safe_details: BTreeMap::new(),
+    }
+}
+
+fn store_error(value: StoreError) -> ProtocolError {
+    match value {
+        StoreError::IdempotencyConflict => error(-32006, "idempotency_conflict", false),
+        StoreError::NotFound("session") => error(-32004, "session_not_found", false),
+        StoreError::NotFound("run") => error(-32005, "run_not_found", false),
+        StoreError::NotFound("approval") => error(-32011, "approval_not_found", false),
+        StoreError::ActorMismatch => error(-32004, "resource_not_found", false),
+        StoreError::RevisionConflict => error(-32012, "approval_revision_conflict", true),
+        StoreError::AlreadyResolved => error(-32013, "approval_already_resolved", false),
+        StoreError::RunNotActive => error(-32005, "run_not_active", false),
+        StoreError::InvalidTransition { .. } => error(-32007, "session_run_active", true),
+        StoreError::BudgetExceeded(_) => error(-32014, "budget_exceeded", false),
+        StoreError::NotFound(_) => error(-32004, "resource_not_found", false),
+        StoreError::Sqlite(_)
+        | StoreError::Json(_)
+        | StoreError::Io(_)
+        | StoreError::Corrupt(_) => error(-32603, "durable_state_error", true),
     }
 }
 
@@ -1394,9 +1384,11 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for StdioIo<R, W> {
 
 pub fn capabilities() -> BTreeSet<String> {
     [
-        "ephemeral_sessions",
+        "approval_resolution",
+        "durable_sessions",
         "event_catch_up",
         "local_socket",
+        "recovery",
         "run_cancellation",
         "stdio",
     ]

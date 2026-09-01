@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 cool-app-server = { path = "../cool-app-server" }
+cool-state = { path = "../cool-state" }
 serde_json.workspace = true
 tokio.workspace = true
 

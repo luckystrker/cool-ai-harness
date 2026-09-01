@@ -7,13 +7,14 @@ fn cool() -> Command {
 }
 
 #[test]
-fn doctor_reports_the_m5_runtime_boundary() {
+fn doctor_reports_the_m6_runtime_boundary() {
     let output = cool().arg("doctor").output().expect("run cool doctor");
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(report["status"], "ok");
-    assert_eq!(report["phase"], "M5");
-    assert_eq!(report["durableState"], false);
+    assert_eq!(report["phase"], "M6");
+    assert_eq!(report["durableState"], true);
+    assert_eq!(report["securityKernel"], true);
     assert_eq!(report["agentLoop"], false);
     assert!(report["capabilities"].as_array().unwrap().len() >= 5);
 }
@@ -24,7 +25,7 @@ fn later_phase_routes_fail_closed_with_structured_errors() {
         let output = cool().arg(route).output().expect("run routed command");
         assert_eq!(output.status.code(), Some(2));
         let error: Value = serde_json::from_slice(&output.stderr).expect("structured CLI error");
-        assert_eq!(error["coolCode"], "m5_route_not_implemented");
+        assert_eq!(error["coolCode"], "m7_route_not_implemented");
         assert_eq!(error["retryable"], false);
     }
 }

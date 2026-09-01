@@ -540,6 +540,7 @@ fn generated_typescript() -> String {
         SessionLoadedResult,
         PromptAcceptedResult,
         RunCancelledResult,
+        ApprovalResolvedResult,
         ResponsePayload,
         RpcSuccess,
         RpcFailure,

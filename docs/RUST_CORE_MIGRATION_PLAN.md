@@ -1,6 +1,6 @@
 # Cool — план миграции на Rust core
 
-> Статус: active; M0-M3 complete, M4 implementation passed / real-client acceptance pending
+> Статус: active; M0-M3 и M5-M6 complete, M4 implementation passed / real-client acceptance pending
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions
@@ -48,7 +48,7 @@
 | 3 | M3 — Standard plugin contract | M1 | [x] complete | [checkpoint](migration/checkpoints/M3.md) |
 | 4 | M4 — ACP adapter поверх Python runtime | M1 | [~] implementation passed; client acceptance pending | [`M4 checkpoint`](migration/checkpoints/M4.md) |
 | 5 | M5 — App Server и CLI skeleton | M0, M1 | [x] complete | [`M5.md`](migration/checkpoints/M5.md) |
-| 6 | M6 — Durable state и security kernel | M5 | [ ] pending | — |
+| 6 | M6 — Durable state и security kernel | M5 | [x] complete | [`M6.md`](migration/checkpoints/M6.md) |
 | 7 | M7 — Agent loop и trusted tool runtime | M6 | [ ] pending | — |
 | 8 | M8 — MCP, plugins, hooks и workers | M3, M6, M7 | [ ] pending | — |
 | 9 | M9 — Rust CLI/TUI и ACP cutover | M4, M7, M8 | [ ] pending | — |

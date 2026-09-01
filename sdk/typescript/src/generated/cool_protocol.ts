@@ -126,7 +126,9 @@ export type PromptAcceptedResult = { runId: string, };
 
 export type RunCancelledResult = { runId: string, accepted: boolean, };
 
-export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "event_page", "value": EventPage };
+export type ApprovalResolvedResult = { approvalId: string, revision: number, outcome: ApprovalOutcome, };
+
+export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "approval_resolved", "value": ApprovalResolvedResult } | { "kind": "event_page", "value": EventPage };
 
 export type RpcSuccess = { jsonrpc: JsonRpcV2, id: RpcId, result: ResponsePayload, };
 
