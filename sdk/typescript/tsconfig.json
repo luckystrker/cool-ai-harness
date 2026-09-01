@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "types": ["node"],
+    "typeRoots": ["../../frontend/node_modules/@types"]
+  },
+  "include": ["sample-client.ts", "src/generated/**/*.ts"]
+}

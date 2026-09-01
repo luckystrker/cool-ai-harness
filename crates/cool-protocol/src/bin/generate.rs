@@ -17,12 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let schema_path = repository.join("schemas/cool-protocol-v1.schema.json");
     let typescript_path = repository.join("frontend/src/api/generated/cool_protocol.ts");
+    let sdk_typescript_path = repository.join("sdk/typescript/src/generated/cool_protocol.ts");
     let golden_path = repository.join("crates/cool-protocol/tests/golden");
 
     let schema = serde_json::to_string_pretty(&schema_for!(ProtocolSchemaDocument))? + "\n";
     let typescript = generated_typescript();
     update_artifact(&schema_path, &schema, check)?;
     update_artifact(&typescript_path, &typescript, check)?;
+    update_artifact(&sdk_typescript_path, &typescript, check)?;
     update_goldens(&golden_path, check)?;
     Ok(())
 }
@@ -527,6 +529,22 @@ fn generated_typescript() -> String {
         StreamFrame,
         StreamKeepalive,
         StreamEnd,
+        JsonRpcV2,
+        CoolCommandMethod,
+        RunEventMethod,
+        RpcId,
+        RpcRequest,
+        TransportLimits,
+        InitializeResult,
+        SessionCreatedResult,
+        SessionLoadedResult,
+        PromptAcceptedResult,
+        RunCancelledResult,
+        ResponsePayload,
+        RpcSuccess,
+        RpcFailure,
+        RpcNotification,
+        ServerFrame,
     );
     output.truncate(output.trim_end_matches('\n').len());
     output.push('\n');

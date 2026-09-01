@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use cool_protocol::{
-    ClientState, CommandEnvelope, ContentPart, EventEnvelope, GoldenTrace, StreamFrame,
+    ClientState, CommandEnvelope, ContentPart, CoolCommandMethod, EventEnvelope, GoldenTrace,
+    JsonRpcV2, RunEventMethod, StreamFrame,
 };
 use serde_json::json;
 
@@ -112,6 +113,13 @@ fn replay_rejects_events_for_a_different_plan() {
 
 #[test]
 fn v1_wire_types_reject_client_identity_wrong_versions_and_unknown_fields() {
+    assert!(serde_json::from_value::<JsonRpcV2>(json!("2.0")).is_ok());
+    assert!(serde_json::from_value::<JsonRpcV2>(json!("1.0")).is_err());
+    assert!(serde_json::from_value::<CoolCommandMethod>(json!("cool.command")).is_ok());
+    assert!(serde_json::from_value::<CoolCommandMethod>(json!("other")).is_err());
+    assert!(serde_json::from_value::<RunEventMethod>(json!("run.event")).is_ok());
+    assert!(serde_json::from_value::<RunEventMethod>(json!("other")).is_err());
+
     let valid_read = json!({
         "protocolVersion": 1,
         "commandId": "command-1",

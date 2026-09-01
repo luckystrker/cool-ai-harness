@@ -47,7 +47,7 @@
 | 2 | M2 — Единая поставка текущего приложения | M0 | [x] complete | [checkpoint](migration/checkpoints/M2.md) |
 | 3 | M3 — Standard plugin contract | M1 | [x] complete | [checkpoint](migration/checkpoints/M3.md) |
 | 4 | M4 — ACP adapter поверх Python runtime | M1 | [~] implementation passed; client acceptance pending | [`M4 checkpoint`](migration/checkpoints/M4.md) |
-| 5 | M5 — App Server и CLI skeleton | M0, M1 | [ ] pending | — |
+| 5 | M5 — App Server и CLI skeleton | M0, M1 | [x] complete | [`M5.md`](migration/checkpoints/M5.md) |
 | 6 | M6 — Durable state и security kernel | M5 | [ ] pending | — |
 | 7 | M7 — Agent loop и trusted tool runtime | M6 | [ ] pending | — |
 | 8 | M8 — MCP, plugins, hooks и workers | M3, M6, M7 | [ ] pending | — |

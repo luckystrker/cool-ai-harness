@@ -1,6 +1,7 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
@@ -9,6 +10,55 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub type Extensions = BTreeMap<String, Value>;
+
+macro_rules! fixed_wire_string {
+    ($name:ident, $value:literal, $typescript:literal) => {
+        #[derive(Clone, Copy, Debug, PartialEq, TS)]
+        #[ts(type = $typescript)]
+        pub struct $name;
+
+        impl $name {
+            pub const VALUE: Self = Self;
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str($value)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let actual = String::deserialize(deserializer)?;
+                if actual == $value {
+                    Ok(Self)
+                } else {
+                    Err(serde::de::Error::custom(concat!("expected literal ", $value)))
+                }
+            }
+        }
+
+        impl JsonSchema for $name {
+            fn schema_name() -> Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                json_schema!({"type": "string", "const": $value})
+            }
+        }
+    };
+}
+
+fixed_wire_string!(JsonRpcV2, "2.0", "\"2.0\"");
+fixed_wire_string!(CoolCommandMethod, "cool.command", "\"cool.command\"");
+fixed_wire_string!(RunEventMethod, "run.event", "\"run.event\"");
 
 #[derive(Clone, Copy, Debug, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -46,6 +96,10 @@ impl IdempotencyKey {
         } else {
             Ok(Self(value))
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -894,6 +948,133 @@ pub enum StreamFrame {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum RpcId {
+    String(#[schemars(length(max = 128))] String),
+    Integer(#[ts(type = "number")] i64),
+    Null,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RpcRequest {
+    pub jsonrpc: JsonRpcV2,
+    pub id: RpcId,
+    pub method: CoolCommandMethod,
+    pub params: CommandEnvelope,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct TransportLimits {
+    pub max_frame_bytes: u32,
+    pub max_rpc_id_bytes: u16,
+    pub max_in_flight: u16,
+    pub outbound_queue: u16,
+    pub event_page_limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct InitializeResult {
+    #[ts(type = "1")]
+    pub protocol_version: V1Version,
+    pub server_name: String,
+    pub server_version: String,
+    pub capabilities: BTreeSet<String>,
+    pub limits: TransportLimits,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionCreatedResult {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionLoadedResult {
+    pub session_id: String,
+    pub active_run_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub last_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PromptAcceptedResult {
+    pub run_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RunCancelledResult {
+    pub run_id: String,
+    pub accepted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[ts(export)]
+pub enum ResponsePayload {
+    Initialized(InitializeResult),
+    SessionCreated(SessionCreatedResult),
+    SessionLoaded(SessionLoadedResult),
+    PromptAccepted(PromptAcceptedResult),
+    RunCancelled(RunCancelledResult),
+    EventPage(EventPage),
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RpcSuccess {
+    pub jsonrpc: JsonRpcV2,
+    pub id: RpcId,
+    pub result: ResponsePayload,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RpcFailure {
+    pub jsonrpc: JsonRpcV2,
+    pub id: RpcId,
+    pub error: ProtocolError,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RpcNotification {
+    pub jsonrpc: JsonRpcV2,
+    pub method: RunEventMethod,
+    pub params: StreamFrame,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum ServerFrame {
+    Success(RpcSuccess),
+    Failure(RpcFailure),
+    Notification(RpcNotification),
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
 pub struct StreamKeepalive {
@@ -914,6 +1095,8 @@ pub struct StreamEnd {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolSchemaDocument {
     pub command: CommandEnvelope,
+    pub rpc_request: RpcRequest,
+    pub server_frame: ServerFrame,
     pub event: EventEnvelope,
     pub event_page: EventPage,
     pub error: ProtocolError,

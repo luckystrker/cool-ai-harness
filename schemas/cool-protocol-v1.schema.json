@@ -18,6 +18,12 @@
     "goldenTrace": {
       "$ref": "#/$defs/GoldenTrace"
     },
+    "rpcRequest": {
+      "$ref": "#/$defs/RpcRequest"
+    },
+    "serverFrame": {
+      "$ref": "#/$defs/ServerFrame"
+    },
     "streamFrame": {
       "$ref": "#/$defs/StreamFrame"
     }
@@ -25,6 +31,8 @@
   "additionalProperties": false,
   "required": [
     "command",
+    "rpcRequest",
+    "serverFrame",
     "event",
     "eventPage",
     "error",
@@ -1163,6 +1171,10 @@
         }
       ]
     },
+    "CoolCommandMethod": {
+      "type": "string",
+      "const": "cool.command"
+    },
     "EventCursor": {
       "type": "object",
       "properties": {
@@ -1340,6 +1352,38 @@
         "supportedProtocolVersions"
       ]
     },
+    "InitializeResult": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "limits": {
+          "$ref": "#/$defs/TransportLimits"
+        },
+        "protocolVersion": {
+          "$ref": "#/$defs/V1Version"
+        },
+        "serverName": {
+          "type": "string"
+        },
+        "serverVersion": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "serverName",
+        "serverVersion",
+        "capabilities",
+        "limits"
+      ]
+    },
     "ItemEvent": {
       "type": "object",
       "properties": {
@@ -1364,6 +1408,10 @@
         }
       },
       "additionalProperties": false
+    },
+    "JsonRpcV2": {
+      "type": "string",
+      "const": "2.0"
     },
     "PlanCreated": {
       "type": "object",
@@ -1461,6 +1509,18 @@
         "position",
         "title",
         "status"
+      ]
+    },
+    "PromptAcceptedResult": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId"
       ]
     },
     "ProtocolError": {
@@ -1609,6 +1669,211 @@
         "sourceCount"
       ]
     },
+    "ResponsePayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "initialized"
+            },
+            "value": {
+              "$ref": "#/$defs/InitializeResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_created"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionCreatedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_loaded"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionLoadedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prompt_accepted"
+            },
+            "value": {
+              "$ref": "#/$defs/PromptAcceptedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run_cancelled"
+            },
+            "value": {
+              "$ref": "#/$defs/RunCancelledResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "event_page"
+            },
+            "value": {
+              "$ref": "#/$defs/EventPage"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "RpcFailure": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ProtocolError"
+        },
+        "id": {
+          "$ref": "#/$defs/RpcId"
+        },
+        "jsonrpc": {
+          "$ref": "#/$defs/JsonRpcV2"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ]
+    },
+    "RpcId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 128
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RpcNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/$defs/JsonRpcV2"
+        },
+        "method": {
+          "$ref": "#/$defs/RunEventMethod"
+        },
+        "params": {
+          "$ref": "#/$defs/StreamFrame"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ]
+    },
+    "RpcRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RpcId"
+        },
+        "jsonrpc": {
+          "$ref": "#/$defs/JsonRpcV2"
+        },
+        "method": {
+          "$ref": "#/$defs/CoolCommandMethod"
+        },
+        "params": {
+          "$ref": "#/$defs/CommandEnvelope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "RpcSuccess": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/RpcId"
+        },
+        "jsonrpc": {
+          "$ref": "#/$defs/JsonRpcV2"
+        },
+        "result": {
+          "$ref": "#/$defs/ResponsePayload"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ]
+    },
     "RunCancelParams": {
       "type": "object",
       "properties": {
@@ -1630,6 +1895,26 @@
         "idempotencyKey",
         "runId"
       ]
+    },
+    "RunCancelledResult": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "accepted"
+      ]
+    },
+    "RunEventMethod": {
+      "type": "string",
+      "const": "run.event"
     },
     "RunEventsParams": {
       "type": "object",
@@ -1694,6 +1979,19 @@
         "reason"
       ]
     },
+    "ServerFrame": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RpcSuccess"
+        },
+        {
+          "$ref": "#/$defs/RpcFailure"
+        },
+        {
+          "$ref": "#/$defs/RpcNotification"
+        }
+      ]
+    },
     "SessionCompacted": {
       "type": "object",
       "properties": {
@@ -1738,6 +2036,18 @@
         "idempotencyKey"
       ]
     },
+    "SessionCreatedResult": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId"
+      ]
+    },
     "SessionEvent": {
       "type": "object",
       "properties": {
@@ -1759,6 +2069,32 @@
     "SessionLoadParams": {
       "type": "object",
       "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId"
+      ]
+    },
+    "SessionLoadedResult": {
+      "type": "object",
+      "properties": {
+        "activeRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSeq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "sessionId": {
           "type": "string"
         }
@@ -2119,6 +2455,48 @@
       "required": [
         "callId",
         "name"
+      ]
+    },
+    "TransportLimits": {
+      "type": "object",
+      "properties": {
+        "eventPageLimit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "maxFrameBytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxInFlight": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "maxRpcIdBytes": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "outboundQueue": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "maxFrameBytes",
+        "maxRpcIdBytes",
+        "maxInFlight",
+        "outboundQueue",
+        "eventPageLimit"
       ]
     },
     "UsageUpdated": {

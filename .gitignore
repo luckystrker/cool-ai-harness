@@ -77,6 +77,7 @@ logs/
 
 # --- Node / Frontend ---
 node_modules/
+sdk/typescript/dist/
 frontend/dist/
 frontend/.vite/
 frontend/.protocol-test-dist/

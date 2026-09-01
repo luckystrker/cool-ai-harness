@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-protocol:
-    name: Rust protocol (${{ matrix.os }})
+  rust-workspace:
+    name: Rust workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,16 +28,61 @@ jobs:
         run: cargo +1.98.0 fmt --all -- --check
 
       - name: Clippy
-        run: cargo +1.98.0 clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo +1.98.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo +1.98.0 test --workspace --all-features
+        run: cargo +1.98.0 test --locked --workspace --all-features
 
       - name: Build
-        run: cargo +1.98.0 build --workspace --all-targets
+        run: cargo +1.98.0 build --locked --workspace --all-targets
+
+      - name: Release build
+        run: cargo +1.98.0 build --locked --workspace --release --all-targets
 
       - name: Generated schema, TypeScript and golden traces are current
-        run: cargo +1.98.0 run -p cool-protocol --bin generate -- --check
+        run: cargo +1.98.0 run --locked -p cool-protocol --bin generate -- --check
+
+      - name: Set up Node.js for generated SDK sample
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install TypeScript toolchain
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type-check and run TypeScript App Server sample
+        shell: bash
+        run: |
+          ./frontend/node_modules/.bin/tsc -p sdk/typescript/tsconfig.json
+          node sdk/typescript/dist/sample-client.js
+
+      - name: Upload Unix release binary
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cool-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/cool
+
+      - name: Upload Windows release binary
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cool-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/cool.exe
+
+  rust-security:
+    name: Rust dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit licenses, advisories, sources and bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
   rust-m0-spike:
     name: Rust M0 spike (${{ matrix.os }})
@@ -59,13 +104,13 @@ jobs:
         run: cargo +1.98.0 fmt --all -- --check
 
       - name: Clippy
-        run: cargo +1.98.0 clippy --all-targets --all-features -- -D warnings
+        run: cargo +1.98.0 clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo +1.98.0 test --all-features
+        run: cargo +1.98.0 test --locked --all-features
 
       - name: Build
-        run: cargo +1.98.0 build --all-targets
+        run: cargo +1.98.0 build --locked --all-targets
 
   backend:
     name: Backend (ruff + mypy + pytest + evals)
