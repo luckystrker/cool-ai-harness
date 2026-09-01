@@ -115,7 +115,7 @@ def registry_entry_to_config(
         # Strip common prefixes.
         for prefix in ("servers-", "mcp-server-", "mcp-"):
             if local_name.startswith(prefix):
-                local_name = local_name[len(prefix):]
+                local_name = local_name[len(prefix) :]
                 break
         # Sanitize.
         local_name = local_name.lower().replace(" ", "-").replace("_", "-")

@@ -1,18 +1,10 @@
 ---
 name: deep-research
 description: Conduct thorough multi-source research on a topic, synthesizing findings into a comprehensive report
-version: "1.0"
-tags:
-  - research
-  - investigation
-  - analysis
-  - report
-  - deep-dive
-tools:
-  - web_search
-  - web_fetch
-  - read_file
-  - write_file
+metadata:
+  cool.version: "1.0"
+  cool.tags: "research investigation analysis report deep-dive"
+allowed-tools: "web_search web_fetch read_file write_file"
 ---
 
 # Deep Research

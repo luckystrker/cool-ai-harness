@@ -1,16 +1,10 @@
 ---
 name: translate
 description: Translate text between languages while preserving meaning, tone, and formatting
-version: "1.0"
-tags:
-  - translate
-  - translation
-  - language
-  - localization
-  - multilingual
-tools:
-  - read_file
-  - write_file
+metadata:
+  cool.version: "1.0"
+  cool.tags: "translate translation language localization multilingual"
+allowed-tools: "read_file write_file"
 ---
 
 # Translate

@@ -26,7 +26,7 @@ from app.tools.base import ToolArgs, ToolResult, get_registry, register_tool
 log = get_logger(__name__)
 
 # Track which MCP tools we've registered so we can clean them up.
-_registered_mcp_tools: set[str] = set()
+_registered_mcp_tools: dict[str, str] = {}
 
 # JSON Schema type -> Python type mapping for dynamic model fields.
 _TYPE_MAP: dict[str, type] = {
@@ -122,6 +122,14 @@ def register_mcp_tools(tools: list[MCPToolInfo] | None = None) -> int:
     count = 0
     for tool_info in tools:
         qualified_name = tool_info.qualified_name
+        if qualified_name in get_registry() or qualified_name in _registered_mcp_tools:
+            log.error(
+                "mcp.tool_name_collision",
+                name=qualified_name,
+                server=tool_info.server_name,
+                tool=tool_info.name,
+            )
+            continue
         args_model = _build_args_model(tool_info)
         func = _make_tool_func(tool_info)
         capabilities = _resolve_capabilities(tool_info)
@@ -138,7 +146,7 @@ def register_mcp_tools(tools: list[MCPToolInfo] | None = None) -> int:
             dangerous=is_dangerous,
             capabilities=capabilities,
         )
-        _registered_mcp_tools.add(qualified_name)
+        _registered_mcp_tools[qualified_name] = tool_info.server_name
         count += 1
 
     if count:
@@ -155,13 +163,13 @@ def unregister_mcp_tools(server_name: str | None = None) -> int:
     tool_registry = get_registry()
     to_remove: list[str] = []
 
-    for name in _registered_mcp_tools:
-        if server_name is None or name.startswith(f"mcp_{server_name}_"):
+    for name, registered_server in _registered_mcp_tools.items():
+        if server_name is None or registered_server == server_name:
             to_remove.append(name)
 
     for name in to_remove:
         tool_registry.pop(name, None)
-        _registered_mcp_tools.discard(name)
+        _registered_mcp_tools.pop(name, None)
 
     if to_remove:
         log.info("mcp.tools_unregistered", count=len(to_remove), server=server_name or "all")

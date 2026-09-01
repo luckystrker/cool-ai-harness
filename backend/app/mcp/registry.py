@@ -57,9 +57,7 @@ class MCPRegistry:
                 try:
                     loop = asyncio.get_running_loop()
                     task = loop.create_task(old_client.disconnect())
-                    task.add_done_callback(
-                        lambda t: t.exception() if not t.cancelled() else None
-                    )
+                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
                 except RuntimeError:
                     pass  # No running loop; client will be GC'd.
             log.info("mcp.server_replacing_connected", name=config.name)

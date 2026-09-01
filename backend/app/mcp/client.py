@@ -92,14 +92,17 @@ class MCPClient:
             await self._connect_http()
 
         # Perform the initialize handshake.
-        result = await self._request("initialize", {
-            "protocolVersion": _PROTOCOL_VERSION,
-            "capabilities": _CLIENT_CAPABILITIES,
-            "clientInfo": {
-                "name": "cool-ai-harness",
-                "version": "0.1.0",
+        result = await self._request(
+            "initialize",
+            {
+                "protocolVersion": _PROTOCOL_VERSION,
+                "capabilities": _CLIENT_CAPABILITIES,
+                "clientInfo": {
+                    "name": "cool-ai-harness",
+                    "version": "0.1.0",
+                },
             },
-        })
+        )
         self._server_info = result
         self._connected = True
 
@@ -152,21 +155,26 @@ class MCPClient:
         result = await self._request("tools/list", {})
         tools: list[MCPToolInfo] = []
         for item in result.get("tools", []):
-            tools.append(MCPToolInfo(
-                name=item.get("name", ""),
-                description=item.get("description", ""),
-                input_schema=item.get("inputSchema", {}),
-                server_name=self.config.name,
-            ))
+            tools.append(
+                MCPToolInfo(
+                    name=item.get("name", ""),
+                    description=item.get("description", ""),
+                    input_schema=item.get("inputSchema", {}),
+                    server_name=self.config.name,
+                )
+            )
         log.info("mcp.tools_listed", server=self.config.name, count=len(tools))
         return tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Invoke a tool on the MCP server and return the result content."""
-        result = await self._request("tools/call", {
-            "name": tool_name,
-            "arguments": arguments or {},
-        })
+        result = await self._request(
+            "tools/call",
+            {
+                "name": tool_name,
+                "arguments": arguments or {},
+            },
+        )
         # MCP tool results have a "content" array with typed content blocks.
         content = result.get("content", [])
         is_error = result.get("isError", False)
@@ -210,6 +218,7 @@ class MCPClient:
                     cwd.mkdir(parents=True, exist_ok=True)
         # Strip secret-looking env vars if sandbox_strip_env is enabled.
         from app.core.config import get_settings
+
         settings = get_settings()
         if settings.sandbox_strip_env:
             env = _strip_secrets_from_env(env)
@@ -227,9 +236,7 @@ class MCPClient:
                 cwd=self.config.cwd or None,
             )
         except (OSError, FileNotFoundError) as exc:
-            raise MCPClientError(
-                f"Failed to spawn MCP server '{self.config.name}': {exc}"
-            ) from exc
+            raise MCPClientError(f"Failed to spawn MCP server '{self.config.name}': {exc}") from exc
 
         # Start background reader for stdout.
         self._reader_task = asyncio.create_task(self._stdio_reader())
@@ -264,10 +271,12 @@ class MCPClient:
             future = self._pending.pop(msg_id)
             if not future.done():
                 if "error" in msg:
-                    future.set_exception(MCPClientError(
-                        f"RPC error {msg['error'].get('code', '?')}: "
-                        f"{msg['error'].get('message', 'unknown')}"
-                    ))
+                    future.set_exception(
+                        MCPClientError(
+                            f"RPC error {msg['error'].get('code', '?')}: "
+                            f"{msg['error'].get('message', 'unknown')}"
+                        )
+                    )
                 else:
                     future.set_result(msg.get("result", {}))
 
@@ -286,11 +295,25 @@ class MCPClient:
         """Initialize the HTTP client for the MCP server."""
         if not self.config.url:
             raise MCPClientError(f"Server '{self.config.name}': no URL configured for HTTP")
+        client_generated = {
+            "accept",
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "content-type",
+            "host",
+            "user-agent",
+        }
+        plugin_headers = {
+            name: value
+            for name, value in self.config.headers.items()
+            if name.lower() not in client_generated
+        }
         self._http_client = httpx.AsyncClient(
             base_url=self.config.url,
             headers={
+                **plugin_headers,
                 "Content-Type": "application/json",
-                **self.config.headers,
             },
             timeout=httpx.Timeout(self.config.timeout_s),
         )
@@ -371,7 +394,4 @@ class MCPClient:
 def _strip_secrets_from_env(env: dict[str, str]) -> dict[str, str]:
     """Remove environment variables that look like secrets."""
     secret_patterns = ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL")
-    return {
-        k: v for k, v in env.items()
-        if not any(pat in k.upper() for pat in secret_patterns)
-    }
+    return {k: v for k, v in env.items() if not any(pat in k.upper() for pat in secret_patterns)}

@@ -1,19 +1,10 @@
 ---
 name: skill-creation
 description: Create new skills based on user requests - generates properly formatted SKILL.md files with metadata and instructions
-version: "1.0"
-tags:
-  - skill
-  - create
-  - generate
-  - new
-  - author
-  - build
-tools:
-  - create_skill
-  - list_skills
-  - read_file
-  - write_file
+metadata:
+  cool.version: "1.0"
+  cool.tags: "skill create generate new author build"
+allowed-tools: "create_skill list_skills read_file write_file"
 ---
 
 # Skill Creation

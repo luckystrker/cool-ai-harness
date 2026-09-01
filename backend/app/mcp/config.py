@@ -38,9 +38,11 @@ _ENV_RE = re.compile(r"\$\{([^}]+)\}")
 
 def _interpolate_env(value: str) -> str:
     """Replace ${VAR} placeholders with environment variable values."""
+
     def _replace(m: re.Match[str]) -> str:
         var_name = m.group(1)
         return os.environ.get(var_name, "")
+
     return _ENV_RE.sub(_replace, value)
 
 
@@ -169,11 +171,13 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     try:
         import yaml
+
         return yaml.safe_load(text) or {}
     except ImportError:
         pass
     # Fallback: try JSON (config.yaml might actually be JSON).
     import json
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -184,8 +188,10 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     """Write data to a YAML file."""
     try:
         import yaml
+
         text = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
     except ImportError:
         import json
+
         text = json.dumps(data, indent=2, ensure_ascii=False)
     path.write_text(text, encoding="utf-8")

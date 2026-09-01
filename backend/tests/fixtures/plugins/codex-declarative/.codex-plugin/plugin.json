@@ -1,0 +1,6 @@
+{
+  "name": "fixture.codex",
+  "version": "1.0.0",
+  "description": "Representative Codex declarative plugin fixture",
+  "skills": "./skills"
+}

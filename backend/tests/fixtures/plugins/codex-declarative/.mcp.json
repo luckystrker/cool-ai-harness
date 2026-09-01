@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "fixture": {
+      "command": "fixture-server"
+    }
+  }
+}

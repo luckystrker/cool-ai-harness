@@ -6,6 +6,8 @@ Configuration is loaded from ``config.yaml`` and/or managed via the API/UI.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -53,7 +55,11 @@ class MCPToolInfo:
     @property
     def qualified_name(self) -> str:
         """Globally unique tool name: ``mcp_{server}_{tool}``."""
-        return f"mcp_{self.server_name}_{self.name}"
+        raw = f"mcp_{self.server_name}_{self.name}"
+        if len(raw) <= 64 and re.fullmatch(r"[A-Za-z0-9_-]+", raw):
+            return raw
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+        return f"mcpx_{digest}"
 
 
 @dataclass
@@ -69,7 +75,9 @@ class MCPServerConfig:
     transport: MCPTransport = MCPTransport.STDIO
     # --- stdio transport ---
     command: str = ""  # e.g. "npx", "python", "node"
-    args: list[str] = field(default_factory=list)  # e.g. ["-y", "@modelcontextprotocol/server-filesystem"]
+    args: list[str] = field(
+        default_factory=list
+    )  # e.g. ["-y", "@modelcontextprotocol/server-filesystem"]
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for the subprocess
     cwd: str = ""  # explicit subprocess working directory
     # Canonical plugin activation roots. Internal-only: native config.yaml must

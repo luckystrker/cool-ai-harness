@@ -39,6 +39,24 @@ from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.db import init_db
 from app.core.logging import configure_logging, get_logger
+from app.mcp.models import MCPServerConfig
+
+
+def _merge_mcp_configs(
+    native: list[MCPServerConfig], plugins: list[MCPServerConfig]
+) -> tuple[list[MCPServerConfig], list[str]]:
+    """Merge without allowing a plugin server to replace an existing server."""
+
+    merged = list(native)
+    names = {config.name for config in native}
+    collisions: list[str] = []
+    for config in plugins:
+        if config.name in names:
+            collisions.append(config.name)
+            continue
+        names.add(config.name)
+        merged.append(config)
+    return merged, collisions
 
 
 @asynccontextmanager
@@ -73,6 +91,16 @@ async def lifespan(app: FastAPI):
     from app.mcp import get_mcp_registry, load_mcp_configs, register_mcp_tools
 
     mcp_configs = load_mcp_configs()
+    from app.plugins import PluginStore, PluginStoreError
+
+    try:
+        mcp_configs, collisions = _merge_mcp_configs(
+            mcp_configs, PluginStore().enabled_mcp_configs()
+        )
+        for name in collisions:
+            log.error("app.plugin_mcp_collision", name=name)
+    except PluginStoreError as exc:
+        log.error("app.plugin_store_invalid", error=str(exc))
     if mcp_configs:
         mcp_registry = get_mcp_registry()
         mcp_registry.load_configs(mcp_configs)

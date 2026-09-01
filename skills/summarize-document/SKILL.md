@@ -1,19 +1,10 @@
 ---
 name: summarize-document
 description: Summarize documents, articles, or long text into concise structured summaries
-version: "1.0"
-tags:
-  - summarize
-  - summary
-  - document
-  - article
-  - condense
-  - digest
-  - tldr
-tools:
-  - read_file
-  - web_fetch
-  - write_file
+metadata:
+  cool.version: "1.0"
+  cool.tags: "summarize summary document article condense digest tldr"
+allowed-tools: "read_file web_fetch write_file"
 ---
 
 # Summarize Document

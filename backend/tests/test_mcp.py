@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.mcp.client import MCPClient
 from app.mcp.models import (
     MCPServerConfig,
     MCPServerState,
@@ -29,6 +31,17 @@ class TestMCPModels:
     def test_tool_info_qualified_name(self):
         tool = MCPToolInfo(name="read_file", server_name="filesystem")
         assert tool.qualified_name == "mcp_filesystem_read_file"
+
+    def test_tool_info_encodes_provider_unsafe_or_long_names(self):
+        tool = MCPToolInfo(name="read.tool/with unicode Ж", server_name="fixture.plugin")
+        other = MCPToolInfo(name="read_tool_with unicode Ж", server_name="fixture.plugin")
+
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool.qualified_name)
+        assert (
+            tool.qualified_name
+            == MCPToolInfo(name=tool.name, server_name=tool.server_name).qualified_name
+        )
+        assert tool.qualified_name != other.qualified_name
 
     def test_server_config_roundtrip(self):
         config = MCPServerConfig(
@@ -122,7 +135,9 @@ class TestMCPRegistry:
 
     @pytest.mark.asyncio
     async def test_connect_server_error_sets_status(self):
-        config = MCPServerConfig(name="bad", transport=MCPTransport.STDIO, command="nonexistent_cmd_xyz")
+        config = MCPServerConfig(
+            name="bad", transport=MCPTransport.STDIO, command="nonexistent_cmd_xyz"
+        )
         self.registry.add_server(config)
         state = await self.registry.connect_server("bad")
         assert state.status == MCPServerStatus.ERROR
@@ -133,6 +148,32 @@ class TestMCPRegistry:
 
     def test_get_tool_not_found(self):
         assert self.registry.get_tool("mcp_x_y") is None
+
+
+@pytest.mark.asyncio
+async def test_http_client_generated_headers_override_plugin_case_insensitively():
+    client = MCPClient(
+        MCPServerConfig(
+            name="headers",
+            transport=MCPTransport.HTTP,
+            url="https://example.test/mcp",
+            headers={
+                "content-type": "text/plain",
+                "user-agent": "malicious",
+                "X-Plugin": "yes",
+            },
+        )
+    )
+
+    await client._connect_http()
+    try:
+        assert client._http_client is not None
+        assert client._http_client.headers["Content-Type"] == "application/json"
+        assert client._http_client.headers["X-Plugin"] == "yes"
+        assert client._http_client.headers["User-Agent"] != "malicious"
+        assert len(client._http_client.headers.get_list("Content-Type")) == 1
+    finally:
+        await client.disconnect()
 
 
 # --- Tool Bridge ---
@@ -174,10 +215,22 @@ class TestToolBridge:
         assert state is not None
         state.status = MCPServerStatus.CONNECTED
         state.tools = [
-            MCPToolInfo(name="read_file", description="Read a file", server_name="fs",
-                        input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
-            MCPToolInfo(name="list_dir", description="List directory", server_name="fs",
-                        input_schema={"type": "object", "properties": {}}),
+            MCPToolInfo(
+                name="read_file",
+                description="Read a file",
+                server_name="fs",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            ),
+            MCPToolInfo(
+                name="list_dir",
+                description="List directory",
+                server_name="fs",
+                input_schema={"type": "object", "properties": {}},
+            ),
         ]
 
         count = register_mcp_tools()
@@ -196,6 +249,20 @@ class TestToolBridge:
         removed = unregister_mcp_tools("fs")
         assert removed == 2
         assert get_tool("mcp_fs_read_file") is None
+
+    def test_register_provider_safe_name_for_plugin_style_identifiers(self):
+        registry = get_mcp_registry()
+        config = MCPServerConfig(name="fixture.plugin", capabilities=["read"])
+        registry.add_server(config)
+        state = registry.get_server(config.name)
+        assert state is not None
+        state.status = MCPServerStatus.CONNECTED
+        info = MCPToolInfo(name="read.tool", server_name=config.name)
+        state.tools = [info]
+
+        assert register_mcp_tools() == 1
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", info.qualified_name)
+        assert get_tool(info.qualified_name) is not None
 
 
 # --- Config ---
@@ -304,13 +371,16 @@ class TestMCPAPI:
         assert data["servers"] == []
 
     def test_add_server(self, client: TestClient):
-        resp = client.post("/api/mcp/servers", json={
-            "name": "test-fs",
-            "transport": "stdio",
-            "command": "echo",
-            "args": ["hello"],
-            "description": "Test filesystem",
-        })
+        resp = client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "test-fs",
+                "transport": "stdio",
+                "command": "echo",
+                "args": ["hello"],
+                "description": "Test filesystem",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["name"] == "test-fs"
@@ -329,7 +399,9 @@ class TestMCPAPI:
 
     def test_update_server(self, client: TestClient):
         client.post("/api/mcp/servers", json={"name": "upd-srv", "command": "echo"})
-        resp = client.patch("/api/mcp/servers/upd-srv", json={"enabled": False, "description": "updated"})
+        resp = client.patch(
+            "/api/mcp/servers/upd-srv", json={"enabled": False, "description": "updated"}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is False

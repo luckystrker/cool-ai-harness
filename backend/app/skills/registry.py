@@ -3,10 +3,10 @@
 Skills are loaded from three sources (in priority order):
 1. **builtin** — shipped with the repository under ``skills/`` (repo root).
 2. **user** — user-created skills under ``data/skills/`` (gitignored).
-3. **plugin** — skills provided by installed plugins (future, Фаза 2 §2).
+3. **plugin** — skills provided by enabled, integrity-checked plugins.
 
-Later sources override earlier ones by name (user > builtin), allowing users
-to customize or replace built-in skills without editing the repo.
+User skills override builtins. Plugins cannot shadow an existing skill; a
+collision is diagnosed and the already-loaded skill wins.
 """
 
 from __future__ import annotations
@@ -67,10 +67,8 @@ class SkillRegistry:
         if user_dir.is_dir():
             self._load_from_dir(user_dir, source="user", target=skills)
 
-        # 3. Plugin skills (future — Фаза 2 §2 plugin lifecycle).
-        # plugin_dir = Path(settings.data_dir) / "plugins" / "skills"
-        # if plugin_dir.is_dir():
-        #     self._load_from_dir(plugin_dir, source="plugin", target=skills)
+        # 3. Enabled plugin skills. Integrity failures are isolated per bundle.
+        self._load_plugin_skills(Path(settings.data_dir) / "plugins", target=skills)
 
         self._skills = skills
         self._loaded = True
@@ -94,9 +92,7 @@ class SkillRegistry:
             target[skill.name] = skill
             log.debug("skills.loaded_one", name=skill.name, source="builtin", path=str(skill.path))
 
-    def _load_from_dir(
-        self, base_dir: Path, *, source: str, target: dict[str, Skill]
-    ) -> None:
+    def _load_from_dir(self, base_dir: Path, *, source: str, target: dict[str, Skill]) -> None:
         """Load all skill subdirectories from a base directory."""
         for entry in sorted(base_dir.iterdir()):
             if not entry.is_dir():
@@ -107,6 +103,49 @@ class SkillRegistry:
             if skill is not None:
                 target[skill.name] = skill
                 log.debug("skills.loaded_one", name=skill.name, source=source, path=str(entry))
+
+    @staticmethod
+    def _load_plugin_skills(base_dir: Path, *, target: dict[str, Skill]) -> None:
+        from app.plugins.models import PluginDiagnostic
+        from app.plugins.store import PluginStore, PluginStoreError
+
+        try:
+            bundles = PluginStore(base_dir).load_enabled()
+        except PluginStoreError as exc:
+            log.error("skills.plugin_store_invalid", error=str(exc))
+            return
+        for bundle in bundles:
+            for diagnostic in bundle.diagnostics:
+                log.warning(
+                    "skills.plugin_diagnostic",
+                    code=diagnostic.code,
+                    path=diagnostic.path,
+                    message=diagnostic.message,
+                )
+            if bundle.manifest is None:
+                continue
+            for skill in bundle.skills:
+                if skill.name in target:
+                    diagnostic = PluginDiagnostic(
+                        code="registry.skill_collision",
+                        message=f"plugin skill does not replace existing skill: {skill.name}",
+                        level="error",
+                        status="unsafe",
+                        path=str(skill.path),
+                    )
+                    bundle.diagnostics.append(diagnostic)
+                    log.error(
+                        "skills.plugin_collision",
+                        plugin=bundle.manifest.name,
+                        name=skill.name,
+                        path=str(skill.path),
+                    )
+                    continue
+                skill.source = "plugin"
+                target[skill.name] = skill
+                log.debug(
+                    "skills.loaded_one", name=skill.name, source="plugin", path=str(skill.path)
+                )
 
     # --- Access ---
 

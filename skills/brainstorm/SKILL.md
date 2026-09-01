@@ -1,18 +1,10 @@
 ---
 name: brainstorm
 description: Generate creative ideas, explore possibilities, and structure thinking around a problem or opportunity
-version: "1.0"
-tags:
-  - brainstorm
-  - ideas
-  - creative
-  - explore
-  - possibilities
-  - innovation
-  - thinking
-tools:
-  - web_search
-  - write_file
+metadata:
+  cool.version: "1.0"
+  cool.tags: "brainstorm ideas creative explore possibilities innovation thinking"
+allowed-tools: "web_search write_file"
 ---
 
 # Brainstorm

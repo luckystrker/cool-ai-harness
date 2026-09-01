@@ -1,0 +1,9 @@
+{
+  "name": "fixture.claude",
+  "version": "1.0.0",
+  "description": "Representative Claude Code declarative plugin fixture",
+  "skills": "./skills",
+  "agents": "./agents",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

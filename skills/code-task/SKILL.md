@@ -1,36 +1,10 @@
 ---
 name: code-task
 description: Execute a structured coding task with best practices - read, plan, implement, test, commit
-version: "2.0"
-tags:
-  - code
-  - programming
-  - implementation
-  - development
-  - software
-  - engineering
-  - git
-  - github
-tools:
-  - read_file
-  - write_file
-  - list_files
-  - python_execute
-  - bash_execute
-  - web_search
-  - git_status
-  - git_diff
-  - git_log
-  - git_blame
-  - git_branch
-  - git_commit
-  - git_push
-  - git_clone
-  - github_pr_diff
-  - github_pr_review
-  - github_issue_list
-  - github_issue_create
-  - github_actions_status
+metadata:
+  cool.version: "2.0"
+  cool.tags: "code programming implementation development software engineering git github"
+allowed-tools: "read_file write_file list_files python_execute bash_execute web_search git_status git_diff git_log git_blame git_branch git_commit git_push git_clone github_pr_diff github_pr_review github_issue_list github_issue_create github_actions_status"
 ---
 
 # Code Task

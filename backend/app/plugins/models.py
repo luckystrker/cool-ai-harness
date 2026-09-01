@@ -91,6 +91,8 @@ class PluginBundle:
 
     @property
     def conformant(self) -> bool:
+        if self.provenance.source_type in {"codex", "claude"}:
+            return False
         portable_violation_codes = {"manifest.unknown_field", "manifest.extensions_ignored"}
         return self.manifest is not None and not any(
             item.code in portable_violation_codes
@@ -125,6 +127,10 @@ class PluginBundle:
 
     def doctor_dict(self) -> dict[str, Any]:
         report = self.to_dict()
+        report["compatibility"] = {
+            status: sum(item.status == status for item in self.diagnostics)
+            for status in ("supported", "transformed", "ignored", "unsafe")
+        }
         report["components"] = {
             "skills": [
                 {
