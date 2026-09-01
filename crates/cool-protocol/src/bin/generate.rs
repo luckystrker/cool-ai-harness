@@ -92,6 +92,9 @@ fn trace(name: &str, events: Vec<EventEnvelope>) -> GoldenTrace {
             expected_state
                 .workers
                 .insert("worker-1".to_owned(), "running".to_owned());
+            expected_state
+                .plugins
+                .insert("demo".to_owned(), "enabled".to_owned());
         }
         "error" => {
             expected_state.run_status = Some("failed".to_owned());
@@ -394,21 +397,26 @@ fn golden_traces() -> Vec<GoldenTrace> {
             vec![
                 event(
                     1,
+                    "plugin.status",
+                    json!({"pluginId": "demo", "status": "enabled", "code": null}),
+                ),
+                event(
+                    2,
                     "worker.started",
                     json!({"workerId": "worker-1", "attempt": 1, "code": null}),
                 ),
                 event(
-                    2,
+                    3,
                     "worker.failed",
                     json!({"workerId": "worker-1", "attempt": 1, "code": "process_exit"}),
                 ),
                 event(
-                    3,
+                    4,
                     "worker.restarted",
                     json!({"workerId": "worker-1", "attempt": 2, "code": null}),
                 ),
                 event(
-                    4,
+                    5,
                     "run.completed",
                     json!({"reason": "recovered", "errorCode": null}),
                 ),
@@ -519,6 +527,7 @@ fn generated_typescript() -> String {
         SubagentEvent,
         SubagentProgress,
         WorkerEvent,
+        PluginStatusEvent,
         ResearchStage,
         ResearchStarted,
         ResearchSource,

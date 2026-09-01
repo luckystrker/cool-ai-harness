@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use cool_agent::{AgentRuntime, ModelEvent, ScriptedDriver, Usage, builtin_registry};
-use cool_app_server::{AppServer, ServerConfig};
+use cool_app_server::{AppServer, RunLifecycle, ServerConfig};
 use cool_protocol::{ActorKind, CanonicalEvent, ResponsePayload, RpcId, ServerFrame, StreamFrame};
 use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
@@ -191,6 +192,63 @@ async fn stdio_shape_streams_the_rust_agent_event_history() {
 
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
+}
+
+struct PluginLifecycle(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl RunLifecycle for PluginLifecycle {
+    async fn on_event(
+        &self,
+        event: &str,
+        _payload: serde_json::Value,
+        _policy: &CapabilityPolicy,
+    ) -> Vec<CanonicalEvent> {
+        self.0.lock().unwrap().push(event.to_owned());
+        if matches!(event, "Stop" | "Interrupt" | "SessionEnd") {
+            return Vec::new();
+        }
+        vec![CanonicalEvent::PluginStatus(
+            cool_protocol::PluginStatusEvent {
+                plugin_id: "demo".to_owned(),
+                status: event.to_owned(),
+                code: None,
+            },
+        )]
+    }
+}
+
+#[tokio::test]
+async fn configured_extension_lifecycle_emits_durable_plugin_status() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let server = AppServer::new(ServerConfig::default())
+        .with_run_lifecycle(Arc::new(PluginLifecycle(calls.clone())));
+    let (mut client, task) = connection(server);
+    initialize(&mut client, 1).await;
+    let session_id = create_session(&mut client, 2, "lifecycle-session").await;
+    let _ = prompt(&mut client, 3, &session_id, "lifecycle-prompt").await;
+    let first = client.notification().await;
+    assert!(matches!(first.event, CanonicalEvent::RunStarted(_)));
+    let mut remaining = Vec::new();
+    for _ in 0..6 {
+        remaining.push(client.notification().await);
+    }
+    let terminal_index = remaining
+        .iter()
+        .position(|event| matches!(event.event, CanonicalEvent::RunCompleted(_)))
+        .unwrap();
+    assert_eq!(terminal_index, remaining.len() - 1);
+    assert!(
+        remaining[..terminal_index]
+            .iter()
+            .any(|event| matches!(event.event, CanonicalEvent::PluginStatus(_)))
+    );
+    drop(client);
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"]
+    );
 }
 
 #[tokio::test]

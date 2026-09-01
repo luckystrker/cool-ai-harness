@@ -15,6 +15,7 @@ export function initialCanonicalState(): ClientState {
     artifacts: [],
     subagents: {},
     workers: {},
+    plugins: {},
     budgetStatus: null,
     researchStatus: null,
     lastSeq: null,
@@ -145,6 +146,9 @@ export function replayCanonicalEvents(events: EventEnvelope[]): ClientState {
         break;
       case "worker.failed":
         state.workers[canonical.payload.workerId] = "failed";
+        break;
+      case "plugin.status":
+        state.plugins[canonical.payload.pluginId] = canonical.payload.status;
         break;
       case "research.started":
       case "research.stage":

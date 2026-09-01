@@ -19,7 +19,10 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
-use crate::context::{Message, MessageRole, ToolCall, compact_history, load_project_instructions};
+use crate::context::{
+    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
+    load_project_instructions,
+};
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 
@@ -124,6 +127,9 @@ impl From<StoreError> for RuntimeError {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError>;
+    async fn before_compaction(&self, _history: &[Message]) -> Result<(), RuntimeError> {
+        Ok(())
+    }
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
         Ok(Vec::new())
     }
@@ -289,6 +295,9 @@ impl AgentRuntime {
             let mut usage_observed = false;
             if let Some(reason) = cancel.reason() {
                 return finish_cancelled(sink, history, reason).await;
+            }
+            if estimate_history_tokens(&history) > request.limits.context_tokens {
+                sink.before_compaction(&history).await?;
             }
             let compacted = compact_history(&history, request.limits.context_tokens);
             if compacted.dropped_messages > 0 {

@@ -7,16 +7,18 @@ fn cool() -> Command {
 }
 
 #[test]
-fn doctor_reports_the_m7_runtime_boundary() {
+fn doctor_reports_the_m8_runtime_boundary() {
     let output = cool().arg("doctor").output().expect("run cool doctor");
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(report["status"], "ok");
-    assert_eq!(report["phase"], "M7");
+    assert_eq!(report["phase"], "M8");
     assert_eq!(report["durableState"], true);
     assert_eq!(report["securityKernel"], true);
     assert_eq!(report["agentLoop"], true);
     assert_eq!(report["trustedTools"], true);
+    assert_eq!(report["plugins"], true);
+    assert_eq!(report["hooks"], true);
     assert!(report["capabilities"].as_array().unwrap().len() >= 5);
 }
 

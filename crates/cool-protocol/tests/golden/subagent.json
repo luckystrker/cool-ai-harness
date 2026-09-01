@@ -94,6 +94,7 @@
       "sub-1": "completed"
     },
     "workers": {},
+    "plugins": {},
     "budgetStatus": null,
     "researchStatus": null,
     "lastSeq": 3

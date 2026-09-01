@@ -189,6 +189,12 @@ impl ToolRegistry {
             .map(|tool| tool.definition.clone())
             .collect()
     }
+
+    pub fn extend(&self, tools: impl IntoIterator<Item = Tool>) -> Result<Self, ToolError> {
+        let mut combined = self.tools.values().cloned().collect::<Vec<_>>();
+        combined.extend(tools);
+        Self::new(combined)
+    }
 }
 
 pub fn builtin_registry() -> ToolRegistry {

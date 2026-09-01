@@ -750,6 +750,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "plugin.status"
+            },
+            "payload": {
+              "$ref": "#/$defs/PluginStatusEvent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "research.stage"
             },
             "payload": {
@@ -947,6 +964,13 @@
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "plugins": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
         },
         "reasoning": {
           "type": "string"
@@ -1530,6 +1554,28 @@
         "planId",
         "position",
         "title",
+        "status"
+      ]
+    },
+    "PluginStatusEvent": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
         "status"
       ]
     },

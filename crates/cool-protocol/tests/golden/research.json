@@ -159,6 +159,7 @@
     "artifacts": [],
     "subagents": {},
     "workers": {},
+    "plugins": {},
     "budgetStatus": null,
     "researchStatus": "completed",
     "lastSeq": 6

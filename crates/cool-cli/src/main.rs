@@ -1,14 +1,20 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, MessageRole,
     ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink, ToolContext,
     builtin_registry,
 };
-use cool_app_server::{AppServer, ServerConfig, capabilities};
-use cool_protocol::ApprovalOutcome;
+use cool_app_server::{AppServer, RunLifecycle, ServerConfig, capabilities};
+use cool_extensions::{
+    CompatibilityAdapter, ExtensionRuntime, McpToolPolicy, PluginLoader, PluginStore,
+    WorkerLaunchSpec, discover_plugin_tools_with_policy,
+};
+use cool_protocol::{ApprovalOutcome, CanonicalEvent};
 use cool_security::{CapabilityPolicy, Decision, NetworkPolicy, Workspace};
 use cool_state::DurableStore;
 use serde_json::json;
@@ -72,8 +78,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                     .map_err(|error| runtime("workspace_failed", &error.to_string()))?,
             )
             .map_err(|error| runtime("workspace_failed", &error.to_string()))?;
-            let agent = AgentRuntime::new(provider, builtin_registry());
-            let server = AppServer::with_agent_runtime(
+            let (registry, extensions) = extension_registry(&data_dir).await;
+            let agent = AgentRuntime::new(provider, registry);
+            let mut server = AppServer::with_agent_runtime(
                 config,
                 store,
                 agent,
@@ -82,6 +89,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 model,
             )
             .map_err(|error| runtime("durable_recovery_failed", &error.to_string()))?;
+            if let Some(extensions) = extensions {
+                server = server.with_run_lifecycle(Arc::new(CliExtensions(extensions)));
+            }
             match transport.as_str() {
                 "stdio" => server
                     .serve_stdio()
@@ -102,20 +112,25 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "status": "ok",
-                    "phase": "M7",
-                    "runtime": "rust-agent-tool-runtime",
+                    "phase": "M8",
+                    "runtime": "rust-extension-runtime",
                     "protocolVersion": 1,
                     "capabilities": capabilities(),
                     "durableState": true,
                     "securityKernel": true,
                     "agentLoop": true,
                     "trustedTools": true,
-                    "baselineProvider": "openai-compatible"
+                    "baselineProvider": "openai-compatible",
+                    "plugins": true,
+                    "mcp": ["stdio", "streamable-http"],
+                    "hooks": true,
+                    "compatibilityWorkers": ["codex", "claude"]
                 }))
                 .expect("doctor JSON serializes")
             );
             Ok(())
         }
+        "plugin" => plugin_command(args.collect()),
         "run" => run_prompt(args.collect()).await,
         "serve" => Err((
             2,
@@ -134,6 +149,147 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
             Ok(())
         }
         _ => Err(usage("unknown command")),
+    }
+}
+
+fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
+    if arguments.len() != 2 || arguments[0] != "doctor" {
+        return Err(usage("plugin command is: plugin doctor <path>"));
+    }
+    let root = PathBuf::from(&arguments[1]);
+    let data = root
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".plugin-data");
+    let bundle = PluginLoader
+        .load(&root, &data)
+        .map_err(|error| runtime("plugin_load_failed", &error.to_string()))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "name": bundle.manifest.as_ref().map(|value| &value.name),
+            "loadable": bundle.loadable(),
+            "conformant": bundle.conformant(),
+            "contentHash": bundle.content_hash,
+            "skills": bundle.skills,
+            "mcpServers": bundle.mcp_servers,
+            "hooks": bundle.hooks,
+            "diagnostics": bundle.diagnostics,
+        }))
+        .expect("plugin doctor JSON serializes")
+    );
+    Ok(())
+}
+
+async fn extension_registry(
+    data_dir: &std::path::Path,
+) -> (cool_agent::ToolRegistry, Option<ExtensionRuntime>) {
+    let mut registry = builtin_registry();
+    let Ok(store) = PluginStore::open(data_dir.join("plugins")) else {
+        return (registry, None);
+    };
+    let runtime = ExtensionRuntime::from_store(&store).ok();
+    if let Some(runtime) = &runtime {
+        start_configured_worker(runtime, CompatibilityAdapter::Codex, "COOL_CODEX_WORKER").await;
+        start_configured_worker(runtime, CompatibilityAdapter::Claude, "COOL_CLAUDE_WORKER").await;
+    }
+    let policy_path = data_dir.join("plugins").join("mcp-tool-policy.json");
+    let tool_policy = if policy_path.exists() {
+        match std::fs::read(&policy_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<McpToolPolicy>(&bytes).ok())
+        {
+            Some(policy) => policy,
+            None => {
+                if let Some(runtime) = &runtime {
+                    runtime
+                        .report_plugin_status(
+                            "core/mcp-policy",
+                            "failed",
+                            Some("invalid mcp-tool-policy.json".to_owned()),
+                        )
+                        .await;
+                }
+                McpToolPolicy::deny_all()
+            }
+        }
+    } else {
+        McpToolPolicy::default()
+    };
+    let Ok(entries) = store.load_enabled_isolated() else {
+        return (registry, runtime);
+    };
+    for bundle in entries.into_iter().flatten() {
+        let Some(manifest) = bundle.manifest else {
+            continue;
+        };
+        for server in bundle.mcp_servers {
+            match discover_plugin_tools_with_policy(&manifest.name, server, &tool_policy).await {
+                Ok(tools) => match registry.extend(tools) {
+                    Ok(extended) => registry = extended,
+                    Err(error) => {
+                        if let Some(runtime) = &runtime {
+                            runtime
+                                .report_plugin_status(
+                                    &manifest.name,
+                                    "degraded",
+                                    Some(format!("tool_registry: {error}")),
+                                )
+                                .await;
+                        }
+                    }
+                },
+                Err(error) => {
+                    if let Some(runtime) = &runtime {
+                        runtime
+                            .report_plugin_status(
+                                &manifest.name,
+                                "degraded",
+                                Some(format!("mcp_discovery: {error}")),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+    (registry, runtime)
+}
+
+async fn start_configured_worker(
+    runtime: &ExtensionRuntime,
+    adapter: CompatibilityAdapter,
+    variable: &str,
+) {
+    let Some(program) = env::var_os(variable).map(PathBuf::from) else {
+        return;
+    };
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let _ = runtime
+        .start_worker(
+            adapter,
+            WorkerLaunchSpec {
+                program,
+                args: Vec::new(),
+                cwd,
+                environment: BTreeMap::new(),
+                allowed_secret_environment: BTreeSet::new(),
+            },
+        )
+        .await;
+}
+
+struct CliExtensions(ExtensionRuntime);
+
+#[async_trait]
+impl RunLifecycle for CliExtensions {
+    async fn on_event(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+        policy: &CapabilityPolicy,
+    ) -> Vec<CanonicalEvent> {
+        self.0.lifecycle_event(event, payload, policy).await
     }
 }
 
@@ -273,6 +429,6 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run [--scripted] <prompt>\n  doctor"
+        "Cool Rust CLI\n\nCommands:\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run [--scripted] <prompt>\n  plugin doctor <path>\n  doctor"
     );
 }

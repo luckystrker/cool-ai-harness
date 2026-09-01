@@ -4,6 +4,7 @@ members = [
     "crates/cool-app-server",
     "crates/cool-cli",
     "crates/cool-core",
+    "crates/cool-extensions",
     "crates/cool-protocol",
     "crates/cool-security",
     "crates/cool-state",

@@ -17,10 +17,10 @@
       "causationId": null,
       "correlationId": null,
       "event": {
-        "kind": "worker.started",
+        "kind": "plugin.status",
         "payload": {
-          "workerId": "worker-1",
-          "attempt": 1,
+          "pluginId": "demo",
+          "status": "enabled",
           "code": null
         }
       }
@@ -41,11 +41,11 @@
       "causationId": null,
       "correlationId": null,
       "event": {
-        "kind": "worker.failed",
+        "kind": "worker.started",
         "payload": {
           "workerId": "worker-1",
           "attempt": 1,
-          "code": "process_exit"
+          "code": null
         }
       }
     },
@@ -65,11 +65,11 @@
       "causationId": null,
       "correlationId": null,
       "event": {
-        "kind": "worker.restarted",
+        "kind": "worker.failed",
         "payload": {
           "workerId": "worker-1",
-          "attempt": 2,
-          "code": null
+          "attempt": 1,
+          "code": "process_exit"
         }
       }
     },
@@ -81,6 +81,30 @@
       "itemId": null,
       "seq": 4,
       "occurredAt": "2026-08-31T00:00:04Z",
+      "actor": {
+        "id": "local-user",
+        "kind": "local_user"
+      },
+      "source": "golden",
+      "causationId": null,
+      "correlationId": null,
+      "event": {
+        "kind": "worker.restarted",
+        "payload": {
+          "workerId": "worker-1",
+          "attempt": 2,
+          "code": null
+        }
+      }
+    },
+    {
+      "eventId": "event-5",
+      "schemaVersion": 1,
+      "sessionId": "session-1",
+      "runId": "run-1",
+      "itemId": null,
+      "seq": 5,
+      "occurredAt": "2026-08-31T00:00:05Z",
       "actor": {
         "id": "local-user",
         "kind": "local_user"
@@ -113,8 +137,11 @@
     "workers": {
       "worker-1": "running"
     },
+    "plugins": {
+      "demo": "enabled"
+    },
     "budgetStatus": null,
     "researchStatus": null,
-    "lastSeq": 4
+    "lastSeq": 5
   }
 }

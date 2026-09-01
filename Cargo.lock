@@ -189,8 +189,10 @@ dependencies = [
 name = "cool-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cool-agent",
  "cool-app-server",
+ "cool-extensions",
  "cool-protocol",
  "cool-security",
  "cool-state",
@@ -207,6 +209,24 @@ dependencies = [
  "cool-state",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "cool-extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cool-agent",
+ "cool-protocol",
+ "cool-security",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]

@@ -401,6 +401,8 @@ pub enum CanonicalEvent {
     WorkerFailed(WorkerEvent),
     #[serde(rename = "worker.restarted")]
     WorkerRestarted(WorkerEvent),
+    #[serde(rename = "plugin.status")]
+    PluginStatus(PluginStatusEvent),
     #[serde(rename = "research.stage")]
     ResearchStage(ResearchStage),
     #[serde(rename = "research.started")]
@@ -639,6 +641,15 @@ pub struct WorkerEvent {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct PluginStatusEvent {
+    pub plugin_id: String,
+    pub status: String,
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct ResearchStage {
     pub stage: String,
     pub message: Option<String>,
@@ -705,6 +716,8 @@ pub struct ClientState {
     pub subagents: BTreeMap<String, String>,
     #[serde(default)]
     pub workers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub plugins: BTreeMap<String, String>,
     pub budget_status: Option<String>,
     pub research_status: Option<String>,
     #[ts(type = "number | null")]
@@ -887,6 +900,10 @@ impl ClientState {
             CanonicalEvent::WorkerRestarted(payload) => {
                 self.workers
                     .insert(payload.worker_id.clone(), "running".to_owned());
+            }
+            CanonicalEvent::PluginStatus(payload) => {
+                self.plugins
+                    .insert(payload.plugin_id.clone(), payload.status.clone());
             }
             CanonicalEvent::ResearchStarted(_) | CanonicalEvent::ResearchStage(_) => {
                 self.research_status = Some("running".to_owned());

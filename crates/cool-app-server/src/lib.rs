@@ -76,6 +76,17 @@ struct Inner {
     policy: CapabilityPolicy,
     default_model: String,
     approval_waiters: Mutex<HashMap<String, watch::Sender<Option<cool_protocol::ApprovalOutcome>>>>,
+    lifecycle: Option<Arc<dyn RunLifecycle>>,
+}
+
+#[async_trait]
+pub trait RunLifecycle: Send + Sync {
+    async fn on_event(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+        policy: &CapabilityPolicy,
+    ) -> Vec<CanonicalEvent>;
 }
 
 #[derive(Default)]
@@ -213,8 +224,16 @@ impl AppServer {
                 policy,
                 default_model,
                 approval_waiters: Mutex::new(HashMap::new()),
+                lifecycle: None,
             }),
         }
+    }
+
+    pub fn with_run_lifecycle(mut self, lifecycle: Arc<dyn RunLifecycle>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("run lifecycle must be configured before the server is cloned")
+            .lifecycle = Some(lifecycle);
+        self
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -943,6 +962,7 @@ impl AppServer {
                 session_id: run.session_id,
                 outbound: outbound.clone(),
             };
+            let masked_prompt = mask_secrets(&content);
             let request = AgentRequest {
                 model: model.unwrap_or_else(|| server.inner.default_model.clone()),
                 history: Vec::<Message>::new(),
@@ -957,12 +977,27 @@ impl AppServer {
                     server.inner.policy.clone(),
                 ),
             };
+            let lifecycle_sink =
+                server
+                    .inner
+                    .lifecycle
+                    .as_ref()
+                    .map(|lifecycle| LifecycleEventSink {
+                        inner: sink.clone(),
+                        lifecycle: lifecycle.clone(),
+                        policy: server.inner.policy.clone(),
+                        prompt: masked_prompt,
+                    });
+            let event_sink: &dyn EventSink = lifecycle_sink
+                .as_ref()
+                .map(|value| value as &dyn EventSink)
+                .unwrap_or(&sink);
             let result = server
                 .inner
                 .runtime
                 .run(
                     request,
-                    &sink,
+                    event_sink,
                     &approvals,
                     CancelSignal::from_receiver(cancel),
                 )
@@ -1170,10 +1205,166 @@ impl AppServer {
     }
 }
 
+#[derive(Clone)]
 struct AppServerEventSink {
     server: AppServer,
     run_id: String,
     outbound: Outbound,
+}
+
+struct LifecycleEventSink {
+    inner: AppServerEventSink,
+    lifecycle: Arc<dyn RunLifecycle>,
+    policy: CapabilityPolicy,
+    prompt: String,
+}
+
+#[async_trait]
+impl EventSink for LifecycleEventSink {
+    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        let payload = lifecycle_payload(&event);
+        match &event {
+            CanonicalEvent::RunStarted(_) => {
+                let envelope = self.inner.emit(event).await?;
+                self.dispatch("SessionStart", payload.clone()).await;
+                self.dispatch(
+                    "UserPromptSubmit",
+                    serde_json::json!({"content": self.prompt}),
+                )
+                .await;
+                Ok(envelope)
+            }
+            CanonicalEvent::ToolStarted(_) => {
+                self.dispatch("PreToolUse", payload).await;
+                self.inner.emit(event).await
+            }
+            CanonicalEvent::ToolApprovalRequired(_) => {
+                self.dispatch("PermissionRequest", payload).await;
+                self.inner.emit(event).await
+            }
+            CanonicalEvent::SessionCompacted(_) => {
+                let envelope = self.inner.emit(event).await?;
+                self.dispatch("PostCompact", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentStarted(_) => {
+                self.dispatch("SubagentStart", payload).await;
+                self.inner.emit(event).await
+            }
+            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
+                let envelope = self.inner.emit(event).await?;
+                self.dispatch("PostToolUse", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
+                let envelope = self.inner.emit(event).await?;
+                self.dispatch("SubagentStop", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::RunCompleted(_)
+            | CanonicalEvent::RunFailed(_)
+            | CanonicalEvent::RunCancelled(_) => {
+                if self.terminal_already_recorded() {
+                    return self.inner.emit(event).await;
+                }
+                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
+                let envelope = self.inner.emit(event).await?;
+                let hook = if cancelled { "Interrupt" } else { "Stop" };
+                self.dispatch(hook, payload.clone()).await;
+                self.dispatch("SessionEnd", payload).await;
+                Ok(envelope)
+            }
+            _ => self.inner.emit(event).await,
+        }
+    }
+
+    async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
+        self.inner.load_history().await
+    }
+
+    async fn before_compaction(&self, history: &[Message]) -> Result<(), RuntimeError> {
+        self.dispatch(
+            "PreCompact",
+            serde_json::json!({"historyItems": history.len()}),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
+        self.inner.reserve_usage(usage).await
+    }
+}
+
+impl LifecycleEventSink {
+    async fn dispatch(&self, event: &str, payload: serde_json::Value) {
+        let events = self.lifecycle.on_event(event, payload, &self.policy).await;
+        for lifecycle_event in events {
+            let _ = self.inner.emit(lifecycle_event).await;
+        }
+    }
+
+    fn terminal_already_recorded(&self) -> bool {
+        self.inner
+            .server
+            .inner
+            .store
+            .all_events(&self.inner.run_id, &local_actor().id)
+            .is_ok_and(|events| {
+                events.iter().any(|event| {
+                    matches!(
+                        event.event,
+                        CanonicalEvent::RunCompleted(_)
+                            | CanonicalEvent::RunFailed(_)
+                            | CanonicalEvent::RunCancelled(_)
+                    )
+                })
+            })
+    }
+}
+
+fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
+    match event {
+        CanonicalEvent::ToolStarted(payload) => {
+            serde_json::json!({"tool": payload.name, "callId": payload.call_id})
+        }
+        CanonicalEvent::ToolCompleted(payload) => {
+            serde_json::json!({"tool": payload.name, "callId": payload.call_id})
+        }
+        CanonicalEvent::ToolApprovalRequired(payload) => serde_json::json!({
+            "tool": payload.name,
+            "callId": payload.call_id,
+            "reason": mask_secrets(&payload.reason),
+            "approvalId": payload.approval_id,
+        }),
+        CanonicalEvent::ToolFailed(payload) => serde_json::json!({
+            "tool": payload.name,
+            "callId": payload.call_id,
+            "errorCode": payload.error_code,
+        }),
+        CanonicalEvent::SubagentStarted(payload)
+        | CanonicalEvent::SubagentCompleted(payload)
+        | CanonicalEvent::SubagentFailed(payload) => serde_json::json!({
+            "subagentRunId": payload.subagent_run_id,
+            "name": payload.name,
+            "status": payload.status,
+        }),
+        CanonicalEvent::SessionCompacted(payload) => serde_json::json!({
+            "retainedItems": payload.retained_items,
+            "summaryItemId": payload.summary_item_id,
+        }),
+        CanonicalEvent::RunCompleted(payload)
+        | CanonicalEvent::RunFailed(payload)
+        | CanonicalEvent::RunCancelled(payload) => serde_json::json!({
+            "reason": mask_secrets(&payload.reason),
+            "errorCode": payload.error_code,
+        }),
+        _ => {
+            let masked = mask_canonical_event(event.clone()).unwrap_or_else(|_| event.clone());
+            serde_json::to_value(masked)
+                .unwrap_or_else(|_| serde_json::json!({"kind":"unserializable"}))
+        }
+    }
 }
 
 #[async_trait]

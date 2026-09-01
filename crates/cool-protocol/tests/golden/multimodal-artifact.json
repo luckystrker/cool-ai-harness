@@ -66,6 +66,7 @@
     ],
     "subagents": {},
     "workers": {},
+    "plugins": {},
     "budgetStatus": null,
     "researchStatus": null,
     "lastSeq": 2
