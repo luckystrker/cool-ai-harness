@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=_port(os.environ.get("COOL_PORT", "8000")),
     )
+
+    commands.add_parser("acp", help="serve Agent Client Protocol v1 over stdio")
     serve.add_argument(
         "--log-level",
         choices=("critical", "error", "warning", "info", "debug", "trace"),
@@ -89,6 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "acp":
+        import asyncio
+        import sys
+
+        from app.acp import run_stdio
+        from app.core.db import init_db
+        from app.core.logging import configure_logging
+
+        # stdout is reserved exclusively for JSON-RPC frames.
+        configure_logging(stream=sys.stderr)
+        init_db()
+        asyncio.run(run_stdio())
+        return 0
+
     if args.command == "plugin":
         from app.plugins import (
             CompatibilityLoader,

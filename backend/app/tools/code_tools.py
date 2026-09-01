@@ -21,6 +21,12 @@ from app.security.capabilities import Capability
 from app.security.sandbox import build_sandbox_env
 from app.security.secrets import mask_tool_output
 from app.tools.base import ToolArgs, ToolResult, register_tool
+from app.tools.subprocess_cancellation import (
+    communicate_cancellable,
+    kill_and_reap,
+    process_group_kwargs,
+    run_in_thread_cancellable,
+)
 
 # Capture stdout/stderr from a heredoc'd script.
 _RUNNER_TEMPLATE = textwrap.dedent(
@@ -100,7 +106,7 @@ async def python_execute(
     if _loop_supports_subprocess(loop):
         result = await _run_subprocess_async(argv, timeout, cwd=workdir, env=sandbox_env)
     else:
-        result = await asyncio.to_thread(
+        result = await run_in_thread_cancellable(
             _run_subprocess_sync, argv, timeout, cwd=workdir, env=sandbox_env
         )
 
@@ -151,6 +157,7 @@ async def _run_subprocess_async(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd is not None else None,
             env=env,
+            **process_group_kwargs(),
         )
     except Exception as exc:
         loop_kind = type(asyncio.get_running_loop()).__name__
@@ -161,17 +168,23 @@ async def _run_subprocess_async(
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        await asyncio.shield(kill_and_reap(proc))
+        raise
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await kill_and_reap(proc)
         return f"python_execute timed out after {timeout}s"
 
     return stdout_b or b"", stderr_b or b"", proc.returncode if proc.returncode is not None else 0
 
 
 def _run_subprocess_sync(
-    argv: list[str], timeout: float, *, cwd: Path | None = None,
+    argv: list[str],
+    timeout: float,
+    *,
+    cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    cancel_event,
 ) -> tuple[bytes, bytes, int] | str:
     """Thread-pool fallback: run the subprocess synchronously via subprocess.run.
 
@@ -181,21 +194,17 @@ def _run_subprocess_sync(
     import subprocess
 
     try:
-        completed = subprocess.run(
+        return communicate_cancellable(
             argv,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            cwd=str(cwd) if cwd is not None else None,
+            timeout,
+            cwd=cwd,
             env=env,
+            cancel_event=cancel_event,
         )
     except subprocess.TimeoutExpired:
         return f"python_execute timed out after {timeout}s"
     except Exception as exc:
         return f"Failed to start subprocess ({type(exc).__name__}: {exc!r}); interpreter={sys.executable!r}"
-
-    return completed.stdout or b"", completed.stderr or b"", completed.returncode
-
 
 def register_code_tools() -> None:
     register_tool(

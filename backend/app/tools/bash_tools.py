@@ -22,6 +22,12 @@ from app.security.sandbox import build_sandbox_env
 from app.security.secrets import mask_tool_output
 from app.tools.base import ToolArgs, ToolResult, register_tool
 from app.tools.context import get_run_context
+from app.tools.subprocess_cancellation import (
+    communicate_cancellable,
+    kill_and_reap,
+    process_group_kwargs,
+    run_in_thread_cancellable,
+)
 
 
 class BashExecuteArgs(ToolArgs):
@@ -59,7 +65,7 @@ async def bash_execute(
     if _loop_supports_subprocess(loop):
         result = await _run_async(argv, timeout, cwd=workdir, env=sandbox_env)
     else:
-        result = await asyncio.to_thread(
+        result = await run_in_thread_cancellable(
             _run_sync, argv, timeout, cwd=workdir, env=sandbox_env
         )
 
@@ -99,15 +105,18 @@ async def _run_async(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd is not None else None,
             env=env,
+            **process_group_kwargs(),
         )
     except Exception as exc:
         return f"Failed to start subprocess ({type(exc).__name__}: {exc!r})"
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        await asyncio.shield(kill_and_reap(proc))
+        raise
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await kill_and_reap(proc)
         return f"bash_execute timed out after {timeout}s"
 
     return stdout_b or b"", stderr_b or b"", proc.returncode if proc.returncode is not None else 0
@@ -119,24 +128,21 @@ def _run_sync(
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    cancel_event,
 ) -> tuple[bytes, bytes, int] | str:
     """Thread-pool fallback for event loops that can't spawn subprocesses."""
     try:
-        completed = subprocess.run(
+        return communicate_cancellable(
             argv,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            cwd=str(cwd) if cwd is not None else None,
+            timeout,
+            cwd=cwd,
             env=env,
+            cancel_event=cancel_event,
         )
     except subprocess.TimeoutExpired:
         return f"bash_execute timed out after {timeout}s"
     except Exception as exc:
         return f"Failed to start subprocess ({type(exc).__name__}: {exc!r})"
-
-    return completed.stdout or b"", completed.stderr or b"", completed.returncode
-
 
 def register_bash_tools() -> None:
     register_tool(

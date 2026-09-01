@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any
 
@@ -37,6 +38,117 @@ async def test_simple_text_response(scripted_provider) -> None:
     assert events[-1].payload["reason"] in ("stop", "end_turn")
     text_tokens = "".join(e.payload["text"] for e in events if e.kind == "token")
     assert "Hello there" in text_tokens
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_provider_stream_finishes_without_persistable_message(
+    scripted_provider,
+) -> None:
+    """A cancel observed after a token must win over the provider's later finish."""
+    from app.agent.runs import run_registry
+
+    scripted_provider.set_script(["one two"])
+    executor = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(model="m", run_id=991_001, cancellable=True),
+    )
+    run_registry.register(991_001, conversation_id=991_001)
+    events = []
+    async for event in executor.stream("go"):
+        events.append(event)
+        if event.kind == "token":
+            assert run_registry.cancel(991_001)
+
+    assert events[-1].kind == "finish"
+    assert events[-1].payload["reason"] == "cancelled"
+    assert not any(event.kind == "message" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_hung_tool_await(scripted_provider) -> None:
+    from app.agent.runs import run_registry
+    from app.tools import ToolArgs, ToolResult, register_tool
+
+    class NoArgs(ToolArgs):
+        pass
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def never_finishes() -> ToolResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return ToolResult.ok("unreachable")
+
+    register_tool(
+        name="_m4_never_finishes",
+        description="test cancellation",
+        args_model=NoArgs,
+        func=never_finishes,
+    )
+    scripted_provider.set_script(
+        [[{"id": "hung", "name": "_m4_never_finishes", "arguments": {}}]]
+    )
+    executor = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(model="m", run_id=991_002, cancellable=True),
+    )
+    run_registry.register(991_002, conversation_id=991_002)
+
+    async def consume() -> list:
+        return [event async for event in executor.stream("go")]
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert run_registry.cancel(991_002)
+    events = await asyncio.wait_for(task, timeout=1)
+
+    assert events[-1].kind == "finish"
+    assert events[-1].payload["reason"] == "cancelled"
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_preflight_cancel_does_not_start_tool(scripted_provider) -> None:
+    from app.agent.runs import run_registry
+    from app.tools import ToolArgs, ToolResult, register_tool
+
+    class NoArgs(ToolArgs):
+        pass
+
+    executed = False
+
+    async def side_effect() -> ToolResult:
+        nonlocal executed
+        executed = True
+        return ToolResult.ok("done")
+
+    register_tool(
+        name="_m4_preflight_side_effect",
+        description="test preflight cancellation",
+        args_model=NoArgs,
+        func=side_effect,
+    )
+    scripted_provider.set_script(
+        [[{"id": "quick", "name": "_m4_preflight_side_effect", "arguments": {}}]]
+    )
+    executor = AgentExecutor(
+        provider=scripted_provider,
+        config=AgentConfig(model="m", run_id=991_003, cancellable=True),
+    )
+    run_registry.register(991_003, conversation_id=991_003)
+
+    events = []
+    async for event in executor.stream("go"):
+        events.append(event)
+        if event.kind == "tool_call_start":
+            assert run_registry.cancel(991_003)
+
+    assert events[-1].payload["reason"] == "cancelled"
+    assert not executed
 
 
 @pytest.mark.asyncio
@@ -118,9 +230,9 @@ async def test_tool_call_then_answer(scripted_provider) -> None:
 async def test_reasoning_streamed_as_thinking(scripted_provider) -> None:
     """A provider reasoning trace is forwarded as `thinking` events and carried
     on the `message` event so it can be persisted."""
-    scripted_provider.set_script([
-        {"reasoning": "Let me consider the options carefully.", "text": "Answer."}
-    ])
+    scripted_provider.set_script(
+        [{"reasoning": "Let me consider the options carefully.", "text": "Answer."}]
+    )
     ex = AgentExecutor(provider=scripted_provider, config=AgentConfig(model="m"))
 
     events = [e async for e in ex.stream("hi")]
@@ -140,8 +252,13 @@ async def test_tool_result_carries_duration(scripted_provider) -> None:
     """Each tool_result event should record how long the tool took (>= 0)."""
     scripted_provider.set_script(
         [
-            [{"id": "call_1", "name": "write_file",
-              "arguments": {"path": "x.txt", "content": "hi"}}],
+            [
+                {
+                    "id": "call_1",
+                    "name": "write_file",
+                    "arguments": {"path": "x.txt", "content": "hi"},
+                }
+            ],
             "Done.",
         ]
     )
@@ -338,8 +455,7 @@ async def test_tool_call_deltas_as_list(workspace) -> None:
                     payload[0]["function"]["name"] = turn["name"]
                     first = False
                 yield ChatStreamEvent(tool_call_delta=payload)
-            yield ChatStreamEvent(finish=True, finish_reason="tool_calls",
-                                  usage=Usage(1, 1, 2))
+            yield ChatStreamEvent(finish=True, finish_reason="tool_calls", usage=Usage(1, 1, 2))
 
     provider = ListDeltaProvider()
     provider.turns = [
@@ -354,8 +470,8 @@ async def test_tool_call_deltas_as_list(workspace) -> None:
     events = [e async for e in ex.stream("write ok to list.txt")]
 
     # No error event should be emitted.
-    assert not any(e.kind == "error" for e in events), (
-        "got error: " + str([e.payload for e in events if e.kind == "error"])
+    assert not any(e.kind == "error" for e in events), "got error: " + str(
+        [e.payload for e in events if e.kind == "error"]
     )
     tool_call = next(e for e in events if e.kind == "tool_call_start")
     assert tool_call.payload["name"] == "write_file"
@@ -374,8 +490,14 @@ def test_openai_payload_flat_tool_calls_normalized() -> None:
     msg = Message(
         role="assistant",
         content=None,
-        tool_calls=[{"id": "c1", "type": "function", "name": "write_file",
-                     "arguments": {"path": "x", "content": "hi"}}],
+        tool_calls=[
+            {
+                "id": "c1",
+                "type": "function",
+                "name": "write_file",
+                "arguments": {"path": "x", "content": "hi"},
+            }
+        ],
     )
     payload = provider._message_to_payload(msg)
     tc = payload["tool_calls"][0]
@@ -397,8 +519,13 @@ async def test_deny_policy_blocks_tool_and_continues(scripted_provider) -> None:
 
     scripted_provider.set_script(
         [
-            [{"id": "c1", "name": "write_file",
-              "arguments": {"path": "blocked.txt", "content": "x"}}],
+            [
+                {
+                    "id": "c1",
+                    "name": "write_file",
+                    "arguments": {"path": "blocked.txt", "content": "x"},
+                }
+            ],
             "Recovered.",
         ]
     )
@@ -430,8 +557,7 @@ async def test_ask_with_auto_approve_runs_tool(scripted_provider, workspace) -> 
 
     scripted_provider.set_script(
         [
-            [{"id": "c1", "name": "write_file",
-              "arguments": {"path": "ok.txt", "content": "hi"}}],
+            [{"id": "c1", "name": "write_file", "arguments": {"path": "ok.txt", "content": "hi"}}],
             "Done.",
         ]
     )
@@ -463,8 +589,7 @@ async def test_ask_times_out_into_deny(scripted_provider, monkeypatch) -> None:
 
     scripted_provider.set_script(
         [
-            [{"id": "c1", "name": "write_file",
-              "arguments": {"path": "no.txt", "content": "x"}}],
+            [{"id": "c1", "name": "write_file", "arguments": {"path": "no.txt", "content": "x"}}],
             "Recovered.",
         ]
     )
@@ -541,8 +666,7 @@ async def test_allow_policy_runs_without_approval(scripted_provider, workspace) 
 
     scripted_provider.set_script(
         [
-            [{"id": "c1", "name": "write_file",
-              "arguments": {"path": "a.txt", "content": "hi"}}],
+            [{"id": "c1", "name": "write_file", "arguments": {"path": "a.txt", "content": "hi"}}],
             "Done.",
         ]
     )
@@ -615,7 +739,11 @@ async def test_react_steps_sequential_per_tool_call(scripted_provider, workspace
         assert react_events[i + 1].kind == "react_action"
         assert react_events[i + 2].kind == "react_observation"
         # All three share the same step number.
-        assert react_events[i].payload["step"] == react_events[i + 1].payload["step"] == react_events[i + 2].payload["step"]
+        assert (
+            react_events[i].payload["step"]
+            == react_events[i + 1].payload["step"]
+            == react_events[i + 2].payload["step"]
+        )
 
 
 @pytest.mark.asyncio

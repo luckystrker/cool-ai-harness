@@ -22,6 +22,12 @@ from app.security.capabilities import Capability
 from app.security.secrets import mask_tool_output
 from app.tools.base import ToolArgs, ToolResult, register_tool
 from app.tools.context import get_run_context
+from app.tools.subprocess_cancellation import (
+    communicate_cancellable,
+    kill_and_reap,
+    process_group_kwargs,
+    run_in_thread_cancellable,
+)
 
 _GIT_TIMEOUT = 60.0  # seconds; clone may need more — overridden per-tool
 
@@ -52,7 +58,7 @@ async def run_git(
     if _loop_supports_subprocess(loop):
         result = await _run_git_async(args, workdir, timeout)
     else:
-        result = await asyncio.to_thread(_run_git_sync, args, workdir, timeout)
+        result = await run_in_thread_cancellable(_run_git_sync, args, workdir, timeout)
 
     if isinstance(result, str):
         return ToolResult.err(result)
@@ -82,6 +88,7 @@ async def _run_git_async(
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **process_group_kwargs(),
         )
     except FileNotFoundError:
         return "git binary not found on PATH"
@@ -90,27 +97,29 @@ async def _run_git_async(
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        await asyncio.shield(kill_and_reap(proc))
+        raise
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await kill_and_reap(proc)
         return f"git {args[0] if args else ''} timed out after {timeout}s"
 
     return stdout_b or b"", stderr_b or b"", proc.returncode if proc.returncode is not None else 0
 
 
 def _run_git_sync(
-    args: tuple[str, ...], cwd: Path, timeout: float
+    args: tuple[str, ...], cwd: Path, timeout: float, *, cancel_event
 ) -> tuple[bytes, bytes, int] | str:
     """Thread-pool fallback for event loops that can't spawn subprocesses."""
     import subprocess
 
     try:
-        completed = subprocess.run(
+        return communicate_cancellable(
             ["git", *args],
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            cwd=str(cwd),
+            timeout,
+            cwd=cwd,
+            env=None,
+            cancel_event=cancel_event,
         )
     except FileNotFoundError:
         return "git binary not found on PATH"
@@ -118,9 +127,6 @@ def _run_git_sync(
         return f"git {args[0] if args else ''} timed out after {timeout}s"
     except Exception as exc:
         return f"Failed to start git ({type(exc).__name__}: {exc!r})"
-
-    return completed.stdout or b"", completed.stderr or b"", completed.returncode
-
 
 # --- git_status ------------------------------------------------------------
 

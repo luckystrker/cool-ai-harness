@@ -22,7 +22,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agent.runners import run_conversation_turn
-from app.agent.runs import run_registry
+from app.agent.runs import conversation_turn_registry, run_registry
 from app.agent.service import append_message, create_run, get_conversation
 from app.api.schemas import SendMessageRequest
 from app.core.auth import verify_ws_token
@@ -82,17 +82,6 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                     await _send_error(websocket, str(exc))
                     continue
 
-                # Persist the user's message before the run.
-                append_message(
-                    session,
-                    conversation_id=conv_id,
-                    role="user",
-                    content=body.content,
-                    artifact_ids=[
-                        artifact.id for artifact in attachments if artifact.id is not None
-                    ],
-                )
-
                 from app.agent.personalities.service import get_profile
                 from app.providers.registry import resolve_provider_model
 
@@ -104,8 +93,29 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                     await _send_error(websocket, "No default model is configured")
                     continue
 
-                # Durable run: one row per turn, observable + cancellable.
-                run = create_run(session, conversation_id=conv_id, model=model)
+                lease = conversation_turn_registry.acquire(conv_id)
+                if lease is None:
+                    await _send_error(websocket, "A turn is already active")
+                    continue
+
+                try:
+                    append_message(
+                        session,
+                        conversation_id=conv_id,
+                        role="user",
+                        content=body.content,
+                        artifact_ids=[
+                            artifact.id for artifact in attachments if artifact.id is not None
+                        ],
+                        commit=False,
+                    )
+                    run = create_run(session, conversation_id=conv_id, model=model, commit=False)
+                    session.commit()
+                    session.refresh(run)
+                except Exception:
+                    session.rollback()
+                    conversation_turn_registry.release(conv_id, lease)
+                    raise
 
                 try:
                     async for event in run_conversation_turn(
@@ -133,8 +143,10 @@ async def chat_ws(websocket: WebSocket, conv_id: int) -> None:
                     # if the turn ended early (client gone / error).
                     from app.agent.approvals import approval_registry
 
-                    approval_registry.cancel_for_conversation(conv_id)
-                    run_registry.cancel_for_conversation(conv_id)
+                    assert run.id is not None
+                    approval_registry.cancel_for_run(run.id, conversation_id=conv_id)
+                    run_registry.cancel(run.id)
+                    conversation_turn_registry.release(conv_id, lease)
     except WebSocketDisconnect:
         log.info("ws.disconnected", conv_id=conv_id)
     except Exception as exc:

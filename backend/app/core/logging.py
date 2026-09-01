@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from typing import TextIO
 
 import structlog
 
@@ -19,9 +20,7 @@ _SECRET_PATTERNS = [
 ]
 
 
-def _mask_secrets_processor(
-    logger: object, method_name: str, event_dict: dict
-) -> dict:
+def _mask_secrets_processor(logger: object, method_name: str, event_dict: dict) -> dict:
     """Structlog processor: mask secret-looking values in log event strings."""
     for key, value in list(event_dict.items()):
         if isinstance(value, str) and len(value) > 10:
@@ -32,7 +31,7 @@ def _mask_secrets_processor(
     return event_dict
 
 
-def configure_logging() -> None:
+def configure_logging(*, stream: TextIO | None = None) -> None:
     """Configure structlog + stdlib logging once at startup."""
     settings = get_settings()
     level = logging.DEBUG if settings.debug else logging.INFO
@@ -66,7 +65,7 @@ def configure_logging() -> None:
         ],
     )
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(stream or sys.stdout)
     handler.setFormatter(formatter)
 
     root = logging.getLogger()

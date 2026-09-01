@@ -246,7 +246,7 @@ class ApprovalRegistry:
         Resolves the Future as denied so the executor's ``await`` unblocks
         rather than hanging on a dead client.
         """
-        pending = self._pending.pop(approval_id, None)
+        pending = self._pending.get(approval_id)
         if pending is None:
             return
         if not pending.future.done():
@@ -267,10 +267,24 @@ class ApprovalRegistry:
                 cancelled += 1
         return cancelled
 
+    def cancel_for_run(self, run_id: int, *, conversation_id: int | None = None) -> int:
+        """Cancel approvals owned by one run, optionally verifying its conversation."""
+        cancelled = 0
+        for approval_id in list(self._pending):
+            pending = self._pending[approval_id]
+            if pending.run_id != run_id:
+                continue
+            if conversation_id is not None and pending.conversation_id != conversation_id:
+                continue
+            self.cancel(approval_id)
+            cancelled += 1
+        return cancelled
+
     def clear(self) -> None:
         """Cancel everything. Intended for tests."""
         for approval_id in list(self._pending):
             self.cancel(approval_id)
+        self._pending.clear()
 
 
 # Process-wide singleton. Import this where you need to register/resolve.

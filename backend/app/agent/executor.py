@@ -17,9 +17,12 @@ same code drives the chat UI, subagents (Фаза 2), and cron jobs (Фаза 3b
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,6 +55,10 @@ from app.tools import ToolResult, get_tool
 from app.tools.context import RunContext, get_run_context, reset_run_context, set_run_context
 
 log = get_logger(__name__)
+
+
+class _RunCancelled(Exception):
+    """Internal control flow raised when a cancellable await is interrupted."""
 
 
 @dataclass
@@ -134,9 +141,7 @@ class AgentExecutor:
     def available_tools(self) -> list[ToolSpec]:
         """ToolSpecs for whitelisted (or all) registered tools."""
         names = (
-            list(_all_tool_names())
-            if self.config.tool_names is None
-            else self.config.tool_names
+            list(_all_tool_names()) if self.config.tool_names is None else self.config.tool_names
         )
         specs: list[ToolSpec] = []
         for name in names:
@@ -243,13 +248,19 @@ class AgentExecutor:
                 llm_history = truncate_history(self.history, max_tokens=_history_budget)
 
                 try:
-                    async for event in self.provider.chat_completion_stream(
+                    provider_stream = self.provider.chat_completion_stream(
                         llm_history,
                         model=self.config.model,
                         tools=tools or None,
                         temperature=self.config.temperature,
                         max_tokens=self.config.max_tokens,
-                    ):
+                    )
+                    provider_events = aiter(provider_stream)
+                    while True:
+                        try:
+                            event = await self._await_or_cancel(anext(provider_events))
+                        except StopAsyncIteration:
+                            break
                         if event.reasoning:
                             reasoning_parts.append(event.reasoning)
                             yield AgentEvent.thinking(event.reasoning)
@@ -262,6 +273,25 @@ class AgentExecutor:
                             usage = event.usage
                         if event.finish:
                             finish_reason = event.finish_reason or "stop"
+                        # A client can cancel while a streamed token is being
+                        # consumed. Observe it before accepting more provider
+                        # output or persisting a completed assistant message.
+                        if self._is_cancelled():
+                            yield AgentEvent.finish(
+                                reason="cancelled",
+                                usage=total_usage,
+                                iterations=iteration - 1,
+                                elapsed_ms=_elapsed_ms(run_started),
+                            )
+                            return
+                except _RunCancelled:
+                    yield AgentEvent.finish(
+                        reason="cancelled",
+                        usage=total_usage,
+                        iterations=iteration - 1,
+                        elapsed_ms=_elapsed_ms(run_started),
+                    )
+                    return
                 except Exception as exc:
                     log.error("agent.iteration_failed", iteration=iteration, error=str(exc))
                     yield AgentEvent.error(f"LLM error on iteration {iteration}", detail=str(exc))
@@ -378,69 +408,85 @@ class AgentExecutor:
                         arguments=call.get("arguments") or {},
                         call_id=call.get("id") or call.get("name") or "call",
                     )
-                    async for ev in self._run_tool_call(call):
-                        tool_limit_reason: str | None = None
-                        # --- ReAct: emit Observation after tool_result ---
-                        if ev.kind == "tool_result":
-                            result_data = ev.payload.get("result") or {}
-                            output = result_data.get("output") or ""
-                            summary = output[:300] + ("…" if len(output) > 300 else "")
-                            yield AgentEvent.react_observation(
-                                step=react_step,
-                                tool_name=ev.payload.get("name", ""),
-                                result_summary=summary,
-                                is_error=bool(result_data.get("is_error")),
-                            )
-                            metadata = result_data.get("metadata") or {}
-                            usage_data = metadata.get("llm_usage")
-                            if isinstance(usage_data, dict):
-                                tool_usage = Usage(
-                                    prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
-                                    completion_tokens=int(
-                                        usage_data.get("completion_tokens", 0)
-                                    ),
-                                    total_tokens=int(usage_data.get("total_tokens", 0)),
-                                    cost_usd=usage_data.get("cost_usd"),
+                    try:
+                        async for ev in self._run_tool_call(call):
+                            tool_limit_reason: str | None = None
+                            # --- ReAct: emit Observation after tool_result ---
+                            if ev.kind == "tool_result":
+                                result_data = ev.payload.get("result") or {}
+                                output = result_data.get("output") or ""
+                                summary = output[:300] + ("…" if len(output) > 300 else "")
+                                yield AgentEvent.react_observation(
+                                    step=react_step,
+                                    tool_name=ev.payload.get("name", ""),
+                                    result_summary=summary,
+                                    is_error=bool(result_data.get("is_error")),
                                 )
-                                _accumulate(total_usage, tool_usage)
-                                if self.config.user_id is not None:
-                                    for alert in self._record_spend_and_maybe_alert(
-                                        tool_usage,
-                                        model=str(
-                                            metadata.get("llm_model") or self.config.model
+                                metadata = result_data.get("metadata") or {}
+                                usage_data = metadata.get("llm_usage")
+                                if isinstance(usage_data, dict):
+                                    tool_usage = Usage(
+                                        prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
+                                        completion_tokens=int(
+                                            usage_data.get("completion_tokens", 0)
                                         ),
-                                        provider_name=str(
-                                            metadata.get("llm_provider")
-                                            or getattr(self.provider, "name", "")
-                                        ),
+                                        total_tokens=int(usage_data.get("total_tokens", 0)),
+                                        cost_usd=usage_data.get("cost_usd"),
+                                    )
+                                    _accumulate(total_usage, tool_usage)
+                                    if self.config.user_id is not None:
+                                        for alert in self._record_spend_and_maybe_alert(
+                                            tool_usage,
+                                            model=str(
+                                                metadata.get("llm_model") or self.config.model
+                                            ),
+                                            provider_name=str(
+                                                metadata.get("llm_provider")
+                                                or getattr(self.provider, "name", "")
+                                            ),
+                                        ):
+                                            yield alert
+                                    yield AgentEvent.llm_call_complete(
+                                        iteration=iteration,
+                                        model=str(metadata.get("llm_model") or self.config.model),
+                                        usage=vars(tool_usage),
+                                        duration_ms=int(metadata.get("llm_duration_ms") or 0),
+                                    )
+                                    if (
+                                        limits.max_total_tokens is not None
+                                        and total_usage.total_tokens >= limits.max_total_tokens
                                     ):
-                                        yield alert
-                                yield AgentEvent.llm_call_complete(
-                                    iteration=iteration,
-                                    model=str(metadata.get("llm_model") or self.config.model),
-                                    usage=vars(tool_usage),
-                                    duration_ms=int(metadata.get("llm_duration_ms") or 0),
+                                        tool_limit_reason = "token_limit"
+                                    elif (
+                                        limits.max_cost_usd is not None
+                                        and (total_usage.cost_usd or 0.0) >= limits.max_cost_usd
+                                    ):
+                                        tool_limit_reason = "cost_limit"
+                            yield ev
+                            if tool_limit_reason is not None:
+                                yield AgentEvent.finish(
+                                    reason=tool_limit_reason,
+                                    usage=total_usage,
+                                    iterations=iteration,
+                                    elapsed_ms=_elapsed_ms(run_started),
                                 )
-                                if (
-                                    limits.max_total_tokens is not None
-                                    and total_usage.total_tokens >= limits.max_total_tokens
-                                ):
-                                    tool_limit_reason = "token_limit"
-                                elif (
-                                    limits.max_cost_usd is not None
-                                    and (total_usage.cost_usd or 0.0)
-                                    >= limits.max_cost_usd
-                                ):
-                                    tool_limit_reason = "cost_limit"
-                        yield ev
-                        if tool_limit_reason is not None:
-                            yield AgentEvent.finish(
-                                reason=tool_limit_reason,
-                                usage=total_usage,
-                                iterations=iteration,
-                                elapsed_ms=_elapsed_ms(run_started),
-                            )
-                            return
+                                return
+                    except _RunCancelled:
+                        yield AgentEvent.finish(
+                            reason="cancelled",
+                            usage=total_usage,
+                            iterations=iteration,
+                            elapsed_ms=_elapsed_ms(run_started),
+                        )
+                        return
+                    if self._is_cancelled():
+                        yield AgentEvent.finish(
+                            reason="cancelled",
+                            usage=total_usage,
+                            iterations=iteration,
+                            elapsed_ms=_elapsed_ms(run_started),
+                        )
+                        return
 
             # The model spent every allowed iteration calling tools. Instead of
             # stopping silently mid-task (leaving a bare tool result as the last
@@ -533,6 +579,31 @@ class AgentExecutor:
         if not self.config.cancellable or self.config.run_id is None:
             return False
         return run_registry.is_cancelled(self.config.run_id)
+
+    async def _await_or_cancel(self, awaitable: Any) -> Any:
+        """Await provider/tool work while making run cancellation interruptible."""
+        if not self.config.cancellable or self.config.run_id is None:
+            return await awaitable
+        if self._is_cancelled():
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            elif isinstance(awaitable, asyncio.Future):
+                awaitable.cancel()
+            raise _RunCancelled
+        operation = asyncio.ensure_future(awaitable)
+        cancelled = asyncio.create_task(run_registry.wait_cancelled(self.config.run_id))
+        done, _ = await asyncio.wait({operation, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+        # Once an operation has actually completed, preserve its factual
+        # result.  The caller observes the cancel before starting any further
+        # work; discarding a completed side effect would make the event log lie.
+        if operation in done:
+            cancelled.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancelled
+            return await operation
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise _RunCancelled
 
     def _record_spend_and_maybe_alert(
         self,
@@ -644,9 +715,7 @@ class AgentExecutor:
             tool_decision: Decision = (
                 "allow"
                 if self.config.permissions is None
-                else self.config.permissions.resolve(
-                    checked_name, dangerous=checked_dangerous
-                )
+                else self.config.permissions.resolve(checked_name, dangerous=checked_dangerous)
             )
             decision = stricter(decision, stricter(cap_decision, tool_decision))
 
@@ -771,7 +840,7 @@ class AgentExecutor:
             previous_composed = run_context.approved_composed_tools
             run_context.approved_composed_tools = frozenset(tool.composed_tools)
             try:
-                result = await tool.run(args)
+                result = await self._await_or_cancel(tool.run(args))
             finally:
                 run_context.approved_composed_tools = previous_composed
             log.info(
@@ -813,8 +882,7 @@ class AgentExecutor:
         return bool(
             tool
             and any(
-                self.config.breakpoints.should_break(bp_type, tool_name=nested_name)
-                is not None
+                self.config.breakpoints.should_break(bp_type, tool_name=nested_name) is not None
                 for nested_name in tool.composed_tools
             )
         )

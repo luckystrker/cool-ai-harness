@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,58 @@ def test_tool_run_validates_args() -> None:
 
     bad = asyncio.run(t.run({"n": "not-an-int"}))
     assert bad.is_error and "Invalid arguments" in (bad.error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_fallback", [False, True])
+async def test_cancelled_python_subprocess_is_killed_and_reaped(
+    tmp_path: Path, thread_fallback: bool
+) -> None:
+    from app.tools.code_tools import _run_subprocess_async, _run_subprocess_sync
+    from app.tools.subprocess_cancellation import run_in_thread_cancellable
+
+    marker = tmp_path / f"late-grandchild-{thread_fallback}.txt"
+    ready = tmp_path / f"grandchild-ready-{thread_fallback}.txt"
+    ignore_break = (
+        "signal.signal(signal.SIGBREAK,lambda *_:None);" if sys.platform == "win32" else ""
+    )
+    child_code = (
+        "import pathlib,signal,time;"
+        f"{ignore_break}"
+        f"pathlib.Path({str(ready)!r}).write_text('ready');"
+        "time.sleep(0.8);"
+        f"pathlib.Path({str(marker)!r}).write_text('late')"
+    )
+    parent_code = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
+        "time.sleep(5)"
+    )
+    argv = [
+        sys.executable,
+        "-c",
+        parent_code,
+    ]
+    if thread_fallback:
+        task = asyncio.create_task(
+            run_in_thread_cancellable(
+                _run_subprocess_sync, argv, 5.0, cwd=tmp_path, env=None
+            )
+        )
+    else:
+        task = asyncio.create_task(
+            _run_subprocess_async(argv, 5.0, cwd=tmp_path, env=None)
+        )
+    for _ in range(100):
+        if ready.exists():
+            break
+        await asyncio.sleep(0.02)
+    assert ready.exists(), "grandchild did not start"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.9)
+    assert not marker.exists()
 
 
 # --- file tools ---

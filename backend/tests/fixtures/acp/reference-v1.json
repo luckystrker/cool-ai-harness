@@ -1,0 +1,29 @@
+{
+  "client": "ACP reference client",
+  "messages": [
+    {
+      "jsonrpc": "2.0",
+      "id": "init",
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {},
+        "clientInfo": {
+          "name": "acp-reference-client",
+          "title": "ACP Reference Client",
+          "version": "fixture"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "new",
+      "method": "session/new",
+      "params": {
+        "cwd": "$WORKSPACE",
+        "additionalDirectories": [],
+        "mcpServers": []
+      }
+    }
+  ]
+}

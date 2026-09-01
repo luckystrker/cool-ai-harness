@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from uuid import uuid4
 
 from app.core.logging import get_logger
 
@@ -62,6 +63,17 @@ class RunRegistry:
         """True if the run was cancelled (or never registered)."""
         active = self._active.get(run_id)
         return active is None or active.cancel_event.is_set()
+
+    async def wait_cancelled(self, run_id: int) -> None:
+        """Wait until a registered run is cancelled.
+
+        Callers must register the run before awaiting this method.  Treating a
+        missing run as already cancelled keeps the boundary fail closed.
+        """
+        active = self._active.get(run_id)
+        if active is None:
+            return
+        await active.cancel_event.wait()
 
     def cancel(self, run_id: int) -> bool:
         """Signal cancellation for a run.
@@ -111,8 +123,40 @@ class RunRegistry:
         self._active.clear()
 
 
+class ConversationTurnRegistry:
+    """Process-wide single-active-turn ownership for interactive sessions."""
+
+    def __init__(self) -> None:
+        self._owners: dict[int, str] = {}
+
+    def acquire(self, conversation_id: int) -> str | None:
+        """Return an opaque lease token, or ``None`` when the session is busy."""
+        if conversation_id in self._owners:
+            return None
+        token = uuid4().hex
+        self._owners[conversation_id] = token
+        return token
+
+    def release(self, conversation_id: int, token: str) -> bool:
+        """Release only the matching owner token."""
+        if self._owners.get(conversation_id) != token:
+            return False
+        del self._owners[conversation_id]
+        return True
+
+    def clear(self) -> None:
+        """Remove all leases. Intended for tests."""
+        self._owners.clear()
+
+
 # Process-wide singleton. Import this where you need to register/cancel runs.
 run_registry = RunRegistry()
+conversation_turn_registry = ConversationTurnRegistry()
 
 
-__all__ = ["RunRegistry", "run_registry"]
+__all__ = [
+    "ConversationTurnRegistry",
+    "RunRegistry",
+    "conversation_turn_registry",
+    "run_registry",
+]

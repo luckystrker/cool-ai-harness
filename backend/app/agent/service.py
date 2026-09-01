@@ -99,8 +99,7 @@ def list_conversations(session: Session, *, user_id: int) -> Sequence[Conversati
     return [
         r
         for r in rows
-        if not (r.metadata_ or {}).get("is_subagent")
-        and not (r.metadata_ or {}).get("is_task")
+        if not (r.metadata_ or {}).get("is_subagent") and not (r.metadata_ or {}).get("is_task")
     ]
 
 
@@ -269,6 +268,7 @@ def create_run(
     model: str | None = None,
     config: dict | None = None,
     status: str = RUN_STATUS_RUNNING,
+    commit: bool = True,
 ) -> AgentRun:
     """Create and persist a new AgentRun row."""
     run = AgentRun(
@@ -279,8 +279,11 @@ def create_run(
         config=config,
     )
     session.add(run)
-    session.commit()
-    session.refresh(run)
+    if commit:
+        session.commit()
+        session.refresh(run)
+    else:
+        session.flush()
     return run
 
 

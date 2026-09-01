@@ -13,7 +13,7 @@ from app.agent.approvals import approval_registry
 from app.agent.permissions import validate as validate_permissions
 from app.agent.planning import PLANNING_SYSTEM_PROMPT, create_plan, extract_plan_from_response
 from app.agent.runners import run_conversation_turn
-from app.agent.runs import run_registry
+from app.agent.runs import conversation_turn_registry, run_registry
 from app.agent.service import (
     append_message,
     create_conversation,
@@ -354,15 +354,6 @@ async def post_message(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Persist the user message immediately (before the run starts).
-    append_message(
-        session,
-        conversation_id=conv_id,
-        role="user",
-        content=body.content,
-        artifact_ids=[artifact.id for artifact in attachments if artifact.id is not None],
-    )
-
     from app.agent.personalities.service import get_profile
     from app.providers.registry import resolve_provider_model
 
@@ -373,16 +364,35 @@ async def post_message(
     if model is None:
         raise HTTPException(status_code=400, detail="No default model is configured")
 
-    # Create a durable run row so this turn is observable, resumable-aware, and
-    # cancellable. The run_id flows into the agent loop via the runner.
-    run = create_run(session, conversation_id=conv_id, model=model)
+    lease = conversation_turn_registry.acquire(conv_id)
+    if lease is None:
+        raise HTTPException(status_code=409, detail="A turn is already active")
+
+    # Persist the user message and its durable run atomically after provider
+    # resolution, so configuration failures cannot leave orphan messages.
+    try:
+        append_message(
+            session,
+            conversation_id=conv_id,
+            role="user",
+            content=body.content,
+            artifact_ids=[artifact.id for artifact in attachments if artifact.id is not None],
+            commit=False,
+        )
+        run = create_run(session, conversation_id=conv_id, model=model, commit=False)
+        session.commit()
+        session.refresh(run)
+    except Exception:
+        session.rollback()
+        conversation_turn_registry.release(conv_id, lease)
+        raise
     assert run.id is not None
 
     # --- Planning Mode (Фаза 2 §1) ---
     if body.plan_mode:
         return EventSourceResponse(
             _plan_generation_stream(
-                session, conv_id, run.id, provider, model, body.content, conv
+                session, conv_id, run.id, provider, model, body.content, conv, lease
             )
         )
 
@@ -409,14 +419,23 @@ async def post_message(
             # If the client disconnects (SSE closed), cancel any pending
             # approval and signal the run to stop so the loop doesn't hang or
             # keep working for a dead client.
-            approval_registry.cancel_for_conversation(conv_id)
-            run_registry.cancel_for_conversation(conv_id)
+            assert run.id is not None
+            approval_registry.cancel_for_run(run.id, conversation_id=conv_id)
+            run_registry.cancel(run.id)
+            conversation_turn_registry.release(conv_id, lease)
 
     return EventSourceResponse(event_stream())
 
 
 async def _plan_generation_stream(
-    session, conv_id: int, run_id: int, provider, model: str, user_input: str, conv
+    session,
+    conv_id: int,
+    run_id: int,
+    provider,
+    model: str,
+    user_input: str,
+    conv,
+    lease: str,
 ) -> AsyncIterator[dict]:
     """SSE stream for plan generation: runs the full agent loop with planning prompt.
 
@@ -485,8 +504,9 @@ async def _plan_generation_stream(
             # Mark the run as awaiting approval (user must approve the plan).
             update_run(session, run_id, status=RUN_STATUS_AWAITING_APPROVAL)
     finally:
-        approval_registry.cancel_for_conversation(conv_id)
-        run_registry.cancel_for_conversation(conv_id)
+        approval_registry.cancel_for_run(run_id, conversation_id=conv_id)
+        run_registry.cancel(run_id)
+        conversation_turn_registry.release(conv_id, lease)
 
 
 @router.post("/conversations/{conv_id}/tool_calls/{approval_id}/approval")
