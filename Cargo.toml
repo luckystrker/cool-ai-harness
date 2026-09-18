@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/cool-acp",
     "crates/cool-agent",
     "crates/cool-app-server",
     "crates/cool-cli",
@@ -8,6 +9,7 @@ members = [
     "crates/cool-protocol",
     "crates/cool-security",
     "crates/cool-state",
+    "crates/cool-tui",
 ]
 resolver = "3"
 

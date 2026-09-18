@@ -61,7 +61,9 @@ audit rather than appending a run event after the terminal boundary.
 ## Residual boundaries
 
 - Local plugin installation/update remains owned by the M3 Python lifecycle CLI until the Web/API
-  cutover. Rust consumes and validates its lockfile rather than dual-writing installs.
+  cutover. Rust consumes and validates its lockfile rather than dual-writing installs. (Superseded
+  in M9 for the CLI: `cool plugin install` now writes the same versioned lockfile under the store
+  write lock; see `docs/migration/M9_TUI_ACP.md`.)
 - Hook approval UI and interactive approval routing arrive with the M9 CLI/TUI surface; M8 returns a
   typed approval-required result.
 - Publisher signatures, transparency logs and immutable third-party package acquisition are not

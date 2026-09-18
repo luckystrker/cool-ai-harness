@@ -139,6 +139,12 @@ impl HookEngine {
         self
     }
 
+    pub fn mcp_server_names(&self) -> Vec<String> {
+        let mut names = self.mcp.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     pub async fn invoke(
         &self,
         plugin: &str,

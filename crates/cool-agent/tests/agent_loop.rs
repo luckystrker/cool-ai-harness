@@ -818,3 +818,143 @@ fn project_instructions_and_compaction_keep_security_and_tool_groups() {
     );
     assert_eq!(compacted.messages[2].role, cool_agent::MessageRole::Tool);
 }
+
+#[derive(Default)]
+struct SteeringSink {
+    inner: RecordingSink,
+    pending: Mutex<Vec<Message>>,
+}
+
+impl SteeringSink {
+    fn push_steer(&self, text: &str) {
+        self.pending
+            .lock()
+            .unwrap()
+            .push(Message::text(cool_agent::MessageRole::User, text));
+    }
+}
+
+#[async_trait]
+impl EventSink for SteeringSink {
+    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, cool_agent::RuntimeError> {
+        self.inner.emit(event).await
+    }
+
+    async fn drain_steers(&self) -> Result<Vec<Message>, cool_agent::RuntimeError> {
+        Ok(std::mem::take(&mut *self.pending.lock().unwrap()))
+    }
+}
+
+#[tokio::test]
+async fn steer_messages_are_folded_into_history_before_the_next_model_request() {
+    let directory = tempdir().unwrap();
+    let provider = ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::ToolCall(cool_agent::ToolCall {
+                call_id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: [("path".to_owned(), json!("note.txt"))]
+                    .into_iter()
+                    .collect(),
+            }),
+            ModelEvent::Finish { reason: None },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish { reason: None },
+        ]),
+    ]);
+    std::fs::write(directory.path().join("note.txt"), "content").unwrap();
+    let sink = SteeringSink::default();
+    sink.push_steer("steer before the first request");
+    let runtime = AgentRuntime::new(Arc::new(provider), builtin_registry());
+    let (_, cancel) = CancelSignal::channel();
+    let mut request = request(directory.path());
+    request.tool_names = Some(["read_file".to_owned()].into_iter().collect());
+
+    // A steer that arrives while the run is active is delivered between loop
+    // iterations; pushing it before the run proves it is not dropped.
+    let outcome = runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let RunOutcome::Completed { history, .. } = outcome else {
+        panic!("expected completion");
+    };
+    let contents = history
+        .iter()
+        .filter_map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content == "steer before the first request"),
+        "steer must reach the model history: {contents:?}"
+    );
+    assert!(contents.contains(&"done".to_owned()));
+}
+
+#[tokio::test]
+async fn steers_are_drained_between_iterations_and_not_repeated() {
+    let directory = tempdir().unwrap();
+    let provider = ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::ToolCall(cool_agent::ToolCall {
+                call_id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: [("path".to_owned(), json!("note.txt"))]
+                    .into_iter()
+                    .collect(),
+            }),
+            ModelEvent::Finish { reason: None },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("second".to_owned()),
+            ModelEvent::Finish { reason: None },
+        ]),
+    ]);
+    std::fs::write(directory.path().join("note.txt"), "content").unwrap();
+    let provider = Arc::new(provider);
+    let runtime = AgentRuntime::new(provider.clone(), builtin_registry());
+    let sink = SteeringSink::default();
+    sink.push_steer("first steer");
+    sink.push_steer("second steer");
+    let (_, cancel) = CancelSignal::channel();
+    let mut request = request(directory.path());
+    request.tool_names = Some(["read_file".to_owned()].into_iter().collect());
+    runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2);
+    let second = requests[1]
+        .messages
+        .iter()
+        .filter_map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        second
+            .iter()
+            .filter(|content| content.as_str() == "first steer")
+            .count(),
+        1,
+        "a steer is delivered exactly once"
+    );
+    assert!(second.contains(&"second steer".to_owned()));
+}

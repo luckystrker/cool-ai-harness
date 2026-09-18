@@ -18,8 +18,8 @@ pub use loop_runtime::{
     history_from_events, mask_canonical_event,
 };
 pub use provider::{
-    ModelDriver, ModelEvent, ModelRequest, OpenAiCompatibleDriver, ProviderError, ScriptedDriver,
-    Usage,
+    ModelDriver, ModelEvent, ModelRequest, ModelStream, OpenAiCompatibleDriver, ProviderError,
+    ScriptedDriver, Usage,
 };
 pub use tools::{
     PythonFallbackTool, Tool, ToolContext, ToolDefinition, ToolError, ToolHandler, ToolRegistry,

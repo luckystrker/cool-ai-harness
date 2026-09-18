@@ -3,24 +3,30 @@
 //! This crate owns transport/session plumbing only. Provider, tool and policy
 //! decisions remain delegated to `cool-agent`, `cool-security` and `cool-state`.
 
+pub mod client;
+
+pub use client::{AppClient, ClientError};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, CancelSignal,
-    EventSink, Message, RunOutcome, RuntimeError, ScriptedDriver, ToolContext, Usage,
+    EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver, ToolContext, Usage,
     builtin_registry, history_from_events, mask_canonical_event,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
-    EventEnvelope, EventPage, InitializeResult, JsonRpcV2, PromptAcceptedResult, ProtocolError,
-    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    EventEnvelope, EventPage, HistoryItem, InitializeResult, JsonRpcV2, PromptAcceptedResult,
+    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
     RunCancelledResult, RunEventMethod, RunStarted, RunTerminal, ServerFrame, SessionCreatedResult,
-    SessionLoadedResult, StreamFrame, TextDelta, TransportLimits, V1Version,
+    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
+    SessionSummary, StatusGetResult, StreamFrame, TextDelta, TransportLimits, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, Workspace, mask_secrets};
 use cool_state::{BudgetDelta, CancelAcceptance, DurableStore, EventProvenance, StoreError};
@@ -87,6 +93,11 @@ pub trait RunLifecycle: Send + Sync {
         payload: serde_json::Value,
         policy: &CapabilityPolicy,
     ) -> Vec<CanonicalEvent>;
+
+    /// Extension status for `status.get`. `None` reports no extension runtime.
+    async fn status(&self) -> Option<StatusGetResult> {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -564,6 +575,15 @@ impl AppServer {
                     .await;
             }
             Command::SessionCreate(params) => {
+                if let Some(error) = validate_label(
+                    "title",
+                    params.title.as_deref(),
+                    "project_key",
+                    params.project_key.as_deref(),
+                ) {
+                    let _ = self.send(&outbound, failure(id, error)).await;
+                    return;
+                }
                 let actor = local_actor();
                 let fingerprint = fingerprint(&params);
                 let result = self
@@ -589,6 +609,104 @@ impl AppServer {
                 let frame = match result {
                     Some(result) => success(id, ResponsePayload::SessionLoaded(result)),
                     None => failure(id, error(-32004, "session_not_found", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionList(params) => {
+                let frame = match self.session_list(params.project_key.as_deref(), params.limit) {
+                    Ok(result) => success(id, ResponsePayload::SessionListed(result)),
+                    Err(error) => failure(id, error),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionHistory(params) => {
+                let frame = match self.session_history(&id, &params.session_id, params.limit) {
+                    Ok(result) => success(id, ResponsePayload::SessionHistory(result)),
+                    Err(error) => failure(id, error),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionFork(params) => {
+                if let Some(error) = validate_label("title", params.title.as_deref(), "title", None)
+                {
+                    let _ = self.send(&outbound, failure(id, error)).await;
+                    return;
+                }
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let frame = match self.inner.store.fork_session(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.session_id,
+                    params.title.as_deref(),
+                ) {
+                    Ok(forked) => success(
+                        id,
+                        ResponsePayload::SessionForked(SessionForkedResult {
+                            session_id: forked.value,
+                            forked_from: params.session_id,
+                        }),
+                    ),
+                    Err(store) => failure(id, store_error(store)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionSteer(params) => {
+                if params
+                    .content
+                    .iter()
+                    .any(|part| !matches!(part, ContentPart::Text { .. }))
+                {
+                    let _ = self
+                        .send(
+                            &outbound,
+                            failure(id, error(-32602, "unsupported_content_part", false)),
+                        )
+                        .await;
+                    return;
+                }
+                let content = params
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if content.trim().is_empty() {
+                    let _ = self
+                        .send(
+                            &outbound,
+                            failure(id, error(-32602, "empty_steer_content", false)),
+                        )
+                        .await;
+                    return;
+                }
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let frame = match self.inner.store.steer_run(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.run_id,
+                    &mask_secrets(&content),
+                ) {
+                    Ok(steer) => {
+                        let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
+                        if steer.created
+                            && let Ok(events) =
+                                self.inner
+                                    .store
+                                    .events(&params.run_id, &actor.id, None, usize::MAX)
+                            && let Some(event) = events.into_iter().last()
+                        {
+                            let _ = self.send(&outbound, notification(event)).await;
+                        }
+                        frame
+                    }
+                    Err(store) => failure(id, store_error(store)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -801,6 +919,15 @@ impl AppServer {
                     }
                 }
             }
+            Command::StatusGet(_) => {
+                let status = match &self.inner.lifecycle {
+                    Some(lifecycle) => lifecycle.status().await.unwrap_or_default(),
+                    None => StatusGetResult::default(),
+                };
+                let _ = self
+                    .send(&outbound, success(id, ResponsePayload::Status(status)))
+                    .await;
+            }
         }
     }
 
@@ -892,6 +1019,56 @@ impl AppServer {
         })
     }
 
+    fn session_list(
+        &self,
+        project_key: Option<&str>,
+        limit: u16,
+    ) -> Result<SessionListResult, ProtocolError> {
+        if limit == 0 || limit > self.inner.config.event_page_limit {
+            return Err(error(-32602, "invalid_session_list_limit", false));
+        }
+        let sessions = self
+            .inner
+            .store
+            .list_sessions(&local_actor().id, project_key, usize::from(limit))
+            .map_err(store_error)?;
+        Ok(SessionListResult {
+            sessions: sessions
+                .into_iter()
+                .map(|session| SessionSummary {
+                    session_id: session.session_id,
+                    title: session.title,
+                    project_key: session.project_key,
+                    active_run_id: session.active_run_id,
+                    last_seq: session.last_seq,
+                    created_at: session.created_at,
+                })
+                .collect(),
+        })
+    }
+
+    fn session_history(
+        &self,
+        response_id: &RpcId,
+        session_id: &str,
+        limit: u16,
+    ) -> Result<SessionHistoryResult, ProtocolError> {
+        if limit == 0 || limit > self.inner.config.event_page_limit {
+            return Err(error(-32602, "invalid_session_history_limit", false));
+        }
+        let events = self
+            .inner
+            .store
+            .session_events(session_id, &local_actor().id)
+            .map_err(store_error)?;
+        bounded_history(
+            history_items_from_events(&events),
+            usize::from(limit),
+            self.inner.config.max_frame_bytes,
+            response_id,
+        )
+    }
+
     async fn start_prompt(
         &self,
         actor_id: &str,
@@ -955,6 +1132,8 @@ impl AppServer {
                 server: server.clone(),
                 run_id: run_id.clone(),
                 outbound: outbound.clone(),
+                steer_cursor: Arc::new(AtomicU64::new(run.last_seq)),
+                own_user_items: Arc::new(Mutex::new(HashSet::new())),
             };
             let approvals = AppServerApprovalGate {
                 server: server.clone(),
@@ -1210,6 +1389,8 @@ struct AppServerEventSink {
     server: AppServer,
     run_id: String,
     outbound: Outbound,
+    steer_cursor: Arc<AtomicU64>,
+    own_user_items: Arc<Mutex<HashSet<String>>>,
 }
 
 struct LifecycleEventSink {
@@ -1294,6 +1475,10 @@ impl EventSink for LifecycleEventSink {
     async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
         self.inner.reserve_usage(usage).await
     }
+
+    async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
+        self.inner.drain_steers().await
+    }
 }
 
 impl LifecycleEventSink {
@@ -1370,6 +1555,90 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
 #[async_trait]
 impl EventSink for AppServerEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        let envelope = self.emit_once(event).await?;
+        if matches!(
+            &envelope.event,
+            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
+        ) {
+            self.own_user_items
+                .lock()
+                .await
+                .insert(envelope.event_id.clone());
+        }
+        Ok(envelope)
+    }
+
+    async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
+        let run = self
+            .server
+            .inner
+            .store
+            .run(&self.run_id, &local_actor().id)?;
+        let events = self
+            .server
+            .inner
+            .store
+            .session_events(&run.session_id, &local_actor().id)?;
+        let history = history_from_events(&events)?;
+        if let Some(last_seq) = events
+            .iter()
+            .filter(|event| event.run_id == self.run_id)
+            .map(|event| event.seq)
+            .max()
+        {
+            self.steer_cursor.fetch_max(last_seq, Ordering::SeqCst);
+        }
+        Ok(history)
+    }
+
+    async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
+        self.server.inner.store.reserve_budget(
+            &local_actor().id,
+            &format!("run:{}", self.run_id),
+            BudgetDelta {
+                tokens: usage.total_tokens,
+                cost_microusd: usage.cost_micro_usd,
+                iterations: 1,
+                proactive_actions: 0,
+            },
+        )?;
+        Ok(())
+    }
+
+    async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
+        let after = self.steer_cursor.load(Ordering::SeqCst);
+        let events = self.server.inner.store.events(
+            &self.run_id,
+            &local_actor().id,
+            Some(after),
+            usize::MAX,
+        )?;
+        let mut messages = Vec::new();
+        let mut max_seq = after;
+        let mut own = self.own_user_items.lock().await;
+        for envelope in &events {
+            max_seq = max_seq.max(envelope.seq);
+            if let CanonicalEvent::ItemCompleted(item) = &envelope.event
+                && item.role.as_deref() == Some("user")
+            {
+                if own.remove(&envelope.event_id) {
+                    // The loop emitted this user item itself; it is already in
+                    // history and must not be delivered twice.
+                    continue;
+                }
+                if let Some(content) = item.content.clone() {
+                    messages.push(Message::text(MessageRole::User, content));
+                }
+            }
+        }
+        drop(own);
+        self.steer_cursor.fetch_max(max_seq, Ordering::SeqCst);
+        Ok(messages)
+    }
+}
+
+impl AppServerEventSink {
+    async fn emit_once(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
         let event = mask_canonical_event(event)?;
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
             let run = self
@@ -1448,35 +1717,6 @@ impl EventSink for AppServerEventSink {
             ));
         }
         Ok(envelope)
-    }
-
-    async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
-        let run = self
-            .server
-            .inner
-            .store
-            .run(&self.run_id, &local_actor().id)?;
-        history_from_events(
-            &self
-                .server
-                .inner
-                .store
-                .session_events(&run.session_id, &local_actor().id)?,
-        )
-    }
-
-    async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
-        self.server.inner.store.reserve_budget(
-            &local_actor().id,
-            &format!("run:{}", self.run_id),
-            BudgetDelta {
-                tokens: usage.total_tokens,
-                cost_microusd: usage.cost_micro_usd,
-                iterations: 1,
-                proactive_actions: 0,
-            },
-        )?;
-        Ok(())
     }
 }
 
@@ -1617,6 +1857,106 @@ fn runtime_actor() -> ActorRef {
     }
 }
 
+fn history_items_from_events(events: &[EventEnvelope]) -> Vec<HistoryItem> {
+    let mut items = Vec::new();
+    let mut reasoning = String::new();
+    for envelope in events {
+        match &envelope.event {
+            CanonicalEvent::ReasoningDelta(delta) => reasoning.push_str(&delta.text),
+            CanonicalEvent::ItemCompleted(item) => {
+                let Some(role) = item.role.as_deref() else {
+                    continue;
+                };
+                if !matches!(role, "user" | "assistant") {
+                    continue;
+                }
+                let attached = if role == "assistant" && !reasoning.is_empty() {
+                    Some(std::mem::take(&mut reasoning))
+                } else {
+                    reasoning.clear();
+                    None
+                };
+                items.push(HistoryItem {
+                    role: role.to_owned(),
+                    content: item.content.clone(),
+                    reasoning: attached,
+                    tool_calls: item.tool_calls.clone(),
+                    tool_call_id: None,
+                    name: None,
+                });
+            }
+            CanonicalEvent::ToolCompleted(tool) => items.push(HistoryItem {
+                role: "tool".to_owned(),
+                content: Some(
+                    serde_json::to_string(&tool.result).unwrap_or_else(|_| "null".to_owned()),
+                ),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_call_id: Some(tool.call_id.clone()),
+                name: Some(tool.name.clone()),
+            }),
+            CanonicalEvent::ToolFailed(tool) => items.push(HistoryItem {
+                role: "tool".to_owned(),
+                content: Some(
+                    serde_json::json!({
+                        "error": tool.message,
+                        "errorCode": tool.error_code,
+                    })
+                    .to_string(),
+                ),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_call_id: Some(tool.call_id.clone()),
+                name: Some(tool.name.clone()),
+            }),
+            _ => {}
+        }
+    }
+    items
+}
+
+fn bounded_history(
+    items: Vec<HistoryItem>,
+    limit: usize,
+    max_frame_bytes: usize,
+    response_id: &RpcId,
+) -> Result<SessionHistoryResult, ProtocolError> {
+    let original_len = items.len();
+    let mut has_more = items.len() > limit;
+    let mut retained = items
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let encoded_len = |candidate: &[HistoryItem], has_more: bool| {
+        serde_json::to_vec(&success(
+            response_id.clone(),
+            ResponsePayload::SessionHistory(SessionHistoryResult {
+                items: candidate.to_vec(),
+                has_more,
+            }),
+        ))
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX)
+    };
+    while !retained.is_empty() && encoded_len(&retained, has_more) > max_frame_bytes {
+        retained.remove(0);
+        has_more = true;
+    }
+    // History has no pagination cursor, so an item that cannot fit any bounded
+    // frame fails closed instead of silently returning an empty page.
+    if retained.is_empty() && original_len > 0 {
+        return Err(error(-32008, "outbound_frame_too_large", false));
+    }
+    Ok(SessionHistoryResult {
+        items: retained,
+        has_more,
+    })
+}
+
 fn preview_event_envelope(session_id: &str, event: CanonicalEvent) -> EventEnvelope {
     EventEnvelope {
         event_id: "event-00000000-0000-0000-0000-000000000000".to_owned(),
@@ -1672,6 +2012,31 @@ fn notification(event: EventEnvelope) -> ServerFrame {
         method: RunEventMethod::VALUE,
         params: StreamFrame::Event(Box::new(event)),
     })
+}
+
+const MAX_LABEL_CHARS: usize = 200;
+
+fn validate_label(
+    first_name: &'static str,
+    first: Option<&str>,
+    second_name: &'static str,
+    second: Option<&str>,
+) -> Option<ProtocolError> {
+    for (name, value) in [(first_name, first), (second_name, second)] {
+        if value.is_some_and(|value| value.chars().count() > MAX_LABEL_CHARS) {
+            let mut error = error(-32602, "label_too_long", false);
+            error.safe_details.insert(
+                "field".to_owned(),
+                serde_json::Value::String(name.to_owned()),
+            );
+            error.safe_details.insert(
+                "maxChars".to_owned(),
+                serde_json::Value::Number(MAX_LABEL_CHARS.into()),
+            );
+            return Some(error);
+        }
+    }
+    None
 }
 
 fn error(rpc_code: i32, cool_code: &str, retryable: bool) -> ProtocolError {
@@ -1870,6 +2235,10 @@ pub fn capabilities() -> BTreeSet<String> {
         "local_socket",
         "recovery",
         "run_cancellation",
+        "session_fork",
+        "session_history",
+        "session_list",
+        "session_steer",
         "streaming_models",
         "stdio",
         "trusted_tools",

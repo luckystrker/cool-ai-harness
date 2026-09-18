@@ -680,3 +680,320 @@ fn durable_writer_masks_secrets_for_direct_event_callers() {
     assert!(!encoded.contains("short-secret"));
     assert!(encoded.contains("[REDACTED]"));
 }
+
+#[test]
+fn session_listing_is_actor_scoped_filtered_and_bounded() {
+    let store = DurableStore::in_memory().unwrap();
+    for index in 0..3 {
+        store
+            .create_session(
+                "local-user",
+                &format!("key-{index}"),
+                &format!("key-{index}"),
+                Some(&format!("session {index}")),
+                Some(if index == 0 { "project-a" } else { "project-b" }),
+            )
+            .unwrap();
+    }
+    store
+        .create_session("another-user", "other", "other", None, Some("project-a"))
+        .unwrap();
+
+    let all = store.list_sessions("local-user", None, 10).unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].title.as_deref(), Some("session 2"));
+    assert_eq!(all[0].created_at.len(), "2026-01-01T00:00:00.000Z".len());
+
+    let filtered = store
+        .list_sessions("local-user", Some("project-a"), 10)
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].project_key.as_deref(), Some("project-a"));
+
+    let bounded = store.list_sessions("local-user", None, 2).unwrap();
+    assert_eq!(bounded.len(), 2);
+    assert!(store.list_sessions("another-user", None, 10).unwrap().len() == 1);
+}
+
+#[test]
+fn fork_copies_history_into_a_new_session_without_mutating_the_source() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    for (seq, canonical) in [
+        (
+            1,
+            CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: None,
+            }),
+        ),
+        (
+            2,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some("original prompt".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            3,
+            CanonicalEvent::ToolCompleted(cool_protocol::ToolCompleted {
+                call_id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                result: serde_json::json!({"content": "hello"}),
+            }),
+        ),
+        (
+            4,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("original answer".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            5,
+            CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "stop".to_owned(),
+                error_code: None,
+            }),
+        ),
+    ] {
+        store
+            .append_event("local-user", &event(&session, &run, seq, canonical))
+            .unwrap();
+    }
+
+    let forked = store
+        .fork_session("local-user", "fork-key", "fork-a", &session, Some("branch"))
+        .unwrap();
+    assert!(forked.created);
+    assert_ne!(forked.value, session);
+
+    let forked_events = store.session_events(&forked.value, "local-user").unwrap();
+    assert_eq!(forked_events.len(), 5);
+    assert!(forked_events.iter().all(|event| event.run_id != run));
+    assert_eq!(forked_events[0].seq, 1);
+    assert!(matches!(
+        forked_events[0].event,
+        CanonicalEvent::RunStarted(_)
+    ));
+    assert!(matches!(
+        forked_events.last().unwrap().event,
+        CanonicalEvent::RunCompleted(_)
+    ));
+    let original = store
+        .session_events(&session, "local-user")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(original, ["original prompt", "original answer"]);
+    let copied = forked_events
+        .iter()
+        .filter_map(|event| match &event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied, ["original prompt", "original answer"]);
+    assert!(forked_events.iter().any(|event| matches!(
+        &event.event,
+        CanonicalEvent::ToolCompleted(tool) if tool.call_id == "call-1"
+    )));
+
+    let replay = store
+        .fork_session("local-user", "fork-key", "fork-a", &session, Some("branch"))
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.value, forked.value);
+    assert!(matches!(
+        store.fork_session("local-user", "fork-key", "different", &session, None),
+        Err(StoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.fork_session("another-user", "fork-other", "x", &session, None),
+        Err(StoreError::ActorMismatch)
+    ));
+
+    let new_run = store
+        .start_run("local-user", "after-fork", "after-fork", &forked.value)
+        .unwrap();
+    assert!(new_run.created);
+}
+
+#[test]
+fn fork_preserves_multi_run_history_order_not_per_run_sequences() {
+    let store = DurableStore::in_memory().unwrap();
+    let session = store
+        .create_session("local-user", "multi-session", "multi-session", None, None)
+        .unwrap()
+        .value;
+    for (index, answer) in ["answer-1", "answer-2"].iter().enumerate() {
+        let run = store
+            .start_run(
+                "local-user",
+                &format!("multi-run-{index}"),
+                &format!("multi-run-{index}"),
+                &session,
+            )
+            .unwrap()
+            .value;
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    1,
+                    CanonicalEvent::RunStarted(RunStarted {
+                        model: None,
+                        mode: None,
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    2,
+                    CanonicalEvent::ItemCompleted(ItemEvent {
+                        role: Some("user".to_owned()),
+                        content: Some(format!("prompt-{index}")),
+                        tool_calls: Vec::new(),
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    3,
+                    CanonicalEvent::ItemCompleted(ItemEvent {
+                        role: Some("assistant".to_owned()),
+                        content: Some((*answer).to_owned()),
+                        tool_calls: Vec::new(),
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "local-user",
+                &event(
+                    &session,
+                    &run,
+                    4,
+                    CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "stop".to_owned(),
+                        error_code: None,
+                    }),
+                ),
+            )
+            .unwrap();
+    }
+
+    let forked = store
+        .fork_session("local-user", "multi-fork", "multi-fork", &session, None)
+        .unwrap()
+        .value;
+    let contents = store
+        .session_events(&forked, "local-user")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contents, ["prompt-0", "answer-1", "prompt-1", "answer-2"]);
+}
+
+#[test]
+fn steer_appends_a_durable_user_item_only_to_active_runs() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                1,
+                CanonicalEvent::RunStarted(RunStarted {
+                    model: None,
+                    mode: None,
+                }),
+            ),
+        )
+        .unwrap();
+
+    let steer = store
+        .steer_run(
+            "local-user",
+            "steer-key",
+            "steer-fingerprint",
+            &run,
+            "focus",
+        )
+        .unwrap();
+    assert!(steer.created);
+    assert_eq!(steer.value.run_id, run);
+    assert_eq!(steer.value.seq, 2);
+
+    let events = store.all_events(&run, "local-user").unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[1].event,
+        CanonicalEvent::ItemCompleted(item)
+            if item.role.as_deref() == Some("user") && item.content.as_deref() == Some("focus")
+    ));
+
+    let replay = store
+        .steer_run(
+            "local-user",
+            "steer-key",
+            "steer-fingerprint",
+            &run,
+            "focus",
+        )
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.value.seq, 2);
+    assert!(matches!(
+        store.steer_run("local-user", "steer-key", "changed", &run, "focus"),
+        Err(StoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.steer_run("another-user", "foreign", "foreign", &run, "focus"),
+        Err(StoreError::ActorMismatch)
+    ));
+
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                3,
+                CanonicalEvent::RunCompleted(RunTerminal {
+                    reason: "stop".to_owned(),
+                    error_code: None,
+                }),
+            ),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.steer_run("local-user", "late", "late", &run, "too late"),
+        Err(StoreError::RunNotActive)
+    ));
+}

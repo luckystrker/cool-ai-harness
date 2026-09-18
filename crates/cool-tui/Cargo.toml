@@ -1,5 +1,5 @@
 [package]
-name = "cool-extensions"
+name = "cool-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,20 +7,18 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-cool-agent = { path = "../cool-agent" }
+cool-app-server = { path = "../cool-app-server" }
 cool-protocol = { path = "../cool-protocol" }
-cool-security = { path = "../cool-security" }
-async-trait.workspace = true
-futures-util.workspace = true
-reqwest.workspace = true
-serde.workspace = true
+ratatui = "=0.29.0"
 serde_json.workspace = true
-sha2.workspace = true
 tokio.workspace = true
-url.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+cool-agent = { path = "../cool-agent" }
+cool-security = { path = "../cool-security" }
+cool-state = { path = "../cool-state" }
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -957,3 +957,207 @@ fn plugin_status_uses_the_canonical_protocol_event() {
     assert_eq!(value["kind"], "plugin.status");
     assert_eq!(value["payload"]["pluginId"], "demo");
 }
+
+#[test]
+fn store_install_local_writes_a_python_compatible_lockfile() {
+    let temporary = TempDir::new().unwrap();
+    let store_root = temporary.path().join("plugins");
+    let source = temporary.path().join("source");
+    write_plugin(&source, true);
+
+    let store = PluginStore::open(&store_root).unwrap();
+    assert!(store.list().unwrap().is_empty());
+    let entry = store.install_local(&source).unwrap();
+    assert_eq!(entry.name, "demo");
+    assert_eq!(entry.version, "1");
+    assert!(!entry.enabled, "installs are disabled until reviewed");
+    assert_eq!(entry.source_type, "local");
+    assert_eq!(entry.content_hash.len(), 64);
+    assert!(entry.required_capabilities.contains(&"execute".to_owned()));
+    assert!(
+        entry.resolved_dependencies.is_empty(),
+        "only bare commands become runtime dependencies; ./helper is a path"
+    );
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0], entry);
+
+    let document: Value =
+        serde_json::from_slice(&fs::read(store_root.join("plugins.lock.json")).unwrap()).unwrap();
+    assert_eq!(document["lock_version"], 1);
+    assert_eq!(document["plugins"]["demo"]["name"], "demo");
+    assert_eq!(document["plugins"]["demo"]["enabled"], false);
+    assert_eq!(
+        document["plugins"]["demo"]["content_hash"], entry.content_hash,
+        "the lockfile keeps the M3 field names"
+    );
+    assert!(source.exists(), "installing copies, it does not move");
+
+    assert!(matches!(
+        store.install_local(&source),
+        Err(cool_extensions::StoreError::Invalid(message))
+            if message.contains("already installed")
+    ));
+
+    // Integrity binding: a mismatched install tree is rejected.
+    let mut entry = store.list().unwrap()[0].clone();
+    entry.content_hash = "0".repeat(64);
+    let mut document: Value =
+        serde_json::from_slice(&fs::read(store_root.join("plugins.lock.json")).unwrap()).unwrap();
+    document["plugins"]["demo"]["content_hash"] = json!(entry.content_hash);
+    fs::write(
+        store_root.join("plugins.lock.json"),
+        serde_json::to_vec_pretty(&document).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.list(),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+}
+
+#[test]
+fn store_install_rejects_symlinks_and_enable_is_fail_closed() {
+    let temporary = TempDir::new().unwrap();
+    let store_root = temporary.path().join("plugins");
+    let source = temporary.path().join("source");
+    write_plugin(&source, false);
+    let store = PluginStore::open(&store_root).unwrap();
+    let entry = store.install_local(&source).unwrap();
+    assert!(store.set_enabled("demo", true).is_ok());
+    assert!(store.list().unwrap()[0].enabled);
+
+    // A tampered installation cannot be enabled.
+    let installed = PathBuf::from(&entry.install_path);
+    fs::write(installed.join("extra.txt"), "tampered").unwrap();
+    let store = PluginStore::open(&store_root).unwrap();
+    assert!(matches!(
+        store.set_enabled("demo", true),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.set_enabled("missing", true),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+
+    #[cfg(windows)]
+    {
+        let link_source = temporary.path().join("link-source");
+        write_plugin(&link_source, false);
+        let link = temporary.path().join("linked");
+        let created = std::os::windows::fs::symlink_dir(&link_source, &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &link_source.to_string_lossy(),
+                ])
+                .status()
+                .is_ok_and(|status| status.success());
+        assert!(
+            created,
+            "the test must create a real link to prove link rejection"
+        );
+        // A fresh store root keeps the duplicate-install guard out of the way,
+        // so only the link check can reject the linked source.
+        let link_store = PluginStore::open(temporary.path().join("link-store")).unwrap();
+        assert!(matches!(
+            link_store.install_local(&link),
+            Err(cool_extensions::StoreError::Invalid(message)) if message.contains("link")
+        ));
+        assert!(link_store.list().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn store_install_git_requires_a_pinned_commit() {
+    let temporary = TempDir::new().unwrap();
+    let repository = temporary.path().join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    write_plugin(&repository, false);
+    let run = |arguments: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-C", &repository.to_string_lossy()])
+            .args(arguments)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .expect("git is available in the test environment");
+        assert!(status.success(), "git {arguments:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "fixture"]);
+    let revision = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["-C", &repository.to_string_lossy(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let store = PluginStore::open(temporary.path().join("plugins")).unwrap();
+    assert!(matches!(
+        store.install_git(&repository.to_string_lossy(), "main"),
+        Err(cool_extensions::StoreError::Invalid(message))
+            if message.contains("40-character")
+    ));
+    assert!(matches!(
+        store.install_git(&repository.to_string_lossy(), &"f".repeat(40)),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+    let entry = store
+        .install_git(&repository.to_string_lossy(), &revision)
+        .unwrap();
+    assert_eq!(entry.source_type, "git");
+    assert_eq!(entry.revision, revision.to_ascii_lowercase());
+    assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn runtime_status_snapshot_lists_plugins_workers_and_mcp_servers() {
+    let temporary = TempDir::new().unwrap();
+    let store_root = temporary.path().join("plugins");
+    let (install, data, _hash) = install_plugin_fixture(&store_root, "demo", true);
+    let store = PluginStore::open(&store_root).unwrap();
+    let entry = cool_extensions::InstalledPlugin {
+        name: "demo".to_owned(),
+        version: "1".to_owned(),
+        enabled: true,
+        source_type: "local".to_owned(),
+        source: install.to_string_lossy().into_owned(),
+        revision: String::new(),
+        content_hash: install.file_name().unwrap().to_string_lossy().into_owned(),
+        install_path: install.to_string_lossy().into_owned(),
+        data_path: data.to_string_lossy().into_owned(),
+        installed_at: "2026-09-17T00:00:00.000Z".to_owned(),
+        diagnostics: Vec::new(),
+        resolved_dependencies: Vec::new(),
+        required_capabilities: Vec::new(),
+    };
+    fs::write(
+        store_root.join("plugins.lock.json"),
+        serde_json::to_vec_pretty(&json!({
+            "lock_version": 1,
+            "plugins": {"demo": entry},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let runtime = ExtensionRuntime::from_store(&store).unwrap();
+    let status = runtime.status_events().await;
+    assert!(status.iter().any(|event| matches!(
+        event,
+        cool_protocol::CanonicalEvent::PluginStatus(payload)
+            if payload.plugin_id == "demo" && payload.status == "enabled"
+    )));
+    assert_eq!(runtime.mcp_server_names(), ["demo/local"]);
+}

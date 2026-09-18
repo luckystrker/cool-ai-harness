@@ -1,5 +1,5 @@
 [package]
-name = "cool-extensions"
+name = "cool-acp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,20 +7,19 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-cool-agent = { path = "../cool-agent" }
+cool-app-server = { path = "../cool-app-server" }
 cool-protocol = { path = "../cool-protocol" }
-cool-security = { path = "../cool-security" }
-async-trait.workspace = true
-futures-util.workspace = true
-reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tokio.workspace = true
-url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+cool-agent = { path = "../cool-agent" }
+cool-extensions = { path = "../cool-extensions" }
+cool-security = { path = "../cool-security" }
+cool-state = { path = "../cool-state" }
+futures-util.workspace = true
 tempfile.workspace = true
 
 [lints]

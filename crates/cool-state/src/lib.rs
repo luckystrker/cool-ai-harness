@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalDecision, ApprovalOutcome, CanonicalEvent, EventEnvelope,
-    RunCancelledResult, RunTerminal, ToolApprovalRequired, ToolApprovalResolved, ToolFailed,
-    V1Version, WorkerEvent,
+    ItemEvent, RunCancelledResult, RunStarted, RunTerminal, SteerAcceptedResult,
+    ToolApprovalRequired, ToolApprovalResolved, ToolFailed, V1Version, WorkerEvent,
 };
 use cool_security::mask_json;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -141,6 +141,16 @@ fn transition_allowed(from: RunStatus, to: RunStatus) -> bool {
                 | (RunStatus::AwaitingApproval, RunStatus::Failed)
                 | (RunStatus::AwaitingApproval, RunStatus::Cancelled)
         )
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub project_key: Option<String>,
+    pub active_run_id: Option<String>,
+    pub last_seq: Option<u64>,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -388,6 +398,253 @@ impl DurableStore {
         )?;
         let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn list_sessions(
+        &self,
+        actor_id: &str,
+        project_key: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionListEntry>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT s.id, s.title, s.project_key, s.active_run_id, MAX(e.seq), s.created_at \
+             FROM rust_sessions s LEFT JOIN rust_events e ON e.run_id = s.active_run_id \
+             WHERE s.actor_id = ?1 AND (?2 IS NULL OR s.project_key = ?2) \
+             GROUP BY s.id ORDER BY s.rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![actor_id, project_key, limit as i64], |row| {
+            Ok(SessionListEntry {
+                session_id: row.get(0)?,
+                title: row.get(1)?,
+                project_key: row.get(2)?,
+                active_run_id: row.get(3)?,
+                last_seq: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.map(|row| Ok(row?)).collect()
+    }
+
+    pub fn fork_session(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        source_session_id: &str,
+        title: Option<&str>,
+    ) -> Result<IdempotentOutcome<String>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) =
+            lookup_idempotency::<String>(&transaction, actor_id, "session.fork", key, fingerprint)?
+        {
+            transaction.commit()?;
+            return Ok(IdempotentOutcome {
+                value: existing,
+                created: false,
+            });
+        }
+        let (owner, source_title, project_key): (String, Option<String>, Option<String>) =
+            transaction
+                .query_row(
+                    "SELECT actor_id, title, project_key FROM rust_sessions WHERE id = ?1",
+                    [source_session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+                .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let session_id = format!("session-{}", Uuid::new_v4());
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let now = timestamp();
+        transaction.execute(
+            "INSERT INTO rust_sessions(id, actor_id, title, project_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                actor_id,
+                title.or(source_title.as_deref()),
+                project_key,
+                now
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
+            params![run_id, session_id, actor_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE rust_sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run_id, session_id],
+        )?;
+
+        let mut next_seq = 0_u64;
+        let mut fork_events = vec![EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: now.clone(),
+            actor: ActorRef {
+                id: "cool-core".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-state-fork".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: Some("fork".to_owned()),
+            }),
+            extensions: Default::default(),
+        }];
+        let mut copied = Vec::new();
+        {
+            // `seq` is per run, so the merged history must keep the durable
+            // (run rowid, seq) order and must never be re-sorted by seq alone.
+            let mut statement = transaction.prepare(
+                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND r.id != ?2 ORDER BY r.rowid, e.seq",
+            )?;
+            let rows = statement.query_map(params![source_session_id, run_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                if !is_history_event(&source.event) {
+                    continue;
+                }
+                copied.push(source);
+            }
+        }
+        for source in copied {
+            fork_events.push(EventEnvelope {
+                event_id: format!("event-{}", Uuid::new_v4()),
+                schema_version: V1Version::VALUE,
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                item_id: source.item_id,
+                seq: 0,
+                occurred_at: source.occurred_at,
+                actor: source.actor,
+                source: "cool-state-fork".to_owned(),
+                causation_id: Some(source.event_id),
+                correlation_id: source.correlation_id,
+                event: source.event,
+                extensions: source.extensions,
+            });
+        }
+        fork_events.push(EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: timestamp(),
+            actor: ActorRef {
+                id: "cool-core".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-state-fork".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "fork".to_owned(),
+                error_code: None,
+            }),
+            extensions: Default::default(),
+        });
+        for event in &mut fork_events {
+            next_seq += 1;
+            event.seq = next_seq;
+            append_event_tx(&transaction, actor_id, event)?;
+        }
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.fork",
+            key,
+            fingerprint,
+            &session_id,
+        )?;
+        transaction.commit()?;
+        Ok(IdempotentOutcome {
+            value: session_id,
+            created: true,
+        })
+    }
+
+    pub fn steer_run(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        run_id: &str,
+        content: &str,
+    ) -> Result<IdempotentOutcome<SteerAcceptedResult>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<SteerAcceptedResult>(
+            &transaction,
+            actor_id,
+            "session.steer",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(IdempotentOutcome {
+                value: existing,
+                created: false,
+            });
+        }
+        let run = require_run(&transaction, run_id, actor_id)?;
+        if run.status.is_terminal() {
+            return Err(StoreError::RunNotActive);
+        }
+        let event = EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: run.session_id,
+            run_id: run_id.to_owned(),
+            item_id: None,
+            seq: run.last_seq + 1,
+            occurred_at: timestamp(),
+            actor: ActorRef {
+                id: actor_id.to_owned(),
+                kind: ActorKind::LocalUser,
+            },
+            source: "cool-state-steer".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some(content.to_owned()),
+                tool_calls: Vec::new(),
+            }),
+            extensions: Default::default(),
+        };
+        append_event_tx(&transaction, actor_id, &event)?;
+        let result = SteerAcceptedResult {
+            run_id: run_id.to_owned(),
+            seq: event.seq,
+        };
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.steer",
+            key,
+            fingerprint,
+            &result,
+        )?;
+        transaction.commit()?;
+        Ok(IdempotentOutcome {
+            value: result,
+            created: true,
+        })
     }
 
     pub fn start_run(
@@ -1362,6 +1619,17 @@ fn run_status(connection: &Connection, run_id: &str) -> Result<RunStatus, StoreE
         .optional()?
         .ok_or(StoreError::NotFound("run"))?;
     RunStatus::parse(&value)
+}
+
+fn is_history_event(event: &CanonicalEvent) -> bool {
+    matches!(
+        event,
+        CanonicalEvent::ItemCompleted(item)
+            if matches!(item.role.as_deref(), Some("user" | "assistant"))
+    ) || matches!(
+        event,
+        CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
+    )
 }
 
 fn event_status(event: &CanonicalEvent) -> Option<RunStatus> {

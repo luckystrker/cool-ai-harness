@@ -204,6 +204,27 @@ impl From<serde_json::Error> for LoadError {
 pub struct PluginLoader;
 
 impl PluginLoader {
+    /// Deterministic content hash of an installation tree, using the same algorithm as loading.
+    pub fn content_hash(&self, root: &Path) -> Result<String, LoadError> {
+        if !root.is_dir() || is_link_like(&fs::symlink_metadata(root)?) {
+            return Err(LoadError::InvalidRoot);
+        }
+        hash_tree(&root.canonicalize()?)
+    }
+
+    /// Rejects symlink or reparse-point entries anywhere under the plugin root.
+    /// The caller-supplied path is checked before canonicalization so a linked
+    /// root cannot be hidden by resolving it.
+    pub fn reject_links(&self, root: &Path) -> Result<(), LoadError> {
+        if !root.is_dir() || is_link_like(&fs::symlink_metadata(root)?) {
+            return Err(LoadError::InvalidRoot);
+        }
+        let root = root.canonicalize()?;
+        let mut paths = Vec::new();
+        collect_files(&root, &root, &mut paths)?;
+        Ok(())
+    }
+
     pub fn load(&self, root: &Path, data_root: &Path) -> Result<PluginBundle, LoadError> {
         if !root.is_dir() || is_link_like(&fs::symlink_metadata(root)?) {
             return Err(LoadError::InvalidRoot);

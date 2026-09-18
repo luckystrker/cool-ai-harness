@@ -1090,6 +1090,74 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "session.list"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionListParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.history"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionHistoryParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.fork"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionForkParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.steer"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionSteerParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "run.cancel"
             },
             "params": {
@@ -1128,6 +1196,23 @@
             },
             "params": {
               "$ref": "#/$defs/ApprovalResolveParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "status.get"
+            },
+            "params": {
+              "$ref": "#/$defs/StatusGetParams"
             }
           },
           "additionalProperties": false,
@@ -1359,6 +1444,49 @@
         "name",
         "events",
         "expectedState"
+      ]
+    },
+    "HistoryItem": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "toolCallId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCalls": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolRequested"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role"
       ]
     },
     "IdempotencyKey": {
@@ -1795,10 +1923,78 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "session_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_history"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionHistoryResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_forked"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionForkedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "prompt_accepted"
             },
             "value": {
               "$ref": "#/$defs/PromptAcceptedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "steer_accepted"
+            },
+            "value": {
+              "$ref": "#/$defs/SteerAcceptedResult"
             }
           },
           "additionalProperties": false,
@@ -1850,6 +2046,23 @@
             },
             "value": {
               "$ref": "#/$defs/EventPage"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "status"
+            },
+            "value": {
+              "$ref": "#/$defs/StatusGetResult"
             }
           },
           "additionalProperties": false,
@@ -2151,6 +2364,116 @@
       },
       "additionalProperties": false
     },
+    "SessionForkParams": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "sessionId"
+      ]
+    },
+    "SessionForkedResult": {
+      "type": "object",
+      "properties": {
+        "forkedFrom": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "forkedFrom"
+      ]
+    },
+    "SessionHistoryParams": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "limit"
+      ]
+    },
+    "SessionHistoryResult": {
+      "type": "object",
+      "properties": {
+        "hasMore": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HistoryItem"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "hasMore"
+      ]
+    },
+    "SessionListParams": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "projectKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "limit"
+      ]
+    },
+    "SessionListResult": {
+      "type": "object",
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SessionSummary"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "SessionLoadParams": {
       "type": "object",
       "properties": {
@@ -2216,6 +2539,142 @@
         "idempotencyKey",
         "sessionId",
         "content"
+      ]
+    },
+    "SessionSteerParams": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          }
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "runId",
+        "content"
+      ]
+    },
+    "SessionSummary": {
+      "type": "object",
+      "properties": {
+        "activeRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "lastSeq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projectKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "createdAt"
+      ]
+    },
+    "StatusEntry": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ]
+    },
+    "StatusGetParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "StatusGetResult": {
+      "type": "object",
+      "properties": {
+        "mcpServers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "plugins": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatusEntry"
+          }
+        },
+        "workers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StatusEntry"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SteerAcceptedResult": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "seq"
       ]
     },
     "StreamEnd": {

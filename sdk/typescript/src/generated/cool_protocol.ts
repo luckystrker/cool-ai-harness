@@ -8,7 +8,7 @@ export type ActorKind = "local_user" | "server_user" | "telegram_user" | "system
 
 export type CommandEnvelope = { protocolVersion: 1, commandId: string, command: Command, };
 
-export type Command = { "method": "initialize", "params": InitializeParams } | { "method": "session.create", "params": SessionCreateParams } | { "method": "session.load", "params": SessionLoadParams } | { "method": "session.prompt", "params": SessionPromptParams } | { "method": "run.cancel", "params": RunCancelParams } | { "method": "run.events", "params": RunEventsParams } | { "method": "approval.resolve", "params": ApprovalResolveParams };
+export type Command = { "method": "initialize", "params": InitializeParams } | { "method": "session.create", "params": SessionCreateParams } | { "method": "session.load", "params": SessionLoadParams } | { "method": "session.prompt", "params": SessionPromptParams } | { "method": "session.list", "params": SessionListParams } | { "method": "session.history", "params": SessionHistoryParams } | { "method": "session.fork", "params": SessionForkParams } | { "method": "session.steer", "params": SessionSteerParams } | { "method": "run.cancel", "params": RunCancelParams } | { "method": "run.events", "params": RunEventsParams } | { "method": "approval.resolve", "params": ApprovalResolveParams } | { "method": "status.get", "params": StatusGetParams };
 
 export type InitializeParams = { clientName: string, clientVersion: string, supportedProtocolVersions: Array<number>, capabilities: Array<string>, };
 
@@ -18,6 +18,14 @@ export type SessionLoadParams = { sessionId: string, };
 
 export type SessionPromptParams = { idempotencyKey: string, sessionId: string, content: Array<ContentPart>, model: string | null, };
 
+export type SessionListParams = { projectKey: string | null, limit: number, };
+
+export type SessionHistoryParams = { sessionId: string, limit: number, };
+
+export type SessionForkParams = { idempotencyKey: string, sessionId: string, title: string | null, };
+
+export type SessionSteerParams = { idempotencyKey: string, runId: string, content: Array<ContentPart>, };
+
 export type ContentPart = { "type": "text", text: string, } | { "type": "artifact", artifactId: string, } | { "type": "image", artifactId: string, mediaType: string, };
 
 export type RunCancelParams = { idempotencyKey: string, runId: string, reason: string | null, };
@@ -25,6 +33,8 @@ export type RunCancelParams = { idempotencyKey: string, runId: string, reason: s
 export type RunEventsParams = { runId: string, afterSeq: number | null, limit: number, };
 
 export type ApprovalResolveParams = { idempotencyKey: string, approvalId: string, expectedRevision: number, decision: ApprovalDecision, };
+
+export type StatusGetParams = Record<symbol, never>;
 
 export type ApprovalDecision = "approved" | "denied";
 
@@ -124,13 +134,29 @@ export type SessionCreatedResult = { sessionId: string, };
 
 export type SessionLoadedResult = { sessionId: string, activeRunId: string | null, lastSeq: number | null, };
 
+export type SessionListResult = { sessions: Array<SessionSummary>, };
+
+export type SessionSummary = { sessionId: string, title: string | null, projectKey: string | null, activeRunId: string | null, lastSeq: number | null, createdAt: string, };
+
+export type SessionHistoryResult = { items: Array<HistoryItem>, hasMore: boolean, };
+
+export type HistoryItem = { role: string, content: string | null, reasoning: string | null, toolCalls: Array<ToolRequested>, toolCallId: string | null, name: string | null, };
+
+export type SessionForkedResult = { sessionId: string, forkedFrom: string, };
+
 export type PromptAcceptedResult = { runId: string, };
+
+export type SteerAcceptedResult = { runId: string, seq: number, };
+
+export type StatusEntry = { id: string, status: string, code: string | null, };
+
+export type StatusGetResult = { plugins: Array<StatusEntry>, workers: Array<StatusEntry>, mcpServers: Array<string>, };
 
 export type RunCancelledResult = { runId: string, accepted: boolean, };
 
 export type ApprovalResolvedResult = { approvalId: string, revision: number, outcome: ApprovalOutcome, };
 
-export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "approval_resolved", "value": ApprovalResolvedResult } | { "kind": "event_page", "value": EventPage };
+export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "session_listed", "value": SessionListResult } | { "kind": "session_history", "value": SessionHistoryResult } | { "kind": "session_forked", "value": SessionForkedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "steer_accepted", "value": SteerAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "approval_resolved", "value": ApprovalResolvedResult } | { "kind": "event_page", "value": EventPage } | { "kind": "status", "value": StatusGetResult };
 
 export type RpcSuccess = { jsonrpc: JsonRpcV2, id: RpcId, result: ResponsePayload, };
 

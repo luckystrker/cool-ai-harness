@@ -1,0 +1,156 @@
+[
+  {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "agentCapabilities": {
+        "loadSession": true,
+        "mcpCapabilities": {
+          "http": false,
+          "sse": false
+        },
+        "promptCapabilities": {
+          "audio": false,
+          "embeddedContext": false,
+          "image": false
+        }
+      },
+      "agentInfo": {
+        "name": "cool-ai-harness",
+        "title": "Cool AI Harness",
+        "version": "0.1.0"
+      },
+      "authMethods": [],
+      "protocolVersion": 1
+    }
+  },
+  {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+      "sessionId": "session-1"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "session-1",
+      "update": {
+        "content": {
+          "text": "first answer",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_message_chunk"
+      }
+    }
+  },
+  {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+      "stopReason": "end_turn"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "session-1",
+      "update": {
+        "kind": "edit",
+        "rawInput": {
+          "content": "written through ACP",
+          "path": "acp-note.txt"
+        },
+        "sessionUpdate": "tool_call",
+        "status": "pending",
+        "title": "write_file",
+        "toolCallId": "call-1"
+      }
+    }
+  },
+  {
+    "id": "cool-acp-1",
+    "jsonrpc": "2.0",
+    "method": "session/request_permission",
+    "params": {
+      "options": [
+        {
+          "kind": "allow_once",
+          "name": "Allow once",
+          "optionId": "allow_once"
+        },
+        {
+          "kind": "reject_once",
+          "name": "Reject",
+          "optionId": "reject_once"
+        }
+      ],
+      "sessionId": "session-1",
+      "toolCall": {
+        "kind": "edit",
+        "rawInput": {
+          "content": "written through ACP",
+          "path": "acp-note.txt"
+        },
+        "status": "pending",
+        "title": "write_file",
+        "toolCallId": "call-1"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "session-1",
+      "update": {
+        "rawOutput": {
+          "permissionDecision": "approved"
+        },
+        "sessionUpdate": "tool_call_update",
+        "status": "in_progress",
+        "toolCallId": "call-1"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "session-1",
+      "update": {
+        "rawOutput": {
+          "append": false,
+          "bytes": 19,
+          "path": "acp-note.txt"
+        },
+        "sessionUpdate": "tool_call_update",
+        "status": "completed",
+        "toolCallId": "call-1"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "session-1",
+      "update": {
+        "content": {
+          "text": "note written",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_message_chunk"
+      }
+    }
+  },
+  {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+      "stopReason": "end_turn"
+    }
+  }
+]

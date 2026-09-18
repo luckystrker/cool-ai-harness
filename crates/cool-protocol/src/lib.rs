@@ -161,12 +161,22 @@ pub enum Command {
     SessionLoad(SessionLoadParams),
     #[serde(rename = "session.prompt")]
     SessionPrompt(SessionPromptParams),
+    #[serde(rename = "session.list")]
+    SessionList(SessionListParams),
+    #[serde(rename = "session.history")]
+    SessionHistory(SessionHistoryParams),
+    #[serde(rename = "session.fork")]
+    SessionFork(SessionForkParams),
+    #[serde(rename = "session.steer")]
+    SessionSteer(SessionSteerParams),
     #[serde(rename = "run.cancel")]
     RunCancel(RunCancelParams),
     #[serde(rename = "run.events")]
     RunEvents(RunEventsParams),
     #[serde(rename = "approval.resolve")]
     ApprovalResolve(ApprovalResolveParams),
+    #[serde(rename = "status.get")]
+    StatusGet(StatusGetParams),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -233,6 +243,42 @@ pub enum ContentPart {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct SessionListParams {
+    pub project_key: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionHistoryParams {
+    pub session_id: String,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionForkParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub session_id: String,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionSteerParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub run_id: String,
+    pub content: Vec<ContentPart>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct RunCancelParams {
     #[ts(type = "string")]
     pub idempotency_key: IdempotencyKey,
@@ -261,6 +307,11 @@ pub struct ApprovalResolveParams {
     pub expected_revision: u64,
     pub decision: ApprovalDecision,
 }
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct StatusGetParams {}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -1049,6 +1100,87 @@ pub struct ApprovalResolvedResult {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub project_key: Option<String>,
+    pub active_run_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub last_seq: Option<u64>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionListResult {
+    #[serde(default)]
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct HistoryItem {
+    pub role: String,
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolRequested>,
+    pub tool_call_id: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionHistoryResult {
+    #[serde(default)]
+    pub items: Vec<HistoryItem>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionForkedResult {
+    pub session_id: String,
+    pub forked_from: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SteerAcceptedResult {
+    pub run_id: String,
+    #[ts(type = "number")]
+    pub seq: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct StatusEntry {
+    pub id: String,
+    pub status: String,
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct StatusGetResult {
+    #[serde(default)]
+    pub plugins: Vec<StatusEntry>,
+    #[serde(default)]
+    pub workers: Vec<StatusEntry>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -1060,10 +1192,15 @@ pub enum ResponsePayload {
     Initialized(InitializeResult),
     SessionCreated(SessionCreatedResult),
     SessionLoaded(SessionLoadedResult),
+    SessionListed(SessionListResult),
+    SessionHistory(SessionHistoryResult),
+    SessionForked(SessionForkedResult),
     PromptAccepted(PromptAcceptedResult),
+    SteerAccepted(SteerAcceptedResult),
     RunCancelled(RunCancelledResult),
     ApprovalResolved(ApprovalResolvedResult),
     EventPage(EventPage),
+    Status(StatusGetResult),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]

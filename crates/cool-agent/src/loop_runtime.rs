@@ -136,6 +136,11 @@ pub trait EventSink: Send + Sync {
     async fn reserve_usage(&self, _usage: &Usage) -> Result<(), RuntimeError> {
         Ok(())
     }
+    /// User messages durably submitted while the run is active. The loop folds
+    /// them into history before building the next model request.
+    async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
@@ -295,6 +300,9 @@ impl AgentRuntime {
             let mut usage_observed = false;
             if let Some(reason) = cancel.reason() {
                 return finish_cancelled(sink, history, reason).await;
+            }
+            for steer in sink.drain_steers().await? {
+                history.push(steer);
             }
             if estimate_history_tokens(&history) > request.limits.context_tokens {
                 sink.before_compaction(&history).await?;

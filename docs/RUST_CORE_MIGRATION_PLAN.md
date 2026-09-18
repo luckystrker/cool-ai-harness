@@ -1,6 +1,6 @@
 # Cool — план миграции на Rust core
 
-> Статус: active; M0-M3 и M5-M8 complete, M4 implementation passed / real-client acceptance pending
+> Статус: active; M0-M3 и M5-M9 complete, M4 implementation passed / real-client acceptance pending
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions
@@ -51,7 +51,7 @@
 | 6 | M6 — Durable state и security kernel | M5 | [x] complete | [`M6.md`](migration/checkpoints/M6.md) |
 | 7 | M7 — Agent loop и trusted tool runtime | M6 | [x] complete | [`M7.md`](migration/checkpoints/M7.md) |
 | 8 | M8 — MCP, plugins, hooks и workers | M3, M6, M7 | [x] complete | [`M8.md`](migration/checkpoints/M8.md) |
-| 9 | M9 — Rust CLI/TUI и ACP cutover | M4, M7, M8 | [ ] pending | — |
+| 9 | M9 — Rust CLI/TUI и ACP cutover | M4, M7, M8 | [x] complete | [`M9.md`](migration/checkpoints/M9.md) |
 | 10 | M10 — Store и background subsystems parity | M6, M7 | [ ] pending | — |
 | 11 | M11 — Web cutover и compatibility workers | M8, M9, M10 | [ ] pending | — |
 | 12 | M12 — Default cutover и сокращение Python | M11 | [ ] pending | — |

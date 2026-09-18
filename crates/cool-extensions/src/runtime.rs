@@ -107,6 +107,18 @@ impl ExtensionRuntime {
             .push(plugin_status_event(plugin, status, code));
     }
 
+    /// Current plugin/worker status events plus worker heartbeats, without
+    /// starting a session. Used by `status.get` and CLI diagnostics.
+    pub async fn status_events(&self) -> Vec<CanonicalEvent> {
+        let mut status = self.status.lock().await.clone();
+        status.extend(self.workers.heartbeat().await);
+        status
+    }
+
+    pub fn mcp_server_names(&self) -> Vec<String> {
+        self.engine.mcp_server_names()
+    }
+
     pub async fn lifecycle_event(
         &self,
         event: &str,
