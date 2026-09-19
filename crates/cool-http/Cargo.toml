@@ -1,0 +1,28 @@
+[package]
+name = "cool-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum.workspace = true
+cool-app-server = { path = "../cool-app-server" }
+cool-protocol = { path = "../cool-protocol" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+cool-state = { path = "../cool-state" }
+reqwest = { workspace = true, features = ["cookies"] }
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

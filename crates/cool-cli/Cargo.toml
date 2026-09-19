@@ -15,6 +15,7 @@ cool-acp = { path = "../cool-acp" }
 cool-agent = { path = "../cool-agent" }
 cool-app-server = { path = "../cool-app-server" }
 cool-extensions = { path = "../cool-extensions" }
+cool-http = { path = "../cool-http" }
 cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }

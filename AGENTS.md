@@ -35,6 +35,17 @@ in `crates/cool-app-server/src/legacy/`, and the frontend contract gate
 when `ServerConfig::legacy_store` is set (CLI: `cool app-server --legacy-store`,
 read-only unless the file is already Rust-owned).
 
+M11 (in progress) added `crates/cool-http`: a browser-facing HTTP/SSE projection
+of the App Protocol (`cool serve`). It owns no business logic — each browser
+identity is one in-process `AppServer::serve_io` connection driven by
+`AppClient`; `POST /api/rpc` carries canonical `RpcRequest`/`ServerFrame` and
+`GET /api/events` is the canonical cursor/reconnect SSE stream. The `local`
+(loopback, optional token) and `server` (token + TLS/reverse-proxy boundary)
+profiles are validated at startup and fail closed. `sdk/typescript/src/http.ts`
+adds the fetch/SSE `CoolTransport`. The React `frontend/src/api/*` cutover,
+Telegram adapter, OpenCode Bun/Python workers and packaging/upgrade tests remain
+pending; `docs/migration/checkpoints/M11.md` tracks them.
+
 Supporting roots: `backend/tests` (pytest suite), `backend/evals`
 (scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),
 `docs/` (roadmap + per-phase specs), and `spikes/m0-rust-core` (the isolated,

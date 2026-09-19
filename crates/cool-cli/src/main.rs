@@ -106,7 +106,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "status": "ok",
-                    "phase": "M10",
+                    "phase": "M11",
                     "runtime": "rust-trusted-core",
                     "protocolVersion": 1,
                     "capabilities": capabilities(),
@@ -122,6 +122,8 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                     "compatibilityWorkers": ["codex", "claude"],
                     "tui": true,
                     "acp": true,
+                    "webFacade": true,
+                    "serveProfiles": ["local", "server"],
                     "legacyStore": inspect_legacy_store(&data_dir)
                 }))
                 .expect("doctor JSON serializes")
@@ -134,14 +136,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
         "run" => run_prompt(args.collect()).await,
         "acp" => run_acp(default_data_dir()).await,
         "tui" | "chat" => run_tui(args.collect()).await,
-        "serve" => Err((
-            2,
-            json!({
-                "coolCode": "m11_route_not_implemented",
-                "message": format!("{command} is routed but becomes operational in a later phase"),
-                "retryable": false
-            }),
-        )),
+        "serve" => serve_command(args.collect()).await,
         "--version" | "-V" => {
             println!("cool {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -407,6 +402,100 @@ impl RunLifecycle for CliExtensions {
             mcp_servers: self.0.mcp_server_names(),
         })
     }
+}
+
+/// `cool serve`: the browser-facing HTTP/SSE facade over the Rust runtime.
+///
+/// The App Protocol remains the single business boundary: `/api/rpc` carries
+/// canonical `RpcRequest`/`ServerFrame` JSON and `/api/events` is the canonical
+/// cursor/reconnect event stream. Static React assets are served from
+/// `--assets` with an SPA fallback.
+async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
+    let mut options = cool_http::ServeOptions::default();
+    let mut data_dir = default_data_dir();
+    let mut legacy_store = false;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--data-dir" => {
+                data_dir = PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing data directory"))?,
+                );
+            }
+            "--bind" => {
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| usage("missing bind address"))?;
+                let address: std::net::IpAddr = value
+                    .parse()
+                    .map_err(|_| usage("bind must be an IP address"))?;
+                options.bind.set_ip(address);
+            }
+            "--port" => {
+                let value = arguments.next().ok_or_else(|| usage("missing port"))?;
+                let port: u16 = value.parse().map_err(|_| usage("port must be a number"))?;
+                options.bind.set_port(port);
+            }
+            "--assets" => {
+                options.assets = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing assets directory"))?,
+                ));
+            }
+            "--token" => {
+                options.token = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing token value"))?,
+                );
+            }
+            "--public-url" => {
+                options.public_url = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing public URL value"))?,
+                );
+            }
+            "--profile" => {
+                let value = arguments.next().ok_or_else(|| usage("missing profile"))?;
+                options.profile = match value.as_str() {
+                    "local" => cool_http::ServeProfile::Local,
+                    "server" => cool_http::ServeProfile::Server,
+                    _ => return Err(usage("profile must be local or server")),
+                };
+            }
+            "--trusted-proxy" => options.trust_proxy = true,
+            "--tls-terminated" => options.tls_terminated = true,
+            "--allow-remote" => options.allow_remote = true,
+            "--legacy-store" => legacy_store = true,
+            _ => return Err(usage("unknown serve argument")),
+        }
+    }
+    if options.token.is_none()
+        && let Ok(token) = env::var("COOL_API_TOKEN")
+        && !token.is_empty()
+    {
+        options.token = Some(token);
+    }
+    let bind = options.bind;
+    let profile = cool_http::profile_name(options.profile);
+    let server = build_server(&data_dir, legacy_store).await?;
+    let facade =
+        cool_http::HttpFacade::new(server, options).map_err(|error| usage(&error.to_string()))?;
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .map_err(|error| runtime("serve_bind_failed", &error.to_string()))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| runtime("serve_bind_failed", &error.to_string()))?;
+    eprintln!("cool serve: profile={profile} listening on http://{address}");
+    facade
+        .serve(listener)
+        .await
+        .map_err(|error| runtime("serve_failed", &error.to_string()))
 }
 
 async fn run_acp(data_dir: PathBuf) -> Result<(), (i32, serde_json::Value)> {
@@ -867,6 +956,6 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }

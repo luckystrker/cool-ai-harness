@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ fn write_plugin_fixture(root: &std::path::Path) {
 }
 
 #[test]
-fn doctor_reports_the_m10_runtime_boundary() {
+fn doctor_reports_the_m11_runtime_boundary() {
     let temporary = tempfile::tempdir().unwrap();
     let output = cool()
         .arg("doctor")
@@ -33,7 +33,9 @@ fn doctor_reports_the_m10_runtime_boundary() {
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(report["status"], "ok");
-    assert_eq!(report["phase"], "M10");
+    assert_eq!(report["phase"], "M11");
+    assert_eq!(report["webFacade"], true);
+    assert_eq!(report["serveProfiles"], json!(["local", "server"]));
     assert_eq!(report["durableState"], true);
     assert_eq!(report["securityKernel"], true);
     assert_eq!(report["agentLoop"], true);
@@ -305,12 +307,32 @@ fn tui_fails_closed_without_an_interactive_terminal() {
 }
 
 #[test]
-fn later_phase_serve_route_fails_closed_with_structured_error() {
-    let output = cool().arg("serve").output().expect("run routed command");
+fn serve_server_profile_fails_closed_without_a_token() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = cool()
+        .args([
+            "serve",
+            "--data-dir",
+            temporary.path().to_str().unwrap(),
+            "--profile",
+            "server",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("run cool serve server profile");
     assert_eq!(output.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&output.stderr).expect("structured CLI error");
-    assert_eq!(error["coolCode"], "m11_route_not_implemented");
+    assert_eq!(error["coolCode"], "invalid_cli_usage");
     assert_eq!(error["retryable"], false);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("requires an API token"),
+        "message: {}",
+        error["message"]
+    );
 }
 
 #[test]
@@ -349,4 +371,54 @@ fn invalid_transport_is_rejected_before_server_start() {
     assert_eq!(output.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&output.stderr).expect("structured CLI error");
     assert_eq!(error["coolCode"], "invalid_cli_usage");
+}
+
+#[test]
+fn serve_starts_the_http_facade_and_answers_health() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut child = cool()
+        .args([
+            "serve",
+            "--data-dir",
+            temporary.path().to_str().unwrap(),
+            "--port",
+            "0",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cool serve");
+
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let mut address = None;
+    for line in BufReader::new(stderr).lines() {
+        let line = line.expect("stderr line");
+        if let Some(rest) = line.split("listening on http://").nth(1) {
+            address = Some(rest.trim().to_owned());
+            break;
+        }
+    }
+    let address = address.expect("serve announced its address");
+
+    let mut stream = std::net::TcpStream::connect(&address).expect("connect to serve");
+    write!(
+        stream,
+        "GET /api/health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write request");
+    stream.flush().expect("flush request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(response.contains("200 OK"), "response:\n{response}");
+    assert!(
+        response.contains("\"runtime\":\"rust-trusted-core\""),
+        "response:\n{response}"
+    );
+    assert!(
+        response.contains("\"phase\":\"M11\""),
+        "response:\n{response}"
+    );
 }
