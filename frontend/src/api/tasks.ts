@@ -1,59 +1,117 @@
 import { api } from "./client"
-import type {
-  ParseCronResponse,
-  ScheduledTask,
-  ScheduledTaskCreate,
-  ScheduledTaskUpdate,
-  SchedulerStatus,
-  TaskInbox,
-  TaskRun,
-  TaskRunDetail,
-  TaskTemplate,
-} from "./types"
+import { idempotencyKey, sdk } from "./sdk"
+import {
+  toParseCron,
+  toScheduledTask,
+  toTaskInbox,
+  toTaskRun,
+  toTaskRunDetail,
+} from "./mappers"
+import type { ScheduledTaskCreate, ScheduledTaskUpdate, TaskTemplate } from "./types"
+import type { JsonValue } from "./generated/cool_protocol"
 
 export const tasksApi = {
   // --- Tasks ---
-  list: (params?: { enabled?: boolean }) => {
-    const qs = new URLSearchParams()
-    if (params?.enabled != null) qs.set("enabled", String(params.enabled))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<ScheduledTask[]>(`/api/tasks${suffix}`)
+  list: async (params?: { enabled?: boolean }) =>
+    (await sdk.tasksList({ enabled: params?.enabled ?? null })).map(toScheduledTask),
+  get: async (id: number) => toScheduledTask(await sdk.tasksGet({ id })),
+  create: async (body: ScheduledTaskCreate) => {
+    // `template` materializes a built-in workflow server-side; the canonical
+    // create command has no template parameter yet, so that path stays on the
+    // Python runtime (documented M11 gap).
+    if (body.template) {
+      return api.post<import("./types").ScheduledTask>("/api/tasks", body)
+    }
+    return toScheduledTask(
+      await sdk.tasksCreate({
+        idempotencyKey: idempotencyKey(),
+        name: body.name,
+        description: body.description ?? null,
+        triggerType: body.trigger_type ?? "cron",
+        cronExpression: body.cron_expression ?? null,
+        intervalSeconds: body.interval_seconds ?? null,
+        runAt: body.run_at ?? null,
+        timezone: body.timezone ?? "UTC",
+        quietHoursStart: body.quiet_hours_start ?? null,
+        quietHoursEnd: body.quiet_hours_end ?? null,
+        misfirePolicy: body.misfire_policy ?? "skip",
+        prompt: body.prompt ?? "",
+        workflowType: null,
+        profileId: body.profile_id ?? null,
+        model: body.model ?? null,
+        toolsWhitelist: (body.tools_whitelist as unknown as JsonValue) ?? null,
+        capabilityPolicy: (body.capability_policy as unknown as JsonValue) ?? null,
+        workingDirectory: body.working_directory ?? null,
+        approvalPolicy: body.approval_policy ?? "deny_external",
+        deliveryChannels: (body.delivery_channels as unknown as JsonValue) ?? null,
+        deliveryConfig: (body.delivery_config as unknown as JsonValue) ?? null,
+        maxIterations: body.max_iterations ?? 10,
+        maxCostPerRun: body.max_cost_per_run ?? null,
+        timeoutS: body.timeout_s ?? null,
+        enabled: body.enabled ?? true,
+      })
+    )
   },
-  get: (id: number) => api.get<ScheduledTask>(`/api/tasks/${id}`),
-  create: (body: ScheduledTaskCreate) => api.post<ScheduledTask>("/api/tasks", body),
-  update: (id: number, body: ScheduledTaskUpdate) =>
-    api.put<ScheduledTask>(`/api/tasks/${id}`, body),
-  delete: (id: number) => api.delete<void>(`/api/tasks/${id}`),
+  update: async (id: number, body: ScheduledTaskUpdate) =>
+    toScheduledTask(
+      await sdk.tasksUpdate({
+        idempotencyKey: idempotencyKey(),
+        id,
+        name: body.name ?? null,
+        description: body.description ?? null,
+        triggerType: body.trigger_type ?? null,
+        cronExpression: body.cron_expression ?? null,
+        intervalSeconds: body.interval_seconds ?? null,
+        runAt: body.run_at ?? null,
+        timezone: body.timezone ?? null,
+        quietHoursStart: body.quiet_hours_start ?? null,
+        quietHoursEnd: body.quiet_hours_end ?? null,
+        misfirePolicy: body.misfire_policy ?? null,
+        prompt: body.prompt ?? null,
+        workflowType: null,
+        profileId: body.profile_id ?? null,
+        model: body.model ?? null,
+        toolsWhitelist: (body.tools_whitelist as unknown as JsonValue) ?? null,
+        capabilityPolicy: (body.capability_policy as unknown as JsonValue) ?? null,
+        workingDirectory: body.working_directory ?? null,
+        approvalPolicy: body.approval_policy ?? null,
+        deliveryChannels: (body.delivery_channels as unknown as JsonValue) ?? null,
+        deliveryConfig: (body.delivery_config as unknown as JsonValue) ?? null,
+        maxIterations: body.max_iterations ?? null,
+        maxCostPerRun: body.max_cost_per_run ?? null,
+        timeoutS: body.timeout_s ?? null,
+        enabled: body.enabled ?? null,
+      })
+    ),
+  delete: async (id: number) => {
+    await sdk.tasksDelete({ idempotencyKey: idempotencyKey(), id })
+  },
 
   // --- Runs ---
   /** Trigger a run now; returns the queued run (execution continues server-side). */
-  runNow: (id: number) => api.post<TaskRun>(`/api/tasks/${id}/run`),
-  listRuns: (id: number, params?: { limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<TaskRun[]>(`/api/tasks/${id}/runs${suffix}`)
-  },
-  getRun: (runId: number) => api.get<TaskRunDetail>(`/api/tasks/runs/${runId}`),
+  runNow: (id: number) => api.post<import("./types").TaskRun>(`/api/tasks/${id}/run`),
+  listRuns: async (id: number, params?: { limit?: number }) =>
+    (await sdk.tasksRunsList({ taskId: id, limit: params?.limit ?? 50 })).map(toTaskRun),
+  getRun: async (runId: number) => toTaskRunDetail(await sdk.tasksRunsGet({ id: runId })),
   cancelRun: (runId: number) =>
-    api.post<{ task_run_id: number; cancelled: boolean }>(
-      `/api/tasks/runs/${runId}/cancel`
+    api.post<{ task_run_id: number; cancelled: boolean }>(`/api/tasks/runs/${runId}/cancel`),
+  markRead: async (runId: number, isRead = true) =>
+    toTaskRun(
+      await sdk.tasksRunsRead({ idempotencyKey: idempotencyKey(), id: runId, isRead })
     ),
-  markRead: (runId: number, isRead = true) =>
-    api.post<TaskRun>(`/api/tasks/runs/${runId}/read`, { is_read: isRead }),
 
   // --- Inbox / notifications ---
-  inbox: (params?: { unread_only?: boolean; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.unread_only) qs.set("unread_only", "true")
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<TaskInbox>(`/api/tasks/inbox${suffix}`)
-  },
+  inbox: async (params?: { unread_only?: boolean; limit?: number }) =>
+    toTaskInbox(
+      await sdk.tasksInbox({
+        unreadOnly: params?.unread_only ?? false,
+        limit: params?.limit ?? 30,
+      })
+    ),
 
   // --- Helpers ---
   templates: () => api.get<TaskTemplate[]>("/api/tasks/templates"),
-  scheduler: () => api.get<SchedulerStatus>("/api/tasks/scheduler"),
+  scheduler: () => api.get<import("./types").SchedulerStatus>("/api/tasks/scheduler"),
   /** Natural language ("every day at 8pm") or cron -> cron + next run times. */
-  parseCron: (text: string) => api.post<ParseCronResponse>("/api/tasks/parse-cron", { text }),
+  parseCron: async (text: string) => toParseCron(await sdk.tasksParseCron({ text })),
 }

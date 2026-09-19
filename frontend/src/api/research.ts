@@ -1,32 +1,37 @@
 import { api } from "./client"
+import { sdk } from "./sdk"
+import { toResearchRun, toResearchRunDetail } from "./mappers"
 import type {
   ResearchProgressEvent,
   ResearchRerunRequest,
-  ResearchRun,
-  ResearchRunDetail,
   ResearchStartRequest,
 } from "./types"
 
 /**
  * Deep research workflow API (Фаза 4).
  *
- * `streamResearch` drives a research run over SSE (POST /api/research/stream)
- * and yields progress events ({type, payload}) as they arrive: started,
- * stage, subquestion_started/completed, source_found, then a terminal
- * completed/failed/cancelled event.
+ * `list`/`get` read the durable research rows through the canonical protocol.
+ * Starting/cancelling/rerunning a pipeline still executes in the Python
+ * runtime (the canonical runtime has no research executor yet), so those stay
+ * on the documented `deferred`/`sse/stream` transport. `streamResearch` drives
+ * a live run over SSE (POST /api/research/stream) and yields progress events
+ * ({type, payload}) as they arrive: started, stage, subquestion_started/
+ * completed, source_found, then a terminal completed/failed/cancelled event.
  */
 
 export const deepResearchApi = {
-  list: (limit = 50) => api.get<ResearchRun[]>(`/api/research?limit=${limit}`),
-  get: (id: number) => api.get<ResearchRunDetail>(`/api/research/${id}`),
+  list: async (limit = 50) => (await sdk.researchList({ limit })).map(toResearchRun),
+  get: async (id: number) => toResearchRunDetail(await sdk.researchGet({ id })),
   /** Start a background run (no live progress; poll the detail endpoint). */
-  start: (body: ResearchStartRequest) => api.post<ResearchRun>("/api/research", body),
+  start: (body: ResearchStartRequest) => api.post<ResearchRunResponse>("/api/research", body),
   cancel: (id: number) => api.post<{ cancelled: number }>(`/api/research/${id}/cancel`),
   rerun: (id: number, body: ResearchRerunRequest = {}) =>
-    api.post<ResearchRun>(`/api/research/${id}/rerun`, body),
+    api.post<ResearchRunResponse>(`/api/research/${id}/rerun`, body),
   exportUrl: (id: number, format: "md" | "html" | "pdf" | "docx") =>
     `/api/research/${id}/export?format=${format}`,
 }
+
+type ResearchRunResponse = import("./types").ResearchRun
 
 export async function* streamResearch(
   body: ResearchStartRequest,

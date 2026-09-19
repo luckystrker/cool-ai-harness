@@ -1,19 +1,34 @@
 /** API functions for the Inspector (Фаза 1.5 §6). */
 
-import { api } from "./client"
-import type { ReplayRequest, ReplayResponse, RunComparison, RunTimeline } from "./types"
+import { idempotencyKey, sdk } from "./sdk"
+import { toAgentRun, toReplayResponse, toRunComparison, toRunTimeline } from "./mappers"
+import type { ReplayRequest } from "./types"
+
+/** List the durable legacy runs of a conversation, newest first. */
+export async function listRuns(convId: number) {
+  const records = await sdk.runsList({ conversationId: convId, beforeId: null, limit: 100 })
+  return records.map(toAgentRun)
+}
 
 /** Get the structured per-iteration timeline for a run. */
-export function getRunTimeline(convId: number, runId: number) {
-  return api.get<RunTimeline>(`/api/conversations/${convId}/runs/${runId}/timeline`)
+export async function getRunTimeline(_convId: number, runId: number) {
+  return toRunTimeline(await sdk.inspectorTimeline({ id: runId }))
 }
 
 /** Compare two runs side-by-side. */
-export function compareRuns(aId: number, bId: number) {
-  return api.get<RunComparison>(`/api/runs/compare?a=${aId}&b=${bId}`)
+export async function compareRuns(aId: number, bId: number) {
+  return toRunComparison(await sdk.inspectorCompare({ leftRunId: aId, rightRunId: bId }))
 }
 
 /** Replay a run with optional overrides. */
-export function replayRun(convId: number, runId: number, overrides?: ReplayRequest) {
-  return api.post<ReplayResponse>(`/api/conversations/${convId}/runs/${runId}/replay`, overrides ?? {})
+export async function replayRun(_convId: number, runId: number, overrides?: ReplayRequest) {
+  return toReplayResponse(
+    await sdk.inspectorReplay({
+      idempotencyKey: idempotencyKey(),
+      runId,
+      model: overrides?.model ?? null,
+      systemPrompt: overrides?.system_prompt ?? null,
+      temperature: overrides?.temperature ?? null,
+    })
+  )
 }

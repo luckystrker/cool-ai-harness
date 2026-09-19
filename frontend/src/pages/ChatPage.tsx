@@ -21,7 +21,7 @@ import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
-import { plansApi } from "@/api/plans"
+import { executePlan, plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
 import type { Message, Provider, RunOut, ToolPermissions } from "@/api/types"
@@ -320,57 +320,33 @@ export function ChatPage() {
     if (!planMsg?.plan) return
     const planId = planMsg.plan.id
     try {
-      // Stream the plan execution via SSE.
-      const resp = await fetch(plansApi.executeUrl(convId, planId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      })
-      if (!resp.ok || !resp.body) {
-        throw new Error(`Execution failed (${resp.status})`)
-      }
-      // Read the SSE stream and update the plan card in pending messages.
-      const reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        // Parse SSE frames.
-        let sepIdx: number
-        while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, sepIdx)
-          buffer = buffer.slice(sepIdx + 2)
-          const dataLine = frame.split("\n").find((l) => l.startsWith("data:"))
-          if (!dataLine) continue
-          try {
-            const parsed = JSON.parse(dataLine.slice(5).trim())
-            const payload = parsed?.payload ?? parsed
-            const kind = parsed?.kind ?? ""
-            // Update the plan in pending messages based on events.
-            if (kind === "plan_step_start" || kind === "plan_step_complete" || kind === "plan_progress") {
-              setPendingMsgs((cur) =>
-                cur.map((m) => {
-                  if (!m.plan) return m
-                  const steps = m.plan.steps.map((s) => {
-                    if (kind === "plan_step_start" && s.position === payload.position) {
-                      return { ...s, status: "running" as const }
-                    }
-                    if (kind === "plan_step_complete" && s.position === payload.position) {
-                      return { ...s, status: (payload.status ?? "completed") as typeof s.status, result_summary: payload.result_summary ?? s.result_summary }
-                    }
-                    return s
-                  })
-                  const allDone = steps.every((s) => ["completed", "failed", "skipped"].includes(s.status))
-                  const hasFailed = steps.some((s) => s.status === "failed")
+      // Plan execution still runs in the Python runtime; stream its plan events.
+      for await (const { kind, payload } of executePlan(convId, planId)) {
+        if (kind === "plan_step_start" || kind === "plan_step_complete" || kind === "plan_progress") {
+          setPendingMsgs((cur) =>
+            cur.map((m) => {
+              if (!m.plan) return m
+              const steps = m.plan.steps.map((s) => {
+                if (kind === "plan_step_start" && s.position === payload.position) {
+                  return { ...s, status: "running" as const }
+                }
+                if (kind === "plan_step_complete" && s.position === payload.position) {
                   return {
-                    ...m,
-                    plan: { ...m.plan, steps, status: allDone ? (hasFailed ? "failed" as const : "completed" as const) : "executing" as const },
+                    ...s,
+                    status: (payload.status ?? "completed") as typeof s.status,
+                    result_summary: (payload.result_summary as string | null | undefined) ?? s.result_summary,
                   }
-                })
-              )
-            }
-          } catch { /* skip malformed frames */ }
+                }
+                return s
+              })
+              const allDone = steps.every((s) => ["completed", "failed", "skipped"].includes(s.status))
+              const hasFailed = steps.some((s) => s.status === "failed")
+              return {
+                ...m,
+                plan: { ...m.plan, steps, status: allDone ? (hasFailed ? "failed" as const : "completed" as const) : "executing" as const },
+              }
+            })
+          )
         }
       }
       // Mark execution done.

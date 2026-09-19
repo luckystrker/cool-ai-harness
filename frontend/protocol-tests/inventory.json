@@ -111,7 +111,7 @@
       "member": "listModels",
       "http": "GET /api/providers/{id}/models",
       "status": "deferred",
-      "rationale": "Python lists models with a live provider call; Rust has no provider runtime yet (M11), and the store only holds the cached chat_models catalog, so the live list stays deferred"
+      "rationale": "Python lists models with a live provider call; Rust providers.models only projects the cached chat_models catalog, so the live list stays deferred"
     },
     {
       "file": "providers.ts",
@@ -414,6 +414,13 @@
     },
     {
       "file": "plans.ts",
+      "member": "executePlan",
+      "http": "POST /api/conversations/{id}/plans/{plan}/execute",
+      "status": "sse/stream",
+      "rationale": "plan execution is still a Python runtime action; the helper streams its per-plan SSE frames out of the page layer until the canonical runtime owns a plan executor"
+    },
+    {
+      "file": "plans.ts",
       "member": "listTemplates",
       "http": "GET /api/plan-templates",
       "status": "sdk",
@@ -501,14 +508,14 @@
       "member": "launch",
       "http": "POST /api/subagents/launch",
       "status": "deferred",
-      "rationale": "durable subagent-run row and child conversation are created via cool-store; the executor that drives the run lands with the M11 runtime"
+      "rationale": "Rust subagents.launch creates the durable subagent-run row and child conversation but does not execute it; the subagent executor is still the Python runtime, so the launch action stays deferred until the M11 runtime drives the run"
     },
     {
       "file": "subagents.ts",
       "member": "launchBatch",
       "http": "POST /api/subagents/launch-batch",
       "status": "deferred",
-      "rationale": "durable subagent-run rows are created via cool-store; batch execution belongs to the M11 runtime"
+      "rationale": "Rust subagents.launch_batch creates the durable run rows only; batch execution stays in the Python runtime, so this stays deferred"
     },
     {
       "file": "subagents.ts",
@@ -528,8 +535,8 @@
       "file": "subagents.ts",
       "member": "cancelRun",
       "http": "POST /api/subagents/runs/{id}/cancel",
-      "status": "sdk",
-      "command": "subagents.runs_cancel"
+      "status": "deferred",
+      "rationale": "Rust subagents.runs_cancel only flips the durable row; the live asyncio subagent task is cancelled by the Python executor, so cancelling through the canonical command would report success while the run keeps executing"
     },
     {
       "file": "subagents.ts",
@@ -558,6 +565,13 @@
       "http": "POST /api/conversations/{id}/runs/{run}/replay",
       "status": "sdk",
       "command": "inspector.replay"
+    },
+    {
+      "file": "inspector.ts",
+      "member": "listRuns",
+      "http": "GET /api/conversations/{id}/runs",
+      "status": "sdk",
+      "command": "runs.list"
     },
     {
       "file": "budgets.ts",
@@ -823,7 +837,7 @@
       "member": "runNow",
       "http": "POST /api/tasks/{id}/run",
       "status": "deferred",
-      "rationale": "a durable queued task-run row is created via cool-store; execution belongs to the M11 scheduler/executor"
+      "rationale": "Rust tasks.run only inserts a queued task-run row; the task executor/scheduler that actually runs it lives in the Python runtime, so the action stays deferred"
     },
     {
       "file": "tasks.ts",
@@ -843,8 +857,8 @@
       "file": "tasks.ts",
       "member": "cancelRun",
       "http": "POST /api/tasks/runs/{run}/cancel",
-      "status": "sdk",
-      "command": "tasks.runs_cancel"
+      "status": "deferred",
+      "rationale": "Rust tasks.runs_cancel only flips the durable row; the live task/agent run is cancelled by the Python executor, so cancelling through the canonical command would report success while the run keeps executing"
     },
     {
       "file": "tasks.ts",
@@ -872,7 +886,7 @@
       "member": "scheduler",
       "http": "GET /api/tasks/scheduler",
       "status": "deferred",
-      "rationale": "live scheduler engine state belongs to the M11 runtime; the store-backed job projection is available through tasks.list"
+      "rationale": "Rust tasks.scheduler returns a store-backed projection (enabled=true/running=false synthesized from the task rows), not the live scheduler engine; the live runtime state stays in Python"
     },
     {
       "file": "tasks.ts",
@@ -977,7 +991,7 @@
       "member": "replay",
       "http": "POST /api/webhooks/{id}/events/{event}/replay",
       "status": "deferred",
-      "rationale": "the event row is re-enqueued via cool-store; re-dispatching it to the task executor belongs to the M11 runtime"
+      "rationale": "Rust webhooks.replay re-enqueues a durable event row but does not re-dispatch it to the task executor, so the replay action stays in the Python runtime"
     },
     {
       "file": "wiki.ts",
@@ -1061,21 +1075,21 @@
       "member": "start",
       "http": "POST /api/research",
       "status": "deferred",
-      "rationale": "durable research-run row is created via cool-store; the research pipeline executes in the M11 runtime"
+      "rationale": "Rust research.create only inserts the durable research-run row; the research pipeline executes in the Python runtime, so start stays deferred"
     },
     {
       "file": "research.ts",
       "member": "cancel",
       "http": "POST /api/research/{id}/cancel",
       "status": "deferred",
-      "rationale": "cancelling an executing pipeline belongs to the M11 runtime; the store records the cancelled terminal state"
+      "rationale": "Rust research.cancel flips the durable row to cancelled but cannot stop the Python pipeline, so the cancel action stays deferred"
     },
     {
       "file": "research.ts",
       "member": "rerun",
       "http": "POST /api/research/{id}/rerun",
       "status": "deferred",
-      "rationale": "a new durable research-run row is created via cool-store; execution belongs to the M11 runtime"
+      "rationale": "Rust research.rerun only inserts a new durable row; execution stays in the Python runtime, so rerun stays deferred"
     },
     {
       "file": "research.ts",

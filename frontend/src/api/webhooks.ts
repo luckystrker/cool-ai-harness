@@ -1,36 +1,72 @@
 import { api } from "./client"
-import type { WebhookEndpoint, WebhookEvent } from "./types"
+import { idempotencyKey, sdk } from "./sdk"
+import { toWebhookEndpoint, toWebhookEvent } from "./mappers"
+import type { JsonValue } from "./generated/cool_protocol"
 
 export const webhooksApi = {
   // --- Endpoints ---
-  list: () => api.get<WebhookEndpoint[]>("/api/webhooks"),
-  get: (id: number) => api.get<WebhookEndpoint>(`/api/webhooks/${id}`),
-  create: (body: {
+  list: async () => (await sdk.webhooksList({})).map(toWebhookEndpoint),
+  get: async (id: number) => toWebhookEndpoint(await sdk.webhooksGet({ id })),
+  create: async (body: {
     name: string
     source_type?: string
     event_filter?: string[] | null
     task_id?: number | null
     prompt_template?: string | null
     enabled?: boolean
-  }) => api.post<WebhookEndpoint>("/api/webhooks", body),
-  update: (id: number, body: Partial<{
-    name: string
-    source_type: string
-    event_filter: string[] | null
-    task_id: number | null
-    prompt_template: string | null
-    enabled: boolean
-  }>) => api.put<WebhookEndpoint>(`/api/webhooks/${id}`, body),
-  delete: (id: number) => api.delete<void>(`/api/webhooks/${id}`),
+  }) =>
+    toWebhookEndpoint(
+      await sdk.webhooksCreate({
+        idempotencyKey: idempotencyKey(),
+        name: body.name,
+        sourceType: body.source_type ?? null,
+        eventFilter: (body.event_filter as unknown as JsonValue) ?? null,
+        taskId: body.task_id ?? null,
+        promptTemplate: body.prompt_template ?? null,
+        enabled: body.enabled ?? null,
+      })
+    ),
+  update: async (
+    id: number,
+    body: Partial<{
+      name: string
+      source_type: string
+      event_filter: string[] | null
+      task_id: number | null
+      prompt_template: string | null
+      enabled: boolean
+    }>
+  ) =>
+    toWebhookEndpoint(
+      await sdk.webhooksUpdate({
+        idempotencyKey: idempotencyKey(),
+        id,
+        name: body.name ?? null,
+        sourceType: body.source_type ?? null,
+        eventFilter: (body.event_filter as unknown as JsonValue) ?? null,
+        taskId: body.task_id ?? null,
+        promptTemplate: body.prompt_template ?? null,
+        enabled: body.enabled ?? null,
+      })
+    ),
+  delete: async (id: number) => {
+    await sdk.webhooksDelete({ idempotencyKey: idempotencyKey(), id })
+  },
 
   // --- Events ---
-  listEvents: (endpointId: number, params?: { status?: string; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.status) qs.set("status", params.status)
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<WebhookEvent[]>(`/api/webhooks/${endpointId}/events${suffix}`)
-  },
+  listEvents: async (
+    endpointId: number,
+    params?: { status?: string; limit?: number }
+  ) =>
+    (
+      await sdk.webhooksEvents({
+        endpointId,
+        status: params?.status ?? null,
+        limit: params?.limit ?? 50,
+      })
+    ).map(toWebhookEvent),
   replay: (endpointId: number, eventId: number) =>
-    api.post<WebhookEvent>(`/api/webhooks/${endpointId}/events/${eventId}/replay`),
+    api.post<import("./types").WebhookEvent>(
+      `/api/webhooks/${endpointId}/events/${eventId}/replay`
+    ),
 }

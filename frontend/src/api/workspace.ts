@@ -1,4 +1,4 @@
-import { api } from "./client"
+import { idempotencyKey, sdk } from "./sdk"
 
 export interface GitInfo {
   path: string
@@ -47,36 +47,40 @@ export interface GitBranches {
 
 export const workspaceApi = {
   /** Current git branch (if any) for a directory. */
-  gitInfo: (path: string) =>
-    api.get<GitInfo>(`/api/workspace/git-info?path=${encodeURIComponent(path)}`),
+  gitInfo: async (path: string): Promise<GitInfo> => {
+    const record = await sdk.workspaceGitInfo({ path })
+    return { path: record.path, is_git: record.isGit, branch: record.branch }
+  },
 
   /** List sub-directories of a path (folder browser). */
-  directories: (path?: string) =>
-    api.get<DirectoryListing>(
-      `/api/workspace/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`
-    ),
+  directories: async (path?: string): Promise<DirectoryListing> =>
+    sdk.workspaceDirectories({ path: path ?? null }),
 
   /** Recently used working directories + the global default. */
-  recent: () => api.get<RecentDirectories>("/api/workspace/recent"),
+  recent: async (): Promise<RecentDirectories> => sdk.workspaceRecent({}),
 
   /** Parsed git status: branch, staged, modified, untracked files. */
-  gitStatus: (path: string) =>
-    api.get<GitStatus>(`/api/workspace/git-status?path=${encodeURIComponent(path)}`),
+  gitStatus: async (path: string): Promise<GitStatus> => {
+    const record = await sdk.workspaceGitStatus({ path })
+    return {
+      path: record.path,
+      is_git: record.isGit,
+      branch: record.branch,
+      staged: record.staged,
+      modified: record.modified,
+      untracked: record.untracked,
+    }
+  },
 
   /** Recent commit log for a repository. */
-  gitLog: (path: string, limit = 10) =>
-    api.get<GitLog>(
-      `/api/workspace/git-log?path=${encodeURIComponent(path)}&limit=${limit}`
-    ),
+  gitLog: async (path: string, limit = 10): Promise<GitLog> =>
+    sdk.workspaceGitLog({ path, limit }),
 
   /** List all local branches and the current one. */
-  gitBranches: (path: string) =>
-    api.get<GitBranches>(`/api/workspace/git-branches?path=${encodeURIComponent(path)}`),
+  gitBranches: async (path: string): Promise<GitBranches> =>
+    sdk.workspaceGitBranches({ path }),
 
   /** Switch to a different branch. */
-  gitCheckout: (path: string, branch: string) =>
-    api.post<{ path: string; branch: string; status: string }>(
-      "/api/workspace/git-checkout",
-      { path, branch }
-    ),
+  gitCheckout: async (path: string, branch: string) =>
+    sdk.workspaceGitCheckout({ idempotencyKey: idempotencyKey(), path, branch }),
 }

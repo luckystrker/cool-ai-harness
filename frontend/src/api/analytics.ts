@@ -1,39 +1,44 @@
-import { api } from "./client"
-import type {
-  AnalyticsSummary,
-  CallHistoryResponse,
-  LatencyPoint,
-  MemoryActivityPoint,
-  ModelSpend,
-  SpendTimeSeriesPoint,
-  TopTool,
-} from "./types"
+import { sdk } from "./sdk"
+import {
+  toAnalyticsSummary,
+  toCallHistoryResponse,
+  toLatencyPoint,
+  toMemoryActivityPoint,
+  toModelSpend,
+  toSpendTimeSeriesPoint,
+  toTopTool,
+} from "./mappers"
 
 export const analyticsApi = {
-  summary: (days = 30) => api.get<AnalyticsSummary>(`/api/analytics/summary?days=${days}`),
+  summary: async (days = 30) => toAnalyticsSummary(await sdk.analyticsSummary({ days })),
 
-  spendOverTime: (days = 30, bucket: "day" | "hour" = "day") =>
-    api.get<SpendTimeSeriesPoint[]>(`/api/analytics/spend-over-time?days=${days}&bucket=${bucket}`),
+  spendOverTime: async (days = 30, bucket: "day" | "hour" = "day") =>
+    (await sdk.analyticsSpendOverTime({ days, bucket })).map(toSpendTimeSeriesPoint),
 
-  spendByModel: (days = 30) =>
-    api.get<ModelSpend[]>(`/api/analytics/spend-by-model?days=${days}`),
+  spendByModel: async (days = 30) =>
+    (await sdk.analyticsSpendByModel({ days })).map(toModelSpend),
 
-  topTools: (days = 30, limit = 20) =>
-    api.get<TopTool[]>(`/api/analytics/top-tools?days=${days}&limit=${limit}`),
+  topTools: async (days = 30, limit = 20) =>
+    (await sdk.analyticsTopTools({ days, limit })).map(toTopTool),
 
-  latency: (days = 30, bucket: "day" | "hour" = "day") =>
-    api.get<LatencyPoint[]>(`/api/analytics/latency?days=${days}&bucket=${bucket}`),
+  latency: async (days = 30, bucket: "day" | "hour" = "day") =>
+    (await sdk.analyticsLatency({ days, bucket })).map(toLatencyPoint),
 
-  callHistory: (params?: { limit?: number; offset?: number; model?: string; provider?: string }) => {
-    const qs = new URLSearchParams()
-    if (params?.limit) qs.set("limit", String(params.limit))
-    if (params?.offset) qs.set("offset", String(params.offset))
-    if (params?.model) qs.set("model", params.model)
-    if (params?.provider) qs.set("provider", params.provider)
-    const suffix = qs.toString() ? `?${qs.toString()}` : ""
-    return api.get<CallHistoryResponse>(`/api/analytics/call-history${suffix}`)
-  },
+  callHistory: async (params?: {
+    limit?: number
+    offset?: number
+    model?: string
+    provider?: string
+  }) =>
+    toCallHistoryResponse(
+      await sdk.analyticsCallHistory({
+        limit: params?.limit ?? 100,
+        offset: params?.offset ?? 0,
+        model: params?.model ?? null,
+        provider: params?.provider ?? null,
+      })
+    ),
 
-  memoryActivity: (days = 30, bucket: "day" | "hour" = "day") =>
-    api.get<MemoryActivityPoint[]>(`/api/analytics/memory-activity?days=${days}&bucket=${bucket}`),
+  memoryActivity: async (days = 30, bucket: "day" | "hour" = "day") =>
+    (await sdk.analyticsMemoryActivity({ days, bucket })).map(toMemoryActivityPoint),
 }

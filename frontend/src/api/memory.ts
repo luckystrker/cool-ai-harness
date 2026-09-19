@@ -1,52 +1,102 @@
 import { api } from "./client"
+import { idempotencyKey, sdk } from "./sdk"
+import {
+  toEntity,
+  toEpisode,
+  toMemoryExplain,
+  toMemoryItem,
+  toMemoryStats,
+} from "./mappers"
 import type {
-  Entity,
   EntityCreate,
   EntityUpdate,
-  Episode,
   MemoryCreate,
-  MemoryExplain,
   MemoryExtractRequest,
   MemoryExtractResponse,
-  MemoryItem,
-  MemoryStats,
   MemoryUpdate,
 } from "./types"
+import type { JsonValue } from "./generated/cool_protocol"
 
 export const memoryApi = {
   // --- Memories ---
-  list: (params?: {
+  list: async (params?: {
     memory_type?: string
     scope?: string
     status?: string
     limit?: number
     offset?: number
-  }) => {
-    const qs = new URLSearchParams()
-    if (params?.memory_type) qs.set("memory_type", params.memory_type)
-    if (params?.scope) qs.set("scope", params.scope)
-    if (params?.status) qs.set("status", params.status)
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    if (params?.offset != null) qs.set("offset", String(params.offset))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<MemoryItem[]>(`/api/memory${suffix}`)
+  }) =>
+    (
+      await sdk.memoryList({
+        memoryType: params?.memory_type ?? null,
+        scope: params?.scope ?? null,
+        status: params?.status ?? "active",
+        conversationId: null,
+        pinned: null,
+        limit: params?.limit ?? 50,
+        offset: params?.offset ?? 0,
+      })
+    ).map(toMemoryItem),
+  get: async (id: number) => toMemoryItem(await sdk.memoryGet({ id })),
+  create: async (body: MemoryCreate) =>
+    toMemoryItem(
+      await sdk.memoryCreate({
+        idempotencyKey: idempotencyKey(),
+        scope: body.scope ?? null,
+        agentId: body.agent_id ?? null,
+        conversationId: null,
+        memoryType: body.memory_type ?? null,
+        content: body.content,
+        structured: (body.structured as unknown as JsonValue) ?? null,
+        tags: (body.tags as unknown as JsonValue) ?? null,
+        importance: body.importance ?? null,
+        confidence: body.confidence ?? null,
+        source: null,
+        status: null,
+        confirmed: false,
+        supersedesId: null,
+        ttlDays: body.ttl_days ?? null,
+        validFrom: null,
+        validTo: null,
+        pinned: false,
+      })
+    ),
+  update: async (id: number, body: MemoryUpdate) =>
+    toMemoryItem(
+      await sdk.memoryUpdate({
+        idempotencyKey: idempotencyKey(),
+        id,
+        content: body.content ?? null,
+        memoryType: body.memory_type ?? null,
+        scope: body.scope ?? null,
+        agentId: null,
+        importance: body.importance ?? null,
+        confidence: body.confidence ?? null,
+        status: body.status ?? null,
+        tags: (body.tags as unknown as JsonValue) ?? null,
+        structured: (body.structured as unknown as JsonValue) ?? null,
+        ttlDays: body.ttl_days ?? null,
+        validTo: body.valid_to ?? null,
+        pinned: body.pinned ?? null,
+      })
+    ),
+  delete: async (id: number, hard = false) => {
+    await sdk.memoryDelete({ idempotencyKey: idempotencyKey(), id, hard })
   },
-  get: (id: number) => api.get<MemoryItem>(`/api/memory/${id}`),
-  create: (body: MemoryCreate) => api.post<MemoryItem>("/api/memory", body),
-  update: (id: number, body: MemoryUpdate) =>
-    api.patch<MemoryItem>(`/api/memory/${id}`, body),
-  delete: (id: number, hard = false) =>
-    api.delete<void>(`/api/memory/${id}?hard=${hard}`),
 
   // --- Confirmation workflow ---
-  listPending: () => api.get<MemoryItem[]>("/api/memory/pending"),
-  confirm: (id: number) => api.post<MemoryItem>(`/api/memory/${id}/confirm`),
-  reject: (id: number) => api.post<void>(`/api/memory/${id}/reject`),
-  pin: (id: number, pinned: boolean) =>
-    api.post<MemoryItem>(`/api/memory/${id}/pin`, { pinned }),
+  listPending: async () =>
+    (await sdk.memoryPending({ limit: 100, offset: 0 })).map(toMemoryItem),
+  confirm: async (id: number) =>
+    toMemoryItem(await sdk.memoryConfirm({ idempotencyKey: idempotencyKey(), id })),
+  reject: async (id: number) => {
+    await sdk.memoryReject({ idempotencyKey: idempotencyKey(), id })
+  },
+  pin: async (id: number, pinned: boolean) =>
+    toMemoryItem(await sdk.memoryPin({ idempotencyKey: idempotencyKey(), id, pinned })),
 
   // --- Explainability ---
-  explain: (id: number) => api.get<MemoryExplain>(`/api/memory/${id}/explain`),
+  explain: async (id: number) => toMemoryExplain(await sdk.memoryExplain({ id })),
 
   // --- Export (triggers a browser download) ---
   exportMemories: async (
@@ -69,16 +119,16 @@ export const memoryApi = {
   },
 
   // --- Episodes ---
-  listEpisodes: (params?: { agent_id?: number; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.agent_id != null) qs.set("agent_id", String(params.agent_id))
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<Episode[]>(`/api/memory/episodes${suffix}`)
-  },
+  listEpisodes: async (params?: { agent_id?: number; limit?: number }) =>
+    (
+      await sdk.memoryEpisodes({
+        agentId: params?.agent_id ?? null,
+        limit: params?.limit ?? 20,
+      })
+    ).map(toEpisode),
 
   // --- Stats ---
-  stats: () => api.get<MemoryStats>("/api/memory/stats"),
+  stats: async () => toMemoryStats(await sdk.memoryStats({})),
 
   // --- Extraction ---
   extract: (body: MemoryExtractRequest) =>
@@ -86,17 +136,39 @@ export const memoryApi = {
 }
 
 export const entitiesApi = {
-  list: (params?: { entity_type?: string; query?: string; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.entity_type) qs.set("entity_type", params.entity_type)
-    if (params?.query) qs.set("query", params.query)
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<Entity[]>(`/api/entities${suffix}`)
+  list: async (params?: { entity_type?: string; query?: string; limit?: number }) =>
+    (
+      await sdk.entitiesList({
+        entityType: params?.entity_type ?? null,
+        query: params?.query ?? null,
+        limit: params?.limit ?? 100,
+      })
+    ).map(toEntity),
+  get: async (id: number) => toEntity(await sdk.entitiesGet({ id })),
+  create: async (body: EntityCreate) =>
+    toEntity(
+      await sdk.entitiesCreate({
+        idempotencyKey: idempotencyKey(),
+        name: body.name,
+        entityType: body.entity_type ?? "concept",
+        aliases: (body.aliases as unknown as JsonValue) ?? null,
+        attributes: (body.attributes as unknown as JsonValue) ?? null,
+        description: body.description ?? null,
+      })
+    ),
+  update: async (id: number, body: EntityUpdate) =>
+    toEntity(
+      await sdk.entitiesUpdate({
+        idempotencyKey: idempotencyKey(),
+        id,
+        name: body.name ?? null,
+        entityType: body.entity_type ?? null,
+        aliases: (body.aliases as unknown as JsonValue) ?? null,
+        attributes: (body.attributes as unknown as JsonValue) ?? null,
+        description: body.description ?? null,
+      })
+    ),
+  delete: async (id: number) => {
+    await sdk.entitiesDelete({ idempotencyKey: idempotencyKey(), id })
   },
-  get: (id: number) => api.get<Entity>(`/api/entities/${id}`),
-  create: (body: EntityCreate) => api.post<Entity>("/api/entities", body),
-  update: (id: number, body: EntityUpdate) =>
-    api.patch<Entity>(`/api/entities/${id}`, body),
-  delete: (id: number) => api.delete<void>(`/api/entities/${id}`),
 }

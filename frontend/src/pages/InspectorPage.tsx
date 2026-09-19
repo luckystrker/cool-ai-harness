@@ -8,9 +8,9 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 import { ArrowRight, Bug, GitCompareArrows, Loader2, Play } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
-import { compareRuns, getRunTimeline, replayRun } from "@/api/inspector"
+import { compareRuns, getRunTimeline, listRuns, replayRun } from "@/api/inspector"
 import { conversationsApi } from "@/api/conversations"
-import type { RunOut, RunTimeline as RunTimelineType } from "@/api/types"
+import type { RunTimeline as RunTimelineType } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -20,7 +20,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { ComparisonView } from "@/components/inspector/ComparisonView"
 import { RunTimeline } from "@/components/inspector/RunTimeline"
-import { api, getErrorDescription } from "@/api/client"
+import { getErrorDescription } from "@/api/client"
 
 type Mode = "timeline" | "compare"
 
@@ -46,7 +46,7 @@ export function InspectorPage() {
   // Load runs for the selected conversation.
   const { data: runs = [] } = useQuery({
     queryKey: ["runs", selectedConvId],
-    queryFn: () => api.get<RunOut[]>(`/api/conversations/${selectedConvId}/runs`),
+    queryFn: () => listRuns(selectedConvId!),
     enabled: selectedConvId !== null,
   })
 

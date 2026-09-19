@@ -1,38 +1,61 @@
 import { api } from "./client"
-import type { RssEntry, RssSubscription } from "./types"
+import { idempotencyKey, sdk } from "./sdk"
+import { toRssEntry, toRssSubscription } from "./mappers"
 
 export const rssApi = {
   // --- Subscriptions ---
-  listSubscriptions: (params?: { category?: string; enabled?: boolean }) => {
-    const qs = new URLSearchParams()
-    if (params?.category) qs.set("category", params.category)
-    if (params?.enabled != null) qs.set("enabled", String(params.enabled))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<RssSubscription[]>(`/api/rss/subscriptions${suffix}`)
+  listSubscriptions: async (params?: { category?: string; enabled?: boolean }) =>
+    (
+      await sdk.rssSubscriptionsList({
+        category: params?.category ?? null,
+        enabled: params?.enabled ?? null,
+      })
+    ).map(toRssSubscription),
+  subscribe: async (body: {
+    url: string
+    category?: string
+    fetch_interval_minutes?: number
+  }) =>
+    toRssSubscription(
+      await sdk.rssSubscribe({
+        idempotencyKey: idempotencyKey(),
+        url: body.url,
+        title: null,
+        siteUrl: null,
+        category: body.category ?? null,
+        fetchIntervalMinutes: body.fetch_interval_minutes ?? null,
+        enabled: null,
+      })
+    ),
+  unsubscribe: async (id: number) => {
+    await sdk.rssUnsubscribe({ idempotencyKey: idempotencyKey(), id })
   },
-  subscribe: (body: { url: string; category?: string; fetch_interval_minutes?: number }) =>
-    api.post<RssSubscription>("/api/rss/subscriptions", body),
-  unsubscribe: (id: number) => api.delete<void>(`/api/rss/subscriptions/${id}`),
   fetchNow: (id: number) =>
     api.post<{ subscription_id: number; new_entries: number }>(
       `/api/rss/subscriptions/${id}/fetch`
     ),
 
   // --- Entries ---
-  listEntries: (subId: number, params?: { unread_only?: boolean; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.unread_only) qs.set("unread_only", "true")
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<RssEntry[]>(`/api/rss/subscriptions/${subId}/entries${suffix}`)
-  },
-  allEntries: (params?: { unread_only?: boolean; limit?: number }) => {
-    const qs = new URLSearchParams()
-    if (params?.unread_only) qs.set("unread_only", "true")
-    if (params?.limit != null) qs.set("limit", String(params.limit))
-    const suffix = qs.toString() ? `?${qs}` : ""
-    return api.get<RssEntry[]>(`/api/rss/entries${suffix}`)
-  },
-  markRead: (entryId: number, isRead = true) =>
-    api.post<RssEntry>(`/api/rss/entries/${entryId}/read`, { is_read: isRead }),
+  listEntries: async (
+    subId: number,
+    params?: { unread_only?: boolean; limit?: number }
+  ) =>
+    (
+      await sdk.rssEntriesList({
+        subscriptionId: subId,
+        unreadOnly: params?.unread_only ?? false,
+        limit: params?.limit ?? 50,
+      })
+    ).map(toRssEntry),
+  allEntries: async (params?: { unread_only?: boolean; limit?: number }) =>
+    (
+      await sdk.rssEntriesAll({
+        unreadOnly: params?.unread_only ?? false,
+        limit: params?.limit ?? 50,
+      })
+    ).map(toRssEntry),
+  markRead: async (entryId: number, isRead = true) =>
+    toRssEntry(
+      await sdk.rssEntryRead({ idempotencyKey: idempotencyKey(), id: entryId, isRead })
+    ),
 }
