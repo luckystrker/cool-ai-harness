@@ -386,6 +386,16 @@ pub struct MessagePage {
     pub limit: Option<usize>,
 }
 
+/// Bounded window over the newest messages of one conversation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentMessages {
+    /// Oldest-first slice of at most `limit` messages.
+    pub messages: Vec<Message>,
+    /// True when older messages were dropped to satisfy `limit`.
+    pub has_more: bool,
+}
+
 /// Fetch a message without re-locking the store.
 fn fetch_message(
     connection: &rusqlite::Connection,
@@ -402,6 +412,31 @@ fn fetch_message(
 }
 
 impl crate::LegacyStore {
+    /// The newest `limit` messages of a conversation, oldest-first, plus
+    /// whether older messages were dropped. Single bounded query: callers that
+    /// need a working window never scan the whole transcript.
+    pub fn recent_messages(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        limit: usize,
+    ) -> Result<RecentMessages, StoreError> {
+        let connection = self.connection()?;
+        require_conversation(&connection, actor_id, conversation_id)?;
+        let limit = limit.clamp(1, 10_000);
+        let mut statement = connection.prepare(
+            "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = statement.query(params![conversation_id, (limit + 1) as i64])?;
+        let mut messages = collect_rows(rows, Message::from_row)?;
+        let has_more = messages.len() > limit;
+        if has_more {
+            messages.truncate(limit);
+        }
+        messages.reverse();
+        Ok(RecentMessages { messages, has_more })
+    }
+
     /// Chronological message page (oldest first), optionally bounded by id.
     pub fn list_messages(
         &self,

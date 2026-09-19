@@ -1864,6 +1864,40 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "session.for_conversation"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionForConversationParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.runs"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionRunsParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "session.steer"
             },
             "params": {
@@ -1987,6 +2021,23 @@
             },
             "params": {
               "$ref": "#/$defs/LegacyIdParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "conversations.messages"
+            },
+            "params": {
+              "$ref": "#/$defs/ConversationMessagesParams"
             }
           },
           "additionalProperties": false,
@@ -4529,6 +4580,34 @@
       },
       "additionalProperties": false,
       "required": [
+        "limit"
+      ]
+    },
+    "ConversationMessagesParams": {
+      "description": "Paginated transcript read for one legacy conversation.",
+      "type": "object",
+      "properties": {
+        "beforeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
         "limit"
       ]
     },
@@ -7733,6 +7812,40 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "session_for_conversation"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionConversationResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_runs"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionRunsResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "prompt_accepted"
             },
             "value": {
@@ -7876,6 +7989,26 @@
             },
             "value": {
               "$ref": "#/$defs/ConversationRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "conversations_messages"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MessageRecord"
+              }
             }
           },
           "additionalProperties": false,
@@ -10872,6 +11005,39 @@
         "retainedItems"
       ]
     },
+    "SessionConversationResult": {
+      "type": "object",
+      "properties": {
+        "conversationId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "importedEvents": {
+          "description": "Canonical history events projected from the legacy transcript.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "True when the projection is not the complete legacy transcript: the\nbound was reached and/or leading orphan tool rows were dropped. Older\nmessages stay readable through `conversations.messages`.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "conversationId",
+        "created",
+        "importedEvents",
+        "truncated"
+      ]
+    },
     "SessionCreateParams": {
       "type": "object",
       "properties": {
@@ -10925,6 +11091,24 @@
         }
       },
       "additionalProperties": false
+    },
+    "SessionForConversationParams": {
+      "description": "Binds one legacy conversation to a durable Rust session, importing the\nlegacy transcript once so chat turns run on the canonical event model.",
+      "type": "object",
+      "properties": {
+        "conversationId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "conversationId"
+      ]
     },
     "SessionForkParams": {
       "type": "object",
@@ -11102,6 +11286,71 @@
         "sessionId",
         "content"
       ]
+    },
+    "SessionRunSummary": {
+      "type": "object",
+      "properties": {
+        "finishReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSeq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "status",
+        "lastSeq",
+        "updatedAt"
+      ]
+    },
+    "SessionRunsParams": {
+      "description": "List durable runs of one session, newest first.",
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "limit"
+      ]
+    },
+    "SessionRunsResult": {
+      "type": "object",
+      "properties": {
+        "runs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SessionRunSummary"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "SessionSteerParams": {
       "type": "object",

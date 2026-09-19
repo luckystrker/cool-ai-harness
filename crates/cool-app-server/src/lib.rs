@@ -23,14 +23,19 @@ use cool_agent::{
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
-    EventEnvelope, EventPage, HistoryItem, InitializeResult, JsonRpcV2, PromptAcceptedResult,
-    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
-    RunCancelledResult, RunEventMethod, RunStarted, RunTerminal, ServerFrame, SessionCreatedResult,
-    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
-    SessionSummary, StatusGetResult, StreamFrame, TextDelta, TransportLimits, V1Version,
+    EventEnvelope, EventPage, HistoryItem, InitializeResult, ItemEvent, JsonRpcV2,
+    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
+    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunTerminal,
+    ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
+    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TextDelta, ToolCompleted,
+    ToolRequested, TransportLimits, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
-use cool_state::{BudgetDelta, CancelAcceptance, DurableStore, EventProvenance, StoreError};
+use cool_state::{
+    BudgetDelta, CancelAcceptance, ConversationLink, DurableStore, EventProvenance,
+    ImportedHistoryEvent, StoreError,
+};
 use cool_store::LegacyStore;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
@@ -684,6 +689,120 @@ impl AppServer {
                         }),
                     ),
                     Err(store) => failure(id, store_error(store)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionForConversation(params) => {
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                // Replays answer from the durable idempotency record before
+                // touching the legacy store, so repeating the command is cheap
+                // and still returns the original outcome after the source
+                // conversation was deleted.
+                match self.inner.store.lookup_idempotent::<ConversationLink>(
+                    &actor.id,
+                    "session.for_conversation",
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                ) {
+                    Ok(Some(link)) => {
+                        let _ = self
+                            .send(&outbound, success(id, session_conversation_payload(link)))
+                            .await;
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                }
+                let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+                    let _ = self
+                        .send(
+                            &outbound,
+                            failure(id, error(-32010, "legacy_store_unavailable", false)),
+                        )
+                        .await;
+                    return;
+                };
+                let conversation = match legacy.get_conversation(&actor.id, params.conversation_id)
+                {
+                    Ok(conversation) => conversation,
+                    Err(error) => {
+                        let _ = self
+                            .send(&outbound, failure(id, legacy::store_error(error)))
+                            .await;
+                        return;
+                    }
+                };
+                let window = match legacy.recent_messages(
+                    &actor.id,
+                    params.conversation_id,
+                    MAX_IMPORTED_MESSAGES,
+                ) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        let _ = self
+                            .send(&outbound, failure(id, legacy::store_error(error)))
+                            .await;
+                        return;
+                    }
+                };
+                let mut messages = window.messages;
+                let trimmed = trim_orphan_tool_rows(&mut messages);
+                // `truncated` means the projection is not the complete legacy
+                // transcript: an older window exists and/or leading orphan
+                // tool rows were dropped.
+                let truncated = window.has_more || trimmed > 0;
+                let history = legacy_history_events(&messages);
+                let frame = match self.inner.store.link_conversation(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    params.conversation_id,
+                    conversation.title.as_deref(),
+                    conversation.working_directory.as_deref(),
+                    &history,
+                    truncated,
+                ) {
+                    Ok(link) => success(id, session_conversation_payload(link)),
+                    Err(error) => failure(id, store_error(error)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionRuns(params) => {
+                if params.limit == 0 || params.limit > self.inner.config.event_page_limit {
+                    let _ = self
+                        .send(
+                            &outbound,
+                            failure(id, error(-32602, "invalid_session_runs_limit", false)),
+                        )
+                        .await;
+                    return;
+                }
+                let actor = local_actor();
+                let frame = match self.inner.store.list_session_runs(
+                    &actor.id,
+                    &params.session_id,
+                    usize::from(params.limit),
+                ) {
+                    Ok(runs) => success(
+                        id,
+                        ResponsePayload::SessionRuns(SessionRunsResult {
+                            runs: runs
+                                .into_iter()
+                                .map(|run| SessionRunSummary {
+                                    run_id: run.run_id,
+                                    status: run.status.as_str().to_owned(),
+                                    last_seq: run.last_seq,
+                                    finish_reason: run.finish_reason,
+                                    updated_at: run.updated_at,
+                                })
+                                .collect(),
+                        }),
+                    ),
+                    Err(error) => failure(id, store_error(error)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -1913,6 +2032,252 @@ fn runtime_actor() -> ActorRef {
     }
 }
 
+/// Most recent legacy messages projected into one session import. Older
+/// history stays readable through the paginated `conversations.messages`
+/// command, so the canonical session keeps a bounded working context.
+const MAX_IMPORTED_MESSAGES: usize = 10_000;
+
+fn session_conversation_payload(link: ConversationLink) -> ResponsePayload {
+    ResponsePayload::SessionForConversation(SessionConversationResult {
+        session_id: link.session_id,
+        conversation_id: link.conversation_id,
+        created: link.created,
+        imported_events: link.imported_events,
+        truncated: link.truncated,
+    })
+}
+
+/// Drop leading tool rows so a bounded window never starts with a tool result
+/// whose assistant tool call was cut off: providers reject an orphan tool role.
+/// Returns how many rows were dropped.
+fn trim_orphan_tool_rows(messages: &mut Vec<cool_store::domains::conversations::Message>) -> usize {
+    let leading_tools = messages
+        .iter()
+        .take_while(|message| message.role == "tool")
+        .count();
+    messages.drain(..leading_tools);
+    leading_tools
+}
+
+/// Match a legacy tool result row to a pending assistant tool call.
+///
+/// The stored id wins; otherwise the result falls back to a uniquely named
+/// pending call and then to the only pending call. `None` means the row is an
+/// orphan result (the assistant call was never persisted or was truncated).
+fn match_pending_tool_call(
+    pending: &[ToolRequested],
+    stored_call_id: Option<&str>,
+    name: &str,
+) -> Option<usize> {
+    if let Some(call_id) = stored_call_id
+        && let Some(index) = pending.iter().position(|call| call.call_id == call_id)
+    {
+        return Some(index);
+    }
+    let mut named = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.name == name);
+    match (named.next(), named.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ if pending.len() == 1 => Some(0),
+        _ => None,
+    }
+}
+
+/// Flush assistant tool calls that never received a persisted result as
+/// `tool.failed`, mirroring the Python runtime's `_backfill_missing_tool_results`
+/// so imported history stays a valid provider transcript.
+fn flush_unanswered_tool_calls(
+    events: &mut Vec<ImportedHistoryEvent>,
+    pending: &mut Vec<ToolRequested>,
+    occurred_at: &str,
+) {
+    for call in pending.drain(..) {
+        events.push(ImportedHistoryEvent {
+            occurred_at: occurred_at.to_owned(),
+            event: CanonicalEvent::ToolFailed(cool_protocol::ToolFailed {
+                call_id: call.call_id,
+                name: call.name,
+                error_code: "legacy_tool_unanswered".to_owned(),
+                message: Some("tool call has no persisted result".to_owned()),
+            }),
+        });
+    }
+}
+
+/// Normalize a SQLAlchemy `YYYY-MM-DD HH:MM:SS.ffffff` timestamp to the
+/// RFC3339 form the canonical event envelope uses. Unknown shapes pass through.
+fn normalize_legacy_timestamp(value: &str) -> String {
+    let Some(seconds) = cool_store::time::parse_python_datetime(value) else {
+        return value.to_owned();
+    };
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_date(days);
+    let hour = rest / 3_600;
+    let minute = (rest % 3_600) / 60;
+    let second = rest % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.000Z")
+}
+
+/// Project the legacy transcript into canonical history events.
+///
+/// Legacy tool rows carry their call id inside `tool_result`; assistant rows
+/// carry OpenAI-shaped `tool_calls`. Missing call ids or names degrade to a
+/// stable synthetic value instead of dropping the row, and failed tool rows
+/// map to `tool.failed` so replayed history keeps their error semantics.
+/// Structurally invalid JSON in a legacy column is rejected earlier by the
+/// store's strict column parsing, failing the whole read closed.
+fn legacy_history_events(
+    messages: &[cool_store::domains::conversations::Message],
+) -> Vec<ImportedHistoryEvent> {
+    let mut events = Vec::new();
+    let mut pending: Vec<ToolRequested> = Vec::new();
+    let mut last_occurred_at = String::new();
+    for message in messages {
+        let occurred_at = normalize_legacy_timestamp(&message.created_at);
+        last_occurred_at = occurred_at.clone();
+        match message.role.as_str() {
+            "user" => {
+                flush_unanswered_tool_calls(&mut events, &mut pending, &occurred_at);
+                if message.content.is_some() {
+                    events.push(ImportedHistoryEvent {
+                        occurred_at,
+                        event: CanonicalEvent::ItemCompleted(ItemEvent {
+                            role: Some("user".to_owned()),
+                            content: message.content.clone(),
+                            tool_calls: Vec::new(),
+                        }),
+                    });
+                }
+            }
+            "assistant" => {
+                flush_unanswered_tool_calls(&mut events, &mut pending, &occurred_at);
+                if let Some(thinking) = message
+                    .thinking
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    events.push(ImportedHistoryEvent {
+                        occurred_at: occurred_at.clone(),
+                        event: CanonicalEvent::ReasoningDelta(TextDelta {
+                            text: thinking.to_owned(),
+                            channel: Some("analysis".to_owned()),
+                        }),
+                    });
+                }
+                let tool_calls = legacy_tool_calls(message);
+                if message.content.is_some() || !tool_calls.is_empty() {
+                    pending.extend(tool_calls.iter().cloned());
+                    events.push(ImportedHistoryEvent {
+                        occurred_at,
+                        event: CanonicalEvent::ItemCompleted(ItemEvent {
+                            role: Some("assistant".to_owned()),
+                            content: message.content.clone(),
+                            tool_calls,
+                        }),
+                    });
+                }
+            }
+            "tool" => {
+                let tool_result = message.tool_result.as_ref();
+                let stored_call_id = tool_result
+                    .and_then(|value| value.get("tool_call_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                let name = tool_result
+                    .and_then(|value| value.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("tool")
+                    .to_owned();
+                let matched = match_pending_tool_call(&pending, stored_call_id.as_deref(), &name);
+                let call_id = match matched {
+                    Some(index) => pending.remove(index).call_id,
+                    None => stored_call_id.unwrap_or_else(|| {
+                        format!("legacy-tool-{}-{}", message.conversation_id, message.id)
+                    }),
+                };
+                let result = tool_result
+                    .and_then(|value| value.get("result"))
+                    .cloned()
+                    .or_else(|| message.content.clone().map(serde_json::Value::String))
+                    .unwrap_or(serde_json::Value::Null);
+                let is_error = result
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let event = if is_error {
+                    let message_text = result
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| result.get("output").and_then(serde_json::Value::as_str))
+                        .map(str::to_owned);
+                    CanonicalEvent::ToolFailed(cool_protocol::ToolFailed {
+                        call_id,
+                        name,
+                        error_code: "legacy_tool_error".to_owned(),
+                        message: message_text,
+                    })
+                } else {
+                    CanonicalEvent::ToolCompleted(ToolCompleted {
+                        call_id,
+                        name,
+                        result,
+                    })
+                };
+                events.push(ImportedHistoryEvent { occurred_at, event });
+            }
+            _ => {
+                flush_unanswered_tool_calls(&mut events, &mut pending, &occurred_at);
+            }
+        }
+    }
+    flush_unanswered_tool_calls(&mut events, &mut pending, &last_occurred_at);
+    events
+}
+
+fn legacy_tool_calls(message: &cool_store::domains::conversations::Message) -> Vec<ToolRequested> {
+    let Some(calls) = message
+        .tool_calls
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let name = call
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_owned();
+            let call_id = call
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    format!("legacy-{}-{}-{index}", message.conversation_id, message.id)
+                });
+            let arguments = match call.get("arguments") {
+                Some(serde_json::Value::Object(map)) => map.clone().into_iter().collect(),
+                None | Some(serde_json::Value::Null) => BTreeMap::new(),
+                Some(other) => BTreeMap::from([("value".to_owned(), other.clone())]),
+            };
+            ToolRequested {
+                call_id,
+                name,
+                arguments,
+            }
+        })
+        .collect()
+}
+
 fn history_items_from_events(events: &[EventEnvelope]) -> Vec<HistoryItem> {
     let mut items = Vec::new();
     let mut reasoning = String::new();
@@ -2286,6 +2651,7 @@ pub fn capabilities() -> BTreeSet<String> {
     [
         "approval_resolution",
         "agent_loop",
+        "conversation_sessions",
         "durable_sessions",
         "event_catch_up",
         "local_socket",
@@ -2294,6 +2660,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "session_fork",
         "session_history",
         "session_list",
+        "session_runs",
         "session_steer",
         "streaming_models",
         "stdio",

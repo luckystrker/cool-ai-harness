@@ -39,7 +39,13 @@ pub fn parse_python_datetime(value: &str) -> Option<i64> {
     let year: i64 = date_parts.next()?.parse().ok()?;
     let month: u32 = date_parts.next()?.parse().ok()?;
     let day: u32 = date_parts.next()?.parse().ok()?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // Bound the year before the civil-date math: unchecked `era * 146_097`
+    // would overflow on crafted far-future values.
+    if !(1..=9999).contains(&year)
+        || date_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+    {
         return None;
     }
     let mut time_parts = rest.split(':');
@@ -119,6 +125,19 @@ mod tests {
         let formatted = python_datetime(1_700_000_123, 456_789);
         assert_eq!(formatted, "2023-11-14 22:15:23.456789");
         assert_eq!(parse_python_datetime(&formatted), Some(1_700_000_123));
+    }
+
+    #[test]
+    fn datetime_rejects_out_of_range_years_without_overflowing() {
+        assert_eq!(
+            parse_python_datetime("30000000000000000-01-01 00:00:00"),
+            None
+        );
+        assert_eq!(
+            parse_python_datetime("0001-01-01 00:00:00"),
+            Some(-62_135_596_800)
+        );
+        assert_eq!(parse_python_datetime("10000-01-01 00:00:00"), None);
     }
 
     #[test]

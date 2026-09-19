@@ -905,8 +905,10 @@ async fn disconnect_during_prompt_dispatch_does_not_orphan_or_duplicate_the_run(
 
 #[tokio::test]
 async fn oversized_frame_does_not_desynchronize_the_next_request() {
+    // The limit must still admit the initialize handshake (whose capability
+    // list grows with the protocol surface) while rejecting the padded request.
     let config = ServerConfig {
-        max_frame_bytes: 512,
+        max_frame_bytes: 1024,
         ..ServerConfig::default()
     };
     let (mut client, task) = connection(AppServer::new(config));

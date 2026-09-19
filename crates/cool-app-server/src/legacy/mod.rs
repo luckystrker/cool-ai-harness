@@ -86,6 +86,20 @@ pub(crate) async fn dispatch(
                 .map_err(store_error)?;
             Ok(ResponsePayload::ConversationsGot(convert(record)?))
         }
+        Command::ConversationsMessages(params) => {
+            if params.limit == 0 || params.limit > 2000 {
+                return Err(invalid_input("limit must be between 1 and 2000"));
+            }
+            let page = MessagePage {
+                before_id: params.before_id,
+                after_id: None,
+                limit: Some(usize::from(params.limit)),
+            };
+            let records = store
+                .list_messages(&actor.id, params.id, &page)
+                .map_err(store_error)?;
+            Ok(ResponsePayload::ConversationsMessages(convert(records)?))
+        }
         Command::ConversationsUpdate(params) => {
             let patch: cool_store::domains::conversations::ConversationPatch = bridge(&params)?;
             let conversation_id = params.id;

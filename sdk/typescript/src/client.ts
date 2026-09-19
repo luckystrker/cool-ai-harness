@@ -39,6 +39,8 @@ export class CoolSdk {
   sessionList(params: protocol.SessionListParams) { return this.send<protocol.SessionListResult>({ method: "session.list", params }); }
   sessionHistory(params: protocol.SessionHistoryParams) { return this.send<protocol.SessionHistoryResult>({ method: "session.history", params }); }
   sessionFork(params: protocol.SessionForkParams) { return this.send<protocol.SessionForkedResult>({ method: "session.fork", params }); }
+  sessionForConversation(params: protocol.SessionForConversationParams) { return this.send<protocol.SessionConversationResult>({ method: "session.for_conversation", params }); }
+  sessionRuns(params: protocol.SessionRunsParams) { return this.send<protocol.SessionRunsResult>({ method: "session.runs", params }); }
   sessionSteer(params: protocol.SessionSteerParams) { return this.send<protocol.SteerAcceptedResult>({ method: "session.steer", params }); }
   runCancel(params: protocol.RunCancelParams) { return this.send<protocol.RunCancelledResult>({ method: "run.cancel", params }); }
   runEvents(params: protocol.RunEventsParams) { return this.send<protocol.EventPage>({ method: "run.events", params }); }
@@ -48,6 +50,7 @@ export class CoolSdk {
   conversationsList(params: protocol.ConversationListParams) { return this.send<protocol.ConversationRecord[]>({ method: "conversations.list", params }); }
   conversationsCreate(params: protocol.ConversationCreateParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.create", params }); }
   conversationsGet(params: protocol.LegacyIdParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.get", params }); }
+  conversationsMessages(params: protocol.ConversationMessagesParams) { return this.send<protocol.MessageRecord[]>({ method: "conversations.messages", params }); }
   conversationsUpdate(params: protocol.ConversationUpdateParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.update", params }); }
   conversationsDelete(params: protocol.IdempotentIdParams) { return this.send<protocol.DeletedResult>({ method: "conversations.delete", params }); }
   conversationsCompact(params: protocol.IdempotentIdParams) { return this.send<protocol.CompactResult>({ method: "conversations.compact", params }); }

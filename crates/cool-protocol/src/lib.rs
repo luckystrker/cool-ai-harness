@@ -179,6 +179,10 @@ pub enum Command {
     SessionHistory(SessionHistoryParams),
     #[serde(rename = "session.fork")]
     SessionFork(SessionForkParams),
+    #[serde(rename = "session.for_conversation")]
+    SessionForConversation(SessionForConversationParams),
+    #[serde(rename = "session.runs")]
+    SessionRuns(SessionRunsParams),
     #[serde(rename = "session.steer")]
     SessionSteer(SessionSteerParams),
     #[serde(rename = "run.cancel")]
@@ -195,6 +199,8 @@ pub enum Command {
     ConversationsCreate(ConversationCreateParams),
     #[serde(rename = "conversations.get")]
     ConversationsGet(LegacyIdParams),
+    #[serde(rename = "conversations.messages")]
+    ConversationsMessages(ConversationMessagesParams),
     #[serde(rename = "conversations.update")]
     ConversationsUpdate(ConversationUpdateParams),
     #[serde(rename = "conversations.delete")]
@@ -540,6 +546,26 @@ pub struct SessionForkParams {
     pub idempotency_key: IdempotencyKey,
     pub session_id: String,
     pub title: Option<String>,
+}
+
+/// Binds one legacy conversation to a durable Rust session, importing the
+/// legacy transcript once so chat turns run on the canonical event model.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionForConversationParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub conversation_id: i64,
+}
+
+/// List durable runs of one session, newest first.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRunsParams {
+    pub session_id: String,
+    pub limit: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1429,6 +1455,42 @@ pub struct SessionForkedResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct SessionConversationResult {
+    pub session_id: String,
+    pub conversation_id: i64,
+    pub created: bool,
+    /// Canonical history events projected from the legacy transcript.
+    #[ts(type = "number")]
+    pub imported_events: u64,
+    /// True when the projection is not the complete legacy transcript: the
+    /// bound was reached and/or leading orphan tool rows were dropped. Older
+    /// messages stay readable through `conversations.messages`.
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRunSummary {
+    pub run_id: String,
+    pub status: String,
+    #[ts(type = "number")]
+    pub last_seq: u64,
+    pub finish_reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRunsResult {
+    #[serde(default)]
+    pub runs: Vec<SessionRunSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct SteerAcceptedResult {
     pub run_id: String,
     #[ts(type = "number")]
@@ -1472,6 +1534,8 @@ pub enum ResponsePayload {
     SessionListed(SessionListResult),
     SessionHistory(SessionHistoryResult),
     SessionForked(SessionForkedResult),
+    SessionForConversation(SessionConversationResult),
+    SessionRuns(SessionRunsResult),
     PromptAccepted(PromptAcceptedResult),
     SteerAccepted(SteerAcceptedResult),
     RunCancelled(RunCancelledResult),
@@ -1481,6 +1545,7 @@ pub enum ResponsePayload {
     ConversationsList(Vec<ConversationRecord>),
     ConversationsCreated(ConversationRecord),
     ConversationsGot(ConversationRecord),
+    ConversationsMessages(Vec<MessageRecord>),
     ConversationsUpdated(ConversationRecord),
     ConversationsDeleted(DeletedResult),
     ConversationsCompacted(CompactResult),

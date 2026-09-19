@@ -19,7 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -103,7 +103,7 @@ impl RunStatus {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
@@ -151,6 +151,33 @@ pub struct SessionListEntry {
     pub active_run_id: Option<String>,
     pub last_seq: Option<u64>,
     pub created_at: String,
+}
+
+/// Result of binding a legacy conversation to a durable Rust session.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConversationLink {
+    pub conversation_id: i64,
+    pub session_id: String,
+    pub created: bool,
+    pub imported_events: u64,
+    pub truncated: bool,
+}
+
+/// One projected legacy transcript item imported into a session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportedHistoryEvent {
+    pub occurred_at: String,
+    pub event: CanonicalEvent,
+}
+
+/// One durable run row of a session, newest-first when listed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRunEntry {
+    pub run_id: String,
+    pub status: RunStatus,
+    pub last_seq: u64,
+    pub finish_reason: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -576,6 +603,191 @@ impl DurableStore {
             value: session_id,
             created: true,
         })
+    }
+
+    /// Find or create the durable session bound to a legacy conversation.
+    ///
+    /// The first call creates the session and an import run that projects the
+    /// supplied legacy transcript into the canonical event log (an import is a
+    /// one-way projection, not a dual write: no legacy table is touched). The
+    /// link row makes later calls return the same session. Actor-scoped: a link
+    /// owned by another actor is rejected instead of being reused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn link_conversation(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        conversation_id: i64,
+        title: Option<&str>,
+        project_key: Option<&str>,
+        history: &[ImportedHistoryEvent],
+        truncated: bool,
+    ) -> Result<ConversationLink, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<ConversationLink>(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        if let Some((owner, session_id)) = transaction
+            .query_row(
+                "SELECT actor_id, session_id FROM rust_conversation_links WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if owner != actor_id {
+                return Err(StoreError::ActorMismatch);
+            }
+            let link = ConversationLink {
+                conversation_id,
+                session_id,
+                created: false,
+                imported_events: 0,
+                truncated,
+            };
+            insert_idempotency(
+                &transaction,
+                actor_id,
+                "session.for_conversation",
+                key,
+                fingerprint,
+                &link,
+            )?;
+            transaction.commit()?;
+            return Ok(link);
+        }
+        let session_id = format!("session-{}", Uuid::new_v4());
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let now = timestamp();
+        transaction.execute(
+            "INSERT INTO rust_sessions(id, actor_id, title, project_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, actor_id, title, project_key, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
+            params![run_id, session_id, actor_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE rust_sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run_id, session_id],
+        )?;
+        let import_actor = ActorRef {
+            id: "cool-core".to_owned(),
+            kind: ActorKind::System,
+        };
+        let mut next_seq = 0_u64;
+        let mut append = |event: CanonicalEvent, occurred_at: &str| -> Result<(), StoreError> {
+            next_seq += 1;
+            let envelope = EventEnvelope {
+                event_id: format!("event-{}", Uuid::new_v4()),
+                schema_version: V1Version::VALUE,
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                item_id: None,
+                seq: next_seq,
+                occurred_at: occurred_at.to_owned(),
+                actor: import_actor.clone(),
+                source: "cool-state-import".to_owned(),
+                causation_id: None,
+                correlation_id: None,
+                event,
+                extensions: Default::default(),
+            };
+            append_event_tx(&transaction, actor_id, &envelope)
+        };
+        append(
+            CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: Some("import".to_owned()),
+            }),
+            &now,
+        )?;
+        for item in history {
+            append(item.event.clone(), &item.occurred_at)?;
+        }
+        append(
+            CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "import".to_owned(),
+                error_code: None,
+            }),
+            &now,
+        )?;
+        let link = ConversationLink {
+            conversation_id,
+            session_id: session_id.clone(),
+            created: true,
+            imported_events: history.len() as u64,
+            truncated,
+        };
+        transaction.execute(
+            "INSERT INTO rust_conversation_links(conversation_id, actor_id, session_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, actor_id, session_id, now],
+        )?;
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+            &link,
+        )?;
+        transaction.commit()?;
+        Ok(link)
+    }
+
+    /// Newest-first run summaries of one actor-owned session.
+    pub fn list_session_runs(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionRunEntry>, StoreError> {
+        let connection = self.connection()?;
+        let owner: String = connection
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let mut statement = connection.prepare(
+            "SELECT id, status, last_seq, finish_reason, updated_at FROM rust_runs \
+             WHERE session_id = ?1 ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![session_id, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (run_id, status, last_seq, finish_reason, updated_at) = row?;
+            runs.push(SessionRunEntry {
+                run_id,
+                status: RunStatus::parse(&status)?,
+                last_seq: last_seq as u64,
+                finish_reason,
+                updated_at,
+            });
+        }
+        Ok(runs)
     }
 
     pub fn steer_run(
@@ -1528,7 +1740,14 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
            id TEXT PRIMARY KEY, run_id TEXT, status TEXT NOT NULL, generation INTEGER NOT NULL,
            last_error TEXT, updated_at TEXT NOT NULL
          );
-         UPDATE rust_schema_meta SET version = 1 WHERE version < 1;
+         -- Legacy conversation ids live in harness.db, so this is a soft
+         -- reference maintained by the app-server, not a cross-database FK.
+         CREATE TABLE IF NOT EXISTS rust_conversation_links(
+           conversation_id INTEGER PRIMARY KEY, actor_id TEXT NOT NULL,
+           session_id TEXT NOT NULL REFERENCES rust_sessions(id), created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS rust_conversation_sessions ON rust_conversation_links(session_id);
+         UPDATE rust_schema_meta SET version = 2 WHERE version < 2;
          COMMIT;",
     )?;
     Ok(())
@@ -1753,6 +1972,14 @@ fn append_event_tx(
         "status": next_status,
     });
     let persisted = masked_envelope(envelope.clone())?;
+    // Derive the run summary reason from the masked event so a secret in a
+    // cancellation/terminal reason can never outlive it in `rust_runs`.
+    let finish_reason = match &persisted.event {
+        CanonicalEvent::RunCompleted(terminal)
+        | CanonicalEvent::RunFailed(terminal)
+        | CanonicalEvent::RunCancelled(terminal) => Some(terminal.reason.clone()),
+        _ => None,
+    };
     transaction.execute(
         "INSERT INTO rust_events(event_id, run_id, seq, envelope_json) VALUES (?1, ?2, ?3, ?4)",
         params![
@@ -1763,8 +1990,8 @@ fn append_event_tx(
         ],
     )?;
     transaction.execute(
-        "UPDATE rust_runs SET status = ?1, last_seq = ?2, checkpoint_json = ?3, updated_at = ?4 WHERE id = ?5",
-        params![next_status.as_str(), envelope.seq as i64, serde_json::to_string(&checkpoint)?, timestamp(), envelope.run_id],
+        "UPDATE rust_runs SET status = ?1, last_seq = ?2, checkpoint_json = ?3, finish_reason = COALESCE(?4, finish_reason), updated_at = ?5 WHERE id = ?6",
+        params![next_status.as_str(), envelope.seq as i64, serde_json::to_string(&checkpoint)?, finish_reason, timestamp(), envelope.run_id],
     )?;
     if next_status.is_terminal() {
         transaction.execute(

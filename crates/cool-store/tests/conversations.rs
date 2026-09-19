@@ -183,6 +183,49 @@ fn message_pages_are_chronological_and_cursor_bounded() {
 }
 
 #[test]
+fn recent_message_windows_are_newest_first_and_bounded() {
+    let (_directory, store) = adopted_store();
+    for index in 0..3 {
+        store
+            .add_message(
+                "local-user",
+                1,
+                &NewMessage {
+                    role: "user".to_string(),
+                    content: Some(format!("turn-{index}")),
+                    ..NewMessage::default()
+                },
+            )
+            .expect("append");
+    }
+    // The seed conversation already has one "hello" message.
+    let all = store.recent_messages("local-user", 1, 10).expect("all");
+    assert!(!all.has_more);
+    assert_eq!(all.messages.len(), 4);
+    assert_eq!(all.messages[0].content.as_deref(), Some("hello"));
+    assert_eq!(all.messages[3].content.as_deref(), Some("turn-2"));
+
+    let window = store.recent_messages("local-user", 1, 2).expect("window");
+    assert!(window.has_more);
+    assert_eq!(window.messages.len(), 2);
+    assert_eq!(window.messages[0].content.as_deref(), Some("turn-1"));
+    assert_eq!(window.messages[1].content.as_deref(), Some("turn-2"));
+
+    let exact = store.recent_messages("local-user", 1, 4).expect("exact");
+    assert!(
+        !exact.has_more,
+        "limit equal to the row count is not truncation"
+    );
+    assert_eq!(exact.messages.len(), 4);
+
+    store.ensure_actor("other-actor").expect("register actor");
+    let error = store
+        .recent_messages("other-actor", 1, 2)
+        .expect_err("cross-actor read must fail");
+    assert!(matches!(error, StoreError::NotFound("conversation")));
+}
+
+#[test]
 fn deleting_a_conversation_with_history_matches_python_orphaning() {
     let (_directory, store) = adopted_store();
     // Give the conversation a run, an event, an artifact and a tool call so

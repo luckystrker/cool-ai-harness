@@ -98,6 +98,16 @@ pub struct ConversationApprovalsParams {
     pub limit: u16,
 }
 
+/// Paginated transcript read for one legacy conversation.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ConversationMessagesParams {
+    pub id: i64,
+    pub before_id: Option<i64>,
+    pub limit: u16,
+}
+
 /// Full-text search over conversation message content.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
