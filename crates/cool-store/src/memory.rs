@@ -178,26 +178,105 @@ pub(crate) fn timestamp_micros(value: &str) -> Option<i64> {
 }
 
 fn score_memory(item: &MemoryItem, now_micros: i64, relevance: Option<f64>) -> f64 {
+    score_breakdown(item, now_micros, relevance).total
+}
+
+/// Component breakdown of the composite memory score, mirroring
+/// `retrieval.score_memory` for the explainability surface.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryScoreBreakdown {
+    pub importance: f64,
+    pub recency: f64,
+    pub confidence: f64,
+    pub type_priority: f64,
+    pub age_days: f64,
+    pub total: f64,
+}
+
+/// "Why is this remembered" projection, mirroring `memory.service.explain_memory`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryExplanation {
+    pub memory_id: i64,
+    pub source: String,
+    pub scope: String,
+    pub status: String,
+    pub pinned: bool,
+    pub confidence: f64,
+    pub importance: f64,
+    pub memory_type: String,
+    pub conversation_id: Option<i64>,
+    pub agent_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_accessed_at: Option<String>,
+    pub access_count: i64,
+    pub score: MemoryScoreBreakdown,
+}
+
+impl crate::LegacyStore {
+    /// Explain why a memory is retained: provenance, lifecycle metadata and
+    /// the composite score breakdown (actor-scoped).
+    pub fn explain_memory(
+        &self,
+        actor_id: &str,
+        memory_id: i64,
+    ) -> Result<MemoryExplanation, StoreError> {
+        let item = self.get_memory_item(actor_id, memory_id)?;
+        Ok(MemoryExplanation {
+            memory_id: item.id,
+            source: item.source.clone(),
+            scope: item.scope.clone(),
+            status: item.status.clone(),
+            pinned: item.pinned,
+            confidence: item.confidence,
+            importance: item.importance,
+            memory_type: item.memory_type.clone(),
+            conversation_id: item.conversation_id,
+            agent_id: item.agent_id,
+            created_at: item.created_at.clone(),
+            updated_at: item.updated_at.clone(),
+            last_accessed_at: item.last_accessed_at.clone(),
+            access_count: item.access_count,
+            score: score_breakdown(&item, current_micros(), None),
+        })
+    }
+}
+
+fn score_breakdown(
+    item: &MemoryItem,
+    now_micros: i64,
+    relevance: Option<f64>,
+) -> MemoryScoreBreakdown {
     let age_days = match timestamp_micros(&item.updated_at) {
         Some(updated) => (now_micros - updated) as f64 / 1_000_000.0 / 86_400.0,
         None => 30.0,
     };
     let recency = 1.0 / (1.0 + age_days / 30.0);
     let priority = type_priority(&item.memory_type);
-    match relevance {
-        Some(relevance) => {
-            W_REL * relevance
-                + W_REL_IMPORTANCE * item.importance
-                + W_REL_RECENCY * recency
-                + W_REL_CONFIDENCE * item.confidence
-                + W_REL_TYPE * priority
-        }
-        None => {
-            W_IMPORTANCE * item.importance
-                + W_RECENCY * recency
-                + W_CONFIDENCE * item.confidence
-                + W_TYPE * priority
-        }
+    let (importance, recency_weight, confidence, type_weight, relevance_weight) = match relevance {
+        Some(_) => (
+            W_REL_IMPORTANCE,
+            W_REL_RECENCY,
+            W_REL_CONFIDENCE,
+            W_REL_TYPE,
+            W_REL,
+        ),
+        None => (W_IMPORTANCE, W_RECENCY, W_CONFIDENCE, W_TYPE, 0.0),
+    };
+    let total = relevance_weight * relevance.unwrap_or(0.0)
+        + importance * item.importance
+        + recency_weight * recency
+        + confidence * item.confidence
+        + type_weight * priority;
+    MemoryScoreBreakdown {
+        importance: importance * item.importance,
+        recency: recency_weight * recency,
+        confidence: confidence * item.confidence,
+        type_priority: type_weight * priority,
+        age_days,
+        total,
     }
 }
 

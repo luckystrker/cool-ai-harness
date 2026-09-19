@@ -188,6 +188,48 @@ fn required_budget(connection: &Connection, user_id: i64) -> Result<Budget, Stor
         .ok_or(StoreError::Corruption("budget row disappeared".to_string()))
 }
 
+/// Spend against one budget window, mirroring `security.cost.WindowSpend`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetWindowStatus {
+    pub spend_usd: f64,
+    pub limit_usd: Option<f64>,
+    pub pct: f64,
+}
+
+/// Live budget picture mirroring `security.cost.BudgetEvaluation`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetStatus {
+    pub status: String,
+    pub overridden: bool,
+    pub daily: BudgetWindowStatus,
+    pub weekly: BudgetWindowStatus,
+    pub monthly: BudgetWindowStatus,
+    pub daily_limit_usd: Option<f64>,
+    pub weekly_limit_usd: Option<f64>,
+    pub monthly_limit_usd: Option<f64>,
+    pub alert_threshold_pct: f64,
+    pub block_on_exceed: bool,
+    pub override_until: Option<String>,
+}
+
+/// UTC start of the period containing `now`, matching `_window_start`.
+fn window_start(window: &str, now: i64) -> i64 {
+    let day_start = crate::time::start_of_day(now);
+    match window {
+        "daily" => day_start,
+        "weekly" => {
+            let (year, month, day) = crate::time::civil_date(now.div_euclid(86_400));
+            day_start - i64::from(crate::time::iso_weekday(year, month, day)) * 86_400
+        }
+        _ => {
+            let (year, month, _) = crate::time::civil_date(now.div_euclid(86_400));
+            crate::time::days_from_civil(year, month, 1) * 86_400
+        }
+    }
+}
+
 impl crate::LegacyStore {
     /// The actor's budget row, or `None` when it was never created.
     pub fn get_budget(&self, actor_id: &str) -> Result<Option<Budget>, StoreError> {
@@ -370,6 +412,80 @@ impl crate::LegacyStore {
         Ok(SpendSummary {
             cost_usd: (summary.cost_usd * 1_000_000.0).round() / 1_000_000.0,
             ..summary
+        })
+    }
+
+    /// Full budget picture for the actor at `now` (unix seconds), mirroring
+    /// `budgets.budget_evaluation` including calendar window starts and the
+    /// override/alert/block status decision.
+    pub fn budget_status(&self, actor_id: &str, now: i64) -> Result<BudgetStatus, StoreError> {
+        let budget = self.get_budget(actor_id)?;
+        let status = |window: &str, limit: Option<f64>| -> Result<BudgetWindowStatus, StoreError> {
+            let summary = self.spend_summary(actor_id, Some(window_start(window, now)))?;
+            let pct = match limit {
+                Some(limit) if limit > 0.0 => summary.cost_usd / limit * 100.0,
+                _ => 0.0,
+            };
+            Ok(BudgetWindowStatus {
+                spend_usd: summary.cost_usd,
+                limit_usd: limit,
+                pct: (pct * 100.0).round() / 100.0,
+            })
+        };
+        let (daily_limit, weekly_limit, monthly_limit, alert_threshold_pct, block_on_exceed) =
+            match &budget {
+                Some(budget) => (
+                    budget.daily_limit_usd,
+                    budget.weekly_limit_usd,
+                    budget.monthly_limit_usd,
+                    budget.alert_threshold_pct,
+                    budget.block_on_exceed,
+                ),
+                None => (
+                    None,
+                    None,
+                    None,
+                    DEFAULT_ALERT_THRESHOLD_PCT,
+                    DEFAULT_BLOCK_ON_EXCEED,
+                ),
+            };
+        let override_until = budget
+            .as_ref()
+            .and_then(|budget| budget.override_until.clone());
+        let overridden = override_until
+            .as_deref()
+            .and_then(crate::time::parse_python_datetime)
+            .is_some_and(|until| until > now);
+        let daily = status("daily", daily_limit)?;
+        let weekly = status("weekly", weekly_limit)?;
+        let monthly = status("monthly", monthly_limit)?;
+        let alerted = |window: &BudgetWindowStatus| {
+            window.limit_usd.is_some() && window.pct >= alert_threshold_pct
+        };
+        let exceeded = |window: &BudgetWindowStatus| {
+            window.limit_usd.is_some() && window.spend_usd >= window.limit_usd.unwrap_or_default()
+        };
+        let any_exceeded = exceeded(&daily) || exceeded(&weekly) || exceeded(&monthly);
+        let any_alerted = alerted(&daily) || alerted(&weekly) || alerted(&monthly);
+        let status = if any_exceeded && block_on_exceed && !overridden {
+            "blocked"
+        } else if any_alerted {
+            "alert"
+        } else {
+            "ok"
+        };
+        Ok(BudgetStatus {
+            status: status.to_owned(),
+            overridden,
+            daily,
+            weekly,
+            monthly,
+            daily_limit_usd: daily_limit,
+            weekly_limit_usd: weekly_limit,
+            monthly_limit_usd: monthly_limit,
+            alert_threshold_pct,
+            block_on_exceed,
+            override_until,
         })
     }
 }

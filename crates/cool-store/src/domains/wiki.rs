@@ -90,6 +90,8 @@ pub struct WikiFilter {
     pub project_key: Option<String>,
     /// SQL `LIKE` across title/content/category/tags (substring match).
     pub search: Option<String>,
+    /// Exact tag membership inside the JSON `tags` array.
+    pub tag: Option<String>,
     pub pinned: Option<bool>,
     pub limit: Option<usize>,
     pub offset: usize,
@@ -137,7 +139,8 @@ impl crate::LegacyStore {
              AND (?5 IS NULL OR is_pinned = ?5) \
              AND (?6 IS NULL OR title LIKE ?6 OR content LIKE ?6 OR category LIKE ?6 \
                   OR tags LIKE ?6) \
-             ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?7 OFFSET ?8",
+             AND (?7 IS NULL OR tags LIKE ?7) \
+             ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?8 OFFSET ?9",
         )?;
         let rows = statement.query(params![
             user_id,
@@ -146,6 +149,7 @@ impl crate::LegacyStore {
             filter.project_key,
             filter.pinned.map(i64::from),
             filter.search.as_ref().map(|value| format!("%{value}%")),
+            filter.tag.as_ref().map(|value| format!("%\"{value}\"%")),
             bounded_limit(filter.limit, 100, 500),
             filter.offset as i64,
         ])?;

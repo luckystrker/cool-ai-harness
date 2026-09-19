@@ -444,6 +444,24 @@ impl crate::LegacyStore {
         collect_rows(rows, WebhookEvent::from_row)
     }
 
+    /// Event history for one owned endpoint with an optional status filter.
+    pub fn list_webhook_events_by_status(
+        &self,
+        actor_id: &str,
+        endpoint_id: i64,
+        status: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<WebhookEvent>, StoreError> {
+        let connection = self.connection()?;
+        fetch_endpoint(&connection, actor_id, endpoint_id)?;
+        let mut statement = connection.prepare(
+            "SELECT * FROM webhook_events WHERE endpoint_id = ?1 \
+             AND (?2 IS NULL OR status = ?2) ORDER BY id DESC LIMIT ?3",
+        )?;
+        let rows = statement.query(params![endpoint_id, status, bounded_limit(limit, 50, 200)])?;
+        collect_rows(rows, WebhookEvent::from_row)
+    }
+
     /// Owner-scoped event read (used by tests and diagnostics).
     pub fn get_webhook_event(
         &self,

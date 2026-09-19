@@ -982,6 +982,19 @@ impl crate::LegacyStore {
         collect_rows(rows, TaskRun::from_row)
     }
 
+    /// Number of unread inbox runs across the actor's tasks.
+    pub fn count_unread_task_runs(&self, actor_id: &str) -> Result<i64, StoreError> {
+        let connection = self.connection()?;
+        let user_id = user_id_for(&connection, actor_id)?;
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM task_runs WHERE is_read = 0 AND task_id IN \
+               (SELECT id FROM scheduled_tasks WHERE user_id = ?1)",
+            [user_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Flip a run's inbox read state.
     pub fn mark_task_run_read(
         &self,

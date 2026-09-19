@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import { replayCanonicalEvents } from "../src/api/canonicalReducer.js";
 import type { EventEnvelope, GoldenTrace } from "../src/api/generated/cool_protocol.js";
+import { runCoverage } from "./coverage.js";
 
 // @ts-expect-error App Protocol v1 rejects every other schema version at compile time.
 const unsupportedVersion: EventEnvelope["schemaVersion"] = 2;
@@ -52,3 +53,5 @@ mismatchedPlan[progressIndex] = {
 assert.throws(() => replayCanonicalEvents(mismatchedPlan), /plan id mismatch/);
 
 console.log(`canonical protocol replay passed for ${files.length} golden traces`);
+
+runCoverage();

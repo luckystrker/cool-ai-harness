@@ -141,6 +141,35 @@ impl crate::LegacyStore {
         collect_rows(rows, Conversation::from_row)
     }
 
+    /// Distinct, newest-first working directories across the actor's
+    /// conversations, mirroring the `/workspace/recent` projection.
+    pub fn recent_working_directories(
+        &self,
+        actor_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let connection = self.connection()?;
+        let user_id = user_id_for(&connection, actor_id)?;
+        let mut statement = connection.prepare(
+            "SELECT working_directory FROM conversations WHERE user_id = ?1 \
+             AND working_directory IS NOT NULL AND working_directory != '' \
+             ORDER BY id DESC LIMIT 200",
+        )?;
+        let rows = statement.query([user_id])?;
+        let directories = collect_rows(rows, |row| Ok(row.get::<_, String>(0)?))?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut recent = Vec::new();
+        for directory in directories {
+            if seen.insert(directory.clone()) {
+                recent.push(directory);
+            }
+            if recent.len() >= limit {
+                break;
+            }
+        }
+        Ok(recent)
+    }
+
     pub fn get_conversation(
         &self,
         actor_id: &str,

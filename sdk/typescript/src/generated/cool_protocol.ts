@@ -8,7 +8,7 @@ export type ActorKind = "local_user" | "server_user" | "telegram_user" | "system
 
 export type CommandEnvelope = { protocolVersion: 1, commandId: string, command: Command, };
 
-export type Command = { "method": "initialize", "params": InitializeParams } | { "method": "session.create", "params": SessionCreateParams } | { "method": "session.load", "params": SessionLoadParams } | { "method": "session.prompt", "params": SessionPromptParams } | { "method": "session.list", "params": SessionListParams } | { "method": "session.history", "params": SessionHistoryParams } | { "method": "session.fork", "params": SessionForkParams } | { "method": "session.steer", "params": SessionSteerParams } | { "method": "run.cancel", "params": RunCancelParams } | { "method": "run.events", "params": RunEventsParams } | { "method": "approval.resolve", "params": ApprovalResolveParams } | { "method": "status.get", "params": StatusGetParams };
+export type Command = { "method": "initialize", "params": InitializeParams } | { "method": "session.create", "params": SessionCreateParams } | { "method": "session.load", "params": SessionLoadParams } | { "method": "session.prompt", "params": SessionPromptParams } | { "method": "session.list", "params": SessionListParams } | { "method": "session.history", "params": SessionHistoryParams } | { "method": "session.fork", "params": SessionForkParams } | { "method": "session.steer", "params": SessionSteerParams } | { "method": "run.cancel", "params": RunCancelParams } | { "method": "run.events", "params": RunEventsParams } | { "method": "approval.resolve", "params": ApprovalResolveParams } | { "method": "status.get", "params": StatusGetParams } | { "method": "conversations.list", "params": ConversationListParams } | { "method": "conversations.create", "params": ConversationCreateParams } | { "method": "conversations.get", "params": LegacyIdParams } | { "method": "conversations.update", "params": ConversationUpdateParams } | { "method": "conversations.delete", "params": IdempotentIdParams } | { "method": "conversations.compact", "params": IdempotentIdParams } | { "method": "conversations.approvals", "params": ConversationApprovalsParams } | { "method": "conversations.search", "params": ConversationSearchParams } | { "method": "conversations.bulk", "params": ConversationBulkParams } | { "method": "runs.list", "params": RunListParams } | { "method": "runs.get", "params": LegacyIdParams } | { "method": "runs.events", "params": RunEventsLegacyParams } | { "method": "runs.cancel", "params": IdempotentIdParams } | { "method": "providers.list", "params": ProviderListParams } | { "method": "providers.create", "params": ProviderCreateParams } | { "method": "providers.get", "params": LegacyIdParams } | { "method": "providers.update", "params": ProviderUpdateParams } | { "method": "providers.delete", "params": IdempotentIdParams } | { "method": "providers.models", "params": LegacyIdParams } | { "method": "memory.list", "params": MemoryListParams } | { "method": "memory.get", "params": LegacyIdParams } | { "method": "memory.create", "params": MemoryCreateParams } | { "method": "memory.update", "params": MemoryUpdateParams } | { "method": "memory.delete", "params": MemoryDeleteParams } | { "method": "memory.pending", "params": MemoryPendingParams } | { "method": "memory.confirm", "params": IdempotentIdParams } | { "method": "memory.reject", "params": IdempotentIdParams } | { "method": "memory.pin", "params": MemoryPinParams } | { "method": "memory.explain", "params": LegacyIdParams } | { "method": "memory.episodes", "params": MemoryEpisodesParams } | { "method": "memory.stats", "params": EmptyParams } | { "method": "entities.list", "params": EntityListParams } | { "method": "entities.get", "params": LegacyIdParams } | { "method": "entities.create", "params": EntityCreateParams } | { "method": "entities.update", "params": EntityUpdateParams } | { "method": "entities.delete", "params": IdempotentIdParams } | { "method": "plans.list", "params": PlanListParams } | { "method": "plans.get", "params": PlanIdParams } | { "method": "plans.update", "params": PlanUpdateParams } | { "method": "plans.approve", "params": PlanApproveParams } | { "method": "plans.cancel", "params": IdempotentPlanIdParams } | { "method": "plans.templates_list", "params": EmptyParams } | { "method": "plans.templates_create", "params": PlanTemplateCreateParams } | { "method": "plans.templates_delete", "params": IdempotentIdParams } | { "method": "subagents.roles_list", "params": EmptyParams } | { "method": "subagents.roles_get", "params": LegacyIdParams } | { "method": "subagents.roles_create", "params": SubagentRoleCreateParams } | { "method": "subagents.roles_update", "params": SubagentRoleUpdateParams } | { "method": "subagents.roles_delete", "params": IdempotentIdParams } | { "method": "subagents.launch", "params": SubagentLaunchParams } | { "method": "subagents.launch_batch", "params": SubagentLaunchBatchParams } | { "method": "subagents.runs_list", "params": SubagentRunListParams } | { "method": "subagents.runs_get", "params": LegacyIdParams } | { "method": "subagents.runs_cancel", "params": IdempotentIdParams } | { "method": "subagents.runs_delete", "params": IdempotentIdParams } | { "method": "inspector.timeline", "params": LegacyIdParams } | { "method": "inspector.compare", "params": InspectorCompareParams } | { "method": "inspector.replay", "params": ReplayParams } | { "method": "budgets.get", "params": EmptyParams } | { "method": "budgets.update", "params": BudgetUpdateParams } | { "method": "budgets.override_set", "params": BudgetOverrideParams } | { "method": "budgets.override_clear", "params": IdempotentParams } | { "method": "budgets.spend", "params": BudgetSpendParams } | { "method": "artifacts.list", "params": ArtifactListParams } | { "method": "artifacts.get", "params": ArtifactIdParams } | { "method": "artifacts.delete", "params": IdempotentIdParams } | { "method": "workspace.git_info", "params": WorkspacePathParams } | { "method": "workspace.directories", "params": WorkspaceOptionalPathParams } | { "method": "workspace.recent", "params": EmptyParams } | { "method": "workspace.git_status", "params": WorkspacePathParams } | { "method": "workspace.git_log", "params": WorkspaceGitLogParams } | { "method": "workspace.git_branches", "params": WorkspacePathParams } | { "method": "workspace.git_checkout", "params": WorkspaceGitCheckoutParams } | { "method": "profiles.list", "params": ProfileListParams } | { "method": "profiles.get", "params": LegacyIdParams } | { "method": "profiles.create", "params": ProfileCreateParams } | { "method": "profiles.update", "params": ProfileUpdateParams } | { "method": "profiles.delete", "params": IdempotentIdParams } | { "method": "profiles.seed", "params": IdempotentParams } | { "method": "profiles.clone", "params": IdempotentIdParams } | { "method": "profiles.playground", "params": ProfilePlaygroundParams } | { "method": "analytics.summary", "params": AnalyticsDaysParams } | { "method": "analytics.spend_over_time", "params": AnalyticsBucketParams } | { "method": "analytics.spend_by_model", "params": AnalyticsDaysParams } | { "method": "analytics.top_tools", "params": AnalyticsTopToolsParams } | { "method": "analytics.latency", "params": AnalyticsBucketParams } | { "method": "analytics.call_history", "params": AnalyticsCallHistoryParams } | { "method": "analytics.memory_activity", "params": AnalyticsBucketParams } | { "method": "tasks.list", "params": TaskListParams } | { "method": "tasks.get", "params": LegacyIdParams } | { "method": "tasks.create", "params": TaskCreateParams } | { "method": "tasks.update", "params": TaskUpdateParams } | { "method": "tasks.delete", "params": IdempotentIdParams } | { "method": "tasks.run", "params": IdempotentIdParams } | { "method": "tasks.runs_list", "params": TaskRunsParams } | { "method": "tasks.runs_get", "params": LegacyIdParams } | { "method": "tasks.runs_cancel", "params": IdempotentIdParams } | { "method": "tasks.runs_read", "params": TaskRunReadParams } | { "method": "tasks.inbox", "params": TaskInboxParams } | { "method": "tasks.scheduler", "params": EmptyParams } | { "method": "tasks.parse_cron", "params": ParseCronParams } | { "method": "rss.subscriptions_list", "params": RssSubscriptionListParams } | { "method": "rss.subscribe", "params": RssSubscribeParams } | { "method": "rss.unsubscribe", "params": IdempotentIdParams } | { "method": "rss.entries_list", "params": RssEntriesParams } | { "method": "rss.entries_all", "params": RssAllEntriesParams } | { "method": "rss.entry_read", "params": RssEntryReadParams } | { "method": "webhooks.list", "params": EmptyParams } | { "method": "webhooks.get", "params": LegacyIdParams } | { "method": "webhooks.create", "params": WebhookCreateParams } | { "method": "webhooks.update", "params": WebhookUpdateParams } | { "method": "webhooks.delete", "params": IdempotentIdParams } | { "method": "webhooks.events", "params": WebhookEventsParams } | { "method": "webhooks.replay", "params": WebhookReplayParams } | { "method": "wiki.list", "params": WikiListParams } | { "method": "wiki.search", "params": WikiSearchParams } | { "method": "wiki.get", "params": LegacyIdParams } | { "method": "wiki.create", "params": WikiCreateParams } | { "method": "wiki.update", "params": WikiUpdateParams } | { "method": "wiki.delete", "params": IdempotentIdParams } | { "method": "wiki.categories", "params": EmptyParams } | { "method": "wiki.stats", "params": EmptyParams } | { "method": "wiki.promote", "params": WikiPromoteParams } | { "method": "research.list", "params": ResearchListParams } | { "method": "research.get", "params": LegacyIdParams } | { "method": "research.create", "params": ResearchCreateParams } | { "method": "research.cancel", "params": IdempotentIdParams } | { "method": "research.rerun", "params": ResearchRerunParams } | { "method": "constructor.macros", "params": ConstructorMacroListParams } | { "method": "constructor.macros_create", "params": MacroCreateParams } | { "method": "constructor.macros_update", "params": MacroUpdateParams } | { "method": "constructor.macros_delete", "params": IdempotentIdParams };
 
 export type InitializeParams = { clientName: string, clientVersion: string, supportedProtocolVersions: Array<number>, capabilities: Array<string>, };
 
@@ -152,11 +152,323 @@ export type StatusEntry = { id: string, status: string, code: string | null, };
 
 export type StatusGetResult = { plugins: Array<StatusEntry>, workers: Array<StatusEntry>, mcpServers: Array<string>, };
 
+export type LegacyIdParams = { id: number, };
+
+export type IdempotentIdParams = { idempotencyKey: string, id: number, };
+
+export type IdempotentParams = { idempotencyKey: string, };
+
+export type EmptyParams = Record<symbol, never>;
+
+export type DeletedResult = { deleted: number, };
+
+export type LegacyOkResult = { ok: boolean, };
+
+export type AffectedResult = { affected: number, action: string, };
+
+export type ConversationRecord = { id: number, userId: number, title: string | null, provider: string | null, model: string | null, workingDirectory: string | null, permissions: JsonValue | null, capabilityPolicy: JsonValue | null, profileId: number | null, tags: JsonValue | null, folder: string | null, isPinned: boolean, isArchived: boolean, metadata: JsonValue | null, createdAt: string, updatedAt: string, };
+
+export type ConversationListParams = { includeMachineOwned: boolean, archived: boolean | null, pinned: boolean | null, folder: string | null, search: string | null, limit: number, offset: number, };
+
+export type ConversationCreateParams = { idempotencyKey: string, title: string | null, provider: string | null, model: string | null, workingDirectory: string | null, permissions: JsonValue | null, capabilityPolicy: JsonValue | null, profileId: number | null, tags: JsonValue | null, folder: string | null, metadata: JsonValue | null, };
+
+export type ConversationUpdateParams = { idempotencyKey: string, id: number, title: string | null, provider: string | null, model: string | null, workingDirectory: string | null, permissions: JsonValue | null, capabilityPolicy: JsonValue | null, profileId: number | null, tags: JsonValue | null, folder: string | null, isPinned: boolean | null, isArchived: boolean | null, metadata: JsonValue | null, };
+
+export type ConversationApprovalsParams = { id: number, runId: number | null, limit: number, };
+
+export type ConversationSearchParams = { query: string, limit: number, };
+
+export type ConversationBulkParams = { idempotencyKey: string, ids: Array<number>, action: string, folder: string | null, };
+
+export type CompactResult = { status: string, reason: string | null, messageCount: number | null, messagesCompacted: number | null, messagesKept: number | null, summaryLength: number | null, };
+
+export type MessageRecord = { id: number, conversationId: number, role: string, content: string | null, toolCalls: JsonValue | null, toolResult: JsonValue | null, usage: JsonValue | null, thinking: string | null, model: string | null, durationMs: number | null, artifactIds: JsonValue | null, createdAt: string, updatedAt: string, };
+
+export type ApprovalAuditRecord = { id: number, conversationId: number, runId: number | null, callId: string, toolName: string, arguments: JsonValue | null, approved: boolean, decisionSource: string, decidedBy: string | null, reason: string | null, isBreakpoint: boolean, breakpointType: string | null, durationMs: number | null, createdAt: string, updatedAt: string, };
+
+export type AgentRunRecord = { id: number, conversationId: number, userId: number | null, status: string, model: string | null, config: JsonValue | null, checkpoint: JsonValue | null, usage: JsonValue | null, iterations: number, finishReason: string | null, error: string | null, startedAt: string, finishedAt: string | null, createdAt: string, updatedAt: string, };
+
+export type RunListParams = { conversationId: number, beforeId: number | null, limit: number, };
+
+export type RunEventRecord = { id: number, runId: number, seq: number, kind: string, payload: JsonValue | null, createdAt: string, };
+
+export type RunEventsLegacyParams = { runId: number, afterSeq: number | null, limit: number, };
+
+export type ToolCallRecord = { id: number, conversationId: number | null, messageId: number | null, userId: number | null, name: string, arguments: JsonValue | null, result: JsonValue | null, durationMs: number | null, success: boolean, error: string | null, createdAt: string, updatedAt: string, };
+
+export type PlanRecord = { id: number, conversationId: number, runId: number | null, title: string | null, status: string, steps: JsonValue | null, metadata: JsonValue | null, createdAt: string, updatedAt: string, };
+
+export type PlanStepRecord = { id: number, planId: number, position: number, title: string, description: string | null, status: string, dependsOn: JsonValue | null, tools: JsonValue | null, resultSummary: string | null, runId: number | null, delegateRole: string | null, createdAt: string, updatedAt: string, };
+
+export type PlanTemplateRecord = { id: number, name: string, description: string | null, steps: JsonValue, isBuiltin: boolean, createdAt: string, updatedAt: string, };
+
+export type PlanListParams = { conversationId: number, };
+
+export type PlanIdParams = { conversationId: number, planId: number, };
+
+export type IdempotentPlanIdParams = { idempotencyKey: string, conversationId: number, planId: number, };
+
+export type PlanUpdateParams = { idempotencyKey: string, conversationId: number, planId: number, title: string | null, steps: JsonValue | null, };
+
+export type PlanApproveParams = { idempotencyKey: string, conversationId: number, planId: number, approved: boolean, };
+
+export type PlanTemplateCreateParams = { idempotencyKey: string, name: string, description: string | null, steps: JsonValue, };
+
+export type SubagentRoleRecord = { id: number, name: string, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, capabilityPolicy: JsonValue | null, maxIterations: number, maxCostUsd: number | null, isBuiltin: boolean, createdAt: string, updatedAt: string, };
+
+export type SubagentRoleCreateParams = { idempotencyKey: string, name: string, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, capabilityPolicy: JsonValue | null, maxIterations: number, maxCostUsd: number | null, isBuiltin: boolean, };
+
+export type SubagentRoleUpdateParams = { idempotencyKey: string, id: number, name: string | null, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, capabilityPolicy: JsonValue | null, maxIterations: number | null, maxCostUsd: number | null, clearMaxCostUsd: boolean, };
+
+export type SubagentRunRecord = { id: number, roleId: number | null, profileId: number | null, parentConversationId: number, parentRunId: number | null, researchRunId: number | null, conversationId: number, runId: number | null, name: string | null, prompt: string, status: string, resultSummary: string | null, usage: JsonValue | null, error: string | null, startedAt: string, finishedAt: string | null, createdAt: string, updatedAt: string, };
+
+export type SubagentLaunchParams = { idempotencyKey: string, parentConversationId: number, roleId: number | null, profileId: number | null, name: string | null, prompt: string, model: string | null, };
+
+export type SubagentLaunchItem = { roleId: number | null, profileId: number | null, name: string | null, prompt: string, model: string | null, };
+
+export type SubagentLaunchBatchParams = { idempotencyKey: string, parentConversationId: number, items: Array<SubagentLaunchItem>, };
+
+export type SubagentRunListParams = { parentConversationId: number | null, status: string | null, limit: number, };
+
+export type SubagentRunCancelResult = { runId: number, cancelled: boolean, };
+
+export type SubagentRunDetailRecord = { run: SubagentRunRecord, messages: Array<MessageRecord>, };
+
+export type ResearchCancelResult = { cancelled: number, };
+
+export type ResearchRunRecord = { id: number, userId: number, conversationId: number | null, parentTaskRunId: number | null, topic: string, depth: number, model: string | null, status: string, subQuestions: JsonValue | null, sources: JsonValue | null, citations: JsonValue | null, reportMarkdown: string | null, reportArtifactId: number | null, usage: JsonValue | null, error: string | null, inputHash: string | null, finishedAt: string | null, createdAt: string, updatedAt: string, };
+
+export type ResearchRunDetailRecord = { run: ResearchRunRecord, conversationId: number | null, parentTaskRunId: number | null, subQuestions: Array<string>, sources: Array<JsonValue>, citations: Array<JsonValue>, reportMarkdown: string | null, };
+
+export type ResearchListParams = { limit: number, };
+
+export type ResearchCreateParams = { idempotencyKey: string, topic: string, depth: number, model: string | null, conversationId: number | null, };
+
+export type ResearchRerunParams = { idempotencyKey: string, id: number, depth: number | null, model: string | null, };
+
+export type ArtifactRecord = { id: number, conversationId: number, runId: number | null, toolCallId: string | null, filename: string, mediaType: string, kind: string, sizeBytes: number, sha256: string | null, storagePath: string, version: number, parentId: number | null, metadata: JsonValue | null, extractedText: string | null, isDeleted: boolean, createdAt: string, updatedAt: string, };
+
+export type ArtifactDetailRecord = { artifact: ArtifactRecord, extractedText: string | null, versions: Array<ArtifactRecord>, };
+
+export type ArtifactListParams = { conversationId: number, runId: number | null, kind: string | null, includeDeleted: boolean, limit: number, };
+
+export type ArtifactIdParams = { conversationId: number, artifactId: number, };
+
+export type TimelineEntryRecord = { index: number, kind: string, phase: string, status: string | null, title: string | null, occurredAt: string, durationMs: number | null, payload: JsonValue | null, };
+
+export type TimelineRecord = { runId: number, conversationId: number, status: string, startedAt: string | null, finishedAt: string | null, totalDurationMs: number | null, entries: Array<TimelineEntryRecord>, usage: JsonValue | null, error: string | null, };
+
+export type ComparisonDeltasRecord = { durationMs: number | null, eventCount: number, totalTokens: number | null, costUsd: number | null, toolCalls: number, };
+
+export type RunComparisonRecord = { left: TimelineRecord, right: TimelineRecord, deltas: ComparisonDeltasRecord, };
+
+export type InspectorCompareParams = { leftRunId: number, rightRunId: number, };
+
+export type ReplayParams = { idempotencyKey: string, runId: number, model: string | null, systemPrompt: string | null, temperature: number | null, };
+
+export type ReplayResult = { newRunId: number, originalRunId: number, status: string, };
+
+export type GitInfoRecord = { path: string, isGit: boolean, branch: string | null, };
+
+export type DirectoryListingRecord = { current: string, parent: string | null, directories: Array<string>, default: string, };
+
+export type RecentDirectoriesRecord = { recent: Array<string>, default: string, };
+
+export type GitStatusRecord = { path: string, isGit: boolean, branch: string | null, staged: Array<string>, modified: Array<string>, untracked: Array<string>, };
+
+export type GitLogEntryRecord = { hash: string, message: string, author: string, date: string, };
+
+export type GitLogRecord = { path: string, commits: Array<GitLogEntryRecord>, };
+
+export type GitBranchesRecord = { path: string, branches: Array<string>, current: string | null, };
+
+export type GitCheckoutResult = { path: string, branch: string, status: string, };
+
+export type WorkspacePathParams = { path: string, };
+
+export type WorkspaceOptionalPathParams = { path: string | null, };
+
+export type WorkspaceGitLogParams = { path: string, limit: number, };
+
+export type WorkspaceGitCheckoutParams = { idempotencyKey: string, path: string, branch: string, };
+
+export type MacroToolRecord = { id: number, userId: number, name: string, description: string, inputSchema: JsonValue, steps: JsonValue, isActive: boolean, createdAt: string, updatedAt: string, };
+
+export type ConstructorMacroListParams = { includeInactive: boolean, };
+
+export type MacroCreateParams = { idempotencyKey: string, name: string, description: string, inputSchema: JsonValue, steps: JsonValue, isActive: boolean, };
+
+export type MacroUpdateParams = { idempotencyKey: string, id: number, description: string | null, inputSchema: JsonValue | null, steps: JsonValue | null, isActive: boolean | null, };
+
+export type MemoryRecord = { id: number, userId: number, scope: string, agentId: number | null, conversationId: number | null, memoryType: string, content: string, structured: JsonValue | null, tags: JsonValue | null, importance: number, confidence: number, source: string, status: string, supersedesId: number | null, accessCount: number, lastAccessedAt: string | null, ttlDays: number | null, validFrom: string | null, validTo: string | null, pinned: boolean, createdAt: string, updatedAt: string, };
+
+export type MemoryListParams = { memoryType: string | null, scope: string | null, status: string | null, conversationId: number | null, pinned: boolean | null, limit: number, offset: number, };
+
+export type MemoryCreateParams = { idempotencyKey: string, scope: string | null, agentId: number | null, conversationId: number | null, memoryType: string | null, content: string, structured: JsonValue | null, tags: JsonValue | null, importance: number | null, confidence: number | null, source: string | null, status: string | null, confirmed: boolean, supersedesId: number | null, ttlDays: number | null, validFrom: string | null, validTo: string | null, pinned: boolean, };
+
+export type MemoryUpdateParams = { idempotencyKey: string, id: number, content: string | null, memoryType: string | null, scope: string | null, agentId: number | null, importance: number | null, confidence: number | null, status: string | null, tags: JsonValue | null, structured: JsonValue | null, ttlDays: number | null, validTo: string | null, pinned: boolean | null, };
+
+export type MemoryDeleteParams = { idempotencyKey: string, id: number, hard: boolean, };
+
+export type MemoryPendingParams = { limit: number, offset: number, };
+
+export type MemoryPinParams = { idempotencyKey: string, id: number, pinned: boolean, };
+
+export type MemoryEpisodesParams = { agentId: number | null, limit: number, };
+
+export type MemoryScoreBreakdown = { importance: number, recency: number, confidence: number, typePriority: number, ageDays: number, total: number, };
+
+export type MemoryExplainRecord = { memoryId: number, source: string, scope: string, status: string, pinned: boolean, confidence: number, importance: number, memoryType: string, conversationId: number | null, agentId: number | null, createdAt: string, updatedAt: string, lastAccessedAt: string | null, accessCount: number, score: MemoryScoreBreakdown, };
+
+export type MemoryStatsRecord = { totalActive: number, byType: { [key in string]: number }, byScope: { [key in string]: number }, totalEpisodes: number, totalArchived: number, totalPending: number, totalEntities: number, };
+
+export type EpisodeRecord = { id: number, userId: number, agentId: number | null, conversationId: number | null, runId: number | null, title: string, summary: string, outcome: string, importance: number, tags: JsonValue | null, relatedEntities: JsonValue | null, startedAt: string | null, endedAt: string | null, createdAt: string, updatedAt: string, };
+
+export type EntityRecord = { id: number, userId: number, name: string, entityType: string, aliases: JsonValue | null, attributes: JsonValue | null, description: string | null, createdAt: string, updatedAt: string, };
+
+export type EntityListParams = { entityType: string | null, query: string | null, limit: number, };
+
+export type EntityCreateParams = { idempotencyKey: string, name: string, entityType: string, aliases: JsonValue | null, attributes: JsonValue | null, description: string | null, };
+
+export type EntityUpdateParams = { idempotencyKey: string, id: number, name: string | null, entityType: string | null, aliases: JsonValue | null, attributes: JsonValue | null, description: string | null, };
+
+export type WikiArticleRecord = { id: number, title: string, content: string, category: string, tags: JsonValue | null, source: string, sourceMemoryId: number | null, userId: number | null, projectKey: string | null, isPinned: boolean, isArchived: boolean, version: number, metadata: JsonValue | null, createdAt: string, updatedAt: string, };
+
+export type WikiStatsRecord = { total: number, pinned: number, archived: number, byCategory: { [key in string]: number }, };
+
+export type WikiListParams = { category: string | null, tag: string | null, archived: boolean | null, projectKey: string | null, pinned: boolean | null, search: string | null, limit: number, offset: number, };
+
+export type WikiSearchParams = { query: string, limit: number, };
+
+export type WikiCreateParams = { idempotencyKey: string, title: string, content: string, category: string | null, tags: JsonValue | null, source: string | null, sourceMemoryId: number | null, projectKey: string | null, metadata: JsonValue | null, };
+
+export type WikiUpdateParams = { idempotencyKey: string, id: number, title: string | null, content: string | null, category: string | null, tags: JsonValue | null, isPinned: boolean | null, isArchived: boolean | null, };
+
+export type WikiPromoteParams = { idempotencyKey: string, memoryItemId: number, title: string, content: string, category: string | null, tags: JsonValue | null, };
+
+export type RssSubscriptionRecord = { id: number, userId: number, url: string, title: string | null, siteUrl: string | null, category: string | null, fetchIntervalMinutes: number, enabled: boolean, lastFetchedAt: string | null, lastError: string | null, entryCount: number, createdAt: string, updatedAt: string, };
+
+export type RssEntryRecord = { id: number, subscriptionId: number, guid: string, title: string | null, link: string | null, author: string | null, summary: string | null, publishedAt: string | null, contentHash: string | null, isRead: boolean, fetchedAt: string, createdAt: string, updatedAt: string, };
+
+export type RssSubscriptionListParams = { category: string | null, enabled: boolean | null, };
+
+export type RssSubscribeParams = { idempotencyKey: string, url: string, title: string | null, siteUrl: string | null, category: string | null, fetchIntervalMinutes: number | null, enabled: boolean | null, };
+
+export type RssEntriesParams = { subscriptionId: number, unreadOnly: boolean, limit: number, };
+
+export type RssAllEntriesParams = { unreadOnly: boolean, limit: number, };
+
+export type RssEntryReadParams = { idempotencyKey: string, id: number, isRead: boolean, };
+
+export type WebhookEndpointRecord = { id: number, userId: number, name: string, hookId: string, sourceType: string, eventFilter: JsonValue | null, taskId: number | null, promptTemplate: string | null, enabled: boolean, createdAt: string, updatedAt: string, };
+
+export type WebhookEventRecord = { id: number, endpointId: number, eventType: string | null, payload: JsonValue | null, signatureValid: boolean, status: string, taskRunId: number | null, error: string | null, receivedAt: string, createdAt: string, updatedAt: string, };
+
+export type WebhookCreateParams = { idempotencyKey: string, name: string, sourceType: string | null, eventFilter: JsonValue | null, taskId: number | null, promptTemplate: string | null, enabled: boolean | null, };
+
+export type WebhookUpdateParams = { idempotencyKey: string, id: number, name: string | null, sourceType: string | null, eventFilter: JsonValue | null, taskId: number | null, promptTemplate: string | null, enabled: boolean | null, };
+
+export type WebhookEventsParams = { endpointId: number, status: string | null, limit: number, };
+
+export type WebhookReplayParams = { idempotencyKey: string, endpointId: number, eventId: number, };
+
+export type ProviderRecord = { id: number, name: string, label: string | null, baseUrl: string | null, defaultModel: string | null, isActive: boolean, isSubscription: boolean, isFallback: boolean, isDefault: boolean, chatModels: JsonValue | null, };
+
+export type ModelInfoRecord = { id: string, contextWindow: number | null, promptPrice: number | null, completionPrice: number | null, };
+
+export type ProviderListParams = { includeInactive: boolean, };
+
+export type ProviderCreateParams = { idempotencyKey: string, name: string, label: string | null, baseUrl: string | null, apiKey: string | null, defaultModel: string | null, isActive: boolean, isSubscription: boolean, isFallback: boolean, isDefault: boolean, chatModels: JsonValue | null, };
+
+export type ProviderUpdateParams = { idempotencyKey: string, id: number, label: string | null, baseUrl: string | null, apiKey: string | null, defaultModel: string | null, isActive: boolean | null, isFallback: boolean | null, isDefault: boolean | null, chatModels: JsonValue | null, };
+
+export type BudgetRecord = { id: number, userId: number, dailyLimitUsd: number | null, weeklyLimitUsd: number | null, monthlyLimitUsd: number | null, alertThresholdPct: number, blockOnExceed: boolean, overrideUntil: string | null, lastAlertAt: string | null, createdAt: string, updatedAt: string, };
+
+export type BudgetWindowSpendRecord = { spendUsd: number, limitUsd: number | null, pct: number, };
+
+export type BudgetStatusRecord = { status: string, overridden: boolean, daily: BudgetWindowSpendRecord, weekly: BudgetWindowSpendRecord, monthly: BudgetWindowSpendRecord, dailyLimitUsd: number | null, weeklyLimitUsd: number | null, monthlyLimitUsd: number | null, alertThresholdPct: number, blockOnExceed: boolean, overrideUntil: string | null, };
+
+export type BudgetUpdateParams = { idempotencyKey: string, dailyLimitUsd: number | null, weeklyLimitUsd: number | null, monthlyLimitUsd: number | null, alertThresholdPct: number | null, blockOnExceed: boolean | null, };
+
+export type BudgetOverrideParams = { idempotencyKey: string, until: string, };
+
+export type BudgetSpendParams = { since: string | null, limit: number, };
+
+export type SpendEntryRecord = { id: number, runId: number | null, conversationId: number | null, providerName: string, model: string, promptTokens: number, completionTokens: number, totalTokens: number, costUsd: number, ts: string, createdAt: string, updatedAt: string, };
+
+export type AnalyticsSummaryRecord = { totalSpendUsd: number, totalLlmCalls: number, totalTokens: number, totalToolCalls: number, toolErrorCount: number, toolSuccessRate: number, days: number, };
+
+export type SpendBucketRecord = { period: string, costUsd: number, totalTokens: number, calls: number, };
+
+export type ModelSpendRecord = { model: string, costUsd: number, totalTokens: number, calls: number, };
+
+export type ToolUsageRecord = { name: string, calls: number, avgDurationMs: number, successRate: number, errorCount: number, };
+
+export type LatencyBucketRecord = { period: string, avgMs: number, minMs: number, maxMs: number, calls: number, };
+
+export type CallHistoryRowRecord = { id: number, ts: string | null, model: string, providerName: string, promptTokens: number, completionTokens: number, totalTokens: number, costUsd: number, runId: number | null, conversationId: number | null, };
+
+export type CallHistoryResult = { rows: Array<CallHistoryRowRecord>, total: number, };
+
+export type MemoryActivityBucketRecord = { period: string, created: number, byType: { [key in string]: number }, };
+
+export type AnalyticsDaysParams = { days: number, };
+
+export type AnalyticsBucketParams = { days: number, bucket: string, };
+
+export type AnalyticsTopToolsParams = { days: number, limit: number, };
+
+export type AnalyticsCallHistoryParams = { limit: number, offset: number, model: string | null, provider: string | null, };
+
+export type TaskRecord = { id: number, userId: number, name: string, description: string | null, triggerType: string, cronExpression: string | null, intervalSeconds: number | null, runAt: string | null, timezone: string, quietHoursStart: string | null, quietHoursEnd: string | null, misfirePolicy: string, prompt: string, workflowType: string | null, profileId: number | null, model: string | null, toolsWhitelist: JsonValue | null, capabilityPolicy: JsonValue | null, workingDirectory: string | null, approvalPolicy: string, deliveryChannels: JsonValue | null, deliveryConfig: JsonValue | null, lastDeliveryHash: string | null, maxIterations: number, maxCostPerRun: number | null, timeoutS: number | null, enabled: boolean, nextRunAt: string | null, lastRunAt: string | null, lastStatus: string | null, runCount: number, failureCount: number, createdAt: string, updatedAt: string, };
+
+export type TaskRunRecord = { id: number, taskId: number, conversationId: number | null, runId: number | null, status: string, triggerSource: string, prompt: string, output: string | null, error: string | null, skipReason: string | null, approvalPolicy: string | null, approvalReason: string | null, usage: JsonValue | null, durationMs: number | null, deliveryStatus: JsonValue | null, deliveredAt: string | null, isRead: boolean, startedAt: string, finishedAt: string | null, createdAt: string, updatedAt: string, };
+
+export type TaskRunDetailRecord = { run: TaskRunRecord, messages: Array<MessageRecord>, };
+
+export type TaskInboxResult = { unreadCount: number, runs: Array<TaskRunRecord>, };
+
+export type SchedulerJobRecord = { id: string, name: string, nextRunTime: string | null, };
+
+export type SchedulerStatusRecord = { enabled: boolean, running: boolean, timezone: string, maxConcurrentTasks: number, jobs: Array<SchedulerJobRecord>, };
+
+export type ParseCronResult = { cronExpression: string | null, description: string | null, nextRuns: Array<string>, detail: string | null, };
+
+export type TaskRunCancelResult = { taskRunId: number, cancelled: boolean, };
+
+export type TaskListParams = { enabled: boolean | null, };
+
+export type TaskCreateParams = { idempotencyKey: string, name: string, description: string | null, triggerType: string, cronExpression: string | null, intervalSeconds: number | null, runAt: string | null, timezone: string, quietHoursStart: string | null, quietHoursEnd: string | null, misfirePolicy: string, prompt: string, workflowType: string | null, profileId: number | null, model: string | null, toolsWhitelist: JsonValue | null, capabilityPolicy: JsonValue | null, workingDirectory: string | null, approvalPolicy: string, deliveryChannels: JsonValue | null, deliveryConfig: JsonValue | null, maxIterations: number, maxCostPerRun: number | null, timeoutS: number | null, enabled: boolean, };
+
+export type TaskUpdateParams = { idempotencyKey: string, id: number, name: string | null, description: string | null, triggerType: string | null, cronExpression: string | null, intervalSeconds: number | null, runAt: string | null, timezone: string | null, quietHoursStart: string | null, quietHoursEnd: string | null, misfirePolicy: string | null, prompt: string | null, workflowType: string | null, profileId: number | null, model: string | null, toolsWhitelist: JsonValue | null, capabilityPolicy: JsonValue | null, workingDirectory: string | null, approvalPolicy: string | null, deliveryChannels: JsonValue | null, deliveryConfig: JsonValue | null, maxIterations: number | null, maxCostPerRun: number | null, timeoutS: number | null, enabled: boolean | null, };
+
+export type TaskRunsParams = { taskId: number, limit: number, };
+
+export type TaskRunReadParams = { idempotencyKey: string, id: number, isRead: boolean, };
+
+export type TaskInboxParams = { unreadOnly: boolean, limit: number, };
+
+export type ParseCronParams = { text: string, };
+
+export type ProfileRecord = { id: number, name: string, slug: string, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, skillNames: JsonValue | null, settings: JsonValue | null, avatarColor: string | null, isBuiltin: boolean, isActive: boolean, isShared: boolean, createdAt: string, updatedAt: string, };
+
+export type ProfileListParams = { includeInactive: boolean, };
+
+export type ProfileCreateParams = { idempotencyKey: string, name: string, slug: string, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, skillNames: JsonValue | null, settings: JsonValue | null, avatarColor: string | null, isBuiltin: boolean, isActive: boolean, isShared: boolean, };
+
+export type ProfileUpdateParams = { idempotencyKey: string, id: number, name: string | null, slug: string | null, description: string | null, systemPrompt: string | null, model: string | null, toolNames: JsonValue | null, skillNames: JsonValue | null, settings: JsonValue | null, avatarColor: string | null, isActive: boolean | null, isShared: boolean | null, };
+
+export type ProfilePlaygroundParams = { idempotencyKey: string, id: number, title: string | null, initialPrompt: string | null, };
+
+export type PlaygroundResult = { conversationId: number, };
+
+export type SeedResult = { created: number, };
+
 export type RunCancelledResult = { runId: string, accepted: boolean, };
 
 export type ApprovalResolvedResult = { approvalId: string, revision: number, outcome: ApprovalOutcome, };
 
-export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "session_listed", "value": SessionListResult } | { "kind": "session_history", "value": SessionHistoryResult } | { "kind": "session_forked", "value": SessionForkedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "steer_accepted", "value": SteerAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "approval_resolved", "value": ApprovalResolvedResult } | { "kind": "event_page", "value": EventPage } | { "kind": "status", "value": StatusGetResult };
+export type ResponsePayload = { "kind": "initialized", "value": InitializeResult } | { "kind": "session_created", "value": SessionCreatedResult } | { "kind": "session_loaded", "value": SessionLoadedResult } | { "kind": "session_listed", "value": SessionListResult } | { "kind": "session_history", "value": SessionHistoryResult } | { "kind": "session_forked", "value": SessionForkedResult } | { "kind": "prompt_accepted", "value": PromptAcceptedResult } | { "kind": "steer_accepted", "value": SteerAcceptedResult } | { "kind": "run_cancelled", "value": RunCancelledResult } | { "kind": "approval_resolved", "value": ApprovalResolvedResult } | { "kind": "event_page", "value": EventPage } | { "kind": "status", "value": StatusGetResult } | { "kind": "conversations_list", "value": Array<ConversationRecord> } | { "kind": "conversations_created", "value": ConversationRecord } | { "kind": "conversations_got", "value": ConversationRecord } | { "kind": "conversations_updated", "value": ConversationRecord } | { "kind": "conversations_deleted", "value": DeletedResult } | { "kind": "conversations_compacted", "value": CompactResult } | { "kind": "conversations_approvals", "value": Array<ApprovalAuditRecord> } | { "kind": "conversations_searched", "value": Array<ConversationRecord> } | { "kind": "conversations_bulk", "value": AffectedResult } | { "kind": "runs_listed", "value": Array<AgentRunRecord> } | { "kind": "runs_got", "value": AgentRunRecord } | { "kind": "runs_events", "value": Array<RunEventRecord> } | { "kind": "runs_cancelled", "value": AgentRunRecord } | { "kind": "providers_listed", "value": Array<ProviderRecord> } | { "kind": "providers_created", "value": ProviderRecord } | { "kind": "providers_got", "value": ProviderRecord } | { "kind": "providers_updated", "value": ProviderRecord } | { "kind": "providers_deleted", "value": DeletedResult } | { "kind": "providers_models", "value": Array<ModelInfoRecord> } | { "kind": "memory_listed", "value": Array<MemoryRecord> } | { "kind": "memory_got", "value": MemoryRecord } | { "kind": "memory_created", "value": MemoryRecord } | { "kind": "memory_updated", "value": MemoryRecord } | { "kind": "memory_deleted", "value": LegacyOkResult } | { "kind": "memory_pending", "value": Array<MemoryRecord> } | { "kind": "memory_confirmed", "value": MemoryRecord } | { "kind": "memory_rejected", "value": LegacyOkResult } | { "kind": "memory_pinned", "value": MemoryRecord } | { "kind": "memory_explained", "value": MemoryExplainRecord } | { "kind": "memory_episodes", "value": Array<EpisodeRecord> } | { "kind": "memory_stats", "value": MemoryStatsRecord } | { "kind": "entities_listed", "value": Array<EntityRecord> } | { "kind": "entities_got", "value": EntityRecord } | { "kind": "entities_created", "value": EntityRecord } | { "kind": "entities_updated", "value": EntityRecord } | { "kind": "entities_deleted", "value": LegacyOkResult } | { "kind": "plans_listed", "value": Array<PlanRecord> } | { "kind": "plans_got", "value": PlanRecord } | { "kind": "plans_updated", "value": PlanRecord } | { "kind": "plans_approved", "value": PlanRecord } | { "kind": "plans_cancelled", "value": PlanRecord } | { "kind": "plans_templates_listed", "value": Array<PlanTemplateRecord> } | { "kind": "plans_templates_created", "value": PlanTemplateRecord } | { "kind": "plans_templates_deleted", "value": DeletedResult } | { "kind": "subagents_roles_listed", "value": Array<SubagentRoleRecord> } | { "kind": "subagents_roles_got", "value": SubagentRoleRecord } | { "kind": "subagents_roles_created", "value": SubagentRoleRecord } | { "kind": "subagents_roles_updated", "value": SubagentRoleRecord } | { "kind": "subagents_roles_deleted", "value": DeletedResult } | { "kind": "subagents_launched", "value": SubagentRunRecord } | { "kind": "subagents_launched_batch", "value": Array<SubagentRunRecord> } | { "kind": "subagents_runs_listed", "value": Array<SubagentRunRecord> } | { "kind": "subagents_runs_got", "value": SubagentRunDetailRecord } | { "kind": "subagents_runs_cancelled", "value": SubagentRunCancelResult } | { "kind": "subagents_runs_deleted", "value": LegacyOkResult } | { "kind": "inspector_timeline", "value": TimelineRecord } | { "kind": "inspector_compared", "value": RunComparisonRecord } | { "kind": "inspector_replayed", "value": ReplayResult } | { "kind": "budgets_got", "value": BudgetStatusRecord } | { "kind": "budgets_updated", "value": BudgetStatusRecord } | { "kind": "budgets_override_set", "value": BudgetStatusRecord } | { "kind": "budgets_override_cleared", "value": BudgetStatusRecord } | { "kind": "budgets_spend", "value": Array<SpendEntryRecord> } | { "kind": "artifacts_listed", "value": Array<ArtifactRecord> } | { "kind": "artifacts_got", "value": ArtifactDetailRecord } | { "kind": "artifacts_deleted", "value": DeletedResult } | { "kind": "workspace_git_info", "value": GitInfoRecord } | { "kind": "workspace_directories", "value": DirectoryListingRecord } | { "kind": "workspace_recent", "value": RecentDirectoriesRecord } | { "kind": "workspace_git_status", "value": GitStatusRecord } | { "kind": "workspace_git_log", "value": GitLogRecord } | { "kind": "workspace_git_branches", "value": GitBranchesRecord } | { "kind": "workspace_git_checkout", "value": GitCheckoutResult } | { "kind": "profiles_listed", "value": Array<ProfileRecord> } | { "kind": "profiles_got", "value": ProfileRecord } | { "kind": "profiles_created", "value": ProfileRecord } | { "kind": "profiles_updated", "value": ProfileRecord } | { "kind": "profiles_deleted", "value": DeletedResult } | { "kind": "profiles_seeded", "value": SeedResult } | { "kind": "profiles_cloned", "value": ProfileRecord } | { "kind": "profiles_playground", "value": PlaygroundResult } | { "kind": "analytics_summary", "value": AnalyticsSummaryRecord } | { "kind": "analytics_spend_over_time", "value": Array<SpendBucketRecord> } | { "kind": "analytics_spend_by_model", "value": Array<ModelSpendRecord> } | { "kind": "analytics_top_tools", "value": Array<ToolUsageRecord> } | { "kind": "analytics_latency", "value": Array<LatencyBucketRecord> } | { "kind": "analytics_call_history", "value": CallHistoryResult } | { "kind": "analytics_memory_activity", "value": Array<MemoryActivityBucketRecord> } | { "kind": "tasks_listed", "value": Array<TaskRecord> } | { "kind": "tasks_got", "value": TaskRecord } | { "kind": "tasks_created", "value": TaskRecord } | { "kind": "tasks_updated", "value": TaskRecord } | { "kind": "tasks_deleted", "value": DeletedResult } | { "kind": "tasks_ran", "value": TaskRunRecord } | { "kind": "tasks_runs_listed", "value": Array<TaskRunRecord> } | { "kind": "tasks_runs_got", "value": TaskRunDetailRecord } | { "kind": "tasks_runs_cancelled", "value": TaskRunCancelResult } | { "kind": "tasks_runs_read", "value": TaskRunRecord } | { "kind": "tasks_inbox", "value": TaskInboxResult } | { "kind": "tasks_scheduler", "value": SchedulerStatusRecord } | { "kind": "tasks_parsed_cron", "value": ParseCronResult } | { "kind": "rss_subscriptions_listed", "value": Array<RssSubscriptionRecord> } | { "kind": "rss_subscribed", "value": RssSubscriptionRecord } | { "kind": "rss_unsubscribed", "value": DeletedResult } | { "kind": "rss_entries_listed", "value": Array<RssEntryRecord> } | { "kind": "rss_entries_all", "value": Array<RssEntryRecord> } | { "kind": "rss_entry_read", "value": RssEntryRecord } | { "kind": "webhooks_listed", "value": Array<WebhookEndpointRecord> } | { "kind": "webhooks_got", "value": WebhookEndpointRecord } | { "kind": "webhooks_created", "value": WebhookEndpointRecord } | { "kind": "webhooks_updated", "value": WebhookEndpointRecord } | { "kind": "webhooks_deleted", "value": DeletedResult } | { "kind": "webhooks_events", "value": Array<WebhookEventRecord> } | { "kind": "webhooks_replayed", "value": WebhookEventRecord } | { "kind": "wiki_listed", "value": Array<WikiArticleRecord> } | { "kind": "wiki_searched", "value": Array<WikiArticleRecord> } | { "kind": "wiki_got", "value": WikiArticleRecord } | { "kind": "wiki_created", "value": WikiArticleRecord } | { "kind": "wiki_updated", "value": WikiArticleRecord } | { "kind": "wiki_deleted", "value": DeletedResult } | { "kind": "wiki_categories", "value": Array<string> } | { "kind": "wiki_stats", "value": WikiStatsRecord } | { "kind": "wiki_promoted", "value": WikiArticleRecord } | { "kind": "research_listed", "value": Array<ResearchRunRecord> } | { "kind": "research_got", "value": ResearchRunDetailRecord } | { "kind": "research_created", "value": ResearchRunRecord } | { "kind": "research_cancelled", "value": ResearchCancelResult } | { "kind": "research_reran", "value": ResearchRunRecord } | { "kind": "constructor_macros", "value": Array<MacroToolRecord> } | { "kind": "constructor_macros_created", "value": MacroToolRecord } | { "kind": "constructor_macros_updated", "value": MacroToolRecord } | { "kind": "constructor_macros_deleted", "value": DeletedResult };
 
 export type RpcSuccess = { jsonrpc: JsonRpcV2, id: RpcId, result: ResponsePayload, };
 

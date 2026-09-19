@@ -16,7 +16,9 @@ use cool_extensions::{
     PluginStore, WorkerLaunchSpec, discover_plugin_tools_with_policy,
 };
 use cool_protocol::{ApprovalOutcome, CanonicalEvent, StatusEntry, StatusGetResult};
-use cool_security::{CapabilityPolicy, Decision, NetworkPolicy, Workspace};
+use cool_security::{
+    CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace,
+};
 use cool_state::DurableStore;
 use serde_json::json;
 
@@ -41,6 +43,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
             let mut transport = "stdio".to_owned();
             let mut endpoint: Option<PathBuf> = None;
             let mut data_dir = default_data_dir();
+            let mut legacy_store = false;
             while let Some(argument) = args.next() {
                 match argument.as_str() {
                     "--transport" => {
@@ -58,6 +61,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                             args.next().ok_or_else(|| usage("missing data directory"))?,
                         );
                     }
+                    "--legacy-store" => legacy_store = true,
                     _ => return Err(usage("unknown app-server argument")),
                 }
             }
@@ -67,7 +71,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "local" => return Err(usage("local transport needs endpoint")),
                 _ => return Err(usage("transport must be stdio or local")),
             }
-            let server = build_server(&data_dir).await?;
+            let server = build_server(&data_dir, legacy_store).await?;
             match transport.as_str() {
                 "stdio" => server
                     .serve_stdio()
@@ -190,10 +194,61 @@ fn inspect_legacy_store(data_dir: &std::path::Path) -> serde_json::Value {
     }
 }
 
-async fn build_server(data_dir: &std::path::Path) -> Result<AppServer, (i32, serde_json::Value)> {
+/// Open `harness.db` for the app server.
+///
+/// A Rust-owned store opens normally (ownership is verified and pending Rust
+/// migrations run). A Python-owned store is opened **read-only**: adoption is a
+/// migration decision, not a side effect of starting a server. This is only
+/// reachable through the explicit `--legacy-store` flag.
+fn open_legacy_store(
+    database: &std::path::Path,
+) -> Result<cool_store::LegacyStore, (i32, serde_json::Value)> {
+    let read_only = match cool_store::LegacyStore::open_read_only(database) {
+        Ok(store) => !store
+            .meta()
+            .map(|meta| meta.owner.as_deref() == Some("rust"))
+            .unwrap_or(false),
+        Err(error) => return Err(runtime("legacy_store_failed", &error.to_string())),
+    };
+    let options = cool_store::StoreOptions {
+        read_only,
+        ..cool_store::StoreOptions::default()
+    };
+    cool_store::LegacyStore::open(database, &options)
+        .map_err(|error| runtime("legacy_store_failed", &error.to_string()))
+}
+
+fn configured_secrets() -> Option<Arc<SecretKeyring>> {
+    let secret = env::var("SECRET_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let key = SecretKey::from_secret("default", &secret, false).ok()?;
+    Some(Arc::new(SecretKeyring::new(key, std::iter::empty())))
+}
+
+async fn build_server(
+    data_dir: &std::path::Path,
+    legacy_store: bool,
+) -> Result<AppServer, (i32, serde_json::Value)> {
     let store = DurableStore::open(data_dir.join("rust-core.db"))
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
-    let config = ServerConfig::default();
+    let legacy = if legacy_store {
+        let database = data_dir.join("harness.db");
+        if !database.exists() {
+            return Err(runtime(
+                "legacy_store_missing",
+                "harness.db was not found under the data directory",
+            ));
+        }
+        Some(Arc::new(open_legacy_store(&database)?))
+    } else {
+        None
+    };
+    let config = ServerConfig {
+        secrets: configured_secrets(),
+        legacy_store: legacy,
+        ..ServerConfig::default()
+    };
     let (provider, model) = configured_provider(config.event_delay, true)?;
     let workspace = current_workspace()?;
     let (registry, extensions) = extension_registry(data_dir).await;
@@ -812,6 +867,6 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }

@@ -26,7 +26,10 @@ fn adopting_an_existing_database_backs_it_up_and_preserves_data() {
     let report = store.adoption_report().expect("adoption report");
     assert!(report.adopted);
     assert_eq!(report.adopted_revision, "0022");
-    assert_eq!(report.migrations_applied, vec![1]);
+    assert_eq!(
+        report.migrations_applied,
+        (1..=cool_store::latest_schema_version()).collect::<Vec<_>>()
+    );
     let backup = report.backup.as_ref().expect("backup");
     assert_eq!(backup.revision, "0022");
     assert_eq!(backup.integrity_check, "ok");
@@ -91,7 +94,10 @@ fn reopening_an_adopted_database_is_idempotent_and_takes_no_new_backup() {
     assert!(!report.adopted);
     assert!(report.backup.is_none());
     assert!(report.migrations_applied.is_empty());
-    assert_eq!(second.schema_version().expect("version"), 1);
+    assert_eq!(
+        second.schema_version().expect("version"),
+        cool_store::latest_schema_version()
+    );
     assert!(backup_path.exists());
 }
 
@@ -171,7 +177,10 @@ fn an_interrupted_adoption_resumes_pending_migrations() {
     let report = store.adoption_report().expect("report");
     assert!(!report.adopted);
     assert_eq!(report.adopted_revision, "0022");
-    assert_eq!(report.migrations_applied, vec![1]);
+    assert_eq!(
+        report.migrations_applied,
+        (1..=cool_store::latest_schema_version()).collect::<Vec<_>>()
+    );
     assert!(has_table(&path, "rust_actors"));
     // The default actor mapping is restored on the resume path as well.
     assert_eq!(store.ensure_actor("local-user").expect("actor"), 1);
@@ -355,7 +364,10 @@ fn initialize_creates_a_rust_owned_store_without_a_backup() {
     let report = store.adoption_report().expect("report");
     assert!(report.initialized);
     assert!(report.backup.is_none());
-    assert_eq!(store.schema_version().expect("version"), 1);
+    assert_eq!(
+        store.schema_version().expect("version"),
+        cool_store::latest_schema_version()
+    );
     assert!(store.meta().expect("meta").backup_path.is_none());
     assert_eq!(
         store

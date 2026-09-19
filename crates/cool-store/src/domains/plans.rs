@@ -275,6 +275,53 @@ impl crate::LegacyStore {
         self.get_plan(actor_id, conversation_id, plan_id)
     }
 
+    /// Update a draft plan's title and/or replace its steps, mirroring
+    /// `planning.update_plan_steps` (draft-only, title optional).
+    pub fn update_plan_draft(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        plan_id: i64,
+        title: Option<&str>,
+        steps: Option<&Value>,
+    ) -> Result<Plan, StoreError> {
+        if let Some(steps) = steps
+            && !steps.is_array()
+        {
+            return Err(StoreError::InvalidInput(
+                "plan steps must be a JSON array".to_string(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        require_conversation(&connection, actor_id, conversation_id)?;
+        let plan = fetch_plan(&connection, conversation_id, plan_id)?;
+        if plan.status != "draft" {
+            return Err(StoreError::InvalidInput(format!(
+                "plan {plan_id} is not in draft status"
+            )));
+        }
+        let timestamp = now_python();
+        let transaction = connection.transaction()?;
+        if let Some(title) = title {
+            transaction.execute(
+                "UPDATE plans SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![title, timestamp, plan_id],
+            )?;
+        }
+        if let Some(steps) = steps {
+            let array = steps.as_array().expect("validated JSON array");
+            transaction.execute("DELETE FROM plan_steps WHERE plan_id = ?1", [plan_id])?;
+            insert_plan_steps(&transaction, plan_id, array, &timestamp)?;
+            transaction.execute(
+                "UPDATE plans SET steps = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serde_json::to_string(steps)?, timestamp, plan_id],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.get_plan(actor_id, conversation_id, plan_id)
+    }
+
     /// Set a plan status, validating the Python plan-status vocabulary.
     pub fn set_plan_status(
         &self,

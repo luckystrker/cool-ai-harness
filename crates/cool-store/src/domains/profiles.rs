@@ -148,7 +148,105 @@ fn slug_taken_by_other(
     Ok(existing.is_some())
 }
 
+/// One built-in profile preset, mirroring `personalities/presets.py`.
+struct BuiltinPreset {
+    name: &'static str,
+    slug: &'static str,
+    description: &'static str,
+    system_prompt: &'static str,
+    avatar_color: &'static str,
+    temperature: f64,
+    max_iterations: Option<i64>,
+}
+
+/// Built-in profile presets, mirroring `personalities/presets.py`.
+const BUILTIN_PRESETS: &[BuiltinPreset] = &[
+    BuiltinPreset {
+        name: "Assistant",
+        slug: "assistant",
+        description: "General-purpose helper for everyday tasks.",
+        system_prompt: "You are Assistant, a versatile AI helper. You help users with a wide range of tasks: answering questions, brainstorming, planning, writing, analysis, and light coding.\n\n# Guidelines\n- Be helpful, clear, and concise.\n- Use tools when they improve accuracy (file reading, web search, memory).\n- Adapt your tone to the user's style.\n- When uncertain, ask clarifying questions rather than guessing.\n",
+        avatar_color: "#6366F1",
+        temperature: 0.7,
+        max_iterations: None,
+    },
+    BuiltinPreset {
+        name: "Coder",
+        slug: "coder",
+        description: "Focused software engineering agent.",
+        system_prompt: "You are Coder, a focused software engineering agent. You write, review, debug, and refactor code. You prefer precision over verbosity.\n\n# Guidelines\n- Read existing code before modifying it.\n- Follow the project's conventions, style, and architecture.\n- Write minimal, correct changes - avoid over-engineering.\n- Run tests/linters when available to verify your work.\n- Explain trade-offs briefly when multiple approaches exist.\n- Never introduce security vulnerabilities.\n",
+        avatar_color: "#10B981",
+        temperature: 0.3,
+        max_iterations: Some(15),
+    },
+    BuiltinPreset {
+        name: "Researcher",
+        slug: "researcher",
+        description: "Deep research and multi-source analysis.",
+        system_prompt: "You are Researcher, a deep-research and analysis agent. You gather information from multiple sources, synthesize findings, and present structured conclusions.\n\n# Guidelines\n- Use web_search and web_fetch to find authoritative sources.\n- Cross-reference claims across multiple sources.\n- Cite sources explicitly (URL or title).\n- Structure output with headings, bullet points, and summaries.\n- Distinguish facts from opinions and flag uncertainty.\n- Save important findings to memory for future reference.\n",
+        avatar_color: "#F59E0B",
+        temperature: 0.5,
+        max_iterations: Some(12),
+    },
+    BuiltinPreset {
+        name: "Writer",
+        slug: "writer",
+        description: "Creative and technical writing specialist.",
+        system_prompt: "You are Writer, a creative and technical writing specialist. You craft prose, documentation, articles, stories, and marketing copy with attention to voice and structure.\n\n# Guidelines\n- Match the requested tone, audience, and format precisely.\n- Use vivid language for creative work; precise language for technical work.\n- Structure long pieces with clear headings and logical flow.\n- Offer alternatives when style choices are subjective.\n- Edit ruthlessly: cut filler, strengthen verbs, tighten sentences.\n",
+        avatar_color: "#EC4899",
+        temperature: 0.9,
+        max_iterations: None,
+    },
+    BuiltinPreset {
+        name: "DM",
+        slug: "dm",
+        description: "Dungeon Master for tabletop RPGs.",
+        system_prompt: "You are DM, a Dungeon Master for tabletop role-playing games. You narrate scenes, play NPCs, adjudicate rules, and drive the story forward based on player choices.\n\n# Guidelines\n- Describe scenes vividly: sights, sounds, smells, atmosphere.\n- Play NPCs with distinct voices, motivations, and mannerisms.\n- Present meaningful choices with consequences.\n- Adjudicate actions fairly using the game system's rules.\n- Track inventory, HP, quest state, and NPC relationships via memory tools.\n- Never decide the player's actions for them - present options and wait.\n- Balance combat, exploration, and roleplay.\n",
+        avatar_color: "#8B5CF6",
+        temperature: 0.85,
+        max_iterations: Some(8),
+    },
+];
+
 impl crate::LegacyStore {
+    /// Create any missing built-in profile presets, preserving user edits
+    /// (existing slugs are skipped). Mirrors `seed_builtin_profiles`.
+    pub fn seed_builtin_profiles(&self) -> Result<u64, StoreError> {
+        let mut created = 0;
+        for preset in BUILTIN_PRESETS {
+            if self.find_profile_by_slug(preset.slug)?.is_some() {
+                continue;
+            }
+            let mut settings = serde_json::Map::new();
+            settings.insert(
+                "temperature".to_owned(),
+                serde_json::Value::from(preset.temperature),
+            );
+            if let Some(max_iterations) = preset.max_iterations {
+                settings.insert(
+                    "max_iterations".to_owned(),
+                    serde_json::Value::from(max_iterations),
+                );
+            }
+            self.create_profile(&NewAgentProfile {
+                name: preset.name.to_owned(),
+                slug: preset.slug.to_owned(),
+                description: Some(preset.description.to_owned()),
+                system_prompt: Some(preset.system_prompt.to_owned()),
+                model: None,
+                tool_names: None,
+                skill_names: None,
+                settings: Some(serde_json::Value::Object(settings)),
+                avatar_color: Some(preset.avatar_color.to_owned()),
+                is_builtin: true,
+                is_active: true,
+                is_shared: false,
+            })?;
+            created += 1;
+        }
+        Ok(created)
+    }
+
     /// List profiles. Built-in presets sort first, then by name; inactive
     /// profiles are hidden unless `include_inactive`.
     pub fn list_profiles(&self, include_inactive: bool) -> Result<Vec<AgentProfile>, StoreError> {

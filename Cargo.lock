@@ -231,6 +231,7 @@ dependencies = [
  "cool-protocol",
  "cool-security",
  "cool-state",
+ "cool-store",
  "serde",
  "serde_json",
  "tempfile",
@@ -252,6 +253,7 @@ dependencies = [
  "cool-state",
  "cool-store",
  "cool-tui",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",
@@ -334,6 +336,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 

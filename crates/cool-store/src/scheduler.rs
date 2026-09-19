@@ -187,6 +187,22 @@ pub fn next_run(task: &ScheduledTask, after: i64) -> Result<Option<i64>, Schedul
     }
 }
 
+/// Validate a 5-field cron expression and return the next `count` UTC fire
+/// times strictly after `after` (used by the `tasks.parse_cron` protocol query).
+pub fn cron_next_runs(
+    expression: &str,
+    after: i64,
+    count: usize,
+) -> Result<Vec<i64>, ScheduleError> {
+    let mut cursor = after;
+    let mut runs = Vec::with_capacity(count);
+    for _ in 0..count {
+        cursor = next_cron_after(expression, 0, cursor)?;
+        runs.push(cursor);
+    }
+    Ok(runs)
+}
+
 /// Whether `moment` (UTC unix seconds) falls inside the task's quiet-hours
 /// window. Missing, malformed or equal bounds mean "no quiet hours".
 pub fn quiet_hours(task: &ScheduledTask, moment: i64) -> Result<bool, ScheduleError> {

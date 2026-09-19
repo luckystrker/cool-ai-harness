@@ -9,6 +9,10 @@ use ts_rs::TS;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
 
+mod families;
+
+pub use families::*;
+
 pub type Extensions = BTreeMap<String, Value>;
 
 macro_rules! fixed_wire_string {
@@ -84,15 +88,20 @@ impl<'de> Deserialize<'de> for V1Version {
     }
 }
 
+/// Maximum accepted idempotency-key length.
+pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
+
 #[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct IdempotencyKey(#[schemars(length(min = 1))] String);
+pub struct IdempotencyKey(#[schemars(length(min = 1, max = 256))] String);
 
 impl IdempotencyKey {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
         let value = value.into();
         if value.is_empty() {
             Err("idempotency key must not be empty")
+        } else if value.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS {
+            Err("idempotency key is too long")
         } else {
             Ok(Self(value))
         }
@@ -149,6 +158,9 @@ pub struct AuthorizedCommand {
     pub command: CommandEnvelope,
 }
 
+// The protocol enums mirror the wire schema; boxing variants would only churn
+// every transport match without changing the JSON representation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 #[ts(export)]
@@ -177,6 +189,270 @@ pub enum Command {
     ApprovalResolve(ApprovalResolveParams),
     #[serde(rename = "status.get")]
     StatusGet(StatusGetParams),
+    #[serde(rename = "conversations.list")]
+    ConversationsList(ConversationListParams),
+    #[serde(rename = "conversations.create")]
+    ConversationsCreate(ConversationCreateParams),
+    #[serde(rename = "conversations.get")]
+    ConversationsGet(LegacyIdParams),
+    #[serde(rename = "conversations.update")]
+    ConversationsUpdate(ConversationUpdateParams),
+    #[serde(rename = "conversations.delete")]
+    ConversationsDelete(IdempotentIdParams),
+    #[serde(rename = "conversations.compact")]
+    ConversationsCompact(IdempotentIdParams),
+    #[serde(rename = "conversations.approvals")]
+    ConversationsApprovals(ConversationApprovalsParams),
+    #[serde(rename = "conversations.search")]
+    ConversationsSearch(ConversationSearchParams),
+    #[serde(rename = "conversations.bulk")]
+    ConversationsBulk(ConversationBulkParams),
+    #[serde(rename = "runs.list")]
+    RunsList(RunListParams),
+    #[serde(rename = "runs.get")]
+    RunsGet(LegacyIdParams),
+    #[serde(rename = "runs.events")]
+    RunsEvents(RunEventsLegacyParams),
+    #[serde(rename = "runs.cancel")]
+    RunsCancel(IdempotentIdParams),
+    #[serde(rename = "providers.list")]
+    ProvidersList(ProviderListParams),
+    #[serde(rename = "providers.create")]
+    ProvidersCreate(ProviderCreateParams),
+    #[serde(rename = "providers.get")]
+    ProvidersGet(LegacyIdParams),
+    #[serde(rename = "providers.update")]
+    ProvidersUpdate(ProviderUpdateParams),
+    #[serde(rename = "providers.delete")]
+    ProvidersDelete(IdempotentIdParams),
+    #[serde(rename = "providers.models")]
+    ProvidersModels(LegacyIdParams),
+    #[serde(rename = "memory.list")]
+    MemoryList(MemoryListParams),
+    #[serde(rename = "memory.get")]
+    MemoryGet(LegacyIdParams),
+    #[serde(rename = "memory.create")]
+    MemoryCreate(MemoryCreateParams),
+    #[serde(rename = "memory.update")]
+    MemoryUpdate(MemoryUpdateParams),
+    #[serde(rename = "memory.delete")]
+    MemoryDelete(MemoryDeleteParams),
+    #[serde(rename = "memory.pending")]
+    MemoryPending(MemoryPendingParams),
+    #[serde(rename = "memory.confirm")]
+    MemoryConfirm(IdempotentIdParams),
+    #[serde(rename = "memory.reject")]
+    MemoryReject(IdempotentIdParams),
+    #[serde(rename = "memory.pin")]
+    MemoryPin(MemoryPinParams),
+    #[serde(rename = "memory.explain")]
+    MemoryExplain(LegacyIdParams),
+    #[serde(rename = "memory.episodes")]
+    MemoryEpisodes(MemoryEpisodesParams),
+    #[serde(rename = "memory.stats")]
+    MemoryStats(EmptyParams),
+    #[serde(rename = "entities.list")]
+    EntitiesList(EntityListParams),
+    #[serde(rename = "entities.get")]
+    EntitiesGet(LegacyIdParams),
+    #[serde(rename = "entities.create")]
+    EntitiesCreate(EntityCreateParams),
+    #[serde(rename = "entities.update")]
+    EntitiesUpdate(EntityUpdateParams),
+    #[serde(rename = "entities.delete")]
+    EntitiesDelete(IdempotentIdParams),
+    #[serde(rename = "plans.list")]
+    PlansList(PlanListParams),
+    #[serde(rename = "plans.get")]
+    PlansGet(PlanIdParams),
+    #[serde(rename = "plans.update")]
+    PlansUpdate(PlanUpdateParams),
+    #[serde(rename = "plans.approve")]
+    PlansApprove(PlanApproveParams),
+    #[serde(rename = "plans.cancel")]
+    PlansCancel(IdempotentPlanIdParams),
+    #[serde(rename = "plans.templates_list")]
+    PlansTemplatesList(EmptyParams),
+    #[serde(rename = "plans.templates_create")]
+    PlansTemplatesCreate(PlanTemplateCreateParams),
+    #[serde(rename = "plans.templates_delete")]
+    PlansTemplatesDelete(IdempotentIdParams),
+    #[serde(rename = "subagents.roles_list")]
+    SubagentsRolesList(EmptyParams),
+    #[serde(rename = "subagents.roles_get")]
+    SubagentsRolesGet(LegacyIdParams),
+    #[serde(rename = "subagents.roles_create")]
+    SubagentsRolesCreate(SubagentRoleCreateParams),
+    #[serde(rename = "subagents.roles_update")]
+    SubagentsRolesUpdate(SubagentRoleUpdateParams),
+    #[serde(rename = "subagents.roles_delete")]
+    SubagentsRolesDelete(IdempotentIdParams),
+    #[serde(rename = "subagents.launch")]
+    SubagentsLaunch(SubagentLaunchParams),
+    #[serde(rename = "subagents.launch_batch")]
+    SubagentsLaunchBatch(SubagentLaunchBatchParams),
+    #[serde(rename = "subagents.runs_list")]
+    SubagentsRunsList(SubagentRunListParams),
+    #[serde(rename = "subagents.runs_get")]
+    SubagentsRunsGet(LegacyIdParams),
+    #[serde(rename = "subagents.runs_cancel")]
+    SubagentsRunsCancel(IdempotentIdParams),
+    #[serde(rename = "subagents.runs_delete")]
+    SubagentsRunsDelete(IdempotentIdParams),
+    #[serde(rename = "inspector.timeline")]
+    InspectorTimeline(LegacyIdParams),
+    #[serde(rename = "inspector.compare")]
+    InspectorCompare(InspectorCompareParams),
+    #[serde(rename = "inspector.replay")]
+    InspectorReplay(ReplayParams),
+    #[serde(rename = "budgets.get")]
+    BudgetsGet(EmptyParams),
+    #[serde(rename = "budgets.update")]
+    BudgetsUpdate(BudgetUpdateParams),
+    #[serde(rename = "budgets.override_set")]
+    BudgetsOverrideSet(BudgetOverrideParams),
+    #[serde(rename = "budgets.override_clear")]
+    BudgetsOverrideClear(IdempotentParams),
+    #[serde(rename = "budgets.spend")]
+    BudgetsSpend(BudgetSpendParams),
+    #[serde(rename = "artifacts.list")]
+    ArtifactsList(ArtifactListParams),
+    #[serde(rename = "artifacts.get")]
+    ArtifactsGet(ArtifactIdParams),
+    #[serde(rename = "artifacts.delete")]
+    ArtifactsDelete(IdempotentIdParams),
+    #[serde(rename = "workspace.git_info")]
+    WorkspaceGitInfo(WorkspacePathParams),
+    #[serde(rename = "workspace.directories")]
+    WorkspaceDirectories(WorkspaceOptionalPathParams),
+    #[serde(rename = "workspace.recent")]
+    WorkspaceRecent(EmptyParams),
+    #[serde(rename = "workspace.git_status")]
+    WorkspaceGitStatus(WorkspacePathParams),
+    #[serde(rename = "workspace.git_log")]
+    WorkspaceGitLog(WorkspaceGitLogParams),
+    #[serde(rename = "workspace.git_branches")]
+    WorkspaceGitBranches(WorkspacePathParams),
+    #[serde(rename = "workspace.git_checkout")]
+    WorkspaceGitCheckout(WorkspaceGitCheckoutParams),
+    #[serde(rename = "profiles.list")]
+    ProfilesList(ProfileListParams),
+    #[serde(rename = "profiles.get")]
+    ProfilesGet(LegacyIdParams),
+    #[serde(rename = "profiles.create")]
+    ProfilesCreate(ProfileCreateParams),
+    #[serde(rename = "profiles.update")]
+    ProfilesUpdate(ProfileUpdateParams),
+    #[serde(rename = "profiles.delete")]
+    ProfilesDelete(IdempotentIdParams),
+    #[serde(rename = "profiles.seed")]
+    ProfilesSeed(IdempotentParams),
+    #[serde(rename = "profiles.clone")]
+    ProfilesClone(IdempotentIdParams),
+    #[serde(rename = "profiles.playground")]
+    ProfilesPlayground(ProfilePlaygroundParams),
+    #[serde(rename = "analytics.summary")]
+    AnalyticsSummary(AnalyticsDaysParams),
+    #[serde(rename = "analytics.spend_over_time")]
+    AnalyticsSpendOverTime(AnalyticsBucketParams),
+    #[serde(rename = "analytics.spend_by_model")]
+    AnalyticsSpendByModel(AnalyticsDaysParams),
+    #[serde(rename = "analytics.top_tools")]
+    AnalyticsTopTools(AnalyticsTopToolsParams),
+    #[serde(rename = "analytics.latency")]
+    AnalyticsLatency(AnalyticsBucketParams),
+    #[serde(rename = "analytics.call_history")]
+    AnalyticsCallHistory(AnalyticsCallHistoryParams),
+    #[serde(rename = "analytics.memory_activity")]
+    AnalyticsMemoryActivity(AnalyticsBucketParams),
+    #[serde(rename = "tasks.list")]
+    TasksList(TaskListParams),
+    #[serde(rename = "tasks.get")]
+    TasksGet(LegacyIdParams),
+    #[serde(rename = "tasks.create")]
+    TasksCreate(TaskCreateParams),
+    #[serde(rename = "tasks.update")]
+    TasksUpdate(TaskUpdateParams),
+    #[serde(rename = "tasks.delete")]
+    TasksDelete(IdempotentIdParams),
+    #[serde(rename = "tasks.run")]
+    TasksRun(IdempotentIdParams),
+    #[serde(rename = "tasks.runs_list")]
+    TasksRunsList(TaskRunsParams),
+    #[serde(rename = "tasks.runs_get")]
+    TasksRunsGet(LegacyIdParams),
+    #[serde(rename = "tasks.runs_cancel")]
+    TasksRunsCancel(IdempotentIdParams),
+    #[serde(rename = "tasks.runs_read")]
+    TasksRunsRead(TaskRunReadParams),
+    #[serde(rename = "tasks.inbox")]
+    TasksInbox(TaskInboxParams),
+    #[serde(rename = "tasks.scheduler")]
+    TasksScheduler(EmptyParams),
+    #[serde(rename = "tasks.parse_cron")]
+    TasksParseCron(ParseCronParams),
+    #[serde(rename = "rss.subscriptions_list")]
+    RssSubscriptionsList(RssSubscriptionListParams),
+    #[serde(rename = "rss.subscribe")]
+    RssSubscribe(RssSubscribeParams),
+    #[serde(rename = "rss.unsubscribe")]
+    RssUnsubscribe(IdempotentIdParams),
+    #[serde(rename = "rss.entries_list")]
+    RssEntriesList(RssEntriesParams),
+    #[serde(rename = "rss.entries_all")]
+    RssEntriesAll(RssAllEntriesParams),
+    #[serde(rename = "rss.entry_read")]
+    RssEntryRead(RssEntryReadParams),
+    #[serde(rename = "webhooks.list")]
+    WebhooksList(EmptyParams),
+    #[serde(rename = "webhooks.get")]
+    WebhooksGet(LegacyIdParams),
+    #[serde(rename = "webhooks.create")]
+    WebhooksCreate(WebhookCreateParams),
+    #[serde(rename = "webhooks.update")]
+    WebhooksUpdate(WebhookUpdateParams),
+    #[serde(rename = "webhooks.delete")]
+    WebhooksDelete(IdempotentIdParams),
+    #[serde(rename = "webhooks.events")]
+    WebhooksEvents(WebhookEventsParams),
+    #[serde(rename = "webhooks.replay")]
+    WebhooksReplay(WebhookReplayParams),
+    #[serde(rename = "wiki.list")]
+    WikiList(WikiListParams),
+    #[serde(rename = "wiki.search")]
+    WikiSearch(WikiSearchParams),
+    #[serde(rename = "wiki.get")]
+    WikiGet(LegacyIdParams),
+    #[serde(rename = "wiki.create")]
+    WikiCreate(WikiCreateParams),
+    #[serde(rename = "wiki.update")]
+    WikiUpdate(WikiUpdateParams),
+    #[serde(rename = "wiki.delete")]
+    WikiDelete(IdempotentIdParams),
+    #[serde(rename = "wiki.categories")]
+    WikiCategories(EmptyParams),
+    #[serde(rename = "wiki.stats")]
+    WikiStats(EmptyParams),
+    #[serde(rename = "wiki.promote")]
+    WikiPromote(WikiPromoteParams),
+    #[serde(rename = "research.list")]
+    ResearchList(ResearchListParams),
+    #[serde(rename = "research.get")]
+    ResearchGet(LegacyIdParams),
+    #[serde(rename = "research.create")]
+    ResearchCreate(ResearchCreateParams),
+    #[serde(rename = "research.cancel")]
+    ResearchCancel(IdempotentIdParams),
+    #[serde(rename = "research.rerun")]
+    ResearchRerun(ResearchRerunParams),
+    #[serde(rename = "constructor.macros")]
+    ConstructorMacros(ConstructorMacroListParams),
+    #[serde(rename = "constructor.macros_create")]
+    ConstructorMacrosCreate(MacroCreateParams),
+    #[serde(rename = "constructor.macros_update")]
+    ConstructorMacrosUpdate(MacroUpdateParams),
+    #[serde(rename = "constructor.macros_delete")]
+    ConstructorMacrosDelete(IdempotentIdParams),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1180,6 +1456,7 @@ pub struct StatusGetResult {
     pub mcp_servers: Vec<String>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(
     tag = "kind",
@@ -1201,6 +1478,138 @@ pub enum ResponsePayload {
     ApprovalResolved(ApprovalResolvedResult),
     EventPage(EventPage),
     Status(StatusGetResult),
+    ConversationsList(Vec<ConversationRecord>),
+    ConversationsCreated(ConversationRecord),
+    ConversationsGot(ConversationRecord),
+    ConversationsUpdated(ConversationRecord),
+    ConversationsDeleted(DeletedResult),
+    ConversationsCompacted(CompactResult),
+    ConversationsApprovals(Vec<ApprovalAuditRecord>),
+    ConversationsSearched(Vec<ConversationRecord>),
+    ConversationsBulk(AffectedResult),
+    RunsListed(Vec<AgentRunRecord>),
+    RunsGot(AgentRunRecord),
+    RunsEvents(Vec<RunEventRecord>),
+    RunsCancelled(AgentRunRecord),
+    ProvidersListed(Vec<ProviderRecord>),
+    ProvidersCreated(ProviderRecord),
+    ProvidersGot(ProviderRecord),
+    ProvidersUpdated(ProviderRecord),
+    ProvidersDeleted(DeletedResult),
+    ProvidersModels(Vec<ModelInfoRecord>),
+    MemoryListed(Vec<MemoryRecord>),
+    MemoryGot(MemoryRecord),
+    MemoryCreated(MemoryRecord),
+    MemoryUpdated(MemoryRecord),
+    MemoryDeleted(LegacyOkResult),
+    MemoryPending(Vec<MemoryRecord>),
+    MemoryConfirmed(MemoryRecord),
+    MemoryRejected(LegacyOkResult),
+    MemoryPinned(MemoryRecord),
+    MemoryExplained(MemoryExplainRecord),
+    MemoryEpisodes(Vec<EpisodeRecord>),
+    MemoryStats(MemoryStatsRecord),
+    EntitiesListed(Vec<EntityRecord>),
+    EntitiesGot(EntityRecord),
+    EntitiesCreated(EntityRecord),
+    EntitiesUpdated(EntityRecord),
+    EntitiesDeleted(LegacyOkResult),
+    PlansListed(Vec<PlanRecord>),
+    PlansGot(PlanRecord),
+    PlansUpdated(PlanRecord),
+    PlansApproved(PlanRecord),
+    PlansCancelled(PlanRecord),
+    PlansTemplatesListed(Vec<PlanTemplateRecord>),
+    PlansTemplatesCreated(PlanTemplateRecord),
+    PlansTemplatesDeleted(DeletedResult),
+    SubagentsRolesListed(Vec<SubagentRoleRecord>),
+    SubagentsRolesGot(SubagentRoleRecord),
+    SubagentsRolesCreated(SubagentRoleRecord),
+    SubagentsRolesUpdated(SubagentRoleRecord),
+    SubagentsRolesDeleted(DeletedResult),
+    SubagentsLaunched(SubagentRunRecord),
+    SubagentsLaunchedBatch(Vec<SubagentRunRecord>),
+    SubagentsRunsListed(Vec<SubagentRunRecord>),
+    SubagentsRunsGot(SubagentRunDetailRecord),
+    SubagentsRunsCancelled(SubagentRunCancelResult),
+    SubagentsRunsDeleted(LegacyOkResult),
+    InspectorTimeline(TimelineRecord),
+    InspectorCompared(RunComparisonRecord),
+    InspectorReplayed(ReplayResult),
+    BudgetsGot(BudgetStatusRecord),
+    BudgetsUpdated(BudgetStatusRecord),
+    BudgetsOverrideSet(BudgetStatusRecord),
+    BudgetsOverrideCleared(BudgetStatusRecord),
+    BudgetsSpend(Vec<SpendEntryRecord>),
+    ArtifactsListed(Vec<ArtifactRecord>),
+    ArtifactsGot(ArtifactDetailRecord),
+    ArtifactsDeleted(DeletedResult),
+    WorkspaceGitInfo(GitInfoRecord),
+    WorkspaceDirectories(DirectoryListingRecord),
+    WorkspaceRecent(RecentDirectoriesRecord),
+    WorkspaceGitStatus(GitStatusRecord),
+    WorkspaceGitLog(GitLogRecord),
+    WorkspaceGitBranches(GitBranchesRecord),
+    WorkspaceGitCheckout(GitCheckoutResult),
+    ProfilesListed(Vec<ProfileRecord>),
+    ProfilesGot(ProfileRecord),
+    ProfilesCreated(ProfileRecord),
+    ProfilesUpdated(ProfileRecord),
+    ProfilesDeleted(DeletedResult),
+    ProfilesSeeded(SeedResult),
+    ProfilesCloned(ProfileRecord),
+    ProfilesPlayground(PlaygroundResult),
+    AnalyticsSummary(AnalyticsSummaryRecord),
+    AnalyticsSpendOverTime(Vec<SpendBucketRecord>),
+    AnalyticsSpendByModel(Vec<ModelSpendRecord>),
+    AnalyticsTopTools(Vec<ToolUsageRecord>),
+    AnalyticsLatency(Vec<LatencyBucketRecord>),
+    AnalyticsCallHistory(CallHistoryResult),
+    AnalyticsMemoryActivity(Vec<MemoryActivityBucketRecord>),
+    TasksListed(Vec<TaskRecord>),
+    TasksGot(TaskRecord),
+    TasksCreated(TaskRecord),
+    TasksUpdated(TaskRecord),
+    TasksDeleted(DeletedResult),
+    TasksRan(TaskRunRecord),
+    TasksRunsListed(Vec<TaskRunRecord>),
+    TasksRunsGot(TaskRunDetailRecord),
+    TasksRunsCancelled(TaskRunCancelResult),
+    TasksRunsRead(TaskRunRecord),
+    TasksInbox(TaskInboxResult),
+    TasksScheduler(SchedulerStatusRecord),
+    TasksParsedCron(ParseCronResult),
+    RssSubscriptionsListed(Vec<RssSubscriptionRecord>),
+    RssSubscribed(RssSubscriptionRecord),
+    RssUnsubscribed(DeletedResult),
+    RssEntriesListed(Vec<RssEntryRecord>),
+    RssEntriesAll(Vec<RssEntryRecord>),
+    RssEntryRead(RssEntryRecord),
+    WebhooksListed(Vec<WebhookEndpointRecord>),
+    WebhooksGot(WebhookEndpointRecord),
+    WebhooksCreated(WebhookEndpointRecord),
+    WebhooksUpdated(WebhookEndpointRecord),
+    WebhooksDeleted(DeletedResult),
+    WebhooksEvents(Vec<WebhookEventRecord>),
+    WebhooksReplayed(WebhookEventRecord),
+    WikiListed(Vec<WikiArticleRecord>),
+    WikiSearched(Vec<WikiArticleRecord>),
+    WikiGot(WikiArticleRecord),
+    WikiCreated(WikiArticleRecord),
+    WikiUpdated(WikiArticleRecord),
+    WikiDeleted(DeletedResult),
+    WikiCategories(Vec<String>),
+    WikiStats(WikiStatsRecord),
+    WikiPromoted(WikiArticleRecord),
+    ResearchListed(Vec<ResearchRunRecord>),
+    ResearchGot(ResearchRunDetailRecord),
+    ResearchCreated(ResearchRunRecord),
+    ResearchCancelled(ResearchCancelResult),
+    ResearchReran(ResearchRunRecord),
+    ConstructorMacros(Vec<MacroToolRecord>),
+    ConstructorMacrosCreated(MacroToolRecord),
+    ConstructorMacrosUpdated(MacroToolRecord),
+    ConstructorMacrosDeleted(DeletedResult),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1230,6 +1639,7 @@ pub struct RpcNotification {
     pub params: StreamFrame,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(untagged)]
 #[ts(export)]

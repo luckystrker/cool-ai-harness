@@ -1,0 +1,1146 @@
+{
+  "version": 1,
+  "description": "Committed M10 inventory of every frontend API operation in src/api/*.ts with its protocol status. The coverage test (runner.ts) discovers operations from the TypeScript sources, requires an entry for each, and for every \"sdk\" entry requires a generated App Protocol command plus a typed SDK method.",
+  "statuses": {
+    "sdk": "typed App Protocol command backed by cool-store (or the workspace git capability) and a typed SDK client method",
+    "static/blob": "documented transport exception: raw blob/file transport (download, upload) is not an App Protocol command",
+    "sse/stream": "documented transport exception: canonical SSE/WS streaming stays on the event transport",
+    "deferred": "explicitly deferred to M11 wiring (runtime/provider/network/filesystem surface) with a recorded rationale"
+  },
+  "operations": [
+    {
+      "file": "conversations.ts",
+      "member": "list",
+      "http": "GET /api/conversations",
+      "status": "sdk",
+      "command": "conversations.list"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "create",
+      "http": "POST /api/conversations",
+      "status": "sdk",
+      "command": "conversations.create"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "get",
+      "http": "GET /api/conversations/{id}",
+      "status": "sdk",
+      "command": "conversations.get"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "update",
+      "http": "PATCH /api/conversations/{id}",
+      "status": "sdk",
+      "command": "conversations.update"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "delete",
+      "http": "DELETE /api/conversations/{id}",
+      "status": "sdk",
+      "command": "conversations.delete"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "compact",
+      "http": "POST /api/conversations/{id}/compact",
+      "status": "sdk",
+      "command": "conversations.compact"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "approveToolCall",
+      "http": "POST /api/conversations/{id}/tool_calls/{approval}/approval",
+      "status": "deferred",
+      "rationale": "resolves a live in-process approval future in the Python agent runtime; the durable Rust approval path is approval.resolve (M9) and the audited persistence path is conversations.approvals, so M11 wires the runtime approval registry"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "listApprovals",
+      "http": "GET /api/conversations/{id}/approvals",
+      "status": "sdk",
+      "command": "conversations.approvals"
+    },
+    {
+      "file": "providers.ts",
+      "member": "list",
+      "http": "GET /api/providers",
+      "status": "sdk",
+      "command": "providers.list"
+    },
+    {
+      "file": "providers.ts",
+      "member": "create",
+      "http": "POST /api/providers",
+      "status": "sdk",
+      "command": "providers.create"
+    },
+    {
+      "file": "providers.ts",
+      "member": "get",
+      "http": "GET /api/providers/{id}",
+      "status": "sdk",
+      "command": "providers.get"
+    },
+    {
+      "file": "providers.ts",
+      "member": "update",
+      "http": "PATCH /api/providers/{id}",
+      "status": "sdk",
+      "command": "providers.update"
+    },
+    {
+      "file": "providers.ts",
+      "member": "delete",
+      "http": "DELETE /api/providers/{id}",
+      "status": "sdk",
+      "command": "providers.delete"
+    },
+    {
+      "file": "providers.ts",
+      "member": "listModels",
+      "http": "GET /api/providers/{id}/models",
+      "status": "deferred",
+      "rationale": "Python lists models with a live provider call; Rust has no provider runtime yet (M11), and the store only holds the cached chat_models catalog, so the live list stays deferred"
+    },
+    {
+      "file": "providers.ts",
+      "member": "previewModels",
+      "http": "POST /api/providers/models/preview",
+      "status": "deferred",
+      "rationale": "live model-list probe against an unsaved provider needs the M11 provider runtime and network allowlist; cool-store only holds cached chat_models"
+    },
+    {
+      "file": "settings.ts",
+      "member": "getSystemPrompt",
+      "http": "GET /api/settings/system-prompt",
+      "status": "deferred",
+      "rationale": "process-local settings object, not persisted in the legacy store; M11 settings runtime moves it to the Rust config surface"
+    },
+    {
+      "file": "settings.ts",
+      "member": "updateSystemPrompt",
+      "http": "PUT /api/settings/system-prompt",
+      "status": "deferred",
+      "rationale": "process-local settings object, not persisted in the legacy store; M11 settings runtime moves it to the Rust config surface"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "listServers",
+      "http": "GET /api/mcp/servers",
+      "status": "deferred",
+      "rationale": "MCP servers are owned by the M8 Rust extension runtime (PluginStore/mcp.json), not by the legacy SQLite schema; M11 wires the SDK admin facade"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "addServer",
+      "http": "POST /api/mcp/servers",
+      "status": "deferred",
+      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "updateServer",
+      "http": "PATCH /api/mcp/servers/{name}",
+      "status": "deferred",
+      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "removeServer",
+      "http": "DELETE /api/mcp/servers/{name}",
+      "status": "deferred",
+      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "connect",
+      "http": "POST /api/mcp/servers/{name}/connect",
+      "status": "deferred",
+      "rationale": "M8 runtime transport action (stdio/HTTP session), not a store operation"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "disconnect",
+      "http": "POST /api/mcp/servers/{name}/disconnect",
+      "status": "deferred",
+      "rationale": "M8 runtime transport action, not a store operation"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "health",
+      "http": "GET /api/mcp/servers/{name}/health",
+      "status": "deferred",
+      "rationale": "M8 runtime transport action, not a store operation"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "listTools",
+      "http": "GET /api/mcp/tools",
+      "status": "deferred",
+      "rationale": "M8 runtime tool discovery, not a store operation"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "reconnectAll",
+      "http": "POST /api/mcp/reconnect-all",
+      "status": "deferred",
+      "rationale": "M8 runtime transport action, not a store operation"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "storeSearch",
+      "http": "GET /api/mcp/store/search",
+      "status": "deferred",
+      "rationale": "network access to the MCP Registry; M11 network facade"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "storePopular",
+      "http": "GET /api/mcp/store/popular",
+      "status": "deferred",
+      "rationale": "network access to the MCP Registry; M11 network facade"
+    },
+    {
+      "file": "mcp.ts",
+      "member": "storeInstall",
+      "http": "POST /api/mcp/store/install",
+      "status": "deferred",
+      "rationale": "network install pipeline owned by the M8 extension runtime; M11 facade"
+    },
+    {
+      "file": "memory.ts",
+      "member": "list",
+      "http": "GET /api/memory",
+      "status": "sdk",
+      "command": "memory.list",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "get",
+      "http": "GET /api/memory/{id}",
+      "status": "sdk",
+      "command": "memory.get",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "create",
+      "http": "POST /api/memory",
+      "status": "sdk",
+      "command": "memory.create",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "update",
+      "http": "PATCH /api/memory/{id}",
+      "status": "sdk",
+      "command": "memory.update",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "delete",
+      "http": "DELETE /api/memory/{id}",
+      "status": "sdk",
+      "command": "memory.delete",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "listPending",
+      "http": "GET /api/memory/pending",
+      "status": "sdk",
+      "command": "memory.pending",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "confirm",
+      "http": "POST /api/memory/{id}/confirm",
+      "status": "sdk",
+      "command": "memory.confirm",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "reject",
+      "http": "POST /api/memory/{id}/reject",
+      "status": "sdk",
+      "command": "memory.reject",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "pin",
+      "http": "POST /api/memory/{id}/pin",
+      "status": "sdk",
+      "command": "memory.pin",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "explain",
+      "http": "GET /api/memory/{id}/explain",
+      "status": "sdk",
+      "command": "memory.explain",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "exportMemories",
+      "http": "GET /api/memory/export",
+      "status": "static/blob",
+      "rationale": "browser download (Content-Disposition JSON/Markdown) stays a static blob transport",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "listEpisodes",
+      "http": "GET /api/memory/episodes",
+      "status": "sdk",
+      "command": "memory.episodes",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "stats",
+      "http": "GET /api/memory/stats",
+      "status": "sdk",
+      "command": "memory.stats",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "extract",
+      "http": "POST /api/memory/extract",
+      "status": "deferred",
+      "rationale": "runs LLM extraction over a conversation; the store-side persistence lives in memory.create, so M11 wires the extraction worker",
+      "source": "memoryApi"
+    },
+    {
+      "file": "memory.ts",
+      "member": "list",
+      "source": "entitiesApi",
+      "http": "GET /api/entities",
+      "status": "sdk",
+      "command": "entities.list"
+    },
+    {
+      "file": "memory.ts",
+      "member": "get",
+      "source": "entitiesApi",
+      "http": "GET /api/entities/{id}",
+      "status": "sdk",
+      "command": "entities.get"
+    },
+    {
+      "file": "memory.ts",
+      "member": "create",
+      "source": "entitiesApi",
+      "http": "POST /api/entities",
+      "status": "sdk",
+      "command": "entities.create"
+    },
+    {
+      "file": "memory.ts",
+      "member": "update",
+      "source": "entitiesApi",
+      "http": "PATCH /api/entities/{id}",
+      "status": "sdk",
+      "command": "entities.update"
+    },
+    {
+      "file": "memory.ts",
+      "member": "delete",
+      "source": "entitiesApi",
+      "http": "DELETE /api/entities/{id}",
+      "status": "sdk",
+      "command": "entities.delete"
+    },
+    {
+      "file": "plans.ts",
+      "member": "list",
+      "http": "GET /api/conversations/{id}/plans",
+      "status": "sdk",
+      "command": "plans.list"
+    },
+    {
+      "file": "plans.ts",
+      "member": "get",
+      "http": "GET /api/conversations/{id}/plans/{plan}",
+      "status": "sdk",
+      "command": "plans.get"
+    },
+    {
+      "file": "plans.ts",
+      "member": "update",
+      "http": "PATCH /api/conversations/{id}/plans/{plan}",
+      "status": "sdk",
+      "command": "plans.update"
+    },
+    {
+      "file": "plans.ts",
+      "member": "approve",
+      "http": "POST /api/conversations/{id}/plans/{plan}/approve",
+      "status": "sdk",
+      "command": "plans.approve"
+    },
+    {
+      "file": "plans.ts",
+      "member": "cancel",
+      "http": "POST /api/conversations/{id}/plans/{plan}/cancel",
+      "status": "sdk",
+      "command": "plans.cancel"
+    },
+    {
+      "file": "plans.ts",
+      "member": "executeUrl",
+      "http": "POST /api/conversations/{id}/plans/{plan}/execute",
+      "status": "sse/stream",
+      "rationale": "step execution streams canonical plan events; M11 moves it to the canonical stream"
+    },
+    {
+      "file": "plans.ts",
+      "member": "listTemplates",
+      "http": "GET /api/plan-templates",
+      "status": "sdk",
+      "command": "plans.templates_list"
+    },
+    {
+      "file": "plans.ts",
+      "member": "createTemplate",
+      "http": "POST /api/plan-templates",
+      "status": "sdk",
+      "command": "plans.templates_create"
+    },
+    {
+      "file": "plans.ts",
+      "member": "deleteTemplate",
+      "http": "DELETE /api/plan-templates/{id}",
+      "status": "sdk",
+      "command": "plans.templates_delete"
+    },
+    {
+      "file": "skills.ts",
+      "member": "list",
+      "http": "GET /api/skills",
+      "status": "deferred",
+      "rationale": "skills are discovered from the filesystem by the M8 Rust skills runtime; there is no legacy SQL table, so M11 wires the SDK facade"
+    },
+    {
+      "file": "skills.ts",
+      "member": "create",
+      "http": "POST /api/skills",
+      "status": "deferred",
+      "rationale": "writes a SKILL.md directory via the M8 skills runtime; not a store operation"
+    },
+    {
+      "file": "skills.ts",
+      "member": "delete",
+      "http": "DELETE /api/skills/{name}",
+      "status": "deferred",
+      "rationale": "filesystem skill removal via the M8 skills runtime; not a store operation"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "listTools",
+      "http": "GET /api/subagents/tools",
+      "status": "deferred",
+      "rationale": "tool catalog comes from the agent runtime registry (M7/M8), not from cool-store; M11 wires the runtime extension status"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "listRoles",
+      "http": "GET /api/subagents/roles",
+      "status": "sdk",
+      "command": "subagents.roles_list"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "getRole",
+      "http": "GET /api/subagents/roles/{id}",
+      "status": "sdk",
+      "command": "subagents.roles_get"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "createRole",
+      "http": "POST /api/subagents/roles",
+      "status": "sdk",
+      "command": "subagents.roles_create"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "updateRole",
+      "http": "PUT /api/subagents/roles/{id}",
+      "status": "sdk",
+      "command": "subagents.roles_update"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "deleteRole",
+      "http": "DELETE /api/subagents/roles/{id}",
+      "status": "sdk",
+      "command": "subagents.roles_delete"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "launch",
+      "http": "POST /api/subagents/launch",
+      "status": "deferred",
+      "rationale": "durable subagent-run row and child conversation are created via cool-store; the executor that drives the run lands with the M11 runtime"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "launchBatch",
+      "http": "POST /api/subagents/launch-batch",
+      "status": "deferred",
+      "rationale": "durable subagent-run rows are created via cool-store; batch execution belongs to the M11 runtime"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "listRuns",
+      "http": "GET /api/subagents/runs",
+      "status": "sdk",
+      "command": "subagents.runs_list"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "getRun",
+      "http": "GET /api/subagents/runs/{id}",
+      "status": "sdk",
+      "command": "subagents.runs_get"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "cancelRun",
+      "http": "POST /api/subagents/runs/{id}/cancel",
+      "status": "sdk",
+      "command": "subagents.runs_cancel"
+    },
+    {
+      "file": "subagents.ts",
+      "member": "deleteRun",
+      "http": "DELETE /api/subagents/runs/{id}",
+      "status": "sdk",
+      "command": "subagents.runs_delete"
+    },
+    {
+      "file": "inspector.ts",
+      "member": "getRunTimeline",
+      "http": "GET /api/conversations/{id}/runs/{run}/timeline",
+      "status": "sdk",
+      "command": "inspector.timeline"
+    },
+    {
+      "file": "inspector.ts",
+      "member": "compareRuns",
+      "http": "GET /api/runs/compare",
+      "status": "sdk",
+      "command": "inspector.compare"
+    },
+    {
+      "file": "inspector.ts",
+      "member": "replayRun",
+      "http": "POST /api/conversations/{id}/runs/{run}/replay",
+      "status": "sdk",
+      "command": "inspector.replay"
+    },
+    {
+      "file": "budgets.ts",
+      "member": "getStatus",
+      "http": "GET /api/budgets",
+      "status": "sdk",
+      "command": "budgets.get"
+    },
+    {
+      "file": "budgets.ts",
+      "member": "update",
+      "http": "PUT /api/budgets",
+      "status": "sdk",
+      "command": "budgets.update"
+    },
+    {
+      "file": "budgets.ts",
+      "member": "setOverride",
+      "http": "POST /api/budgets/override",
+      "status": "sdk",
+      "command": "budgets.override_set"
+    },
+    {
+      "file": "budgets.ts",
+      "member": "clearOverride",
+      "http": "DELETE /api/budgets/override",
+      "status": "sdk",
+      "command": "budgets.override_clear"
+    },
+    {
+      "file": "budgets.ts",
+      "member": "spend",
+      "http": "GET /api/budgets/spend",
+      "status": "sdk",
+      "command": "budgets.spend"
+    },
+    {
+      "file": "artifacts.ts",
+      "member": "upload",
+      "http": "POST /api/conversations/{id}/artifacts",
+      "status": "static/blob",
+      "rationale": "multipart file upload is raw blob transport; artifact metadata lands through the store register path"
+    },
+    {
+      "file": "artifacts.ts",
+      "member": "list",
+      "http": "GET /api/conversations/{id}/artifacts",
+      "status": "sdk",
+      "command": "artifacts.list"
+    },
+    {
+      "file": "artifacts.ts",
+      "member": "get",
+      "http": "GET /api/conversations/{id}/artifacts/{artifact}",
+      "status": "sdk",
+      "command": "artifacts.get"
+    },
+    {
+      "file": "artifacts.ts",
+      "member": "downloadUrl",
+      "http": "GET /api/conversations/{id}/artifacts/{artifact}/download",
+      "status": "static/blob",
+      "rationale": "raw artifact content download; stays a static blob transport"
+    },
+    {
+      "file": "artifacts.ts",
+      "member": "delete",
+      "http": "DELETE /api/conversations/{id}/artifacts/{artifact}",
+      "status": "sdk",
+      "command": "artifacts.delete"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "gitInfo",
+      "http": "GET /api/workspace/git-info",
+      "status": "sdk",
+      "command": "workspace.git_info"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "directories",
+      "http": "GET /api/workspace/directories",
+      "status": "sdk",
+      "command": "workspace.directories"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "recent",
+      "http": "GET /api/workspace/recent",
+      "status": "sdk",
+      "command": "workspace.recent"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "gitStatus",
+      "http": "GET /api/workspace/git-status",
+      "status": "sdk",
+      "command": "workspace.git_status"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "gitLog",
+      "http": "GET /api/workspace/git-log",
+      "status": "sdk",
+      "command": "workspace.git_log"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "gitBranches",
+      "http": "GET /api/workspace/git-branches",
+      "status": "sdk",
+      "command": "workspace.git_branches"
+    },
+    {
+      "file": "workspace.ts",
+      "member": "gitCheckout",
+      "http": "POST /api/workspace/git-checkout",
+      "status": "sdk",
+      "command": "workspace.git_checkout"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "list",
+      "http": "GET /api/profiles",
+      "status": "sdk",
+      "command": "profiles.list"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "get",
+      "http": "GET /api/profiles/{id}",
+      "status": "sdk",
+      "command": "profiles.get"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "create",
+      "http": "POST /api/profiles",
+      "status": "sdk",
+      "command": "profiles.create"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "update",
+      "http": "PATCH /api/profiles/{id}",
+      "status": "sdk",
+      "command": "profiles.update"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "delete",
+      "http": "DELETE /api/profiles/{id}",
+      "status": "sdk",
+      "command": "profiles.delete"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "seed",
+      "http": "POST /api/profiles/seed",
+      "status": "sdk",
+      "command": "profiles.seed"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "clone",
+      "http": "POST /api/profiles/{id}/clone",
+      "status": "sdk",
+      "command": "profiles.clone"
+    },
+    {
+      "file": "profiles.ts",
+      "member": "playground",
+      "http": "POST /api/profiles/{id}/playground",
+      "status": "sdk",
+      "command": "profiles.playground"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "summary",
+      "http": "GET /api/analytics/summary",
+      "status": "sdk",
+      "command": "analytics.summary"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "spendOverTime",
+      "http": "GET /api/analytics/spend-over-time",
+      "status": "sdk",
+      "command": "analytics.spend_over_time"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "spendByModel",
+      "http": "GET /api/analytics/spend-by-model",
+      "status": "sdk",
+      "command": "analytics.spend_by_model"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "topTools",
+      "http": "GET /api/analytics/top-tools",
+      "status": "sdk",
+      "command": "analytics.top_tools"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "latency",
+      "http": "GET /api/analytics/latency",
+      "status": "sdk",
+      "command": "analytics.latency"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "callHistory",
+      "http": "GET /api/analytics/call-history",
+      "status": "sdk",
+      "command": "analytics.call_history"
+    },
+    {
+      "file": "analytics.ts",
+      "member": "memoryActivity",
+      "http": "GET /api/analytics/memory-activity",
+      "status": "sdk",
+      "command": "analytics.memory_activity"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "list",
+      "http": "GET /api/tasks",
+      "status": "sdk",
+      "command": "tasks.list"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "get",
+      "http": "GET /api/tasks/{id}",
+      "status": "sdk",
+      "command": "tasks.get"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "create",
+      "http": "POST /api/tasks",
+      "status": "sdk",
+      "command": "tasks.create"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "update",
+      "http": "PUT /api/tasks/{id}",
+      "status": "sdk",
+      "command": "tasks.update"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "delete",
+      "http": "DELETE /api/tasks/{id}",
+      "status": "sdk",
+      "command": "tasks.delete"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "runNow",
+      "http": "POST /api/tasks/{id}/run",
+      "status": "deferred",
+      "rationale": "a durable queued task-run row is created via cool-store; execution belongs to the M11 scheduler/executor"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "listRuns",
+      "http": "GET /api/tasks/{id}/runs",
+      "status": "sdk",
+      "command": "tasks.runs_list"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "getRun",
+      "http": "GET /api/tasks/runs/{run}",
+      "status": "sdk",
+      "command": "tasks.runs_get"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "cancelRun",
+      "http": "POST /api/tasks/runs/{run}/cancel",
+      "status": "sdk",
+      "command": "tasks.runs_cancel"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "markRead",
+      "http": "POST /api/tasks/runs/{run}/read",
+      "status": "sdk",
+      "command": "tasks.runs_read"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "inbox",
+      "http": "GET /api/tasks/inbox",
+      "status": "sdk",
+      "command": "tasks.inbox"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "templates",
+      "http": "GET /api/tasks/templates",
+      "status": "deferred",
+      "rationale": "built-in workflow templates are Python code constants; M11 moves the static catalog into the Rust runtime"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "scheduler",
+      "http": "GET /api/tasks/scheduler",
+      "status": "deferred",
+      "rationale": "live scheduler engine state belongs to the M11 runtime; the store-backed job projection is available through tasks.list"
+    },
+    {
+      "file": "tasks.ts",
+      "member": "parseCron",
+      "http": "POST /api/tasks/parse-cron",
+      "status": "sdk",
+      "command": "tasks.parse_cron"
+    },
+    {
+      "file": "rss.ts",
+      "member": "listSubscriptions",
+      "http": "GET /api/rss/subscriptions",
+      "status": "sdk",
+      "command": "rss.subscriptions_list"
+    },
+    {
+      "file": "rss.ts",
+      "member": "subscribe",
+      "http": "POST /api/rss/subscriptions",
+      "status": "sdk",
+      "command": "rss.subscribe"
+    },
+    {
+      "file": "rss.ts",
+      "member": "unsubscribe",
+      "http": "DELETE /api/rss/subscriptions/{id}",
+      "status": "sdk",
+      "command": "rss.unsubscribe"
+    },
+    {
+      "file": "rss.ts",
+      "member": "fetchNow",
+      "http": "POST /api/rss/subscriptions/{id}/fetch",
+      "status": "deferred",
+      "rationale": "network fetch/parse of the feed is an M11 worker; cool-store owns the entry insert and fetch-result recording paths"
+    },
+    {
+      "file": "rss.ts",
+      "member": "listEntries",
+      "http": "GET /api/rss/subscriptions/{id}/entries",
+      "status": "sdk",
+      "command": "rss.entries_list"
+    },
+    {
+      "file": "rss.ts",
+      "member": "allEntries",
+      "http": "GET /api/rss/entries",
+      "status": "sdk",
+      "command": "rss.entries_all"
+    },
+    {
+      "file": "rss.ts",
+      "member": "markRead",
+      "http": "POST /api/rss/entries/{id}/read",
+      "status": "sdk",
+      "command": "rss.entry_read"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "list",
+      "http": "GET /api/webhooks",
+      "status": "sdk",
+      "command": "webhooks.list"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "get",
+      "http": "GET /api/webhooks/{id}",
+      "status": "sdk",
+      "command": "webhooks.get"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "create",
+      "http": "POST /api/webhooks",
+      "status": "sdk",
+      "command": "webhooks.create"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "update",
+      "http": "PUT /api/webhooks/{id}",
+      "status": "sdk",
+      "command": "webhooks.update"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "delete",
+      "http": "DELETE /api/webhooks/{id}",
+      "status": "sdk",
+      "command": "webhooks.delete"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "listEvents",
+      "http": "GET /api/webhooks/{id}/events",
+      "status": "sdk",
+      "command": "webhooks.events"
+    },
+    {
+      "file": "webhooks.ts",
+      "member": "replay",
+      "http": "POST /api/webhooks/{id}/events/{event}/replay",
+      "status": "deferred",
+      "rationale": "the event row is re-enqueued via cool-store; re-dispatching it to the task executor belongs to the M11 runtime"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "list",
+      "http": "GET /wiki",
+      "status": "sdk",
+      "command": "wiki.list"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "search",
+      "http": "GET /wiki/search",
+      "status": "sdk",
+      "command": "wiki.search"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "get",
+      "http": "GET /wiki/{id}",
+      "status": "sdk",
+      "command": "wiki.get"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "create",
+      "http": "POST /wiki",
+      "status": "sdk",
+      "command": "wiki.create"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "update",
+      "http": "PATCH /wiki/{id}",
+      "status": "sdk",
+      "command": "wiki.update"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "delete",
+      "http": "DELETE /wiki/{id}",
+      "status": "sdk",
+      "command": "wiki.delete"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "categories",
+      "http": "GET /wiki/categories",
+      "status": "sdk",
+      "command": "wiki.categories"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "stats",
+      "http": "GET /wiki/stats",
+      "status": "sdk",
+      "command": "wiki.stats"
+    },
+    {
+      "file": "wiki.ts",
+      "member": "promote",
+      "http": "POST /wiki/promote",
+      "status": "sdk",
+      "command": "wiki.promote"
+    },
+    {
+      "file": "research.ts",
+      "member": "list",
+      "http": "GET /api/research",
+      "status": "sdk",
+      "command": "research.list"
+    },
+    {
+      "file": "research.ts",
+      "member": "get",
+      "http": "GET /api/research/{id}",
+      "status": "sdk",
+      "command": "research.get"
+    },
+    {
+      "file": "research.ts",
+      "member": "start",
+      "http": "POST /api/research",
+      "status": "deferred",
+      "rationale": "durable research-run row is created via cool-store; the research pipeline executes in the M11 runtime"
+    },
+    {
+      "file": "research.ts",
+      "member": "cancel",
+      "http": "POST /api/research/{id}/cancel",
+      "status": "deferred",
+      "rationale": "cancelling an executing pipeline belongs to the M11 runtime; the store records the cancelled terminal state"
+    },
+    {
+      "file": "research.ts",
+      "member": "rerun",
+      "http": "POST /api/research/{id}/rerun",
+      "status": "deferred",
+      "rationale": "a new durable research-run row is created via cool-store; execution belongs to the M11 runtime"
+    },
+    {
+      "file": "research.ts",
+      "member": "exportUrl",
+      "http": "GET /api/research/{id}/export",
+      "status": "static/blob",
+      "rationale": "report export download (md/html/pdf/docx) stays a static blob transport"
+    },
+    {
+      "file": "research.ts",
+      "member": "streamResearch",
+      "http": "POST /api/research/stream",
+      "status": "sse/stream",
+      "rationale": "live research progress streams progress frames; M11 moves it to the canonical event stream"
+    },
+    {
+      "file": "constructor.ts",
+      "member": "tools",
+      "http": "GET /api/agent-constructor/tools",
+      "status": "deferred",
+      "rationale": "tool catalog comes from the agent runtime registry (M7/M8), not from cool-store; M11 wires the runtime catalog"
+    },
+    {
+      "file": "constructor.ts",
+      "member": "macros",
+      "http": "GET /api/agent-constructor/macros",
+      "status": "sdk",
+      "command": "constructor.macros"
+    },
+    {
+      "file": "constructor.ts",
+      "member": "createMacro",
+      "http": "POST /api/agent-constructor/macros",
+      "status": "sdk",
+      "command": "constructor.macros_create"
+    },
+    {
+      "file": "constructor.ts",
+      "member": "updateMacro",
+      "http": "PATCH /api/agent-constructor/macros/{id}",
+      "status": "sdk",
+      "command": "constructor.macros_update"
+    },
+    {
+      "file": "constructor.ts",
+      "member": "deleteMacro",
+      "http": "DELETE /api/agent-constructor/macros/{id}",
+      "status": "sdk",
+      "command": "constructor.macros_delete"
+    },
+    {
+      "file": "streaming.ts",
+      "member": "streamConversationMessage",
+      "http": "POST /api/conversations/{id}/messages",
+      "status": "sse/stream",
+      "rationale": "canonical conversation turn streaming; M11 switches it to session.prompt + run events"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "search",
+      "source": "backend-only",
+      "http": "GET /api/conversations/search/content",
+      "status": "sdk",
+      "command": "conversations.search"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "bulk",
+      "source": "backend-only",
+      "http": "POST /api/conversations/bulk",
+      "status": "sdk",
+      "command": "conversations.bulk"
+    }
+  ]
+}

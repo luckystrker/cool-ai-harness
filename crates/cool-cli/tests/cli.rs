@@ -1,7 +1,7 @@
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn cool() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cool"))
@@ -52,6 +52,112 @@ fn doctor_reports_the_m10_runtime_boundary() {
             .unwrap()
             .iter()
             .any(|capability| capability == "session_fork")
+    );
+}
+
+#[test]
+fn app_server_legacy_store_flag_reads_python_data_without_adopting() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data_dir = temporary.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let database = data_dir.join("harness.db");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(cool_store::BASELINE_SCHEMA_SQL)
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO users(created_at, updated_at, id, external_id, username, display_name, is_active)
+             VALUES ('2026-01-01 00:00:00.000000', '2026-01-01 00:00:00.000000', 1, 'local', 'local', 'Local', 1);
+             INSERT INTO conversations(created_at, updated_at, id, user_id, title, is_pinned, is_archived)
+             VALUES ('2026-01-01 00:00:00.000000', '2026-01-01 00:00:00.000000', 1, 1, 'Legacy chat', 0, 0);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut child = cool()
+        .args(["app-server", "--data-dir"])
+        .arg(&data_dir)
+        .arg("--legacy-store")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "cool.command",
+            "params": {
+                "protocolVersion": 1,
+                "commandId": "cli-init",
+                "command": {
+                    "method": "initialize",
+                    "params": {
+                        "clientName": "cli-test",
+                        "clientVersion": "1",
+                        "supportedProtocolVersions": [1],
+                        "capabilities": []
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "cool.command",
+            "params": {
+                "protocolVersion": 1,
+                "commandId": "cli-list",
+                "command": {
+                    "method": "conversations.list",
+                    "params": {
+                        "includeMachineOwned": false,
+                        "archived": null,
+                        "pinned": null,
+                        "folder": null,
+                        "search": null,
+                        "limit": 10,
+                        "offset": 0
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let mut lines = reader.lines();
+    let initialized: Value =
+        serde_json::from_str(&lines.next().expect("initialize response").unwrap()).unwrap();
+    assert_eq!(initialized["result"]["kind"], "initialized");
+    let listed: Value =
+        serde_json::from_str(&lines.next().expect("list response").unwrap()).unwrap();
+    let conversations = listed["result"]["value"].as_array().unwrap();
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0]["title"], "Legacy chat");
+
+    drop(stdin);
+    let _ = child.wait();
+
+    let reopened = cool_store::LegacyStore::open_read_only(&database).unwrap();
+    assert!(
+        reopened.meta().unwrap().owner.is_none() && !reopened.is_rust_owned().unwrap(),
+        "the explicit flag must not adopt a Python-owned store"
+    );
+    assert_eq!(
+        reopened.alembic_revision().unwrap().as_deref(),
+        Some("0022")
     );
 }
 

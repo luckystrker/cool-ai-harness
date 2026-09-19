@@ -30,17 +30,35 @@ pub(crate) struct Migration {
 }
 
 /// Ordered migrations. Version numbers must be contiguous from 1.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "rust_actors",
-    sql: "CREATE TABLE rust_actors(
-            actor_id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
-            display_name TEXT,
-            created_at TEXT NOT NULL
-          );
-          CREATE INDEX ix_rust_actors_user_id ON rust_actors(user_id);",
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "rust_actors",
+        sql: "CREATE TABLE rust_actors(
+                actor_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+                display_name TEXT,
+                created_at TEXT NOT NULL
+              );
+              CREATE INDEX ix_rust_actors_user_id ON rust_actors(user_id);",
+    },
+    Migration {
+        version: 2,
+        name: "rust_idempotency",
+        sql: "CREATE TABLE rust_idempotency(
+                actor_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(actor_id, method, idempotency_key)
+              );
+              CREATE INDEX ix_rust_idempotency_actor ON rust_idempotency(actor_id);",
+    },
+];
 
 #[cfg(test)]
 pub(crate) fn ensure_meta_table(connection: &Connection) -> Result<(), StoreError> {

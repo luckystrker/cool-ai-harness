@@ -122,6 +122,34 @@ impl crate::LegacyStore {
         collect_rows(rows, Artifact::from_row)
     }
 
+    /// Artifacts for a conversation with optional run/kind filters.
+    pub fn list_artifacts_filtered(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        run_id: Option<i64>,
+        kind: Option<&str>,
+        include_deleted: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<Artifact>, StoreError> {
+        let connection = self.connection()?;
+        require_conversation(&connection, actor_id, conversation_id)?;
+        let mut statement = connection.prepare(
+            "SELECT * FROM artifacts WHERE conversation_id = ?1 \
+             AND (?2 = 1 OR is_deleted = 0) \
+             AND (?3 IS NULL OR run_id = ?3) \
+             AND (?4 IS NULL OR kind = ?4) ORDER BY id DESC LIMIT ?5",
+        )?;
+        let rows = statement.query(params![
+            conversation_id,
+            i64::from(include_deleted),
+            run_id,
+            kind,
+            bounded_limit(limit, 100, 500),
+        ])?;
+        collect_rows(rows, Artifact::from_row)
+    }
+
     /// Artifact metadata; soft-deleted artifacts read as not found (Python).
     pub fn get_artifact(&self, actor_id: &str, artifact_id: i64) -> Result<Artifact, StoreError> {
         let connection = self.connection()?;

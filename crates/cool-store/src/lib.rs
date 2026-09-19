@@ -25,6 +25,7 @@ mod adoption;
 mod backup;
 pub mod domains;
 mod error;
+mod idempotency;
 pub mod memory;
 mod migrations;
 pub mod observability;
@@ -43,7 +44,16 @@ pub use backup::{
     verify_backup,
 };
 pub use error::StoreError;
+pub use idempotency::Idempotent;
 pub use time::{iso_weekday, now_python, parse_python_datetime, python_datetime};
+
+/// The latest Rust-owned schema version.
+pub fn latest_schema_version() -> i64 {
+    migrations::MIGRATIONS
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or(0)
+}
 
 /// Committed baseline schema snapshot (Alembic revision 0022).
 pub const BASELINE_SCHEMA_SQL: &str = include_str!("../tests/fixtures/python_schema_0022.sql");

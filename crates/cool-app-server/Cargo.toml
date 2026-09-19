@@ -12,6 +12,7 @@ cool-agent = { path = "../cool-agent" }
 cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }
+cool-store = { path = "../cool-store" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

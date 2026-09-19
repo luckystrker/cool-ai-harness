@@ -4,6 +4,7 @@
 //! decisions remain delegated to `cool-agent`, `cool-security` and `cool-state`.
 
 pub mod client;
+mod legacy;
 
 pub use client::{AppClient, ClientError};
 
@@ -28,8 +29,9 @@ use cool_protocol::{
     SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
     SessionSummary, StatusGetResult, StreamFrame, TextDelta, TransportLimits, V1Version,
 };
-use cool_security::{CapabilityPolicy, Decision, Workspace, mask_secrets};
+use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{BudgetDelta, CancelAcceptance, DurableStore, EventProvenance, StoreError};
+use cool_store::LegacyStore;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
@@ -41,7 +43,7 @@ pub const MAX_RPC_ID_BYTES: usize = 128;
 pub const RPC_METHOD: &str = "cool.command";
 pub const EVENT_METHOD: &str = "run.event";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub max_frame_bytes: usize,
     pub max_in_flight: usize,
@@ -51,6 +53,16 @@ pub struct ServerConfig {
     pub write_timeout: Duration,
     pub event_delay: Duration,
     pub request_delay: Duration,
+    /// Optional legacy (`harness.db`) store serving the React surface families.
+    ///
+    /// `None` keeps the M9 behavior: those commands fail closed with
+    /// `legacy_store_unavailable`. Opening/adopting the file is an explicit CLI
+    /// decision (`cool app-server --legacy-store`); tests use an in-memory
+    /// store.
+    pub legacy_store: Option<Arc<LegacyStore>>,
+    /// Optional Fernet keyring for provider credentials. Provider writes fail
+    /// closed without it instead of persisting plaintext.
+    pub secrets: Option<Arc<SecretKeyring>>,
 }
 
 impl Default for ServerConfig {
@@ -64,7 +76,30 @@ impl Default for ServerConfig {
             write_timeout: Duration::from_secs(2),
             event_delay: Duration::from_millis(15),
             request_delay: Duration::ZERO,
+            legacy_store: None,
+            secrets: None,
         }
+    }
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("max_frame_bytes", &self.max_frame_bytes)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("outbound_queue", &self.outbound_queue)
+            .field("event_page_limit", &self.event_page_limit)
+            .field("delivery_timeout", &self.delivery_timeout)
+            .field("write_timeout", &self.write_timeout)
+            .field("event_delay", &self.event_delay)
+            .field("request_delay", &self.request_delay)
+            .field(
+                "legacy_store",
+                &self.legacy_store.as_ref().map(|store| store.path()),
+            )
+            .field("secrets", &self.secrets.is_some())
+            .finish()
     }
 }
 
@@ -927,6 +962,27 @@ impl AppServer {
                 let _ = self
                     .send(&outbound, success(id, ResponsePayload::Status(status)))
                     .await;
+            }
+            command => {
+                let frame = match self.inner.config.legacy_store.as_deref() {
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                    Some(store) => {
+                        let actor = local_actor();
+                        match legacy::dispatch(
+                            store,
+                            self.inner.config.secrets.as_deref(),
+                            self.inner.workspace.root(),
+                            &actor,
+                            command,
+                        )
+                        .await
+                        {
+                            Ok(payload) => success(id, payload),
+                            Err(error) => failure(id, error),
+                        }
+                    }
+                };
+                let _ = self.send(&outbound, frame).await;
             }
         }
     }

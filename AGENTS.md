@@ -25,9 +25,15 @@ The Rust trusted core lives in the root Cargo workspace under `crates/`
 `cool-tui`, `cool-acp`, `cool-extensions`, ...). Phase M10 added
 `crates/cool-store`: it adopts the Python SQLite schema at Alembic baseline
 `0022`, takes a verified backup before the first write, owns Rust migrations
-(`rust_store_meta`), and exposes typed subsystem stores. The Python runtimes
-(`backend/app/core/db.py`, `backend/alembic/env.py`) refuse a store owned by
-Rust, so do not bypass those guards.
+(`rust_store_meta`, `rust_idempotency`), and exposes typed subsystem stores. The
+Python runtimes (`backend/app/core/db.py`, `backend/alembic/env.py`) refuse a
+store owned by Rust, so do not bypass those guards. M10 also added the typed
+legacy command families in `crates/cool-protocol/src/families/`, their dispatch
+in `crates/cool-app-server/src/legacy/`, and the frontend contract gate
+`frontend/protocol-tests/{inventory.json,coverage.ts}` with the typed SDK in
+`sdk/typescript/src/client.ts`. The app server serves the legacy families only
+when `ServerConfig::legacy_store` is set (CLI: `cool app-server --legacy-store`,
+read-only unless the file is already Rust-owned).
 
 Supporting roots: `backend/tests` (pytest suite), `backend/evals`
 (scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),
@@ -215,6 +221,23 @@ alembic revision --autogenerate -m "describe change"   # new migration after mod
   backups or datetime/JSON conventions need a cross-language test.
 - `backend/app/core/db.py` or `backend/alembic/env.py` (Rust-ownership guards) →
   update `backend/tests/test_rust_store_contract.py`.
+- `crates/cool-protocol/src/families/*` or `crates/cool-protocol/src/lib.rs` (command
+  schema) → re-run `cargo run -p cool-protocol --bin generate` and commit the schema +
+  both generated TS files; keep the `declarations!` list in
+  `crates/cool-protocol/src/bin/generate.rs` in sync.
+- `crates/cool-app-server/src/legacy/*` (legacy family dispatch) → update
+  `crates/cool-app-server/tests/legacy_surface.rs` and the matching inventory entry in
+  `frontend/protocol-tests/inventory.json`; every mutation must go through
+  `LegacyStore::run_idempotent` (or the async variant) and every command must stay
+  actor-scoped and store-backed.
+- A frontend API operation in `frontend/src/api/*.ts` → add/update its entry in
+  `frontend/protocol-tests/inventory.json` (status `sdk` with a command, or an
+  exception with a rationale). `npm run protocol:check` discovers operations, checks
+  the generated `Command` union, the `CoolSdk` member in
+  `sdk/typescript/src/client.ts`, and the app-server dispatch arm; it fails on
+  undeclared operations, phantom commands and missing handlers.
+- A new protocol command → add the typed SDK method to `sdk/typescript/src/client.ts`
+  (member name = camelCase of `family.operation`; this convention is enforced).
 - `app/api/schemas.py` or `app/api/*_router.py` → update
   `frontend/src/api/types.ts` and the consuming hook/component.
 - `app/agent/events.py` + `app/api/websocket.py` → update
@@ -298,6 +321,9 @@ npm run preview           # preview the production build
   render it in `src/components/chat/*`.
 - A new backend subsystem → add a client in `src/api/`, types in `types.ts`,
   and a page/component to surface it.
+- A change to `src/api/*.ts` operations → keep `protocol-tests/inventory.json`
+  and `sdk/typescript/src/client.ts` in sync; `npm run protocol:check` fails on
+  undeclared operations, phantom commands and missing dispatch arms.
 - Shared UI primitives in `src/components/ui` are consumed across `chat/` —
   don't break existing consumers when editing them.
 
@@ -335,6 +361,8 @@ Required root commands:
   ```bash
   npm run protocol:check && npm run lint && npm run build
   ```
+  `protocol:check` also typechecks the SDK client (`sdk/typescript`) and runs the
+  inventory coverage gate.
 - Touched `spikes/m0-rust-core/`? From that directory:
   ```bash
   cargo fmt --all -- --check
