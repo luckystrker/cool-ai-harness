@@ -97,7 +97,12 @@ export type ToolCompleted = { callId: string, name: string, result: JsonValue, }
 
 export type ToolFailed = { callId: string, name: string, errorCode: string, message: string | null, };
 
-export type PlanCreated = { planId: string, title: string | null, totalSteps: number, };
+export type PlanCreated = { planId: string, title: string | null, totalSteps: number, 
+/**
+ * Full step list with statuses, so a client can render pending steps that
+ * never emit their own `plan.step_*` event.
+ */
+steps: Array<PlanStep>, };
 
 export type PlanStep = { planId: string, position: number, title: string, status: string, resultSummary: string | null, };
 
@@ -168,7 +173,29 @@ export type SessionHistoryResult = { items: Array<HistoryItem>, hasMore: boolean
  */
 nextCursor: number | null, };
 
-export type HistoryItem = { role: string, content: string | null, reasoning: string | null, toolCalls: Array<ToolRequested>, toolCallId: string | null, name: string | null, };
+export type HistoryItem = { 
+/**
+ * Durable cursor of the item's own event (the `rust_events.rowid`), stable
+ * for the lifetime of the store. Clients can use it as a render key.
+ */
+cursor: number, 
+/**
+ * RFC3339 timestamp of the item's event.
+ */
+occurredAt: string, 
+/**
+ * Durable run the item belongs to.
+ */
+runId: string, role: string, content: string | null, reasoning: string | null, toolCalls: Array<ToolRequested>, toolCallId: string | null, name: string | null, 
+/**
+ * Model that produced the assistant item, when the run recorded one.
+ */
+model: string | null, 
+/**
+ * Cumulative usage reported by the model call that produced the assistant
+ * item (absent for user/tool items and imported history).
+ */
+usage: UsageUpdated | null, };
 
 export type SessionForkedResult = { sessionId: string, forkedFrom: string, };
 

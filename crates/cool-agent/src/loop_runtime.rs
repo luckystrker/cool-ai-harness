@@ -737,27 +737,32 @@ async fn emit_plan_events(
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let plan_steps = steps
+        .iter()
+        .enumerate()
+        .map(|(position, step)| PlanStep {
+            plan_id: plan_id.to_owned(),
+            position: position as u32,
+            title: step["title"].as_str().unwrap_or("step").to_owned(),
+            status: step["status"].as_str().unwrap_or("pending").to_owned(),
+            result_summary: None,
+        })
+        .collect::<Vec<_>>();
     sink.emit(CanonicalEvent::PlanCreated(PlanCreated {
         plan_id: plan_id.to_owned(),
         title: result.output["title"].as_str().map(str::to_owned),
         total_steps: steps.len() as u32,
+        steps: plan_steps.clone(),
     }))
     .await?;
     let mut completed = 0_u32;
-    for (position, step) in steps.iter().enumerate() {
-        let status = step["status"].as_str().unwrap_or("pending").to_owned();
+    for step_event in plan_steps {
+        let status = step_event.status.clone();
         if status == "completed" {
             completed += 1;
         }
-        let step_event = PlanStep {
-            plan_id: plan_id.to_owned(),
-            position: position as u32,
-            title: step["title"].as_str().unwrap_or("step").to_owned(),
-            status: status.clone(),
-            result_summary: None,
-        };
         match status.as_str() {
-            "in_progress" => {
+            "in_progress" | "running" => {
                 sink.emit(CanonicalEvent::PlanStepStarted(step_event))
                     .await?;
             }

@@ -921,6 +921,10 @@ pub struct PlanCreated {
     pub plan_id: String,
     pub title: Option<String>,
     pub total_steps: u32,
+    /// Full step list with statuses, so a client can render pending steps that
+    /// never emit their own `plan.step_*` event.
+    #[serde(default)]
+    pub steps: Vec<PlanStep>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1464,6 +1468,13 @@ pub struct SessionListResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
 pub struct HistoryItem {
+    /// Durable cursor of the item's own event (the `rust_events.rowid`), stable
+    /// for the lifetime of the store. Clients can use it as a render key.
+    pub cursor: u64,
+    /// RFC3339 timestamp of the item's event.
+    pub occurred_at: String,
+    /// Durable run the item belongs to.
+    pub run_id: String,
     pub role: String,
     pub content: Option<String>,
     pub reasoning: Option<String>,
@@ -1471,6 +1482,11 @@ pub struct HistoryItem {
     pub tool_calls: Vec<ToolRequested>,
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
+    /// Model that produced the assistant item, when the run recorded one.
+    pub model: Option<String>,
+    /// Cumulative usage reported by the model call that produced the assistant
+    /// item (absent for user/tool items and imported history).
+    pub usage: Option<UsageUpdated>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]

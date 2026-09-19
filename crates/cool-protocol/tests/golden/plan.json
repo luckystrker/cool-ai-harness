@@ -21,7 +21,8 @@
         "payload": {
           "planId": "plan-1",
           "title": "Ship",
-          "totalSteps": 1
+          "totalSteps": 1,
+          "steps": []
         }
       }
     },

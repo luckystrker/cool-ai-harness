@@ -54,8 +54,15 @@
       "file": "conversations.ts",
       "member": "approveToolCall",
       "http": "POST /api/conversations/{id}/tool_calls/{approval}/approval",
-      "status": "deferred",
-      "rationale": "resolves a live in-process approval future in the Python agent runtime; the durable Rust approval path is approval.resolve (M9) and the audited persistence path is conversations.approvals, so M11 wires the runtime approval registry"
+      "status": "sdk",
+      "command": "approval.resolve"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "listRuns",
+      "http": "GET /api/conversations/{id}/runs",
+      "status": "sdk",
+      "command": "session.runs"
     },
     {
       "file": "conversations.ts",
@@ -1124,7 +1131,7 @@
       "member": "streamConversationMessage",
       "http": "POST /api/conversations/{id}/messages",
       "status": "sse/stream",
-      "rationale": "canonical conversation turn streaming; M11 switches it to session.prompt + run events"
+      "rationale": "canonical turn streaming: session.for_conversation + session.prompt + streamRunEvents (run events over GET /api/events); the legacy POST SSE remains only as the artifact-attachment fallback until non-text ContentParts are supported"
     },
     {
       "file": "conversations.ts",

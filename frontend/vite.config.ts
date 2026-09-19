@@ -9,6 +9,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // Generated App Protocol SDK (single typed boundary to the Rust facade).
+      '@cool-sdk': path.resolve(__dirname, '../sdk/typescript/src'),
     },
   },
   server: {

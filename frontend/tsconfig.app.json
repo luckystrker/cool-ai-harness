@@ -24,7 +24,8 @@
 
     /* Path alias — matches Vite resolve.alias */
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@cool-sdk/*": ["../sdk/typescript/src/*"]
     }
   },
   "include": ["src"]

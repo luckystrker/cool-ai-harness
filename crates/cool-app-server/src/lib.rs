@@ -29,7 +29,7 @@ use cool_protocol::{
     RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
     SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
     SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TextDelta, ToolCompleted,
-    ToolRequested, TransportLimits, V1Version,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -1475,10 +1475,19 @@ impl AppServer {
             window.splice(0..0, chunk);
             // Reasoning and content deltas attach to the item that follows
             // them, so the window is only group-complete once its oldest event
-            // is not a delta.
+            // is not a delta. An assistant item as the oldest event means its
+            // leading reasoning deltas are still older, so the walk must
+            // continue past it as well (otherwise that reasoning would be
+            // split onto no page at all).
             let starts_at_boundary = !matches!(
                 window[0].1.event,
-                CanonicalEvent::ReasoningDelta(_) | CanonicalEvent::ContentDelta(_)
+                CanonicalEvent::ReasoningDelta(_)
+                    | CanonicalEvent::ContentDelta(_)
+                    | CanonicalEvent::UsageUpdated(_)
+            ) && !matches!(
+                &window[0].1.event,
+                CanonicalEvent::ItemCompleted(item)
+                    if item.role.as_deref() == Some("assistant")
             );
             if starts_at_boundary || exhausted {
                 break exhausted;
@@ -1487,7 +1496,38 @@ impl AppServer {
                 return Err(error(-32008, "session_history_scan_limit", false));
             }
         };
-        let entries = history_entries_from_window(&window);
+        // A bounded page can start mid-run, so the run's `run.started` event
+        // (and its model) may be older than the window. Page-contained starts
+        // are free; for the rest resolve the model with one bounded read per
+        // distinct run.
+        let actor = local_actor();
+        let mut models = std::collections::HashMap::new();
+        for (_, envelope) in &window {
+            if let CanonicalEvent::RunStarted(started) = &envelope.event
+                && let Some(model) = started.model.as_ref()
+            {
+                models.insert(envelope.run_id.clone(), model.clone());
+            }
+        }
+        let mut run_ids = window
+            .iter()
+            .map(|(_, envelope)| envelope.run_id.clone())
+            .collect::<Vec<_>>();
+        run_ids.sort();
+        run_ids.dedup();
+        for run_id in &run_ids {
+            if models.contains_key(run_id) {
+                continue;
+            }
+            if let Ok(events) = self.inner.store.events(run_id, &actor.id, None, 1)
+                && let Some(CanonicalEvent::RunStarted(started)) =
+                    events.first().map(|envelope| &envelope.event)
+                && let Some(model) = started.model.as_ref()
+            {
+                models.insert(run_id.clone(), model.clone());
+            }
+        }
+        let entries = history_entries_from_window(&window, &models);
         // `exhausted` means no older events exist; otherwise older events (and
         // therefore possibly older items) remain.
         let has_more = !exhausted || entries.len() > requested;
@@ -2569,12 +2609,35 @@ struct HistoryEntry {
 
 /// Project an ordered event window into history items, attaching accumulated
 /// reasoning deltas to the assistant item that follows them.
-fn history_entries_from_window(window: &[(u64, EventEnvelope)]) -> Vec<HistoryEntry> {
+fn history_entries_from_window(
+    window: &[(u64, EventEnvelope)],
+    run_models: &std::collections::HashMap<String, String>,
+) -> Vec<HistoryEntry> {
     let mut entries = Vec::new();
     let mut reasoning = String::new();
     let mut group_start: Option<u64> = None;
+    // Per-run model resolved by the caller (a page can start mid-run) plus any
+    // `run.started` seen in the window, and the latest usage seen since the
+    // previous assistant item, so a projected assistant item can carry both.
+    let mut models = run_models.clone();
+    let mut pending_usage: Option<UsageUpdated> = None;
     for (cursor, envelope) in window {
         match &envelope.event {
+            CanonicalEvent::RunStarted(started) => {
+                if let Some(model) = started.model.as_ref() {
+                    models.insert(envelope.run_id.clone(), model.clone());
+                }
+                // Usage never crosses a run boundary.
+                pending_usage = None;
+            }
+            CanonicalEvent::RunCompleted(_)
+            | CanonicalEvent::RunFailed(_)
+            | CanonicalEvent::RunCancelled(_) => {
+                pending_usage = None;
+            }
+            CanonicalEvent::UsageUpdated(usage) => {
+                pending_usage = Some(usage.clone());
+            }
             CanonicalEvent::ReasoningDelta(delta) => {
                 if reasoning.is_empty() {
                     group_start = Some(*cursor);
@@ -2594,25 +2657,40 @@ fn history_entries_from_window(window: &[(u64, EventEnvelope)]) -> Vec<HistoryEn
                     reasoning.clear();
                     None
                 };
+                let (usage, model) = if role == "assistant" {
+                    (pending_usage.take(), models.get(&envelope.run_id).cloned())
+                } else {
+                    pending_usage = None;
+                    (None, None)
+                };
                 let start_cursor = group_start.take().unwrap_or(*cursor);
                 entries.push(HistoryEntry {
                     start_cursor,
                     item: HistoryItem {
+                        cursor: *cursor,
+                        occurred_at: envelope.occurred_at.clone(),
+                        run_id: envelope.run_id.clone(),
                         role: role.to_owned(),
                         content: item.content.clone(),
                         reasoning: attached,
                         tool_calls: item.tool_calls.clone(),
                         tool_call_id: None,
                         name: None,
+                        model,
+                        usage,
                     },
                 });
             }
             CanonicalEvent::ToolCompleted(tool) => {
                 reasoning.clear();
                 group_start = None;
+                pending_usage = None;
                 entries.push(HistoryEntry {
                     start_cursor: *cursor,
                     item: HistoryItem {
+                        cursor: *cursor,
+                        occurred_at: envelope.occurred_at.clone(),
+                        run_id: envelope.run_id.clone(),
                         role: "tool".to_owned(),
                         content: Some(
                             serde_json::to_string(&tool.result)
@@ -2622,15 +2700,21 @@ fn history_entries_from_window(window: &[(u64, EventEnvelope)]) -> Vec<HistoryEn
                         tool_calls: Vec::new(),
                         tool_call_id: Some(tool.call_id.clone()),
                         name: Some(tool.name.clone()),
+                        model: None,
+                        usage: None,
                     },
                 });
             }
             CanonicalEvent::ToolFailed(tool) => {
                 reasoning.clear();
                 group_start = None;
+                pending_usage = None;
                 entries.push(HistoryEntry {
                     start_cursor: *cursor,
                     item: HistoryItem {
+                        cursor: *cursor,
+                        occurred_at: envelope.occurred_at.clone(),
+                        run_id: envelope.run_id.clone(),
                         role: "tool".to_owned(),
                         content: Some(
                             serde_json::json!({
@@ -2643,6 +2727,8 @@ fn history_entries_from_window(window: &[(u64, EventEnvelope)]) -> Vec<HistoryEn
                         tool_calls: Vec::new(),
                         tool_call_id: Some(tool.call_id.clone()),
                         name: Some(tool.name.clone()),
+                        model: None,
+                        usage: None,
                     },
                 });
             }

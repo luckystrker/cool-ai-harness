@@ -37,8 +37,11 @@ interface ServerFrame {
 /** `CoolTransport` over the facade's JSON-RPC endpoint. */
 export class HttpTransport implements CoolTransport {
   private nextId = 1;
+  private readonly options: HttpTransportOptions;
 
-  constructor(private readonly options: HttpTransportOptions) {}
+  constructor(options: HttpTransportOptions) {
+    this.options = options;
+  }
 
   async initialize(
     clientName = "cool-web",

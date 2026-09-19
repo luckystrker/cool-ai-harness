@@ -18,7 +18,7 @@ import {
   ShieldCheck,
 } from "lucide-react"
 import { toast } from "sonner"
-import { api, getErrorDescription } from "@/api/client"
+import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
 import { artifactsApi } from "@/api/artifacts"
 import { plansApi } from "@/api/plans"
@@ -116,7 +116,7 @@ export function ChatPage() {
 
   const { data: conversationRuns = [] } = useQuery({
     queryKey: ["conversation-runs", convId],
-    queryFn: () => api.get<RunOut[]>(`/api/conversations/${convId}/runs`),
+    queryFn: () => conversationsApi.listRuns(convId!),
     enabled: convId !== null,
     refetchInterval: isStreaming ? 1000 : false,
   })

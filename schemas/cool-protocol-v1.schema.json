@@ -5356,11 +5356,28 @@
             "null"
           ]
         },
+        "cursor": {
+          "description": "Durable cursor of the item's own event (the `rust_events.rowid`), stable\nfor the lifetime of the store. Clients can use it as a render key.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "model": {
+          "description": "Model that produced the assistant item, when the run recorded one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "occurredAt": {
+          "description": "RFC3339 timestamp of the item's event.",
+          "type": "string"
         },
         "reasoning": {
           "type": [
@@ -5369,6 +5386,10 @@
           ]
         },
         "role": {
+          "type": "string"
+        },
+        "runId": {
+          "description": "Durable run the item belongs to.",
           "type": "string"
         },
         "toolCallId": {
@@ -5383,10 +5404,24 @@
           "items": {
             "$ref": "#/$defs/ToolRequested"
           }
+        },
+        "usage": {
+          "description": "Cumulative usage reported by the model call that produced the assistant\nitem (absent for user/tool items and imported history).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageUpdated"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
+        "cursor",
+        "occurredAt",
+        "runId",
         "role"
       ]
     },
@@ -6542,6 +6577,14 @@
       "properties": {
         "planId": {
           "type": "string"
+        },
+        "steps": {
+          "description": "Full step list with statuses, so a client can render pending steps that\nnever emit their own `plan.step_*` event.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
         },
         "title": {
           "type": [

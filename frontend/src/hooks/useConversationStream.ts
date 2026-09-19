@@ -3,14 +3,12 @@ import { getErrorDescription } from "@/api/client"
 import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
+import { idempotencyKey, sdk } from "@/api/sdk"
+import type { EventEnvelope } from "@/api/generated/cool_protocol"
 import type {
-  AgentEvent,
   Plan,
-  PlanGeneratedPayload,
-  PlanProgressPayload,
-  PlanStepEventPayload,
-  ToolApprovalRequestPayload,
-  ToolApprovalResolvedPayload,
+  PlanStep,
+  PlanStepStatus,
   UsagePayload,
 } from "@/api/types"
 import type { ToolCallBlockProps } from "@/components/chat/ToolCallBlock"
@@ -42,9 +40,6 @@ interface Accumulator {
   thinking: string
   /** Ordered interleaved blocks (thinking/tools) for live rendering. */
   blocks: AccBlock[]
-  /** True once the model streamed reasoning deltas this run. Used to skip
-      redundant react_thought events (they repeat the same reasoning text). */
-  thinkingStreamed: boolean
   /** Usage reported by the terminal `finish` event, if any. */
   usage?: UsagePayload
   /** Reason from the terminal `finish` event, if any. */
@@ -53,7 +48,7 @@ interface Accumulator {
   approval?: InlineApproval
   /** Model id for the current turn (shown on the live assistant message). */
   model?: string
-  /** Set when the backend emitted an `error` event (turn failed). */
+  /** Set when the run emitted a failure event (turn failed). */
   errored?: boolean
   /** Plan generated during this turn (Фаза 2 §1 Planning Mode). */
   plan?: Plan
@@ -64,7 +59,6 @@ const newAcc = (): Accumulator => ({
   content: "",
   thinking: "",
   blocks: [],
-  thinkingStreamed: false,
 })
 
 /** Append a streamed reasoning delta to the current (or a new) thinking block. */
@@ -76,12 +70,6 @@ function pushThinkingDelta(acc: Accumulator, text: string) {
     acc.blocks.push({ type: "thinking", text })
   }
   acc.thinking += text
-}
-
-/** Append a discrete ReAct thought as its own (separated) thinking block. */
-function pushThoughtBlock(acc: Accumulator, text: string) {
-  acc.blocks.push({ type: "thinking", text })
-  acc.thinking += (acc.thinking ? "\n\n" : "") + text
 }
 
 /** Add a tool-call id to the current (or a new) tools block. */
@@ -104,9 +92,22 @@ function pushTextDelta(acc: Accumulator, text: string) {
   }
 }
 
+/** Coerce a canonical JSON result into the tool-result view shape. */
+function toolResult(result: unknown): ToolCallBlockProps["result"] {
+  if (typeof result === "string") return { output: result, is_error: false }
+  if (result !== null && typeof result === "object") {
+    return {
+      output: JSON.stringify(result),
+      is_error: false,
+      metadata: result as Record<string, unknown>,
+    }
+  }
+  return { output: result === null || result === undefined ? "(empty)" : String(result), is_error: false }
+}
+
 /**
- * Drives a single agent turn over the SSE stream and produces the two
- * optimistic messages (user + in-flight assistant) that the UI renders
+ * Drives a single agent turn over the canonical cursor stream and produces the
+ * two optimistic messages (user + in-flight assistant) that the UI renders
  * while waiting for the persisted history to reload.
  *
  * Approvals are rendered inline in the chat (no modal): the assistant
@@ -117,6 +118,8 @@ export function useConversationStream() {
   const [isStreaming, setIsStreaming] = useState(false)
   /** Conversation id for the active stream, so respondApproval knows the URL. */
   const convIdRef = useRef<number | null>(null)
+  /** Durable run id of the active turn, so `cancel` can stop it server-side. */
+  const runIdRef = useRef<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   /** monotonic timestamp captured when the run starts (for elapsed time). */
   const startedAtRef = useRef<number | null>(null)
@@ -188,245 +191,243 @@ export function useConversationStream() {
     setPendingMsgs(msgs)
   }
 
-  const applyEvent = (ev: AgentEvent, acc: Accumulator) => {
-    switch (ev.kind) {
-      case "thinking": {
-        const text = (ev.payload.text as string) || ""
-        if (text) {
-          acc.thinkingStreamed = true
-          pushThinkingDelta(acc, text)
-          flush(acc)
-        }
+  /** Apply one canonical event envelope to the live accumulator. */
+  const applyCanonical = (envelope: EventEnvelope, acc: Accumulator) => {
+    const canonical = envelope.event
+    switch (canonical.kind) {
+      case "run.started": {
+        acc.model = acc.model ?? canonical.payload.model ?? undefined
         break
       }
-      case "token": {
-        const text = (ev.payload.text as string) || ""
-        acc.content += text
-        pushTextDelta(acc, text)
+      case "content.delta": {
+        acc.content += canonical.payload.text
+        pushTextDelta(acc, canonical.payload.text)
         flush(acc)
         break
       }
-      case "react_thought": {
-        // Route ReAct thoughts into the reasoning blocks so chain-of-thought
-        // stays visible without the structured trace timeline. For reasoning
-        // models the same text was already streamed via `thinking` events, so
-        // skip it there to avoid duplicating the block content.
-        const text = (ev.payload.text as string) || ""
-        if (text && !acc.thinkingStreamed) {
-          pushThoughtBlock(acc, text)
-          flush(acc)
-        }
-        break
-      }
-      case "react_action":
-      case "react_observation":
-        // Tool execution is surfaced via tool_call_start / tool_result blocks;
-        // the structured ReAct timeline is no longer rendered.
-        break
-      case "tool_call_start": {
-        const id = (ev.payload.id as string) || `tc-${acc.toolCalls.size}`
-        const name = (ev.payload.name as string) || "unknown"
-        const args = (ev.payload.arguments as Record<string, unknown>) || {}
-        acc.toolCalls.set(id, {
-          key: id,
-          call: { id, name, arguments: args },
-          pending: true,
-        })
-        pushToolCall(acc, id)
+      case "reasoning.delta": {
+        pushThinkingDelta(acc, canonical.payload.text)
         flush(acc)
         break
       }
-      case "tool_result": {
-        const id = (ev.payload.id as string) || ""
-        const entry = acc.toolCalls.get(id)
-        if (entry) {
-          entry.pending = false
-          entry.awaitingApproval = false
-          entry.result = ev.payload.result as ToolCallBlockProps["result"]
-        }
-        // If this tool had an unresolved inline approval, the server resolved
-        // it (timeout auto-deny) — reflect the outcome on the card.
-        if (acc.approval && acc.approval.callId === id && acc.approval.status === "pending") {
-          acc.approval = { ...acc.approval, status: "timed_out" }
+      case "usage.updated": {
+        acc.usage = {
+          prompt_tokens: canonical.payload.promptTokens,
+          completion_tokens: canonical.payload.completionTokens,
+          total_tokens: canonical.payload.totalTokens,
+          cost_usd: canonical.payload.costUsd,
         }
         flush(acc)
         break
       }
-      case "tool_approval_request": {
-        const p = ev.payload as unknown as ToolApprovalRequestPayload
-        const id = p.id || `tc-${acc.toolCalls.size}`
-        // arguments can be missing/null on malformed events; coerce to {}
-        // so renderers (Object.keys / JSON.stringify) never crash.
-        const args = p.arguments ?? {}
-        // Ensure there's a toolCall block to mark as awaiting approval; if the
-        // tool_call_start event already created it, just flip the flag.
-        const existing = acc.toolCalls.get(id)
+      case "tool.requested": {
+        const { callId, name, arguments: args } = canonical.payload
+        if (!acc.toolCalls.has(callId)) {
+          acc.toolCalls.set(callId, {
+            key: callId,
+            call: { id: callId, name, arguments: args as Record<string, unknown> },
+            pending: true,
+          })
+          pushToolCall(acc, callId)
+        }
+        flush(acc)
+        break
+      }
+      case "tool.approval_required": {
+        const p = canonical.payload
+        const existing = acc.toolCalls.get(p.callId)
         if (existing) {
           existing.awaitingApproval = true
         } else {
-          acc.toolCalls.set(id, {
-            key: id,
-            call: { id, name: p.name, arguments: args },
+          acc.toolCalls.set(p.callId, {
+            key: p.callId,
+            call: { id: p.callId, name: p.name, arguments: p.arguments as Record<string, unknown> },
             pending: true,
             awaitingApproval: true,
           })
-          pushToolCall(acc, id)
+          pushToolCall(acc, p.callId)
         }
-        // Inline approval: attach the request to the assistant message so the
-        // card renders directly in the chat flow (no modal popup).
         acc.approval = {
-          callId: id,
-          approvalId: p.approval_id,
+          callId: p.callId,
+          approvalId: p.approvalId,
           revision: p.revision,
-          runId: p.run_id,
+          // Canonical runs are addressed by string id; the resolve command
+          // ignores the numeric legacy run id.
+          runId: 0,
           name: p.name,
-          arguments: args,
+          arguments: p.arguments as Record<string, unknown>,
           reason: p.reason,
-          isBreakpoint: p.is_breakpoint,
-          breakpointType: p.breakpoint_type,
-          resultPreview: p.result_preview,
-          currentContent: p.current_content,
+          isBreakpoint: p.breakpointType != null,
+          breakpointType: p.breakpointType ?? undefined,
+          resultPreview: p.resultPreview ?? undefined,
+          currentContent: p.currentContent ?? undefined,
           status: "pending",
         }
         flush(acc)
         break
       }
-      case "tool_approval_resolved": {
-        const p = ev.payload as unknown as ToolApprovalResolvedPayload
-        if (acc.approval?.approvalId === p.approval_id) {
+      case "tool.approval_resolved": {
+        const p = canonical.payload
+        if (acc.approval?.approvalId === p.approvalId) {
           acc.approval = { ...acc.approval, status: p.decision }
         }
-        const entry = acc.toolCalls.get(p.id)
+        const entry = acc.toolCalls.get(p.callId)
         if (entry) entry.awaitingApproval = false
         flush(acc)
         break
       }
-      case "message": {
-        const tcs = ev.payload.tool_calls as
-          | { id?: string | null; name: string; arguments: Record<string, unknown> }[]
-          | undefined
-        if (tcs) {
-          for (const tc of tcs) {
-            const id = tc.id || `tc-${tc.name}`
-            if (!acc.toolCalls.has(id)) {
-              acc.toolCalls.set(id, {
-                key: id,
-                call: {
-                  id,
-                  name: tc.name,
-                  // arguments may be missing/null if the provider emitted a
-                  // tool call without arguments; coerce to {} so the renderer
-                  // (Object.keys, JSON.stringify) never crashes on undefined.
-                  arguments: tc.arguments ?? {},
-                },
-                pending: true,
-              })
-            }
-          }
-          flush(acc)
+      case "tool.started": {
+        const entry = acc.toolCalls.get(canonical.payload.callId)
+        if (entry) {
+          entry.pending = true
+          entry.awaitingApproval = false
         }
-        break
-      }
-      case "finish": {
-        acc.finishReason = (ev.payload.reason as string) || undefined
-        acc.usage = ev.payload.usage as UsagePayload | undefined
         flush(acc)
         break
       }
-      case "budget_alert": {
-        // Surface spend crossing the alert threshold (Фаза 1.5 §5). The
-        // BudgetIndicator in the header also reflects the status; this toast
-        // gives immediate, in-conversation feedback.
-        const window = (ev.payload.window as string) || "budget"
-        const pct = Math.round((ev.payload.pct as number) || 0)
-        toast.warning(`Cost budget alert (${window})`, {
-          description: `Spending has reached ${pct}% of the ${window} limit.`,
+      case "tool.completed": {
+        const p = canonical.payload
+        const entry = acc.toolCalls.get(p.callId)
+        if (entry) {
+          entry.pending = false
+          entry.awaitingApproval = false
+          entry.result = toolResult(p.result)
+        }
+        if (acc.approval && acc.approval.callId === p.callId && acc.approval.status === "pending") {
+          acc.approval = { ...acc.approval, status: "approved" }
+        }
+        flush(acc)
+        break
+      }
+      case "tool.failed": {
+        const p = canonical.payload
+        const message = p.message ?? p.errorCode
+        const entry = acc.toolCalls.get(p.callId)
+        if (entry) {
+          entry.pending = false
+          entry.awaitingApproval = false
+          entry.result = { output: message, is_error: true, error: message }
+        }
+        if (acc.approval && acc.approval.callId === p.callId && acc.approval.status === "pending") {
+          acc.approval = { ...acc.approval, status: "denied" }
+        }
+        flush(acc)
+        break
+      }
+      case "run.completed": {
+        acc.finishReason = canonical.payload.reason
+        flush(acc)
+        break
+      }
+      case "run.cancelled": {
+        acc.finishReason = canonical.payload.reason ?? "cancelled"
+        flush(acc)
+        break
+      }
+      case "run.failed": {
+        const message = canonical.payload.errorCode ?? canonical.payload.reason
+        acc.content += `\n\n⚠️ **Error:** ${message}`
+        acc.finishReason = acc.finishReason ?? "error"
+        acc.errored = true
+        toast.error(message)
+        flush(acc)
+        break
+      }
+      case "budget.warning":
+      case "budget.exceeded": {
+        const p = canonical.payload
+        toast.warning(`Cost budget alert (${p.window})`, {
+          description: `Spending has reached ${Math.round(p.percent)}% of the ${p.window} limit.`,
         })
         break
       }
-      // --- Planning Mode events (Фаза 2 §1) ---
-      case "plan_generated": {
-        const p = ev.payload as unknown as PlanGeneratedPayload
+      case "plan.created": {
+        const p = canonical.payload
         acc.plan = {
-          id: p.plan_id,
+          // Canonical plan ids are model-supplied strings; the live card is a
+          // read-only projection until plan approval moves to the protocol.
+          id: 0,
           conversation_id: convIdRef.current ?? 0,
           run_id: null,
           title: p.title,
           status: "draft",
-          steps: p.steps,
+          // `steps` is optional on the wire (older producers omit it).
+          steps: (p.steps ?? []).map((step) => ({
+            position: step.position,
+            title: step.title,
+            status: step.status as PlanStepStatus,
+            result_summary: step.resultSummary,
+          })),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }
         flush(acc)
         break
       }
-      case "plan_step_start": {
-        const p = ev.payload as unknown as PlanStepEventPayload
-        if (acc.plan) {
-          const step = acc.plan.steps.find((s) => s.position === p.position)
-          if (step) step.status = "running"
-          acc.plan = { ...acc.plan, status: "executing" }
-          flush(acc)
+      case "plan.step_started":
+      case "plan.step_completed": {
+        const p = canonical.payload
+        const current = acc.plan ?? {
+          id: 0,
+          conversation_id: convIdRef.current ?? 0,
+          run_id: null,
+          title: null,
+          status: "draft" as const,
+          steps: [] as PlanStep[],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         }
-        break
-      }
-      case "plan_step_complete": {
-        const p = ev.payload as unknown as PlanStepEventPayload
-        if (acc.plan) {
-          const step = acc.plan.steps.find((s) => s.position === p.position)
-          if (step) {
-            step.status = p.status ?? "completed"
-            step.result_summary = p.result_summary ?? null
-          }
-          flush(acc)
+        const steps = [...current.steps]
+        const index = steps.findIndex((step) => step.position === p.position)
+        const next: PlanStep = {
+          position: p.position,
+          title: p.title,
+          status: p.status as PlanStepStatus,
+          result_summary: p.resultSummary,
         }
-        break
-      }
-      case "plan_progress": {
-        const p = ev.payload as unknown as PlanProgressPayload
-        if (acc.plan) {
-          acc.plan = { ...acc.plan, status: p.status }
-          flush(acc)
+        if (index >= 0) steps[index] = next
+        else steps.push(next)
+        steps.sort((left, right) => left.position - right.position)
+        acc.plan = {
+          ...current,
+          steps,
+          status: canonical.kind === "plan.step_started" ? "executing" : current.status,
+          updated_at: new Date().toISOString(),
         }
-        break
-      }
-      // --- Subagent events (Фаза 2 §5) ---
-      case "subagent_started": {
-        const name = (ev.payload.name as string) || "subagent"
-        const role = (ev.payload.role as string) || ""
-        acc.content += `\n\n> 🤖 **Subagent launched:** ${name}${role ? ` (${role})` : ""}\n`
         flush(acc)
         break
       }
-      case "subagent_completed": {
-        const summary = (ev.payload.result_summary as string) || "Done"
+      case "plan.progress": {
+        const p = canonical.payload
+        if (acc.plan) {
+          acc.plan = { ...acc.plan, status: p.status, updated_at: new Date().toISOString() }
+          flush(acc)
+        }
+        break
+      }
+      case "subagent.started": {
+        const name = canonical.payload.name ?? "subagent"
+        acc.content += `\n\n> 🤖 **Subagent launched:** ${name}\n`
+        flush(acc)
+        break
+      }
+      case "subagent.completed": {
+        const summary = canonical.payload.summary ?? "Done"
         acc.content += `> ✅ **Subagent completed:** ${summary.slice(0, 200)}\n`
         flush(acc)
         break
       }
-      case "subagent_failed": {
-        const error = (ev.payload.error as string) || "Unknown error"
+      case "subagent.failed": {
+        const error = canonical.payload.error ?? "Unknown error"
         acc.content += `> ❌ **Subagent failed:** ${error}\n`
         flush(acc)
         break
       }
-      case "subagent_progress":
+      case "subagent.progress":
         // Progress updates are too frequent to render inline; skip.
         break
-      case "error": {
-        // Provider / loop failures (e.g. 401 from the LLM backend). Without
-        // this the stream just ends and the user sees their message with no
-        // reply and no explanation.
-        const message = (ev.payload.message as string) || "Unknown error"
-        const detail = (ev.payload.detail as string) || ""
-        acc.content += `\n\n⚠️ **Error:** ${message}${detail ? ` — ${detail}` : ""}`
-        acc.finishReason = acc.finishReason ?? "error"
-        acc.errored = true
-        toast.error(message, { description: detail || undefined })
-        flush(acc)
+      default:
         break
-      }
-      // start / tool_call_delta handled by surrounding loop.
     }
   }
 
@@ -443,6 +444,7 @@ export function useConversationStream() {
       const controller = new AbortController()
       abortRef.current = controller
       convIdRef.current = conversationId
+      runIdRef.current = null
       startedAtRef.current = performance.now()
 
       const acc = newAcc()
@@ -457,7 +459,7 @@ export function useConversationStream() {
       flush(acc)
 
       try {
-        for await (const ev of streamConversationMessage(
+        for await (const envelope of streamConversationMessage(
           conversationId,
           {
             content,
@@ -468,7 +470,8 @@ export function useConversationStream() {
           },
           controller.signal
         )) {
-          applyEvent(ev, acc)
+          runIdRef.current = envelope.runId
+          applyCanonical(envelope, acc)
         }
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
@@ -511,6 +514,7 @@ export function useConversationStream() {
         abortRef.current = null
         convIdRef.current = null
         accRef.current = null
+        runIdRef.current = null
       }
       return Boolean(acc.errored)
     },
@@ -520,7 +524,7 @@ export function useConversationStream() {
   /**
    * Resolve the inline approval shown in the chat flow.
    * Updates the card status (resolving → approved/denied) and calls the
-   * approval REST endpoint; the agent loop resumes server-side.
+   * canonical `approval.resolve` command; the agent loop resumes server-side.
    */
   const respondApproval = useCallback(async (approved: boolean) => {
     const acc = accRef.current
@@ -549,7 +553,7 @@ export function useConversationStream() {
         accRef.current.approval = { ...pending, status: approved ? "approved" : "denied" }
       }
     } catch {
-      // If the resolve fails (e.g. 404 — already timed out), the server-side
+      // If the resolve fails (e.g. already timed out), the server-side
       // timeout/auto-deny handles the loop. Show denied so the card doesn't
       // stay stuck in "resolving" — but only if still current.
       if (accRef.current?.approval?.approvalId === resolvedApprovalId) {
@@ -560,7 +564,15 @@ export function useConversationStream() {
   }, [])
 
   const cancel = useCallback(() => {
+    const runId = runIdRef.current
     abortRef.current?.abort()
+    // Aborting the SSE stream does not stop the run server-side, so ask the
+    // runtime to cancel it (best-effort; the run may already be terminal).
+    if (runId && !runId.startsWith("legacy-run-")) {
+      void sdk
+        .runCancel({ idempotencyKey: idempotencyKey(), runId, reason: "client_cancelled" })
+        .catch(() => undefined)
+    }
   }, [])
 
   const clearPending = useCallback(() => setPendingMsgs([]), [])

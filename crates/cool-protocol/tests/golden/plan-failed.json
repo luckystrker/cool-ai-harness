@@ -21,7 +21,8 @@
         "payload": {
           "planId": "plan-failed",
           "title": "Fail",
-          "totalSteps": 1
+          "totalSteps": 1,
+          "steps": []
         }
       }
     },

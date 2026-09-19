@@ -35,7 +35,13 @@ interface DetectedOperation {
 }
 
 const STATUSES: readonly Status[] = ["sdk", "static/blob", "sse/stream", "deferred"];
-const EXCLUDED_FILES = new Set(["client.ts", "types.ts", "canonicalReducer.ts"]);
+const EXCLUDED_FILES = new Set([
+  "client.ts",
+  "types.ts",
+  "canonicalReducer.ts",
+  "sdk.ts",
+  "mappers.ts",
+]);
 // A 2-space line inside an object body that starts with a keyword is body
 // code, not an exported operation (the parser is intentionally source-shape
 // based: these files keep members at two spaces and bodies deeper).

@@ -25,7 +25,11 @@ export class CoolProtocolError extends Error {
 
 /** Thin typed client: one method per App Protocol command. */
 export class CoolSdk {
-  constructor(private readonly transport: CoolTransport) {}
+  private readonly transport: CoolTransport;
+
+  constructor(transport: CoolTransport) {
+    this.transport = transport;
+  }
 
   private async send<T>(command: protocol.Command): Promise<T> {
     const response = await this.transport.request(command);

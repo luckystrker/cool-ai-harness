@@ -482,6 +482,7 @@ fn plan_progress_is_rendered_from_the_canonical_plan_state() {
             plan_id: "plan-1".to_owned(),
             title: Some("Ship".to_owned()),
             total_steps: 2,
+            steps: Vec::new(),
         }),
         extensions: Default::default(),
     };

@@ -743,6 +743,12 @@ async fn session_history_paginates_on_a_durable_cursor_without_splitting_reasoni
             ModelEvent::Reasoning(format!("{prefix} b")),
             ModelEvent::Reasoning(format!("{prefix} c")),
             ModelEvent::Content(prefix.to_owned()),
+            ModelEvent::Usage(cool_agent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cost_micro_usd: Some(1_000),
+            }),
             ModelEvent::Finish { reason: None },
         ])
     };
@@ -825,6 +831,28 @@ async fn session_history_paginates_on_a_durable_cursor_without_splitting_reasoni
                 Some(format!("{prefix} a{prefix} b{prefix} c").as_str()),
                 "reasoning for {prefix} was split or lost"
             );
+        }
+    }
+    // The enriched projection carries a stable cursor, run id and RFC3339
+    // timestamp per item, and the model/usage that produced each assistant
+    // turn, so the React transcript can render persisted history.
+    let mut cursors = std::collections::HashSet::new();
+    for item in &items {
+        assert!(item.cursor > 0, "cursor is the durable rowid");
+        assert!(cursors.insert(item.cursor), "cursors are unique");
+        assert!(
+            item.occurred_at.contains('T') && item.occurred_at.ends_with('Z'),
+            "occurred_at is RFC3339: {}",
+            item.occurred_at
+        );
+        assert!(!item.run_id.is_empty(), "item carries its run id");
+        if item.role == "assistant" {
+            assert_eq!(item.model.as_deref(), Some("scripted"));
+            let usage = item.usage.as_ref().expect("assistant usage is attached");
+            assert_eq!((usage.prompt_tokens, usage.completion_tokens), (10, 5));
+            assert_eq!(usage.cost_usd, Some(0.001));
+        } else {
+            assert!(item.usage.is_none(), "only assistant items carry usage");
         }
     }
     assert!(pages[0].has_more);
