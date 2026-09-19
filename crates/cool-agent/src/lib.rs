@@ -9,8 +9,8 @@ mod provider;
 mod tools;
 
 pub use context::{
-    Compaction, Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
-    load_project_instructions,
+    Compaction, Message, MessageRole, PLANNING_SYSTEM_PROMPT, ToolCall, compact_history,
+    estimate_history_tokens, load_project_instructions, planning_system_prompt,
 };
 pub use loop_runtime::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,

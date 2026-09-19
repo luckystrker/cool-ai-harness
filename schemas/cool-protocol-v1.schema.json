@@ -1949,6 +1949,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "run.subscribe"
+            },
+            "params": {
+              "$ref": "#/$defs/RunSubscribeParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "approval.resolve"
             },
             "params": {
@@ -7897,6 +7914,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "run_subscribed"
+            },
+            "value": {
+              "$ref": "#/$defs/RunSubscribedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "approval_resolved"
             },
             "value": {
@@ -10888,6 +10922,47 @@
       },
       "additionalProperties": false
     },
+    "RunSubscribeParams": {
+      "description": "Subscribes the calling connection to another connection's run so live\n`run.event` notifications fan out to every subscriber, not only the\nconnection that started the run.",
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId"
+      ]
+    },
+    "RunSubscribedResult": {
+      "type": "object",
+      "properties": {
+        "lastSeq": {
+          "description": "Durable cursor to catch up from; live events continue with `seq > last_seq`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "terminal": {
+          "description": "True when the run is already terminal; no live events will follow.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "sessionId",
+        "lastSeq",
+        "terminal"
+      ]
+    },
     "RunTerminal": {
       "type": "object",
       "properties": {
@@ -11151,6 +11226,15 @@
     "SessionHistoryParams": {
       "type": "object",
       "properties": {
+        "beforeCursor": {
+          "description": "Exclusive, opaque durable cursor: only history derived from events\nappended before `before_cursor` is returned. Older pages pass the\n`next_cursor` of the previous page; absent, the newest page is returned.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "limit": {
           "type": "integer",
           "format": "uint16",
@@ -11179,6 +11263,15 @@
           "items": {
             "$ref": "#/$defs/HistoryItem"
           }
+        },
+        "nextCursor": {
+          "description": "Exclusive cursor for the next older page, or `None` when this page is\nthe oldest. Pass it as `beforeCursor` to continue paging.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -11276,8 +11369,20 @@
             "null"
           ]
         },
+        "planMode": {
+          "description": "Planning mode: the runtime owns the system prompt (a canonical planning\ndirective) and marks the run mode as `plan`, so the model produces a\nplan through the trusted `update_plan` tool instead of executing.",
+          "type": "boolean",
+          "default": false
+        },
         "sessionId": {
           "type": "string"
+        },
+        "systemPrompt": {
+          "description": "Caller-supplied system prompt. Ignored in planning mode, where the\nruntime owns the system prompt so a caller cannot steer the plan.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

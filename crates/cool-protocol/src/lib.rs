@@ -189,6 +189,8 @@ pub enum Command {
     RunCancel(RunCancelParams),
     #[serde(rename = "run.events")]
     RunEvents(RunEventsParams),
+    #[serde(rename = "run.subscribe")]
+    RunSubscribe(RunSubscribeParams),
     #[serde(rename = "approval.resolve")]
     ApprovalResolve(ApprovalResolveParams),
     #[serde(rename = "status.get")]
@@ -498,6 +500,14 @@ pub struct SessionPromptParams {
     pub session_id: String,
     pub content: Vec<ContentPart>,
     pub model: Option<String>,
+    /// Planning mode: the runtime owns the system prompt (a canonical planning
+    /// directive) and marks the run mode as `plan`, so the model produces a
+    /// plan through the trusted `update_plan` tool instead of executing.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Caller-supplied system prompt. Ignored in planning mode, where the
+    /// runtime owns the system prompt so a caller cannot steer the plan.
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -536,6 +546,11 @@ pub struct SessionListParams {
 pub struct SessionHistoryParams {
     pub session_id: String,
     pub limit: u16,
+    /// Exclusive, opaque durable cursor: only history derived from events
+    /// appended before `before_cursor` is returned. Older pages pass the
+    /// `next_cursor` of the previous page; absent, the newest page is returned.
+    #[ts(type = "number | null")]
+    pub before_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -596,6 +611,16 @@ pub struct RunEventsParams {
     #[ts(type = "number | null")]
     pub after_seq: Option<u64>,
     pub limit: u16,
+}
+
+/// Subscribes the calling connection to another connection's run so live
+/// `run.event` notifications fan out to every subscriber, not only the
+/// connection that started the run.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RunSubscribeParams {
+    pub run_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1394,6 +1419,19 @@ pub struct RunCancelledResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct RunSubscribedResult {
+    pub run_id: String,
+    pub session_id: String,
+    /// Durable cursor to catch up from; live events continue with `seq > last_seq`.
+    #[ts(type = "number")]
+    pub last_seq: u64,
+    /// True when the run is already terminal; no live events will follow.
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct ApprovalResolvedResult {
     pub approval_id: String,
     #[ts(type = "number")]
@@ -1442,6 +1480,10 @@ pub struct SessionHistoryResult {
     #[serde(default)]
     pub items: Vec<HistoryItem>,
     pub has_more: bool,
+    /// Exclusive cursor for the next older page, or `None` when this page is
+    /// the oldest. Pass it as `beforeCursor` to continue paging.
+    #[ts(type = "number | null")]
+    pub next_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1539,6 +1581,7 @@ pub enum ResponsePayload {
     PromptAccepted(PromptAcceptedResult),
     SteerAccepted(SteerAcceptedResult),
     RunCancelled(RunCancelledResult),
+    RunSubscribed(RunSubscribedResult),
     ApprovalResolved(ApprovalResolvedResult),
     EventPage(EventPage),
     Status(StatusGetResult),

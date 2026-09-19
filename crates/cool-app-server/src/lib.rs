@@ -19,14 +19,14 @@ use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, CancelSignal,
     EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver, ToolContext, Usage,
-    builtin_registry, history_from_events, mask_canonical_event,
+    builtin_registry, history_from_events, mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
     EventEnvelope, EventPage, HistoryItem, InitializeResult, ItemEvent, JsonRpcV2,
     PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunTerminal,
-    ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
+    RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
     SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
     SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TextDelta, ToolCompleted,
     ToolRequested, TransportLimits, V1Version,
@@ -122,6 +122,11 @@ struct Inner {
     policy: CapabilityPolicy,
     default_model: String,
     approval_waiters: Mutex<HashMap<String, watch::Sender<Option<cool_protocol::ApprovalOutcome>>>>,
+    /// Connection that started each live run, so `run.subscribe` fan-out can
+    /// skip it (the owner already receives events through its run sink).
+    run_owners: Mutex<HashMap<String, String>>,
+    /// `run.subscribe` subscribers per run, keyed by connection id.
+    run_subscribers: Mutex<HashMap<String, HashMap<String, Outbound>>>,
     lifecycle: Option<Arc<dyn RunLifecycle>>,
 }
 
@@ -151,10 +156,33 @@ struct RunRecord {
     terminal: bool,
 }
 
-#[derive(Default)]
+/// Canonical inputs for one prompt run, decoupled from the protocol params so
+/// the spawned run does not retain the whole request envelope.
+struct PromptRequest {
+    content: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    plan_mode: bool,
+}
+
 struct ConnectionState {
     initialized: bool,
+    /// Stable per-connection id, so live run events can fan out to
+    /// `run.subscribe` connections while the owner still receives them.
+    id: String,
     owned_runs: HashSet<String>,
+    subscribed_runs: HashSet<String>,
+}
+
+impl ConnectionState {
+    fn new() -> Self {
+        Self {
+            initialized: false,
+            id: format!("connection-{}", Uuid::new_v4()),
+            owned_runs: HashSet::new(),
+            subscribed_runs: HashSet::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -275,6 +303,8 @@ impl AppServer {
                 policy,
                 default_model,
                 approval_waiters: Mutex::new(HashMap::new()),
+                run_owners: Mutex::new(HashMap::new()),
+                run_subscribers: Mutex::new(HashMap::new()),
                 lifecycle: None,
             }),
         }
@@ -330,7 +360,7 @@ impl AppServer {
             result
         });
 
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
+        let connection = Arc::new(Mutex::new(ConnectionState::new()));
         let semaphore = Arc::new(Semaphore::new(self.inner.config.max_in_flight));
         let mut handlers = JoinSet::new();
         let mut read_error = None;
@@ -453,10 +483,19 @@ impl AppServer {
         }
 
         while handlers.join_next().await.is_some() {}
-        let owned_runs = connection.lock().await.owned_runs.clone();
+        let (connection_id, owned_runs, subscribed_runs) = {
+            let connection = connection.lock().await;
+            (
+                connection.id.clone(),
+                connection.owned_runs.clone(),
+                connection.subscribed_runs.clone(),
+            )
+        };
         for run_id in owned_runs {
             self.signal_cancel(&run_id, "disconnect").await;
         }
+        self.drop_connection_registrations(&connection_id, &subscribed_runs)
+            .await;
         drop(outbound);
         if *connection_failed_rx.borrow() && !writer_task.is_finished() {
             writer_task.abort();
@@ -660,7 +699,12 @@ impl AppServer {
                 let _ = self.send(&outbound, frame).await;
             }
             Command::SessionHistory(params) => {
-                let frame = match self.session_history(&id, &params.session_id, params.limit) {
+                let frame = match self.session_history(
+                    &id,
+                    &params.session_id,
+                    params.limit,
+                    params.before_cursor,
+                ) {
                     Ok(result) => success(id, ResponsePayload::SessionHistory(result)),
                     Err(error) => failure(id, error),
                 };
@@ -856,6 +900,7 @@ impl AppServer {
                                     .events(&params.run_id, &actor.id, None, usize::MAX)
                             && let Some(event) = events.into_iter().last()
                         {
+                            self.publish_to_subscribers(&event).await;
                             let _ = self.send(&outbound, notification(event)).await;
                         }
                         frame
@@ -948,8 +993,20 @@ impl AppServer {
                             )
                             .await;
                         if is_new {
+                            let connection_id = connection.lock().await.id.clone();
                             connection.lock().await.owned_runs.insert(run_id.clone());
-                            self.spawn_agent_run(run_id, content, params.model, cancel, outbound);
+                            self.register_run_owner(&run_id, &connection_id).await;
+                            self.spawn_agent_run(
+                                run_id,
+                                PromptRequest {
+                                    content,
+                                    model: params.model,
+                                    system_prompt: params.system_prompt,
+                                    plan_mode: params.plan_mode,
+                                },
+                                cancel,
+                                outbound,
+                            );
                         }
                     }
                     Err(error) => {
@@ -1007,6 +1064,11 @@ impl AppServer {
                     Ok(acceptance) => {
                         let frame =
                             success(id, ResponsePayload::RunCancelled(acceptance.result.clone()));
+                        // Subscribers get every event even if the owner's
+                        // connection has already failed.
+                        for event in &acceptance.events {
+                            self.publish_to_subscribers(event).await;
+                        }
                         if self.send(&outbound, frame).await {
                             for event in acceptance.events {
                                 if !self.send(&outbound, notification(event)).await {
@@ -1029,6 +1091,59 @@ impl AppServer {
                     Err(error) => failure(id, error),
                 };
                 let _ = self.send(&outbound, frame).await;
+            }
+            Command::RunSubscribe(params) => {
+                let actor = local_actor();
+                let run = match self.inner.store.run(&params.run_id, &actor.id) {
+                    Ok(run) => run,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                let connection_id = connection.lock().await.id.clone();
+                let mut terminal = run.status.is_terminal();
+                let mut last_seq = run.last_seq;
+                if !terminal {
+                    self.register_subscriber(&params.run_id, &connection_id, &outbound)
+                        .await;
+                    connection
+                        .lock()
+                        .await
+                        .subscribed_runs
+                        .insert(params.run_id.clone());
+                    // Re-read after registering: the run may have terminated in
+                    // between, in which case its terminal fan-out already ran
+                    // and removed the subscriber map, so this connection would
+                    // otherwise wait for an event that never comes.
+                    if let Ok(run) = self.inner.store.run(&params.run_id, &actor.id) {
+                        terminal = run.status.is_terminal();
+                        last_seq = run.last_seq;
+                    }
+                    if terminal {
+                        self.unregister_subscriber(&params.run_id, &connection_id)
+                            .await;
+                        connection
+                            .lock()
+                            .await
+                            .subscribed_runs
+                            .remove(&params.run_id);
+                    }
+                }
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(
+                            id,
+                            ResponsePayload::RunSubscribed(RunSubscribedResult {
+                                run_id: params.run_id,
+                                session_id: run.session_id,
+                                last_seq,
+                                terminal,
+                            }),
+                        ),
+                    )
+                    .await;
             }
             Command::ApprovalResolve(params) => {
                 let actor = local_actor();
@@ -1065,7 +1180,9 @@ impl AppServer {
                             .await
                             && resolution.created
                         {
-                            let _ = self.send(&outbound, notification(resolution.event)).await;
+                            let event = resolution.event;
+                            self.publish_to_subscribers(&event).await;
+                            let _ = self.send(&outbound, notification(event)).await;
                         }
                     }
                     Err(store) => {
@@ -1118,6 +1235,105 @@ impl AppServer {
 
     async fn send(&self, outbound: &Outbound, frame: ServerFrame) -> bool {
         outbound.send(frame).await
+    }
+
+    /// Register `connection_id` as the owner of a live run so `run.subscribe`
+    /// fan-out can avoid double-delivering to the owner's run sink.
+    async fn register_run_owner(&self, run_id: &str, connection_id: &str) {
+        self.inner
+            .run_owners
+            .lock()
+            .await
+            .insert(run_id.to_owned(), connection_id.to_owned());
+    }
+
+    /// Subscribe one connection to a live run's events.
+    async fn register_subscriber(&self, run_id: &str, connection_id: &str, outbound: &Outbound) {
+        self.inner
+            .run_subscribers
+            .lock()
+            .await
+            .entry(run_id.to_owned())
+            .or_default()
+            .insert(connection_id.to_owned(), outbound.clone());
+    }
+
+    /// Remove one connection from a single run's subscriber set.
+    async fn unregister_subscriber(&self, run_id: &str, connection_id: &str) {
+        let mut subscribers = self.inner.run_subscribers.lock().await;
+        if let Some(entries) = subscribers.get_mut(run_id) {
+            entries.remove(connection_id);
+            if entries.is_empty() {
+                subscribers.remove(run_id);
+            }
+        }
+    }
+
+    /// Remove one connection's live-run registrations on disconnect.
+    async fn drop_connection_registrations(
+        &self,
+        connection_id: &str,
+        subscribed: &HashSet<String>,
+    ) {
+        {
+            let mut owners = self.inner.run_owners.lock().await;
+            owners.retain(|_, owner| owner != connection_id);
+        }
+        if subscribed.is_empty() {
+            return;
+        }
+        let mut subscribers = self.inner.run_subscribers.lock().await;
+        for run_id in subscribed {
+            if let Some(entries) = subscribers.get_mut(run_id) {
+                entries.remove(connection_id);
+                if entries.is_empty() {
+                    subscribers.remove(run_id);
+                }
+            }
+        }
+    }
+
+    /// Fan a durable event out to every `run.subscribe` connection except the
+    /// one that owns the run (which receives it through its own run sink).
+    async fn publish_to_subscribers(&self, envelope: &EventEnvelope) {
+        let targets = {
+            let owner = self
+                .inner
+                .run_owners
+                .lock()
+                .await
+                .get(&envelope.run_id)
+                .cloned();
+            let subscribers = self.inner.run_subscribers.lock().await;
+            subscribers
+                .get(&envelope.run_id)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|(connection_id, _)| {
+                            Some(connection_id.as_str()) != owner.as_deref()
+                        })
+                        .map(|(_, outbound)| outbound.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for outbound in targets {
+            let _ = self.send(&outbound, notification(envelope.clone())).await;
+        }
+        if matches!(
+            envelope.event,
+            CanonicalEvent::RunCompleted(_)
+                | CanonicalEvent::RunFailed(_)
+                | CanonicalEvent::RunCancelled(_)
+        ) {
+            self.inner
+                .run_subscribers
+                .lock()
+                .await
+                .remove(&envelope.run_id);
+            self.inner.run_owners.lock().await.remove(&envelope.run_id);
+        }
     }
 
     fn prompt_start_frames_fit(
@@ -1227,18 +1443,58 @@ impl AppServer {
         response_id: &RpcId,
         session_id: &str,
         limit: u16,
+        before_cursor: Option<u64>,
     ) -> Result<SessionHistoryResult, ProtocolError> {
         if limit == 0 || limit > self.inner.config.event_page_limit {
             return Err(error(-32602, "invalid_session_history_limit", false));
         }
-        let events = self
-            .inner
-            .store
-            .session_events(session_id, &local_actor().id)
-            .map_err(store_error)?;
+        // Walk events newest-first in bounded chunks. A page must begin at a
+        // history-group boundary (an item/tool event, not a reasoning delta),
+        // otherwise the oldest group's reasoning would be cut off and the
+        // following page could never recover it. Reading continues until the
+        // window starts at such a boundary or the log is exhausted.
+        let requested = usize::from(limit);
+        let mut cursor = before_cursor;
+        let mut window: Vec<(u64, EventEnvelope)> = Vec::new();
+        // A single item can be preceded by many reasoning/content deltas, so
+        // reading by event needs more than `limit` rows; the cap turns a
+        // pathological unbroken delta run into a structured error instead of
+        // silently dropping content.
+        let max_events = requested.saturating_mul(64).max(256);
+        let exhausted = loop {
+            let chunk = self
+                .inner
+                .store
+                .session_event_window(session_id, &local_actor().id, cursor, requested + 1)
+                .map_err(store_error)?;
+            if chunk.is_empty() {
+                break true;
+            }
+            cursor = Some(chunk[0].0);
+            let exhausted = chunk.len() <= requested;
+            window.splice(0..0, chunk);
+            // Reasoning and content deltas attach to the item that follows
+            // them, so the window is only group-complete once its oldest event
+            // is not a delta.
+            let starts_at_boundary = !matches!(
+                window[0].1.event,
+                CanonicalEvent::ReasoningDelta(_) | CanonicalEvent::ContentDelta(_)
+            );
+            if starts_at_boundary || exhausted {
+                break exhausted;
+            }
+            if window.len() >= max_events {
+                return Err(error(-32008, "session_history_scan_limit", false));
+            }
+        };
+        let entries = history_entries_from_window(&window);
+        // `exhausted` means no older events exist; otherwise older events (and
+        // therefore possibly older items) remain.
+        let has_more = !exhausted || entries.len() > requested;
         bounded_history(
-            history_items_from_events(&events),
-            usize::from(limit),
+            entries,
+            requested,
+            has_more,
             self.inner.config.max_frame_bytes,
             response_id,
         )
@@ -1293,8 +1549,7 @@ impl AppServer {
     fn spawn_agent_run(
         &self,
         run_id: String,
-        content: String,
-        model: Option<String>,
+        prompt: PromptRequest,
         cancel: watch::Receiver<Option<String>>,
         outbound: Outbound,
     ) {
@@ -1316,12 +1571,28 @@ impl AppServer {
                 session_id: run.session_id,
                 outbound: outbound.clone(),
             };
-            let masked_prompt = mask_secrets(&content);
+            let masked_prompt = mask_secrets(&prompt.content);
+            // Planning mode owns the system prompt: a caller cannot override the
+            // directive that turns the turn into plan generation. The prompt is
+            // used only for the model request and is never persisted, so it is
+            // not masked here (matching the user content, which the event sink
+            // masks before it reaches the log).
+            let (system_prompt, mode) = if prompt.plan_mode {
+                (
+                    Some(planning_system_prompt().to_owned()),
+                    Some("plan".to_owned()),
+                )
+            } else {
+                (prompt.system_prompt, None)
+            };
             let request = AgentRequest {
-                model: model.unwrap_or_else(|| server.inner.default_model.clone()),
+                model: prompt
+                    .model
+                    .unwrap_or_else(|| server.inner.default_model.clone()),
                 history: Vec::<Message>::new(),
-                user_input: content,
-                system_prompt: None,
+                user_input: prompt.content,
+                system_prompt,
+                mode,
                 temperature: 0.0,
                 max_tokens: None,
                 limits: AgentLimits::default(),
@@ -1399,12 +1670,13 @@ impl AppServer {
         );
         let terminal = match acceptance {
             Ok(acceptance) => {
-                if let Some(outbound) = outbound {
-                    for event in acceptance.events {
-                        if !self.send(outbound, notification(event)).await {
-                            break;
-                        }
+                for event in acceptance.events {
+                    if let Some(outbound) = outbound {
+                        let _ = self.send(outbound, notification(event.clone())).await;
                     }
+                    // Subscribers must observe the terminal even when the owner
+                    // disconnected before it was recorded.
+                    self.publish_to_subscribers(&event).await;
                 }
                 true
             }
@@ -1882,6 +2154,10 @@ impl AppServerEventSink {
             .append_event(&self.run_id, event, terminal)
             .await
             .ok_or_else(|| RuntimeError::Sink("run no longer accepts events".to_owned()))?;
+        // Fan out to subscribers before the owner send: the event is already
+        // durable, and a failed owner delivery must not withhold the terminal
+        // from `run.subscribe` connections.
+        self.server.publish_to_subscribers(&envelope).await;
         if !self
             .server
             .send(&self.outbound, notification(envelope.clone()))
@@ -1959,6 +2235,10 @@ impl ApprovalGate for AppServerApprovalGate {
                 .into_iter()
                 .last()
                 .ok_or_else(|| RuntimeError::Sink("approval event is missing".to_owned()))?;
+            // Subscribers see the approval request even if the owner is gone;
+            // the waiter still fails closed below when the owner cannot be
+            // reached, so the run does not silently hang.
+            self.server.publish_to_subscribers(&event).await;
             if !self.server.send(&self.outbound, notification(event)).await {
                 self.server
                     .inner
@@ -2278,12 +2558,29 @@ fn legacy_tool_calls(message: &cool_store::domains::conversations::Message) -> V
         .collect()
 }
 
-fn history_items_from_events(events: &[EventEnvelope]) -> Vec<HistoryItem> {
-    let mut items = Vec::new();
+/// One projected history item together with durable event cursors. `cursor`
+/// points at the item's own event; `start_cursor` points at the first event of
+/// the group (the leading reasoning deltas, when present), so a page boundary
+/// never splits reasoning from the assistant item it belongs to.
+struct HistoryEntry {
+    start_cursor: u64,
+    item: HistoryItem,
+}
+
+/// Project an ordered event window into history items, attaching accumulated
+/// reasoning deltas to the assistant item that follows them.
+fn history_entries_from_window(window: &[(u64, EventEnvelope)]) -> Vec<HistoryEntry> {
+    let mut entries = Vec::new();
     let mut reasoning = String::new();
-    for envelope in events {
+    let mut group_start: Option<u64> = None;
+    for (cursor, envelope) in window {
         match &envelope.event {
-            CanonicalEvent::ReasoningDelta(delta) => reasoning.push_str(&delta.text),
+            CanonicalEvent::ReasoningDelta(delta) => {
+                if reasoning.is_empty() {
+                    group_start = Some(*cursor);
+                }
+                reasoning.push_str(&delta.text);
+            }
             CanonicalEvent::ItemCompleted(item) => {
                 let Some(role) = item.role.as_deref() else {
                     continue;
@@ -2297,54 +2594,76 @@ fn history_items_from_events(events: &[EventEnvelope]) -> Vec<HistoryItem> {
                     reasoning.clear();
                     None
                 };
-                items.push(HistoryItem {
-                    role: role.to_owned(),
-                    content: item.content.clone(),
-                    reasoning: attached,
-                    tool_calls: item.tool_calls.clone(),
-                    tool_call_id: None,
-                    name: None,
+                let start_cursor = group_start.take().unwrap_or(*cursor);
+                entries.push(HistoryEntry {
+                    start_cursor,
+                    item: HistoryItem {
+                        role: role.to_owned(),
+                        content: item.content.clone(),
+                        reasoning: attached,
+                        tool_calls: item.tool_calls.clone(),
+                        tool_call_id: None,
+                        name: None,
+                    },
                 });
             }
-            CanonicalEvent::ToolCompleted(tool) => items.push(HistoryItem {
-                role: "tool".to_owned(),
-                content: Some(
-                    serde_json::to_string(&tool.result).unwrap_or_else(|_| "null".to_owned()),
-                ),
-                reasoning: None,
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
-            CanonicalEvent::ToolFailed(tool) => items.push(HistoryItem {
-                role: "tool".to_owned(),
-                content: Some(
-                    serde_json::json!({
-                        "error": tool.message,
-                        "errorCode": tool.error_code,
-                    })
-                    .to_string(),
-                ),
-                reasoning: None,
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
+            CanonicalEvent::ToolCompleted(tool) => {
+                reasoning.clear();
+                group_start = None;
+                entries.push(HistoryEntry {
+                    start_cursor: *cursor,
+                    item: HistoryItem {
+                        role: "tool".to_owned(),
+                        content: Some(
+                            serde_json::to_string(&tool.result)
+                                .unwrap_or_else(|_| "null".to_owned()),
+                        ),
+                        reasoning: None,
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(tool.call_id.clone()),
+                        name: Some(tool.name.clone()),
+                    },
+                });
+            }
+            CanonicalEvent::ToolFailed(tool) => {
+                reasoning.clear();
+                group_start = None;
+                entries.push(HistoryEntry {
+                    start_cursor: *cursor,
+                    item: HistoryItem {
+                        role: "tool".to_owned(),
+                        content: Some(
+                            serde_json::json!({
+                                "error": tool.message,
+                                "errorCode": tool.error_code,
+                            })
+                            .to_string(),
+                        ),
+                        reasoning: None,
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(tool.call_id.clone()),
+                        name: Some(tool.name.clone()),
+                    },
+                });
+            }
             _ => {}
         }
     }
-    items
+    entries
 }
 
 fn bounded_history(
-    items: Vec<HistoryItem>,
+    entries: Vec<HistoryEntry>,
     limit: usize,
+    has_older_row: bool,
     max_frame_bytes: usize,
     response_id: &RpcId,
 ) -> Result<SessionHistoryResult, ProtocolError> {
-    let original_len = items.len();
-    let mut has_more = items.len() > limit;
-    let mut retained = items
+    let original_len = entries.len();
+    // `has_more` is true when either the caller's window proved an older row
+    // exists or the frame-budget trim below drops leading items.
+    let mut has_more = has_older_row || entries.len() > limit;
+    let mut retained = entries
         .into_iter()
         .rev()
         .take(limit)
@@ -2352,12 +2671,16 @@ fn bounded_history(
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
-    let encoded_len = |candidate: &[HistoryItem], has_more: bool| {
+    let encoded_len = |candidate: &[HistoryEntry], has_more: bool| {
         serde_json::to_vec(&success(
             response_id.clone(),
             ResponsePayload::SessionHistory(SessionHistoryResult {
-                items: candidate.to_vec(),
+                items: candidate.iter().map(|entry| entry.item.clone()).collect(),
                 has_more,
+                // Account for the largest possible cursor so a page that just
+                // fits the probe cannot overflow the real frame and tear down
+                // the connection.
+                next_cursor: has_more.then_some(u64::MAX),
             }),
         ))
         .map(|encoded| encoded.len())
@@ -2367,14 +2690,24 @@ fn bounded_history(
         retained.remove(0);
         has_more = true;
     }
-    // History has no pagination cursor, so an item that cannot fit any bounded
-    // frame fails closed instead of silently returning an empty page.
+    // The page could not fit even one item: fail closed rather than silently
+    // returning an empty page.
     if retained.is_empty() && original_len > 0 {
         return Err(error(-32008, "outbound_frame_too_large", false));
     }
+    // Only expose a cursor when older history exists; a final page reports
+    // `None` so clients know they have reached the oldest item. The cursor is
+    // the oldest retained group's start, so paging back never re-includes a
+    // reasoning delta already delivered with its assistant item.
+    let next_cursor = if has_more {
+        retained.first().map(|entry| entry.start_cursor)
+    } else {
+        None
+    };
     Ok(SessionHistoryResult {
-        items: retained,
+        items: retained.into_iter().map(|entry| entry.item).collect(),
         has_more,
+        next_cursor,
     })
 }
 
@@ -2657,8 +2990,10 @@ pub fn capabilities() -> BTreeSet<String> {
         "local_socket",
         "recovery",
         "run_cancellation",
+        "run_subscribe",
         "session_fork",
         "session_history",
+        "session_history_cursor",
         "session_list",
         "session_runs",
         "session_steer",

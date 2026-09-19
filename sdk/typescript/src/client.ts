@@ -44,6 +44,7 @@ export class CoolSdk {
   sessionSteer(params: protocol.SessionSteerParams) { return this.send<protocol.SteerAcceptedResult>({ method: "session.steer", params }); }
   runCancel(params: protocol.RunCancelParams) { return this.send<protocol.RunCancelledResult>({ method: "run.cancel", params }); }
   runEvents(params: protocol.RunEventsParams) { return this.send<protocol.EventPage>({ method: "run.events", params }); }
+  runSubscribe(params: protocol.RunSubscribeParams) { return this.send<protocol.RunSubscribedResult>({ method: "run.subscribe", params }); }
   approvalResolve(params: protocol.ApprovalResolveParams) { return this.send<protocol.ApprovalResolvedResult>({ method: "approval.resolve", params }); }
   statusGet(params: protocol.StatusGetParams) { return this.send<protocol.StatusGetResult>({ method: "status.get", params }); }
 

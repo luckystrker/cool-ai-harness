@@ -279,11 +279,23 @@ impl AppClient {
         session_id: &str,
         limit: u16,
     ) -> Result<SessionHistoryResult, ClientError> {
+        self.session_history_page(session_id, limit, None).await
+    }
+
+    /// Paginated history read: `before_cursor` is the previous page's
+    /// `next_cursor`, so callers can walk older history deterministically.
+    pub async fn session_history_page(
+        &self,
+        session_id: &str,
+        limit: u16,
+        before_cursor: Option<u64>,
+    ) -> Result<SessionHistoryResult, ClientError> {
         let response = self
             .request(Command::SessionHistory(
                 cool_protocol::SessionHistoryParams {
                     session_id: session_id.to_owned(),
                     limit,
+                    before_cursor,
                 },
             ))
             .await?;
@@ -319,19 +331,60 @@ impl AppClient {
         text: &str,
         model: Option<&str>,
     ) -> Result<PromptAcceptedResult, ClientError> {
+        self.prompt_with(
+            key,
+            session_id,
+            vec![ContentPart::Text {
+                text: text.to_owned(),
+            }],
+            model,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Prompt with explicit canonical inputs (content parts, planning mode and
+    /// an optional caller system prompt).
+    pub async fn prompt_with(
+        &self,
+        key: &str,
+        session_id: &str,
+        content: Vec<ContentPart>,
+        model: Option<&str>,
+        plan_mode: bool,
+        system_prompt: Option<&str>,
+    ) -> Result<PromptAcceptedResult, ClientError> {
         let response = self
             .request(Command::SessionPrompt(cool_protocol::SessionPromptParams {
                 idempotency_key: idempotency(key)?,
                 session_id: session_id.to_owned(),
-                content: vec![ContentPart::Text {
-                    text: text.to_owned(),
-                }],
+                content,
                 model: model.map(str::to_owned),
+                plan_mode,
+                system_prompt: system_prompt.map(str::to_owned),
             }))
             .await?;
         match response {
             ResponsePayload::PromptAccepted(result) => Ok(result),
             other => Err(unexpected("prompt_accepted", &other)),
+        }
+    }
+
+    /// Subscribe this connection to a run's live events. The response reports
+    /// the durable cursor and whether the run is already terminal.
+    pub async fn run_subscribe(
+        &self,
+        run_id: &str,
+    ) -> Result<cool_protocol::RunSubscribedResult, ClientError> {
+        let response = self
+            .request(Command::RunSubscribe(cool_protocol::RunSubscribeParams {
+                run_id: run_id.to_owned(),
+            }))
+            .await?;
+        match response {
+            ResponsePayload::RunSubscribed(result) => Ok(result),
+            other => Err(unexpected("run_subscribed", &other)),
         }
     }
 

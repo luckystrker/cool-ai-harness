@@ -427,6 +427,55 @@ impl DurableStore {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Newest-first window of a session's canonical events, paginated on the
+    /// append-only `rust_events.rowid` cursor. `before_cursor` is exclusive;
+    /// `limit + 1` rows are read so the caller can report `has_more`. The
+    /// returned rows are oldest-first and carry their cursor.
+    pub fn session_event_window(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+        before_cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, EventEnvelope)>, StoreError> {
+        let connection = self.connection()?;
+        let owner = connection
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        if before_cursor.is_some_and(|value| value > i64::MAX as u64) {
+            return Ok(Vec::new());
+        }
+        let mut statement = connection.prepare(
+            "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+             WHERE r.session_id = ?1 AND (?2 IS NULL OR e.rowid < ?2) \
+             ORDER BY e.rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                session_id,
+                before_cursor.map(|value| value as i64),
+                limit as i64
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut window = rows
+            .map(|row| {
+                let (cursor, json) = row?;
+                Ok::<_, StoreError>((cursor as u64, serde_json::from_str(&json)?))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        window.reverse();
+        Ok(window)
+    }
+
     pub fn list_sessions(
         &self,
         actor_id: &str,

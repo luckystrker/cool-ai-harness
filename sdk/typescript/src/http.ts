@@ -8,7 +8,10 @@
 // Browsers get a `cool_client` cookie automatically. In Node (no cookie jar)
 // you MUST pass the same stable `clientId` to both `HttpTransport` and
 // `streamRunEvents`, otherwise a run's live events are delivered to the
-// connection that started it, not to a fresh subscriber connection.
+// connection that started it, not to a fresh subscriber connection. A
+// different connection can still follow a run by issuing `run.subscribe`
+// (CoolSdk.runSubscribe) before opening the stream; the runtime then fans the
+// run's live events out to it.
 
 import { CoolProtocolError, type CoolTransport } from "./client.js";
 import type * as protocol from "./generated/cool_protocol.js";

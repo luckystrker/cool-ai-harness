@@ -864,6 +864,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 history: Vec::new(),
                 user_input: prompt,
                 system_prompt: None,
+                mode: None,
                 temperature: 0.7,
                 max_tokens: None,
                 limits: AgentLimits::default(),

@@ -159,6 +159,7 @@ async fn session_for_conversation_imports_history_and_is_idempotent() {
         Command::SessionHistory(SessionHistoryParams {
             session_id: link.session_id.clone(),
             limit: 50,
+            before_cursor: None,
         }),
     )
     .await;
@@ -358,6 +359,7 @@ async fn failed_and_malformed_tool_rows_degrade_to_canonical_events() {
         Command::SessionHistory(SessionHistoryParams {
             session_id: link.session_id,
             limit: 50,
+            before_cursor: None,
         }),
     )
     .await;
@@ -466,6 +468,7 @@ async fn empty_conversations_link_without_imported_events() {
         Command::SessionHistory(SessionHistoryParams {
             session_id: link.session_id,
             limit: 50,
+            before_cursor: None,
         }),
     )
     .await;
@@ -588,6 +591,7 @@ async fn session_runs_lists_import_and_prompt_runs_newest_first() {
         Command::SessionHistory(SessionHistoryParams {
             session_id: link.session_id,
             limit: 50,
+            before_cursor: None,
         }),
     )
     .await;

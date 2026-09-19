@@ -81,6 +81,7 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     history: Vec::new(),
                     user_input: scenario.id.clone(),
                     system_prompt: None,
+                    mode: None,
                     temperature: 0.0,
                     max_tokens: None,
                     limits: AgentLimits::default(),

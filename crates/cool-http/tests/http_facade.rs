@@ -89,6 +89,8 @@ async fn create_and_prompt(client: &reqwest::Client, base: &str) -> String {
                         text: "hello".to_owned(),
                     }],
                     model: None,
+                    plan_mode: false,
+                    system_prompt: None,
                 }),
             ),
         )
@@ -257,6 +259,8 @@ async fn events_stream_replays_durable_events_and_ends_on_terminal() {
                         text: "hello".to_owned(),
                     }],
                     model: None,
+                    plan_mode: false,
+                    system_prompt: None,
                 }),
             ),
         )

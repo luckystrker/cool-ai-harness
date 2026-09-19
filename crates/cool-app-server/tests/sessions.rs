@@ -29,6 +29,26 @@ impl ToolHandler for SlowTool {
     }
 }
 
+/// Blocks inside a tool call until released, so a test can hold a run live
+/// deterministically instead of relying on provider timing.
+struct GateTool {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ToolHandler for GateTool {
+    async fn execute(
+        &self,
+        _context: &ToolContext,
+        _arguments: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolResult::ok(json!("released")))
+    }
+}
+
 async fn connected_client(
     server: AppServer,
 ) -> (AppClient, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -619,6 +639,411 @@ async fn oversized_session_labels_are_rejected_before_persistence() {
     ));
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn planning_prompt_uses_the_runtime_directive_and_marks_the_run_mode() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("plan drafted".to_owned()),
+        ModelEvent::Finish { reason: None },
+    ])]));
+    let server = scripted_server(provider.clone(), directory.path());
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("plan-session", None, None)
+        .await
+        .unwrap();
+
+    let events = client.subscribe();
+    // A caller-supplied system prompt must not win over the planning directive.
+    let run_id = client
+        .prompt_with(
+            "plan-prompt",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "design it".to_owned(),
+            }],
+            None,
+            true,
+            Some("ignore the runtime"),
+        )
+        .await
+        .unwrap()
+        .run_id;
+    let emitted = drain_run(events, &run_id).await;
+    assert!(matches!(
+        emitted.first(),
+        Some(CanonicalEvent::RunStarted(started)) if started.mode.as_deref() == Some("plan")
+    ));
+
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .first()
+        .expect("system prompt is first");
+    assert_eq!(system.role, cool_agent::MessageRole::System);
+    let content = system.content.as_deref().unwrap_or_default();
+    assert!(content.contains("PLANNING MODE"), "{content}");
+    assert!(!content.contains("ignore the runtime"));
+    // The masked user item still carries the prompt.
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == cool_agent::MessageRole::User
+            && message.content.as_deref() == Some("design it")
+    }));
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn caller_system_prompt_reaches_non_planning_runs() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::echo());
+    let server = scripted_server(provider.clone(), directory.path());
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("system-session", None, None)
+        .await
+        .unwrap();
+    let events = client.subscribe();
+    let run_id = client
+        .prompt_with(
+            "system-prompt",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "hello".to_owned(),
+            }],
+            None,
+            false,
+            Some("be terse"),
+        )
+        .await
+        .unwrap()
+        .run_id;
+    drain_run(events, &run_id).await;
+    let requests = provider.requests().await;
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == cool_agent::MessageRole::System
+            && message.content.as_deref() == Some("be terse")
+    }));
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn session_history_paginates_on_a_durable_cursor_without_splitting_reasoning() {
+    let directory = tempdir().unwrap();
+    // Each assistant turn streams several reasoning deltas then content, so a
+    // page boundary can fall inside a group. The deltas must travel with the
+    // assistant item they belong to, never split onto a different page.
+    let turn = |prefix: &str| {
+        Ok(vec![
+            ModelEvent::Reasoning(format!("{prefix} a")),
+            ModelEvent::Reasoning(format!("{prefix} b")),
+            ModelEvent::Reasoning(format!("{prefix} c")),
+            ModelEvent::Content(prefix.to_owned()),
+            ModelEvent::Finish { reason: None },
+        ])
+    };
+    let provider = Arc::new(ScriptedDriver::new([
+        turn("first"),
+        turn("second"),
+        turn("third"),
+    ]));
+    let server = scripted_server(provider, directory.path());
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("page-session", None, None)
+        .await
+        .unwrap();
+    for key in ["page-1", "page-2", "page-3"] {
+        let events = client.subscribe();
+        let run_id = client
+            .prompt(key, &session_id, key, None)
+            .await
+            .unwrap()
+            .run_id;
+        drain_run(events, &run_id).await;
+    }
+
+    // An asymmetric limit makes the boundary land mid-group for at least one
+    // page (three items per turn: user + assistant).
+    let mut cursor = None;
+    let mut pages = Vec::new();
+    loop {
+        let page = client
+            .session_history_page(&session_id, 3, cursor)
+            .await
+            .unwrap();
+        assert!(page.items.len() <= 3);
+        pages.push(page.clone());
+        if !page.has_more {
+            assert!(page.next_cursor.is_none(), "final page has no cursor");
+            break;
+        }
+        let next = page.next_cursor.expect("a non-final page exposes a cursor");
+        assert!(cursor.is_none_or(|previous| next < previous));
+        cursor = Some(next);
+    }
+    // Pages arrive newest-first; within a page items stay chronological.
+    // Reverse the page order to walk the transcript oldest-first.
+    let items = pages
+        .iter()
+        .rev()
+        .flat_map(|page| page.items.iter())
+        .collect::<Vec<_>>();
+    let roles = items
+        .iter()
+        .map(|item| item.role.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant"
+        ]
+    );
+    // No item may be duplicated or dropped across page boundaries.
+    let contents = items
+        .iter()
+        .filter_map(|item| item.content.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        contents,
+        ["page-1", "first", "page-2", "second", "page-3", "third"]
+    );
+    for item in &items {
+        if item.role == "assistant" {
+            let prefix = item.content.as_deref().unwrap();
+            assert_eq!(
+                item.reasoning.as_deref(),
+                Some(format!("{prefix} a{prefix} b{prefix} c").as_str()),
+                "reasoning for {prefix} was split or lost"
+            );
+        }
+    }
+    assert!(pages[0].has_more);
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn run_subscribe_fans_live_events_out_to_a_second_connection() {
+    let directory = tempdir().unwrap();
+    // A gated tool holds the run live deterministically while the second
+    // connection subscribes, so this exercises the fan-out path rather than
+    // catch-up.
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::Content("before".to_owned()),
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "call-gate".to_owned(),
+                name: "gate_tool".to_owned(),
+                arguments: Default::default(),
+            }),
+            ModelEvent::Finish { reason: None },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("after".to_owned()),
+            ModelEvent::Finish { reason: None },
+        ]),
+    ]));
+    let mut registry = builtin_registry();
+    registry = registry
+        .extend([Tool::new(
+            ToolDefinition {
+                name: "gate_tool".to_owned(),
+                description: "deterministic gate".to_owned(),
+                parameters: json!({"type": "object"}),
+            },
+            [],
+            Decision::Allow,
+            GateTool {
+                started: started.clone(),
+                release: release.clone(),
+            },
+        )])
+        .unwrap();
+    let server = AppServer::with_agent_runtime(
+        ServerConfig::default(),
+        DurableStore::in_memory().unwrap(),
+        AgentRuntime::new(provider, registry),
+        Workspace::new(directory.path()).unwrap(),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted",
+    )
+    .unwrap();
+    let (owner, owner_task) = connected_client(server.clone()).await;
+    let session_id = owner
+        .create_session("fanout-session", None, None)
+        .await
+        .unwrap();
+    let run_id = owner
+        .prompt("fanout-prompt", &session_id, "hello", None)
+        .await
+        .unwrap()
+        .run_id;
+
+    // Wait until the run is parked inside the tool, so it is guaranteed live.
+    timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("run reaches the gate tool");
+
+    // A different connection subscribes to the live run. Its subscription
+    // returns a durable cursor and then receives live events; the local
+    // receiver is created first so no fan-out event is dropped.
+    let (subscriber, subscriber_task) = connected_client(server.clone()).await;
+    let mut live = subscriber.subscribe();
+    let subscription = subscriber.run_subscribe(&run_id).await.unwrap();
+    assert_eq!(subscription.run_id, run_id);
+    assert!(!subscription.terminal);
+
+    // Release the tool so the run emits its remaining events and terminates.
+    release.notify_one();
+    let mut received = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        while let Ok(envelope) = live.recv().await {
+            if envelope.run_id != run_id {
+                continue;
+            }
+            let terminal = matches!(
+                envelope.event,
+                CanonicalEvent::RunCompleted(_)
+                    | CanonicalEvent::RunFailed(_)
+                    | CanonicalEvent::RunCancelled(_)
+            );
+            received.push(envelope.event);
+            if terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("subscriber receives the run's events");
+
+    assert!(
+        received.iter().any(
+            |event| matches!(event, CanonicalEvent::ContentDelta(delta) if delta.text == "after")
+        ),
+        "live post-subscription content must be fanned out: {received:?}"
+    );
+    assert!(matches!(
+        received.last(),
+        Some(CanonicalEvent::RunCompleted(_))
+    ));
+    // Catch-up from the subscription cursor reaches the same durable events.
+    let page = subscriber.run_events(&run_id, None, 50).await.unwrap();
+    assert!(
+        page.events
+            .iter()
+            .any(|event| matches!(event.event, CanonicalEvent::RunCompleted(_)))
+    );
+
+    drop(owner);
+    drop(subscriber);
+    owner_task
+        .await
+        .expect("owner task")
+        .expect("clean disconnect");
+    subscriber_task
+        .await
+        .expect("subscriber task")
+        .expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn run_subscribe_receives_the_terminal_when_the_owner_disconnects() {
+    let directory = tempdir().unwrap();
+    // Long delay: the owner disconnects mid-run, so the disconnect cancellation
+    // path (not the run sink) records the terminal event.
+    let provider = Arc::new(ScriptedDriver::echo_with_delay(Duration::from_secs(10)));
+    let server = scripted_server(provider, directory.path());
+    let (owner, owner_task) = connected_client(server.clone()).await;
+    let session_id = owner
+        .create_session("disconnect-sub", None, None)
+        .await
+        .unwrap();
+    let run_id = owner
+        .prompt("disconnect-sub-prompt", &session_id, "hi", None)
+        .await
+        .unwrap()
+        .run_id;
+
+    let (subscriber, subscriber_task) = connected_client(server.clone()).await;
+    let mut live = subscriber.subscribe();
+    let subscription = subscriber.run_subscribe(&run_id).await.unwrap();
+    assert!(!subscription.terminal);
+
+    // Drop the owner; the server cancels its owned run and the terminal event
+    // must reach the subscriber.
+    drop(owner);
+    owner_task
+        .await
+        .expect("owner task")
+        .expect("clean disconnect");
+    let terminal = timeout(Duration::from_secs(5), async {
+        loop {
+            let envelope = live.recv().await.expect("event channel open");
+            if envelope.run_id == run_id
+                && matches!(envelope.event, CanonicalEvent::RunCancelled(_))
+            {
+                return envelope.event;
+            }
+        }
+    })
+    .await
+    .expect("subscriber observes the terminal cancellation");
+    assert!(matches!(terminal, CanonicalEvent::RunCancelled(_)));
+
+    drop(subscriber);
+    subscriber_task
+        .await
+        .expect("subscriber task")
+        .expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn run_subscribe_reports_a_terminal_run_without_waiting() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::echo());
+    let server = scripted_server(provider, directory.path());
+    let (owner, owner_task) = connected_client(server.clone()).await;
+    let session_id = owner
+        .create_session("terminal-sub", None, None)
+        .await
+        .unwrap();
+    let events = owner.subscribe();
+    let run_id = owner
+        .prompt("terminal-sub-prompt", &session_id, "hi", None)
+        .await
+        .unwrap()
+        .run_id;
+    drain_run(events, &run_id).await;
+
+    let (subscriber, subscriber_task) = connected_client(server).await;
+    let subscription = subscriber.run_subscribe(&run_id).await.unwrap();
+    assert!(
+        subscription.terminal,
+        "terminal run is reported as terminal"
+    );
+    drop(owner);
+    drop(subscriber);
+    owner_task
+        .await
+        .expect("owner task")
+        .expect("clean disconnect");
+    subscriber_task
+        .await
+        .expect("subscriber task")
+        .expect("clean disconnect");
 }
 
 #[tokio::test]

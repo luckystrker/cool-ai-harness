@@ -6,6 +6,31 @@ use serde_json::Value;
 
 const CHARS_PER_TOKEN: usize = 4;
 pub const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 16_384;
+
+/// Canonical system prompt for planning turns (`session.prompt` with
+/// `planMode`). The model researches with tools and records the plan through
+/// the trusted `update_plan` tool, which the agent loop projects into
+/// `plan.created` / `plan.step_*` canonical events. Callers cannot override it.
+pub const PLANNING_SYSTEM_PROMPT: &str = "\
+You are in PLANNING MODE. Produce a detailed, well-researched execution plan \
+for the user's request instead of executing it.
+
+Process:
+1. RESEARCH: use your tools to investigate the task (read relevant files, \
+documentation and configuration).
+2. ANALYZE: identify the concrete files, functions and components to change.
+3. PLAN: record the plan by calling the `update_plan` tool exactly once with \
+a stable planId, a short title, and 3-10 specific, independently verifiable \
+steps. Reference concrete artifacts you discovered; generic steps are not \
+acceptable.
+4. FINISH: after `update_plan` succeeds, summarise the plan to the user. Do \
+not start executing the steps.";
+
+/// The planning-mode system prompt. Kept as a function so callers cannot
+/// mistake it for a caller-supplied prompt.
+pub fn planning_system_prompt() -> &'static str {
+    PLANNING_SYSTEM_PROMPT
+}
 const INSTRUCTION_CANDIDATES: &[&str] = &[
     "AGENTS.md",
     "agents.md",

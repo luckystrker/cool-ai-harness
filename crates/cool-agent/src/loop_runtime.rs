@@ -55,6 +55,9 @@ pub struct AgentRequest {
     pub history: Vec<Message>,
     pub user_input: String,
     pub system_prompt: Option<String>,
+    /// Optional run-mode marker surfaced on `run.started` (`plan` for planning
+    /// turns). `None` keeps the default agent mode.
+    pub mode: Option<String>,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
     pub limits: AgentLimits,
@@ -280,7 +283,12 @@ impl AgentRuntime {
         }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {
             model: Some(request.model.clone()),
-            mode: Some("m7_rust_agent".to_owned()),
+            mode: Some(
+                request
+                    .mode
+                    .clone()
+                    .unwrap_or_else(|| "m7_rust_agent".to_owned()),
+            ),
         }))
         .await?;
         let user_message = Message::text(MessageRole::User, request.user_input);

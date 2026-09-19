@@ -135,6 +135,8 @@ try {
       sessionId: created.value.sessionId,
       content: [{ type: "text", text: "M7 handshake" }],
       model: null,
+      planMode: false,
+      systemPrompt: null,
     },
   });
   if (prompted.kind !== "prompt_accepted") throw new Error("session.prompt contract mismatch");

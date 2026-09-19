@@ -98,6 +98,7 @@ fn request(workspace: &std::path::Path) -> AgentRequest {
         history: Vec::new(),
         user_input: "hello".to_owned(),
         system_prompt: Some("be precise".to_owned()),
+        mode: None,
         temperature: 0.0,
         max_tokens: None,
         limits: AgentLimits::default(),
@@ -151,6 +152,61 @@ async fn scripted_chat_streams_usage_and_completes() {
             "item.completed",
             "run.completed"
         ]
+    );
+}
+
+#[tokio::test]
+async fn run_mode_and_system_prompt_reach_the_provider() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("planned".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = AgentRuntime::new(provider.clone(), builtin_registry());
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut plan_request = request(directory.path());
+    plan_request.mode = Some("plan".to_owned());
+    plan_request.system_prompt = Some(cool_agent::planning_system_prompt().to_owned());
+    runtime
+        .run(
+            plan_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+
+    // The mode is surfaced on run.started and the directive reaches the model
+    // request as the leading system message.
+    let run_started = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            CanonicalEvent::RunStarted(started) => Some(started.mode.clone()),
+            _ => None,
+        })
+        .flatten();
+    assert_eq!(run_started.as_deref(), Some("plan"));
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .first()
+        .expect("system message must be first");
+    assert_eq!(system.role, cool_agent::MessageRole::System);
+    assert!(
+        system
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("PLANNING MODE")),
+        "planning directive missing from the model request"
     );
 }
 
