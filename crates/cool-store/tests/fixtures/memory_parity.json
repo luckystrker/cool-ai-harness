@@ -1,0 +1,185 @@
+{
+  "now": "2026-06-15 12:00:00.000000",
+  "nowMicros": 1781524800000000,
+  "seedSqlRetrieval": "\nINSERT INTO users(created_at, updated_at, id, external_id, username, display_name, is_active)\nVALUES ('2026-01-01 00:00:00.000000','2026-01-01 00:00:00.000000',1,'local','local','Local',1);\nINSERT INTO conversations(created_at, updated_at, id, user_id, title, working_directory, is_pinned, is_archived)\nVALUES ('2026-01-01 00:00:00.000000','2026-01-01 00:00:00.000000',1,1,'Alpha','/proj/alpha',0,0),\n       ('2026-01-01 00:00:00.000000','2026-01-01 00:00:00.000000',2,1,'Beta','/proj/beta',0,0);\nINSERT INTO memory_items(created_at, updated_at, user_id, scope, agent_id, conversation_id, memory_type, content, structured, tags, importance, confidence, source, status, supersedes_id, access_count, last_accessed_at, ttl_days, valid_from, valid_to, pinned) VALUES\n ('2026-06-10 00:00:00.000000','2026-06-10 00:00:00.000000',1,'global',NULL,NULL,'semantic','rust ownership model',NULL,NULL,0.10,0.70,'user_explicit','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-12 00:00:00.000000','2026-06-12 00:00:00.000000',1,'global',NULL,NULL,'semantic','rust borrow checker rules',NULL,NULL,0.20,0.70,'user_explicit','active',NULL,0,NULL,NULL,NULL,NULL,1),\n ('2026-06-14 00:00:00.000000','2026-06-14 00:00:00.000000',1,'global',NULL,NULL,'preference','prefers dark mode',NULL,NULL,0.95,0.70,'user_explicit','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-13 00:00:00.000000','2026-06-13 00:00:00.000000',1,'global',NULL,NULL,'semantic','rust ownership pending draft',NULL,NULL,0.30,0.70,'agent','pending_confirmation',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-13 00:00:00.000000','2026-06-13 00:00:00.000000',1,'global',NULL,NULL,'semantic','rust archived legacy note',NULL,NULL,0.40,0.70,'agent','archived',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-11 00:00:00.000000','2026-06-11 00:00:00.000000',1,'global',NULL,NULL,'procedural','rust cargo build procedure',NULL,NULL,0.50,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-09 00:00:00.000000','2026-06-09 00:00:00.000000',1,'conversation',NULL,1,'semantic','rust project alpha files',NULL,NULL,0.60,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-08 00:00:00.000000','2026-06-08 00:00:00.000000',1,'conversation',NULL,2,'semantic','rust project beta files','{\"_project_key\":\"/proj/alpha\"}',NULL,0.70,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-07 00:00:00.000000','2026-06-07 00:00:00.000000',1,'agent',42,NULL,'semantic','rust agent scoped note',NULL,NULL,0.80,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-13 00:00:00.000000','2026-06-13 00:00:00.000000',1,'global',NULL,NULL,'episodic','rust episode summary',NULL,NULL,0.90,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-15 11:00:00.000000','2026-06-15 11:00:00.000000',1,'global',NULL,NULL,'semantic','python unrelated content',NULL,NULL,0.05,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-05 00:00:00.000000','2026-06-05 00:00:00.000000',1,'global',NULL,NULL,'semantic','rust benchmark notes',NULL,'[\"rust\",\"systems\"]',0.15,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0);\n",
+  "seedSqlLifecycle": "\nINSERT INTO users(created_at, updated_at, id, external_id, username, display_name, is_active)\nVALUES ('2026-01-01 00:00:00.000000','2026-01-01 00:00:00.000000',1,'local','local','Local',1);\nINSERT INTO memory_items(created_at, updated_at, user_id, scope, agent_id, conversation_id, memory_type, content, structured, tags, importance, confidence, source, status, supersedes_id, access_count, last_accessed_at, ttl_days, valid_from, valid_to, pinned) VALUES\n ('2020-01-01 00:00:00.000000','2020-01-01 00:00:00.000000',1,'global',NULL,NULL,'semantic','decay me',NULL,NULL,0.05,0.50,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2026-06-15 11:00:00.000000','2026-06-15 11:00:00.000000',1,'global',NULL,NULL,'semantic','ttl me',NULL,NULL,0.50,0.70,'agent','active',NULL,0,NULL,1,'2026-01-01 00:00:00.000000',NULL,0),\n ('2026-06-15 11:00:00.000000','2026-06-15 11:00:00.000000',1,'global',NULL,NULL,'semantic','validity me',NULL,NULL,0.50,0.70,'agent','active',NULL,0,NULL,NULL,NULL,'2026-05-01 00:00:00.000000',0),\n ('2026-01-01 00:00:00.000000','2026-01-01 00:00:00.000000',1,'global',NULL,NULL,'semantic','pending me',NULL,NULL,0.50,0.70,'agent','pending_confirmation',NULL,0,NULL,NULL,NULL,NULL,0),\n ('2020-01-01 00:00:00.000000','2020-01-01 00:00:00.000000',1,'global',NULL,NULL,'semantic','pinned old',NULL,NULL,0.01,0.50,'agent','active',NULL,0,NULL,NULL,NULL,NULL,1),\n ('2026-06-15 11:00:00.000000','2026-06-15 11:00:00.000000',1,'global',NULL,NULL,'semantic','healthy memory',NULL,NULL,0.50,0.70,'agent','active',NULL,0,NULL,NULL,NULL,NULL,0);\n",
+  "scenarios": [
+    {
+      "name": "fts_rank_status_pinned",
+      "query": {
+        "text": "rust",
+        "memoryType": null,
+        "scope": null,
+        "status": null,
+        "conversationId": null,
+        "limit": 5,
+        "includeArchived": false,
+        "hybrid": false
+      },
+      "ids": [
+        3,
+        10,
+        6,
+        2,
+        1
+      ],
+      "scores": [
+        0.930595238095238,
+        0.8484613932470697,
+        0.8204346528152274,
+        0.7343282284154868,
+        0.7067604181658129
+      ],
+      "ftsRanks": [
+        null,
+        -1.089108910891089e-06,
+        -9.734513274336284e-07,
+        -9.734513274336284e-07,
+        -1.089108910891089e-06
+      ]
+    },
+    {
+      "name": "type_filter_semantic",
+      "query": {
+        "text": "rust",
+        "memoryType": "semantic",
+        "scope": null,
+        "status": null,
+        "conversationId": null,
+        "limit": 5,
+        "includeArchived": false,
+        "hybrid": false
+      },
+      "ids": [
+        3,
+        2,
+        1,
+        12,
+        11
+      ],
+      "scores": [
+        0.930595238095238,
+        0.7343282284154868,
+        0.7067604181658129,
+        0.7011109434921337,
+        0.5771532593619972
+      ],
+      "ftsRanks": [
+        null,
+        -9.734513274336284e-07,
+        -1.089108910891089e-06,
+        -1.2571428571428573e-06,
+        null
+      ]
+    },
+    {
+      "name": "conversation_scope_project_key",
+      "query": {
+        "text": "rust",
+        "memoryType": null,
+        "scope": null,
+        "status": null,
+        "conversationId": 1,
+        "limit": 5,
+        "includeArchived": false,
+        "hybrid": false
+      },
+      "ids": [
+        3,
+        10,
+        6,
+        8,
+        7
+      ],
+      "scores": [
+        0.930595238095238,
+        0.8484613932470697,
+        0.8204346528152274,
+        0.8199998702065316,
+        0.8032875414394085
+      ],
+      "ftsRanks": [
+        null,
+        -1.089108910891089e-06,
+        -9.734513274336284e-07,
+        -9.734513274336284e-07,
+        -9.734513274336284e-07
+      ]
+    },
+    {
+      "name": "no_query_fallback_conversation",
+      "query": {
+        "text": null,
+        "memoryType": null,
+        "scope": null,
+        "status": null,
+        "conversationId": 1,
+        "limit": 5,
+        "includeArchived": false,
+        "hybrid": false
+      },
+      "ids": [
+        3,
+        6,
+        10,
+        8,
+        7
+      ],
+      "scores": [
+        0.930595238095238,
+        0.7273913043478261,
+        0.7007692307692308,
+        0.69,
+        0.6704794520547944
+      ],
+      "ftsRanks": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "name": "sparse_fts_fallback",
+      "query": {
+        "text": "cargo",
+        "memoryType": null,
+        "scope": null,
+        "status": null,
+        "conversationId": null,
+        "limit": 5,
+        "includeArchived": false,
+        "hybrid": false
+      },
+      "ids": [
+        3,
+        10,
+        6,
+        2,
+        11
+      ],
+      "scores": [
+        0.930595238095238,
+        0.7007692307692308,
+        0.6612629707146447,
+        0.5888805970149253,
+        0.5771532593619972
+      ],
+      "ftsRanks": [
+        null,
+        null,
+        -1.982805415917827,
+        null,
+        null
+      ]
+    }
+  ],
+  "lifecycle": {
+    "decay": 1,
+    "ttl": 1,
+    "validity": 1,
+    "pending": 1,
+    "expireTotal": 3
+  }
+}

@@ -22,12 +22,18 @@ fn write_plugin_fixture(root: &std::path::Path) {
 }
 
 #[test]
-fn doctor_reports_the_m9_runtime_boundary() {
-    let output = cool().arg("doctor").output().expect("run cool doctor");
+fn doctor_reports_the_m10_runtime_boundary() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = cool()
+        .arg("doctor")
+        .arg("--data-dir")
+        .arg(temporary.path())
+        .output()
+        .expect("run cool doctor");
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(report["status"], "ok");
-    assert_eq!(report["phase"], "M9");
+    assert_eq!(report["phase"], "M10");
     assert_eq!(report["durableState"], true);
     assert_eq!(report["securityKernel"], true);
     assert_eq!(report["agentLoop"], true);
@@ -36,6 +42,9 @@ fn doctor_reports_the_m9_runtime_boundary() {
     assert_eq!(report["hooks"], true);
     assert_eq!(report["tui"], true);
     assert_eq!(report["acp"], true);
+    // An empty data directory has no legacy store yet; the doctor reports that
+    // instead of adopting or writing anything.
+    assert_eq!(report["legacyStore"]["status"], "absent");
     assert!(report["capabilities"].as_array().unwrap().len() >= 5);
     assert!(
         report["capabilities"]

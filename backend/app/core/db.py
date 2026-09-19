@@ -161,6 +161,7 @@ def init_db() -> None:
     # Memory models are imported separately to avoid circular imports.
     from app.memory import models as memory_models  # noqa: F401
 
+    _assert_python_owns_migrations()
     settings = get_settings()
     if settings.environment == "production":
         _run_alembic_upgrade()
@@ -170,6 +171,34 @@ def init_db() -> None:
         _create_memory_virtual_tables()
         _hide_legacy_test_conversations()
     _seed_profiles()
+
+
+def rust_store_owner() -> str | None:
+    """Return ``rust_store_meta.owner`` when the Rust store adopted this DB.
+
+    The Rust store records migration ownership in `rust_store_meta` (see
+    ``crates/cool-store``). Once that marker exists, the Python runtime must not
+    create tables or run Alembic against the same file: two migration owners on
+    one database is exactly what the M10 cutover forbids.
+    """
+    inspector = inspect(engine)
+    if not inspector.has_table("rust_store_meta"):
+        return None
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT value FROM rust_store_meta WHERE key = 'owner'")
+        ).first()
+    return row[0] if row else None
+
+
+def _assert_python_owns_migrations() -> None:
+    """Fail closed when the database is owned by the Rust store."""
+    if rust_store_owner() == "rust":
+        raise RuntimeError(
+            "Database is owned by the Rust store (rust_store_meta.owner='rust'); "
+            "the Python runtime must not run create_all/Alembic against it. Use the "
+            "Rust store for migrations or restore a pre-adoption backup."
+        )
 
 
 def _run_alembic_upgrade() -> None:
@@ -186,6 +215,7 @@ def _run_alembic_upgrade() -> None:
 
     from alembic import command
 
+    _assert_python_owns_migrations()
     backend_root = Path(__file__).resolve().parents[2]
     cfg = Config(str(backend_root / "alembic.ini"))
     # The DB URL is resolved inside env.py from app settings; we only need to

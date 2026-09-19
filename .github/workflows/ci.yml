@@ -146,6 +146,29 @@ jobs:
         working-directory: backend
         run: python -m evals
 
+  store-parity:
+    name: Store parity (Rust legacy store vs Python schema)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust 1.98.0
+        run: rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: Cross-language store contract tests
+        working-directory: backend
+        run: pytest tests/test_rust_store_contract.py -q --tb=short
+
   frontend:
     name: Frontend (oxlint + build)
     runs-on: ubuntu-latest

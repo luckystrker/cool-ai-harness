@@ -250,6 +250,7 @@ dependencies = [
  "cool-protocol",
  "cool-security",
  "cool-state",
+ "cool-store",
  "cool-tui",
  "serde_json",
  "tempfile",
@@ -319,6 +320,19 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "cool-store"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "uuid",
 ]

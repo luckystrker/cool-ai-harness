@@ -9,6 +9,7 @@ members = [
     "crates/cool-protocol",
     "crates/cool-security",
     "crates/cool-state",
+    "crates/cool-store",
     "crates/cool-tui",
 ]
 resolver = "3"

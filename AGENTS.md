@@ -20,6 +20,15 @@ Two source roots live in one repo:
 - `backend/app` — the FastAPI application (Python package `app`).
 - `frontend/src` — the React SPA (Vite + TypeScript).
 
+The Rust trusted core lives in the root Cargo workspace under `crates/`
+(`cool-protocol`, `cool-state`, `cool-store`, `cool-agent`, `cool-cli`,
+`cool-tui`, `cool-acp`, `cool-extensions`, ...). Phase M10 added
+`crates/cool-store`: it adopts the Python SQLite schema at Alembic baseline
+`0022`, takes a verified backup before the first write, owns Rust migrations
+(`rust_store_meta`), and exposes typed subsystem stores. The Python runtimes
+(`backend/app/core/db.py`, `backend/alembic/env.py`) refuse a store owned by
+Rust, so do not bypass those guards.
+
 Supporting roots: `backend/tests` (pytest suite), `backend/evals`
 (scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),
 `docs/` (roadmap + per-phase specs), and `spikes/m0-rust-core` (the isolated,
@@ -196,7 +205,16 @@ alembic revision --autogenerate -m "describe change"   # new migration after mod
   sandboxing and capability checks).
 - `app/models/*.py` → add a `backend/alembic/versions/*.py` migration
   (autogenerate it; verify with `alembic upgrade head`). Current head is
-  `0022_phase4_completion`.
+  `0022_phase4_completion`, which is also the frozen baseline for
+  `crates/cool-store`; regenerate the Rust schema snapshot with
+  `backend $ python -m tests.schema_snapshot --update ../crates/cool-store/tests/fixtures/python_schema_0022.sql`
+  and update `crates/cool-store` if the baseline changes.
+- `crates/cool-store/*` → keep `backend/tests/test_rust_store_contract.py` green
+  (cross-language read/write, snapshot drift, migration-ownership guards) and the
+  Rust suite `cargo test -p cool-store`; store changes that touch adoption,
+  backups or datetime/JSON conventions need a cross-language test.
+- `backend/app/core/db.py` or `backend/alembic/env.py` (Rust-ownership guards) →
+  update `backend/tests/test_rust_store_contract.py`.
 - `app/api/schemas.py` or `app/api/*_router.py` → update
   `frontend/src/api/types.ts` and the consuming hook/component.
 - `app/agent/events.py` + `app/api/websocket.py` → update

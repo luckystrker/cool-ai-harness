@@ -84,11 +84,25 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
             }
         }
         "doctor" => {
+            let mut data_dir = default_data_dir();
+            let mut remaining = args.peekable();
+            while let Some(argument) = remaining.next() {
+                match argument.as_str() {
+                    "--data-dir" => {
+                        data_dir = PathBuf::from(
+                            remaining
+                                .next()
+                                .ok_or_else(|| usage("missing data directory"))?,
+                        );
+                    }
+                    _ => return Err(usage("unknown doctor argument")),
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "status": "ok",
-                    "phase": "M9",
+                    "phase": "M10",
                     "runtime": "rust-trusted-core",
                     "protocolVersion": 1,
                     "capabilities": capabilities(),
@@ -103,7 +117,8 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                     "hooks": true,
                     "compatibilityWorkers": ["codex", "claude"],
                     "tui": true,
-                    "acp": true
+                    "acp": true,
+                    "legacyStore": inspect_legacy_store(&data_dir)
                 }))
                 .expect("doctor JSON serializes")
             );
@@ -139,6 +154,40 @@ fn default_data_dir() -> PathBuf {
     env::var_os("COOL_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("data"))
+}
+
+/// Read-only inspection of the legacy database for `cool doctor`.
+///
+/// Never adopts or writes: the doctor reports whether `harness.db` is still
+/// Python-owned or already adopted by the Rust store, together with the
+/// Alembic baseline and Rust schema version.
+fn inspect_legacy_store(data_dir: &std::path::Path) -> serde_json::Value {
+    let database = data_dir.join("harness.db");
+    if !database.exists() {
+        return json!({"path": database.to_string_lossy(), "status": "absent"});
+    }
+    match cool_store::LegacyStore::open_read_only(&database) {
+        Ok(store) => {
+            let meta = store.meta().ok();
+            let owner = meta.as_ref().and_then(|meta| meta.owner.clone());
+            json!({
+                "path": database.to_string_lossy(),
+                "status": if owner.as_deref() == Some("rust") {
+                    "rust-owned"
+                } else {
+                    "python-owned"
+                },
+                "alembicRevision": store.alembic_revision().ok().flatten(),
+                "schemaVersion": store.schema_version().ok(),
+                "adoptedAt": meta.and_then(|meta| meta.adopted_at),
+            })
+        }
+        Err(error) => json!({
+            "path": database.to_string_lossy(),
+            "status": "error",
+            "error": error.to_string(),
+        }),
+    }
 }
 
 async fn build_server(data_dir: &std::path::Path) -> Result<AppServer, (i32, serde_json::Value)> {
@@ -763,6 +812,6 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH]\n  serve\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }

@@ -1,0 +1,4687 @@
+{
+  "alembic_revision": "0022",
+  "tables": {
+    "agent_profiles": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "slug",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "system_prompt",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "tool_names",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "skill_names",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "settings",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "avatar_color",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "0",
+          "name": "is_builtin",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "1",
+          "name": "is_active",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "0",
+          "name": "is_shared",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "columns": [
+            "is_active"
+          ],
+          "name": "ix_agent_profiles_is_active",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_shared"
+          ],
+          "name": "ix_agent_profiles_is_shared",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_agent_profiles_name",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "slug"
+          ],
+          "name": "ix_agent_profiles_slug",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "slug"
+          ],
+          "name": "sqlite_autoindex_agent_profiles_1",
+          "origin": "u",
+          "unique": true
+        }
+      ]
+    },
+    "agent_runs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "config",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "checkpoint",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "usage",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "iterations",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "finish_reason",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_agent_runs_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_agent_runs_status",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_agent_runs_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "alembic_version": {
+      "columns": [
+        {
+          "default": null,
+          "name": "version_num",
+          "notnull": 1,
+          "pk": 1,
+          "type": "VARCHAR(32)"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "columns": [
+            "version_num"
+          ],
+          "name": "sqlite_autoindex_alembic_version_1",
+          "origin": "pk",
+          "unique": true
+        }
+      ]
+    },
+    "approval_audits": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "call_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "tool_name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "arguments",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "approved",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "decision_source",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "decided_by",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "reason",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "is_breakpoint",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "breakpoint_type",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "duration_ms",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_approval_audits_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "ix_approval_audits_run_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "artifacts": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "tool_call_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "filename",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "media_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "size_bytes",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "sha256",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "storage_path",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "version",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "parent_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "metadata_",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "extracted_text",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "is_deleted",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "parent_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "artifacts",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_artifacts_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_deleted"
+          ],
+          "name": "ix_artifacts_is_deleted",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "kind"
+          ],
+          "name": "ix_artifacts_kind",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "ix_artifacts_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "sha256"
+          ],
+          "name": "ix_artifacts_sha256",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "budgets": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "daily_limit_usd",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "weekly_limit_usd",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "monthly_limit_usd",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "alert_threshold_pct",
+          "notnull": 1,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "block_on_exceed",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "override_until",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_alert_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_budgets_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "conversations": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "provider",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "working_directory",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "permissions",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "metadata_",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "capability_policy",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "profile_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "tags",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "folder",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'0'",
+          "name": "is_pinned",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "'0'",
+          "name": "is_archived",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "profile_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_profiles",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "folder"
+          ],
+          "name": "ix_conversations_folder",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_archived"
+          ],
+          "name": "ix_conversations_is_archived",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_pinned"
+          ],
+          "name": "ix_conversations_is_pinned",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "profile_id"
+          ],
+          "name": "ix_conversations_profile_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_conversations_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "entities": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'concept'",
+          "name": "entity_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "aliases",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "attributes",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "entity_type"
+          ],
+          "name": "ix_entities_entity_type",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_entities_name",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_entities_user_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id",
+            "name"
+          ],
+          "name": "sqlite_autoindex_entities_1",
+          "origin": "u",
+          "unique": true
+        }
+      ]
+    },
+    "entity_relations": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "source_entity_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "target_entity_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "'related_to'",
+          "name": "relation_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "attributes",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "source_entity_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "entities",
+          "to": "id"
+        },
+        {
+          "from": "target_entity_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "entities",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "source_entity_id"
+          ],
+          "name": "ix_entity_relations_source_entity_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "target_entity_id"
+          ],
+          "name": "ix_entity_relations_target_entity_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_entity_relations_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "episodes": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "agent_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "summary",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'unknown'",
+          "name": "outcome",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'0.5'",
+          "name": "importance",
+          "notnull": 1,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "tags",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "related_entities",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "ended_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "agent_id"
+          ],
+          "name": "ix_episodes_agent_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_episodes_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_episodes_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "macro_tools": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "input_schema",
+          "notnull": 1,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "steps",
+          "notnull": 1,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "is_active",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "is_active"
+          ],
+          "name": "ix_macro_tools_is_active",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_macro_tools_name",
+          "origin": "c",
+          "unique": true
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_macro_tools_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "memory_embeddings": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "memory_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "model",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'1536'",
+          "name": "dimension",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "memory_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "memory_items",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "name": "ix_memory_embeddings_memory_id",
+          "origin": "c",
+          "unique": true
+        }
+      ]
+    },
+    "memory_item_entities": {
+      "columns": [
+        {
+          "default": null,
+          "name": "memory_id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "entity_id",
+          "notnull": 1,
+          "pk": 2,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "entity_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "entities",
+          "to": "id"
+        },
+        {
+          "from": "memory_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "memory_items",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "memory_id",
+            "entity_id"
+          ],
+          "name": "sqlite_autoindex_memory_item_entities_1",
+          "origin": "pk",
+          "unique": true
+        }
+      ]
+    },
+    "memory_items": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "'global'",
+          "name": "scope",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "agent_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "'semantic'",
+          "name": "memory_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "content",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "structured",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "tags",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": "'0.5'",
+          "name": "importance",
+          "notnull": 1,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": "'0.7'",
+          "name": "confidence",
+          "notnull": 1,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": "'agent'",
+          "name": "source",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'active'",
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "supersedes_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "'0'",
+          "name": "access_count",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "last_accessed_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "ttl_days",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "valid_from",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "valid_to",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": "0",
+          "name": "pinned",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "agent_id"
+          ],
+          "name": "ix_memory_items_agent_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "conversation_id",
+            "created_at"
+          ],
+          "name": "ix_memory_items_conversation_created",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "memory_type"
+          ],
+          "name": "ix_memory_items_memory_type",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "pinned"
+          ],
+          "name": "ix_memory_items_pinned",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "scope"
+          ],
+          "name": "ix_memory_items_scope",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_memory_items_status",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_memory_items_user_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id",
+            "status"
+          ],
+          "name": "ix_memory_items_user_status",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "messages": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "role",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "content",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "tool_calls",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "tool_result",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "usage",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "thinking",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "duration_ms",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "artifact_ids",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_messages_conversation_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "plan_steps": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "plan_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "position",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "depends_on",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "tools",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "result_summary",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "delegate_role",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "plan_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "plans",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "plan_id"
+          ],
+          "name": "ix_plan_steps_plan_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "plan_templates": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "steps",
+          "notnull": 1,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "is_builtin",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": []
+    },
+    "plans": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "steps",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "metadata_",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_plans_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "ix_plans_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_plans_status",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "providers": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "label",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "base_url",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "api_key_encrypted",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "default_model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "is_active",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "is_subscription",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "0",
+          "name": "is_fallback",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "chat_models",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": "0",
+          "name": "is_default",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "is_default"
+          ],
+          "name": "ix_providers_is_default",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_fallback"
+          ],
+          "name": "ix_providers_is_fallback",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_providers_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "research_runs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "parent_task_run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "topic",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "depth",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "sub_questions",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "sources",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "citations",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "report_markdown",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "report_artifact_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "usage",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "input_hash",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "report_artifact_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "artifacts",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "parent_task_run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "task_runs",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_research_runs_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "input_hash"
+          ],
+          "name": "ix_research_runs_input_hash",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "parent_task_run_id"
+          ],
+          "name": "ix_research_runs_parent_task_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "report_artifact_id"
+          ],
+          "name": "ix_research_runs_report_artifact_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_research_runs_status",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_research_runs_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "rss_entries": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "subscription_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "guid",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "link",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "author",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "summary",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "published_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "content_hash",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "is_read",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "fetched_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "subscription_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "rss_subscriptions",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "content_hash"
+          ],
+          "name": "ix_rss_entries_content_hash",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "guid"
+          ],
+          "name": "ix_rss_entries_guid",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_read"
+          ],
+          "name": "ix_rss_entries_is_read",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "published_at"
+          ],
+          "name": "ix_rss_entries_published_at",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "subscription_id"
+          ],
+          "name": "ix_rss_entries_subscription_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "rss_subscriptions": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "url",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "site_url",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "category",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "fetch_interval_minutes",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "enabled",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "last_fetched_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "entry_count",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "category"
+          ],
+          "name": "ix_rss_subscriptions_category",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "enabled"
+          ],
+          "name": "ix_rss_subscriptions_enabled",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "url"
+          ],
+          "name": "ix_rss_subscriptions_url",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_rss_subscriptions_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "run_events": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "created_at"
+          ],
+          "name": "ix_run_events_created_at",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "ix_run_events_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id",
+            "kind"
+          ],
+          "name": "ix_run_events_run_id_kind",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "scheduled_tasks": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "trigger_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "cron_expression",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "interval_seconds",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "timezone",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "quiet_hours_start",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "quiet_hours_end",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "misfire_policy",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "prompt",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "workflow_type",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "profile_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "tools_whitelist",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "capability_policy",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "working_directory",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "approval_policy",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "delivery_channels",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "delivery_config",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "last_delivery_hash",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "max_iterations",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "max_cost_per_run",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "timeout_s",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "enabled",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "next_run_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_run_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "last_status",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "run_count",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "failure_count",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "profile_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_profiles",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "enabled"
+          ],
+          "name": "ix_scheduled_tasks_enabled",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_scheduled_tasks_name",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "next_run_at"
+          ],
+          "name": "ix_scheduled_tasks_next_run_at",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "profile_id"
+          ],
+          "name": "ix_scheduled_tasks_profile_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "trigger_type"
+          ],
+          "name": "ix_scheduled_tasks_trigger_type",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_scheduled_tasks_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "spend_log": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "provider_name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "prompt_tokens",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "completion_tokens",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "total_tokens",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "cost_usd",
+          "notnull": 1,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": null,
+          "name": "ts",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_spend_log_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "ix_spend_log_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "ts"
+          ],
+          "name": "ix_spend_log_ts",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id",
+            "created_at"
+          ],
+          "name": "ix_spend_log_user_created",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_spend_log_user_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id",
+            "ts"
+          ],
+          "name": "ix_spend_log_user_ts",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "subagent_roles": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "description",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "system_prompt",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "tool_names",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "capability_policy",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": "'10'",
+          "name": "max_iterations",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "max_cost_usd",
+          "notnull": 0,
+          "pk": 0,
+          "type": "FLOAT"
+        },
+        {
+          "default": "0",
+          "name": "is_builtin",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_subagent_roles_name",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "subagent_runs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "role_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "parent_conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "parent_run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "prompt",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'queued'",
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "result_summary",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "usage",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "profile_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "research_run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "profile_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_profiles",
+          "to": "id"
+        },
+        {
+          "from": "parent_run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "parent_conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "research_run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "research_runs",
+          "to": "id"
+        },
+        {
+          "from": "role_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "subagent_roles",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "parent_conversation_id"
+          ],
+          "name": "ix_subagent_runs_parent_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "parent_run_id"
+          ],
+          "name": "ix_subagent_runs_parent_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "profile_id"
+          ],
+          "name": "ix_subagent_runs_profile_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "research_run_id"
+          ],
+          "name": "ix_subagent_runs_research_run_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "role_id"
+          ],
+          "name": "ix_subagent_runs_role_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_subagent_runs_status",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "task_runs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "task_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "trigger_source",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "prompt",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "output",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "skip_reason",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "approval_policy",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "approval_reason",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "usage",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "duration_ms",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "delivery_status",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "delivered_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "is_read",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "notnull": 0,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "agent_runs",
+          "to": "id"
+        },
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "task_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "scheduled_tasks",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "is_read"
+          ],
+          "name": "ix_task_runs_is_read",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_read",
+            "created_at"
+          ],
+          "name": "ix_task_runs_is_read_created",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_task_runs_status",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "task_id"
+          ],
+          "name": "ix_task_runs_task_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "tool_calls": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "message_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "arguments",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "result",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "duration_ms",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "success",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        },
+        {
+          "from": "message_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "messages",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_tool_calls_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "created_at",
+            "success"
+          ],
+          "name": "ix_tool_calls_created_at_success",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "message_id"
+          ],
+          "name": "ix_tool_calls_message_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_tool_calls_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "users": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "external_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "username",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "display_name",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "is_active",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": []
+    },
+    "webhook_endpoints": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "hook_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "secret",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "source_type",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "event_filter",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "task_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "prompt_template",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "enabled",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "task_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "scheduled_tasks",
+          "to": "id"
+        },
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "enabled"
+          ],
+          "name": "ix_webhook_endpoints_enabled",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "hook_id"
+          ],
+          "name": "ix_webhook_endpoints_hook_id",
+          "origin": "c",
+          "unique": true
+        },
+        {
+          "columns": [
+            "name"
+          ],
+          "name": "ix_webhook_endpoints_name",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "source_type"
+          ],
+          "name": "ix_webhook_endpoints_source_type",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_webhook_endpoints_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "webhook_events": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "endpoint_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "event_type",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "signature_valid",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "task_run_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "received_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "task_run_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "task_runs",
+          "to": "id"
+        },
+        {
+          "from": "endpoint_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "webhook_endpoints",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "endpoint_id"
+          ],
+          "name": "ix_webhook_events_endpoint_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "event_type"
+          ],
+          "name": "ix_webhook_events_event_type",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "status"
+          ],
+          "name": "ix_webhook_events_status",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "wiki_articles": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "''",
+          "name": "content",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'general'",
+          "name": "category",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "tags",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": "'manual'",
+          "name": "source",
+          "notnull": 1,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": null,
+          "name": "source_memory_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "project_key",
+          "notnull": 0,
+          "pk": 0,
+          "type": "VARCHAR"
+        },
+        {
+          "default": "'0'",
+          "name": "is_pinned",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "'0'",
+          "name": "is_archived",
+          "notnull": 1,
+          "pk": 0,
+          "type": "BOOLEAN"
+        },
+        {
+          "default": "'1'",
+          "name": "version",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "metadata_",
+          "notnull": 0,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "user_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "users",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "category"
+          ],
+          "name": "ix_wiki_articles_category",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "is_archived"
+          ],
+          "name": "ix_wiki_articles_is_archived",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "project_key"
+          ],
+          "name": "ix_wiki_articles_project_key",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "title"
+          ],
+          "name": "ix_wiki_articles_title",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "ix_wiki_articles_user_id",
+          "origin": "c",
+          "unique": false
+        }
+      ]
+    },
+    "working_memory": {
+      "columns": [
+        {
+          "default": null,
+          "name": "created_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "notnull": 1,
+          "pk": 0,
+          "type": "DATETIME"
+        },
+        {
+          "default": null,
+          "name": "id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "'{}'",
+          "name": "state",
+          "notnull": 1,
+          "pk": 0,
+          "type": "JSON"
+        },
+        {
+          "default": null,
+          "name": "summary",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "summary_up_to_message_id",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "token_estimate",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "conversation_id",
+          "match": "NONE",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "conversations",
+          "to": "id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "ix_working_memory_conversation_id",
+          "origin": "c",
+          "unique": false
+        },
+        {
+          "columns": [
+            "conversation_id"
+          ],
+          "name": "sqlite_autoindex_working_memory_1",
+          "origin": "u",
+          "unique": true
+        }
+      ]
+    }
+  },
+  "triggers": {
+    "memory_items_ad": "CREATE TRIGGER memory_items_ad AFTER DELETE ON memory_items BEGIN INSERT INTO memory_fts(memory_fts, rowid, content, tags, memory_type) VALUES ('delete', old.id, old.content, COALESCE(old.tags, ''), old.memory_type); END",
+    "memory_items_ai": "CREATE TRIGGER memory_items_ai AFTER INSERT ON memory_items BEGIN INSERT INTO memory_fts(rowid, content, tags, memory_type) VALUES (new.id, new.content, COALESCE(new.tags, ''), new.memory_type); END",
+    "memory_items_au": "CREATE TRIGGER memory_items_au AFTER UPDATE ON memory_items BEGIN INSERT INTO memory_fts(memory_fts, rowid, content, tags, memory_type) VALUES ('delete', old.id, old.content, COALESCE(old.tags, ''), old.memory_type); INSERT INTO memory_fts(rowid, content, tags, memory_type) VALUES (new.id, new.content, COALESCE(new.tags, ''), new.memory_type); END"
+  },
+  "virtual_tables": {
+    "memory_fts": "CREATE VIRTUAL TABLE memory_fts USING fts5( content, tags, memory_type UNINDEXED, content='memory_items', content_rowid='id' )"
+  }
+}
