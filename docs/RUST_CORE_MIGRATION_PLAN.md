@@ -894,7 +894,7 @@ Deliverables:
 - production-ready opt-in `server` profile для VPS (mandatory auth + TLS/reverse-proxy boundary);
 - React production assets обслуживаются Rust binary;
 - OpenCode Bun worker и experimental ABI subset;
-- optional Python OCR/document/ML workers;
+- optional Python OCR/document/ML workers (вынесены в backlog, см. ниже);
 - worker permission review/status UI;
 - end-to-end packaging и upgrade tests.
 
@@ -912,6 +912,12 @@ Exit criteria:
 > [`docs/backlog/telegram-adapter.md`](backlog/telegram-adapter.md): они требуют
 > bot token/публичный HTTPS/VPS, то есть credentials и внешнюю инфраструктуру,
 > и не могут быть проверены в локальном credential-free окружении.
+>
+> Optional Python OCR/document/ML workers вынесены из M11 в
+> [`docs/backlog/python-workers.md`](backlog/python-workers.md): они требуют
+> тяжёлого опционального ML-тулчейна и не должны гейтить Python-free базовую
+> установку (M12). M11 сохраняет только протокол/изоляцию compatibility workers и
+> OpenCode Bun worker.
 
 ### M12 — Default cutover и сокращение Python
 
