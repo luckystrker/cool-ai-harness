@@ -461,6 +461,7 @@ async fn plans_runs_and_inspector_project_the_event_log() {
             &NewRun {
                 model: Some("scripted".to_owned()),
                 config: None,
+                ..Default::default()
             },
         )
         .expect("run");
@@ -720,6 +721,7 @@ async fn subagents_roles_launch_and_runs_are_store_backed() {
             parent_conversation_id: parent.id,
             role_id: Some(role.id),
             profile_id: None,
+            parent_run_id: None,
             name: Some("sub one".to_owned()),
             prompt: "check the diff".to_owned(),
             model: Some("scripted".to_owned()),
@@ -790,10 +792,11 @@ async fn subagents_roles_launch_and_runs_are_store_backed() {
         }),
     )
     .await;
+    // Cancelling a run that already finished is a no-op (Python parity), so the
+    // result carries the row id without asserting a flip.
     assert!(matches!(
         cancelled,
-        ResponsePayload::SubagentsRunsCancelled(result)
-            if result.run_id == run.id && result.cancelled
+        ResponsePayload::SubagentsRunsCancelled(result) if result.run_id == run.id
     ));
 
     request(

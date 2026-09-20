@@ -179,6 +179,105 @@ fn subagent_runs_are_owned_and_lifecycle_bounded() {
 }
 
 #[test]
+fn subagent_run_links_a_queued_child_run_and_flips_to_running() {
+    let (_directory, store) = adopted_store();
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                metadata: Some(json!({"is_subagent": true})),
+                ..NewConversation::default()
+            },
+        )
+        .expect("isolated conversation");
+    // The child agent run starts queued, mirroring Python `create_run(status="queued")`.
+    let child_run = store
+        .create_run(
+            "local-user",
+            conversation.id,
+            &cool_store::domains::runs::NewRun {
+                status: Some("queued".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("child run");
+    assert_eq!(child_run.status, "queued");
+
+    let run = store
+        .create_subagent_run(
+            "local-user",
+            1,
+            &NewSubagentRun {
+                conversation_id: conversation.id,
+                prompt: "work".to_string(),
+                run_id: Some(child_run.id),
+                ..NewSubagentRun::default()
+            },
+        )
+        .expect("run");
+    assert_eq!(run.status, "queued");
+    assert_eq!(run.run_id, Some(child_run.id));
+
+    let running = store
+        .mark_subagent_run_running("local-user", run.id)
+        .expect("running");
+    assert_eq!(running.status, "running");
+
+    // Terminal runs cannot be flipped back to running (cancel-start race).
+    store
+        .finish_subagent_run("local-user", run.id, "cancelled", None, None, None)
+        .expect("finish");
+    let error = store
+        .mark_subagent_run_running("local-user", run.id)
+        .expect_err("terminal");
+    assert!(matches!(error, StoreError::InvalidInput(_)));
+}
+
+#[test]
+fn cancel_and_finalize_never_rewrite_a_terminal_run() {
+    let (_directory, store) = adopted_store();
+    let run_id = seed_run(&store, None, "race");
+    store
+        .finish_subagent_run("local-user", run_id, "completed", Some("done"), None, None)
+        .expect("complete");
+
+    // Cancelling a completed run is a no-op and keeps the outcome.
+    let cancelled = store
+        .cancel_subagent_run("local-user", run_id)
+        .expect("cancel terminal");
+    assert_eq!(cancelled.status, "completed");
+    assert_eq!(cancelled.result_summary.as_deref(), Some("done"));
+
+    // A late `completed` finalization cannot overwrite a delivered cancel.
+    let active = seed_run(&store, None, "active");
+    let cancelled = store
+        .cancel_subagent_run("local-user", active)
+        .expect("cancel active");
+    assert_eq!(cancelled.status, "cancelled");
+    let finalized = store
+        .finalize_subagent_run("local-user", active, "completed", Some("late"), None, None)
+        .expect("finalize after cancel");
+    assert_eq!(finalized.status, "cancelled");
+    assert_eq!(finalized.result_summary, None);
+}
+
+#[test]
+fn create_run_rejects_an_unknown_status() {
+    let (_directory, store) = adopted_store();
+    let error = store
+        .create_run(
+            "local-user",
+            1,
+            &cool_store::domains::runs::NewRun {
+                status: Some("bogus".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("unknown status");
+    assert!(matches!(error, StoreError::InvalidInput(_)));
+}
+
+#[test]
 fn non_terminal_runs_cannot_be_deleted() {
     let (_directory, store) = adopted_store();
     let run_id = seed_run(&store, None, "keep");

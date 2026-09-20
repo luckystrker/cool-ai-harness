@@ -160,6 +160,9 @@ pub struct NewSubagentRun {
     pub role_id: Option<i64>,
     pub parent_run_id: Option<i64>,
     pub conversation_id: i64,
+    /// Durable `agent_runs.id` link for the child execution, when the caller
+    /// created one (Python sets it from `create_run`).
+    pub run_id: Option<i64>,
     pub name: Option<String>,
     pub prompt: String,
     pub profile_id: Option<i64>,
@@ -330,7 +333,7 @@ impl crate::LegacyStore {
             "INSERT INTO subagent_runs(created_at, updated_at, role_id, profile_id,
                parent_conversation_id, parent_run_id, research_run_id, conversation_id, run_id,
                name, prompt, status, started_at)
-             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, 'queued', ?1)",
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued', ?1)",
             params![
                 timestamp,
                 new.role_id,
@@ -339,6 +342,7 @@ impl crate::LegacyStore {
                 new.parent_run_id,
                 new.research_run_id,
                 new.conversation_id,
+                new.run_id,
                 new.name,
                 new.prompt,
             ],
@@ -380,6 +384,95 @@ impl crate::LegacyStore {
     pub fn get_subagent_run(&self, actor_id: &str, run_id: i64) -> Result<SubagentRun, StoreError> {
         let connection = self.connection()?;
         fetch_run(&connection, actor_id, run_id)
+    }
+
+    /// Flip a queued run to `running` and refresh `started_at`/`updated_at`.
+    /// Fails closed if the run is already terminal, so a cancel that races the
+    /// executor start is not silently overwritten.
+    pub fn mark_subagent_run_running(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+    ) -> Result<SubagentRun, StoreError> {
+        let connection = self.connection()?;
+        let run = fetch_run(&connection, actor_id, run_id)?;
+        if TERMINAL_SUBAGENT_STATUSES.contains(&run.status.as_str()) {
+            return Err(StoreError::InvalidInput(format!(
+                "subagent run {run_id} is already terminal ({})",
+                run.status
+            )));
+        }
+        let timestamp = now_python();
+        connection.execute(
+            "UPDATE subagent_runs SET status = 'running', started_at = ?1, updated_at = ?1 \
+             WHERE id = ?2",
+            params![timestamp, run_id],
+        )?;
+        drop(connection);
+        self.get_subagent_run(actor_id, run_id)
+    }
+
+    /// Cancel a non-terminal run. A run that is already terminal is returned
+    /// unchanged, so cancelling a completed run cannot rewrite its outcome.
+    pub fn cancel_subagent_run(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+    ) -> Result<SubagentRun, StoreError> {
+        let connection = self.connection()?;
+        let run = fetch_run(&connection, actor_id, run_id)?;
+        if TERMINAL_SUBAGENT_STATUSES.contains(&run.status.as_str()) {
+            return Ok(run);
+        }
+        let timestamp = now_python();
+        connection.execute(
+            "UPDATE subagent_runs SET status = 'cancelled', finished_at = ?1, updated_at = ?1 \
+             WHERE id = ?2",
+            params![timestamp, run_id],
+        )?;
+        drop(connection);
+        self.get_subagent_run(actor_id, run_id)
+    }
+
+    /// Finalize a run only while it is non-terminal. A run that was cancelled
+    /// while the executor was finishing is returned unchanged, so a late
+    /// `completed` outcome cannot overwrite a delivered cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_subagent_run(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        status: &str,
+        result_summary: Option<&str>,
+        usage: Option<&Value>,
+        error: Option<&str>,
+    ) -> Result<SubagentRun, StoreError> {
+        if !TERMINAL_SUBAGENT_STATUSES.contains(&status) {
+            return Err(StoreError::InvalidInput(format!(
+                "subagent status {status:?} is not terminal"
+            )));
+        }
+        let connection = self.connection()?;
+        let run = fetch_run(&connection, actor_id, run_id)?;
+        if TERMINAL_SUBAGENT_STATUSES.contains(&run.status.as_str()) {
+            return Ok(run);
+        }
+        let timestamp = now_python();
+        connection.execute(
+            "UPDATE subagent_runs SET status = ?1, result_summary = COALESCE(?2, result_summary),
+               usage = COALESCE(?3, usage), error = COALESCE(?4, error), finished_at = ?5,
+               updated_at = ?5 WHERE id = ?6",
+            params![
+                status,
+                result_summary,
+                usage.map(serde_json::to_string).transpose()?,
+                error,
+                timestamp,
+                run_id,
+            ],
+        )?;
+        drop(connection);
+        self.get_subagent_run(actor_id, run_id)
     }
 
     /// Mark a run terminal (`completed` / `failed` / `cancelled`) and stamp

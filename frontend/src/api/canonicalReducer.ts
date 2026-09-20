@@ -138,7 +138,10 @@ export function replayCanonicalEvents(events: EventEnvelope[]): ClientState {
         state.subagents[canonical.payload.subagentRunId] = "completed";
         break;
       case "subagent.failed":
-        state.subagents[canonical.payload.subagentRunId] = "failed";
+        // A cancellation is reported through the same event kind with
+        // `status: "cancelled"`.
+        state.subagents[canonical.payload.subagentRunId] =
+          canonical.payload.status === "cancelled" ? "cancelled" : "failed";
         break;
       case "worker.started":
       case "worker.restarted":

@@ -54,10 +54,33 @@ export const subagentsApi = {
   },
 
   // --- Runs ---
-  launch: (body: SubagentLaunchRequest) =>
-    api.post<import("./types").SubagentRun>("/api/subagents/launch", body),
-  launchBatch: (body: SubagentLaunchBatchRequest) =>
-    api.post<import("./types").SubagentRun[]>("/api/subagents/launch-batch", body),
+  launch: async (body: SubagentLaunchRequest) =>
+    toSubagentRun(
+      await sdk.subagentsLaunch({
+        idempotencyKey: idempotencyKey(),
+        parentConversationId: body.parent_conversation_id,
+        roleId: body.role_id ?? null,
+        profileId: null,
+        parentRunId: null,
+        name: body.name ?? null,
+        prompt: body.prompt,
+        model: body.model ?? null,
+      })
+    ),
+  launchBatch: async (body: SubagentLaunchBatchRequest) =>
+    (
+      await sdk.subagentsLaunchBatch({
+        idempotencyKey: idempotencyKey(),
+        parentConversationId: body.parent_conversation_id,
+        items: body.items.map((item) => ({
+          roleId: item.role_id ?? null,
+          profileId: null,
+          name: item.name ?? null,
+          prompt: item.prompt,
+          model: item.model ?? null,
+        })),
+      })
+    ).map(toSubagentRun),
   listRuns: async (params?: { parent_conversation_id?: number; status?: string }) =>
     (
       await sdk.subagentsRunsList({
@@ -67,8 +90,10 @@ export const subagentsApi = {
       })
     ).map(toSubagentRun),
   getRun: async (id: number) => toSubagentRunDetail(await sdk.subagentsRunsGet({ id })),
-  cancelRun: (id: number) =>
-    api.post<{ run_id: number; cancelled: boolean }>(`/api/subagents/runs/${id}/cancel`),
+  cancelRun: async (id: number) => {
+    const result = await sdk.subagentsRunsCancel({ idempotencyKey: idempotencyKey(), id })
+    return { run_id: result.runId, cancelled: result.cancelled }
+  },
   deleteRun: async (id: number) => {
     await sdk.subagentsRunsDelete({ idempotencyKey: idempotencyKey(), id })
   },

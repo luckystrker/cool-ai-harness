@@ -486,6 +486,7 @@ fn replay_run(
         &NewRun {
             model: params.model.clone().or_else(|| run.model.clone()),
             config: Some(config),
+            ..NewRun::default()
         },
     )?;
     Ok(ReplayResult {

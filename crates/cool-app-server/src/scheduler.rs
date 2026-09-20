@@ -453,7 +453,7 @@ fn task_policy(base: &CapabilityPolicy, task: &ScheduledTask) -> CapabilityPolic
     base.narrow_with(&child)
 }
 
-fn capability_from_name(name: &str) -> Option<Capability> {
+pub(crate) fn capability_from_name(name: &str) -> Option<Capability> {
     match name {
         "read" => Some(Capability::Read),
         "write" => Some(Capability::Write),
@@ -465,7 +465,7 @@ fn capability_from_name(name: &str) -> Option<Capability> {
     }
 }
 
-fn decision_from_name(name: &str) -> Option<Decision> {
+pub(crate) fn decision_from_name(name: &str) -> Option<Decision> {
     match name.trim().to_ascii_lowercase().as_str() {
         "allow" => Some(Decision::Allow),
         "ask" => Some(Decision::Ask),

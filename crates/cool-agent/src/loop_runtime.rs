@@ -665,6 +665,16 @@ impl AgentRuntime {
                 }),
                 Ok(outcome),
             ),
+            Ok(outcome @ RunOutcome::Cancelled { .. }) => (
+                CanonicalEvent::SubagentFailed(SubagentEvent {
+                    subagent_run_id: request.run_id.clone(),
+                    name: Some(request.role.clone()),
+                    status: "cancelled".to_owned(),
+                    summary: Some("subagent cancelled".to_owned()),
+                    error: Some("subagent_cancelled".to_owned()),
+                }),
+                Ok(outcome),
+            ),
             Ok(outcome) => (
                 CanonicalEvent::SubagentFailed(SubagentEvent {
                     subagent_run_id: request.run_id.clone(),

@@ -69,6 +69,7 @@ fn seed_run_from_fixture(store: &LegacyStore, run_key: &str, events_key: &str) -
             &NewRun {
                 model: Some("m".to_string()),
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create run");

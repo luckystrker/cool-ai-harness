@@ -6,9 +6,11 @@
 pub mod client;
 mod legacy;
 mod scheduler;
+mod subagents;
 
 pub use client::{AppClient, ClientError};
 pub use scheduler::TaskExecutor;
+pub use subagents::{SubagentExecutor, SubagentLaunchSpec};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -30,9 +32,9 @@ use cool_protocol::{
     RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
     RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
     SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
-    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TaskRunCancelResult,
-    TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested,
-    TransportLimits, UsageUpdated, V1Version,
+    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, SubagentRunCancelResult,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -134,6 +136,8 @@ struct Inner {
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
+    /// Foreground subagent executor, present when a legacy store is configured.
+    subagent_executor: Option<Arc<SubagentExecutor>>,
 }
 
 #[async_trait]
@@ -309,6 +313,16 @@ impl AppServer {
                 cool_store::scheduler::SchedulerConfig::default(),
             ))
         });
+        let subagent_executor = config.legacy_store.as_ref().map(|legacy| {
+            Arc::new(SubagentExecutor::new(
+                Arc::clone(legacy),
+                store.clone(),
+                runtime.clone(),
+                workspace.clone(),
+                policy.clone(),
+                default_model.clone(),
+            ))
+        });
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -323,6 +337,7 @@ impl AppServer {
                 run_subscribers: Mutex::new(HashMap::new()),
                 lifecycle: None,
                 task_executor,
+                subagent_executor,
             }),
         }
     }
@@ -1279,6 +1294,107 @@ impl AppServer {
                         Ok(status) => success(id, ResponsePayload::TasksScheduler(status)),
                         Err(error) => failure(id, legacy::store_error(error)),
                     },
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SubagentsLaunch(params) => {
+                let frame = match self.inner.subagent_executor.as_ref() {
+                    Some(executor) => {
+                        let spec = SubagentLaunchSpec {
+                            parent_conversation_id: params.parent_conversation_id,
+                            role_id: params.role_id,
+                            profile_id: params.profile_id,
+                            parent_run_id: params.parent_run_id,
+                            name: params.name.clone(),
+                            prompt: params.prompt.clone(),
+                            model: params.model.clone(),
+                        };
+                        let fingerprint = legacy::fingerprint(&params);
+                        match executor
+                            .launch(
+                                &local_actor().id,
+                                spec,
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                            )
+                            .await
+                        {
+                            Ok(run) => match legacy::convert(run) {
+                                Ok(record) => {
+                                    success(id, ResponsePayload::SubagentsLaunched(record))
+                                }
+                                Err(error) => failure(id, error),
+                            },
+                            Err(error) => failure(id, legacy::store_error(error)),
+                        }
+                    }
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SubagentsLaunchBatch(params) => {
+                let frame = match self.inner.subagent_executor.as_ref() {
+                    Some(executor) => {
+                        let specs = params
+                            .items
+                            .iter()
+                            .map(|item| SubagentLaunchSpec {
+                                parent_conversation_id: params.parent_conversation_id,
+                                role_id: item.role_id,
+                                profile_id: item.profile_id,
+                                parent_run_id: None,
+                                name: item.name.clone(),
+                                prompt: item.prompt.clone(),
+                                model: item.model.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        let fingerprint = legacy::fingerprint(&params);
+                        match executor
+                            .launch_batch(
+                                &local_actor().id,
+                                specs,
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                            )
+                            .await
+                        {
+                            Ok(runs) => match legacy::convert(runs) {
+                                Ok(records) => {
+                                    success(id, ResponsePayload::SubagentsLaunchedBatch(records))
+                                }
+                                Err(error) => failure(id, error),
+                            },
+                            Err(error) => failure(id, legacy::store_error(error)),
+                        }
+                    }
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SubagentsRunsCancel(params) => {
+                let frame = match self.inner.subagent_executor.as_ref() {
+                    Some(executor) => {
+                        let fingerprint = legacy::fingerprint(&params);
+                        match executor
+                            .cancel(
+                                &local_actor().id,
+                                params.id,
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                            )
+                            .await
+                        {
+                            Ok(run) => success(
+                                id,
+                                ResponsePayload::SubagentsRunsCancelled(SubagentRunCancelResult {
+                                    run_id: run.id,
+                                    cancelled: run.status == "cancelled",
+                                }),
+                            ),
+                            Err(error) => failure(id, legacy::store_error(error)),
+                        }
+                    }
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;

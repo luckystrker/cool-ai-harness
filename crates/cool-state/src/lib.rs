@@ -793,6 +793,30 @@ impl DurableStore {
         Ok(link)
     }
 
+    /// The durable session bound to one legacy conversation, if any.
+    ///
+    /// Actor-scoped: a link owned by another actor fails closed with
+    /// `ActorMismatch` instead of leaking the session id.
+    pub fn session_for_conversation(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.connection()?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT actor_id, session_id FROM rust_conversation_links WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((owner, session_id)) if owner == actor_id => Ok(Some(session_id)),
+            Some(_) => Err(StoreError::ActorMismatch),
+            None => Ok(None),
+        }
+    }
+
     /// Newest-first run summaries of one actor-owned session.
     pub fn list_session_runs(
         &self,
@@ -973,6 +997,38 @@ impl DurableStore {
             value: run_id,
             created: true,
         })
+    }
+
+    /// Create a standalone canonical run for out-of-band lifecycle events
+    /// (subagent delegation) that does not become the session's active run and
+    /// is not gated by the prompt-run active-run guard.
+    ///
+    /// The caller owns the run and must append a terminal event to close it;
+    /// unlike [`Self::start_run`] this records no idempotency entry because the
+    /// auxiliary run is addressed by its own generated id.
+    pub fn start_auxiliary_run(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+    ) -> Result<String, StoreError> {
+        let connection = self.connection()?;
+        let owner: String = connection
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let run_id = format!("run-{}", Uuid::new_v4());
+        connection.execute(
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
+            params![run_id, session_id, actor_id, timestamp()],
+        )?;
+        Ok(run_id)
     }
 
     pub fn lookup_idempotent<T: DeserializeOwned>(

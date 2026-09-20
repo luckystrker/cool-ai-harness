@@ -507,15 +507,15 @@
       "file": "subagents.ts",
       "member": "launch",
       "http": "POST /api/subagents/launch",
-      "status": "deferred",
-      "rationale": "Rust subagents.launch creates the durable subagent-run row and child conversation but does not execute it; the subagent executor is still the Python runtime, so the launch action stays deferred until the M11 runtime drives the run"
+      "status": "sdk",
+      "command": "subagents.launch"
     },
     {
       "file": "subagents.ts",
       "member": "launchBatch",
       "http": "POST /api/subagents/launch-batch",
-      "status": "deferred",
-      "rationale": "Rust subagents.launch_batch creates the durable run rows only; batch execution stays in the Python runtime, so this stays deferred"
+      "status": "sdk",
+      "command": "subagents.launch_batch"
     },
     {
       "file": "subagents.ts",
@@ -535,8 +535,8 @@
       "file": "subagents.ts",
       "member": "cancelRun",
       "http": "POST /api/subagents/runs/{id}/cancel",
-      "status": "deferred",
-      "rationale": "Rust subagents.runs_cancel only flips the durable row; the live asyncio subagent task is cancelled by the Python executor, so cancelling through the canonical command would report success while the run keeps executing"
+      "status": "sdk",
+      "command": "subagents.runs_cancel"
     },
     {
       "file": "subagents.ts",

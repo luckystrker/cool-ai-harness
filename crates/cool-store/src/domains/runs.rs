@@ -81,6 +81,9 @@ fn fetch_run(connection: &Connection, actor_id: &str, run_id: i64) -> Result<Age
 pub struct NewRun {
     pub model: Option<String>,
     pub config: Option<Value>,
+    /// Initial run status. Defaults to `running` (Python `create_run`), but a
+    /// caller that queues the run first (subagent launch) sets `queued`.
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,14 +127,21 @@ impl crate::LegacyStore {
         let connection = self.connection()?;
         let user_id = require_conversation(&connection, actor_id, conversation_id)?;
         let timestamp = now_python();
+        let status = new.status.as_deref().unwrap_or("running");
+        if !RUN_STATUSES.contains(&status) {
+            return Err(StoreError::InvalidInput(format!(
+                "unknown run status {status:?}"
+            )));
+        }
         connection.execute(
             "INSERT INTO agent_runs(created_at, updated_at, conversation_id, user_id, status,
                model, config, iterations, started_at)
-             VALUES (?1, ?1, ?2, ?3, 'running', ?4, ?5, 0, ?1)",
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, 0, ?1)",
             params![
                 timestamp,
                 conversation_id,
                 user_id,
+                status,
                 new.model,
                 json_text(&new.config)?,
             ],

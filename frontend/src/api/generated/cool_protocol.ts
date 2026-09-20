@@ -307,7 +307,12 @@ export type SubagentRoleUpdateParams = { idempotencyKey: string, id: number, nam
 
 export type SubagentRunRecord = { id: number, roleId: number | null, profileId: number | null, parentConversationId: number, parentRunId: number | null, researchRunId: number | null, conversationId: number, runId: number | null, name: string | null, prompt: string, status: string, resultSummary: string | null, usage: JsonValue | null, error: string | null, startedAt: string, finishedAt: string | null, createdAt: string, updatedAt: string, };
 
-export type SubagentLaunchParams = { idempotencyKey: string, parentConversationId: number, roleId: number | null, profileId: number | null, name: string | null, prompt: string, model: string | null, };
+export type SubagentLaunchParams = { idempotencyKey: string, parentConversationId: number, roleId: number | null, profileId: number | null, 
+/**
+ * Durable parent run the delegation belongs to, when the caller is an
+ * agent-initiated `spawn_subagent` tool call.
+ */
+parentRunId: number | null, name: string | null, prompt: string, model: string | null, };
 
 export type SubagentLaunchItem = { roleId: number | null, profileId: number | null, name: string | null, prompt: string, model: string | null, };
 

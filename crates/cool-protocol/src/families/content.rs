@@ -460,6 +460,9 @@ pub struct SubagentLaunchParams {
     pub parent_conversation_id: i64,
     pub role_id: Option<i64>,
     pub profile_id: Option<i64>,
+    /// Durable parent run the delegation belongs to, when the caller is an
+    /// agent-initiated `spawn_subagent` tool call.
+    pub parent_run_id: Option<i64>,
     pub name: Option<String>,
     pub prompt: String,
     pub model: Option<String>,

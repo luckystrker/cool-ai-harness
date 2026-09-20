@@ -2,16 +2,13 @@
 
 use cool_protocol::*;
 use cool_store::domains::artifacts::NewArtifact;
-use cool_store::domains::conversations::{MessagePage, NewConversation};
+use cool_store::domains::conversations::MessagePage;
 use cool_store::domains::memory::{
     EntityPatch, MemoryFilter, MemoryItemPatch, NewEntity, NewMemoryItem,
 };
-use cool_store::domains::subagents::{
-    NewSubagentRole, NewSubagentRun, SubagentRolePatch, SubagentRunFilter,
-};
+use cool_store::domains::subagents::{NewSubagentRole, SubagentRolePatch, SubagentRunFilter};
 use cool_store::domains::wiki::{NewWikiArticle, WikiArticlePatch, WikiFilter};
 use cool_store::{LegacyStore, StoreError};
-use serde_json::json;
 
 use super::{Unhandled, bridge, convert, fingerprint, idempotent, invalid_input, store_error};
 
@@ -539,55 +536,6 @@ pub(super) async fn dispatch(
             )?;
             ResponsePayload::SubagentsRolesDeleted(deleted)
         }
-        Command::SubagentsLaunch(params) => {
-            let parent = params.parent_conversation_id;
-            let role_id = params.role_id;
-            let profile_id = params.profile_id;
-            let name = params.name.clone();
-            let prompt = params.prompt.clone();
-            let model = params.model.clone();
-            let run = idempotent(
-                store,
-                actor,
-                "subagents.launch",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || {
-                    launch_subagent(
-                        store, &actor.id, parent, role_id, profile_id, name, prompt, model,
-                    )
-                },
-            )?;
-            ResponsePayload::SubagentsLaunched(convert(run)?)
-        }
-        Command::SubagentsLaunchBatch(params) => {
-            let parent = params.parent_conversation_id;
-            let launches = params.items.clone();
-            let runs = idempotent(
-                store,
-                actor,
-                "subagents.launch_batch",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || {
-                    let mut runs = Vec::with_capacity(launches.len());
-                    for launch in &launches {
-                        runs.push(launch_subagent(
-                            store,
-                            &actor.id,
-                            parent,
-                            launch.role_id,
-                            launch.profile_id,
-                            launch.name.clone(),
-                            launch.prompt.clone(),
-                            launch.model.clone(),
-                        )?);
-                    }
-                    Ok(runs)
-                },
-            )?;
-            ResponsePayload::SubagentsLaunchedBatch(convert(runs)?)
-        }
         Command::SubagentsRunsList(params) => {
             let filter = SubagentRunFilter {
                 parent_conversation_id: params.parent_conversation_id,
@@ -618,21 +566,6 @@ pub(super) async fn dispatch(
             ResponsePayload::SubagentsRunsGot(SubagentRunDetailRecord {
                 run: convert(run)?,
                 messages: convert(messages)?,
-            })
-        }
-        Command::SubagentsRunsCancel(params) => {
-            let run_id = params.id;
-            let run = idempotent(
-                store,
-                actor,
-                "subagents.runs_cancel",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || store.finish_subagent_run(&actor.id, run_id, "cancelled", None, None, None),
-            )?;
-            ResponsePayload::SubagentsRunsCancelled(SubagentRunCancelResult {
-                run_id: run.id,
-                cancelled: run.status == "cancelled",
             })
         }
         Command::SubagentsRunsDelete(params) => {
@@ -815,47 +748,6 @@ pub(super) async fn dispatch(
         other => return Err(Unhandled::NotHandled(Box::new(other))),
     };
     Ok(payload)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn launch_subagent(
-    store: &LegacyStore,
-    actor_id: &str,
-    parent_conversation_id: i64,
-    role_id: Option<i64>,
-    profile_id: Option<i64>,
-    name: Option<String>,
-    prompt: String,
-    model: Option<String>,
-) -> Result<cool_store::domains::subagents::SubagentRun, StoreError> {
-    let title = name
-        .clone()
-        .unwrap_or_else(|| format!("Subagent: {}", prompt.chars().take(40).collect::<String>()));
-    let child = store.create_conversation(
-        actor_id,
-        &NewConversation {
-            title: Some(title),
-            model,
-            metadata: Some(json!({
-                "is_subagent": true,
-                "parent_conversation_id": parent_conversation_id,
-            })),
-            ..NewConversation::default()
-        },
-    )?;
-    store.create_subagent_run(
-        actor_id,
-        parent_conversation_id,
-        &NewSubagentRun {
-            role_id,
-            parent_run_id: None,
-            conversation_id: child.id,
-            name,
-            prompt,
-            profile_id,
-            research_run_id: None,
-        },
-    )
 }
 
 // Artifact registration is reachable through the store's typed path; the

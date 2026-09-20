@@ -418,8 +418,14 @@ export function useConversationStream() {
         break
       }
       case "subagent.failed": {
-        const error = canonical.payload.error ?? "Unknown error"
-        acc.content += `> ❌ **Subagent failed:** ${error}\n`
+        // The runtime reports a cancellation through the same event kind with
+        // `status: "cancelled"`, so render it distinctly.
+        if (canonical.payload.status === "cancelled") {
+          acc.content += `> 🛑 **Subagent cancelled**\n`
+        } else {
+          const error = canonical.payload.error ?? "Unknown error"
+          acc.content += `> ❌ **Subagent failed:** ${error}\n`
+        }
         flush(acc)
         break
       }

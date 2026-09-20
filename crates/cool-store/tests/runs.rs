@@ -33,6 +33,7 @@ fn runs_and_events_carry_monotonic_sequences_and_terminal_state() {
             &NewRun {
                 model: Some("test-model".to_string()),
                 config: Some(json!({"temperature": 0})),
+                ..Default::default()
             },
         )
         .expect("create");

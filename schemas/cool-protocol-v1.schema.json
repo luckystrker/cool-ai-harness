@@ -12019,6 +12019,14 @@
           "type": "integer",
           "format": "int64"
         },
+        "parentRunId": {
+          "description": "Durable parent run the delegation belongs to, when the caller is an\nagent-initiated `spawn_subagent` tool call.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "profileId": {
           "type": [
             "integer",
