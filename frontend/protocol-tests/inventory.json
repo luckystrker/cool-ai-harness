@@ -466,7 +466,7 @@
       "member": "listTools",
       "http": "GET /api/subagents/tools",
       "status": "deferred",
-      "rationale": "tool catalog comes from the agent runtime registry (M7/M8), not from cool-store; M11 wires the runtime extension status"
+      "rationale": "the canonical tools.list catalog is the Rust runtime's builtins; subagent role tool_names are still executed by the Python subagent runtime, so the picker stays deferred until that executor is replaced in Rust"
     },
     {
       "file": "subagents.ts",
@@ -878,8 +878,8 @@
       "file": "tasks.ts",
       "member": "templates",
       "http": "GET /api/tasks/templates",
-      "status": "deferred",
-      "rationale": "built-in workflow templates are Python code constants; M11 moves the static catalog into the Rust runtime"
+      "status": "sdk",
+      "command": "tasks.templates"
     },
     {
       "file": "tasks.ts",
@@ -1110,7 +1110,7 @@
       "member": "tools",
       "http": "GET /api/agent-constructor/tools",
       "status": "deferred",
-      "rationale": "tool catalog comes from the agent runtime registry (M7/M8), not from cool-store; M11 wires the runtime catalog"
+      "rationale": "the canonical tools.list command exposes the Rust runtime's 6 builtin tools, but this picker feeds profile/role tool_names that the Python runtime still executes; cutting it over would offer names Python cannot resolve, so it stays deferred until the Rust tool/subagent executor replaces the Python one"
     },
     {
       "file": "constructor.ts",

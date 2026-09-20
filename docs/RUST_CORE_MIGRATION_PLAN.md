@@ -1,6 +1,6 @@
 # Cool — план миграции на Rust core
 
-> Статус: active; M0-M3 и M5-M10 complete, M4 implementation passed / real-client acceptance pending, M11 in progress (Rust HTTP/SSE facade done)
+> Статус: active; M0-M3 и M5-M10 complete, M4 implementation passed / real-client acceptance pending, M11 in progress (Rust HTTP/SSE facade + React store-backed cutover + runtime catalogs + task schedule/template parity done; execution engines, extension/network workers and packaging pending)
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions
@@ -53,7 +53,7 @@
 | 8 | M8 — MCP, plugins, hooks и workers | M3, M6, M7 | [x] complete | [`M8.md`](migration/checkpoints/M8.md) |
 | 9 | M9 — Rust CLI/TUI и ACP cutover | M4, M7, M8 | [x] complete | [`M9.md`](migration/checkpoints/M9.md) |
 | 10 | M10 — Store и background subsystems parity | M6, M7 | [x] complete | [`M10.md`](migration/checkpoints/M10.md) |
-| 11 | M11 — Web cutover и compatibility workers | M8, M9, M10 | [~] Rust HTTP/SSE facade done; React cutover and workers pending | [`M11.md`](migration/checkpoints/M11.md) |
+| 11 | M11 — Web cutover и compatibility workers | M8, M9, M10 | [~] React store-backed cutover + runtime catalogs + task parity done; execution engines, extension/network workers and packaging pending | [`M11.md`](migration/checkpoints/M11.md) |
 | 12 | M12 — Default cutover и сокращение Python | M11 | [ ] pending | — |
 
 Фазы с выполненными зависимостями могут реализовываться независимо, но один агент не должен вести
@@ -300,7 +300,7 @@ legacy/
   TLS или явно настроенного trusted reverse proxy, secure cookies/tokens, rate limits и audit actor.
   App Protocol stdio/local socket наружу не публикуются; внешний доступ идёт через HTTP/WebSocket
   facade;
-- `telegram` — adapter поверх `server`, а не отдельный agent runtime. Backend валидирует raw
+- `telegram` — (backlog; см. [`docs/backlog/telegram-adapter.md`](backlog/telegram-adapter.md)) adapter поверх `server`, а не отдельный agent runtime. Backend валидирует raw
   `Telegram.WebApp.initData`, проверяет signature/hash и freshness `auth_date`, не доверяет
   `initDataUnsafe`, отображает Telegram user id в стабильный internal actor и выдаёт короткоживущую
   application session. Bot token остаётся server-side secret.
@@ -891,8 +891,7 @@ Deliverables:
 - React UI переключён на Rust HTTP/App Protocol facade;
 - generated TypeScript SDK используется как единственная typed boundary;
 - все chat, research, inspector и subagent live streams используют canonical cursor/reconnect model;
-- production-ready opt-in `server` profile для VPS и Telegram adapter, валидирующий Mini App
-  `initData` и использующий тот же actor/session/run contract;
+- production-ready opt-in `server` profile для VPS (mandatory auth + TLS/reverse-proxy boundary);
 - React production assets обслуживаются Rust binary;
 - OpenCode Bun worker и experimental ABI subset;
 - optional Python OCR/document/ML workers;
@@ -904,11 +903,15 @@ Exit criteria:
 - Web, TUI и ACP используют один Rust runtime и durable event model;
 - все существующие React pages проходят route/contract smoke suite без обращения к Python API;
 - local mode остаётся loopback-only по умолчанию; server mode fail-closed без auth/TLS boundary;
-- Telegram identity forgery, stale `auth_date`, replay и cross-user access покрыты integration tests;
 - crash/timeout любого worker не завершает core и виден пользователю;
 - отсутствие Bun/Python не ломает базовую установку;
 - unsupported vendor semantics отображаются явно;
 - один binary/entrypoint обслуживает Web API и assets.
+
+> Telegram adapter и `server`-profile operationalization вынесены из M11 в
+> [`docs/backlog/telegram-adapter.md`](backlog/telegram-adapter.md): они требуют
+> bot token/публичный HTTPS/VPS, то есть credentials и внешнюю инфраструктуру,
+> и не могут быть проверены в локальном credential-free окружении.
 
 ### M12 — Default cutover и сокращение Python
 

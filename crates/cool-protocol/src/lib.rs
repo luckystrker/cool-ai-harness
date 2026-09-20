@@ -195,6 +195,8 @@ pub enum Command {
     ApprovalResolve(ApprovalResolveParams),
     #[serde(rename = "status.get")]
     StatusGet(StatusGetParams),
+    #[serde(rename = "tools.list")]
+    ToolsList(EmptyParams),
     #[serde(rename = "conversations.list")]
     ConversationsList(ConversationListParams),
     #[serde(rename = "conversations.create")]
@@ -397,6 +399,8 @@ pub enum Command {
     TasksInbox(TaskInboxParams),
     #[serde(rename = "tasks.scheduler")]
     TasksScheduler(EmptyParams),
+    #[serde(rename = "tasks.templates")]
+    TasksTemplates(EmptyParams),
     #[serde(rename = "tasks.parse_cron")]
     TasksParseCron(ParseCronParams),
     #[serde(rename = "rss.subscriptions_list")]
@@ -1576,6 +1580,22 @@ pub struct StatusGetResult {
     pub mcp_servers: Vec<String>,
 }
 
+/// One tool registered in the running Rust agent runtime, as shown by the
+/// agent-constructor and subagent tool pickers. `dangerous` marks a tool whose
+/// default decision is `Ask` (requires approval); macro-backed tools are
+/// flagged via the `macro_` name prefix.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ToolCatalogRecord {
+    pub name: String,
+    pub description: String,
+    pub dangerous: bool,
+    pub capabilities: Vec<String>,
+    pub parameters: Value,
+    pub is_macro: bool,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(
@@ -1601,6 +1621,7 @@ pub enum ResponsePayload {
     ApprovalResolved(ApprovalResolvedResult),
     EventPage(EventPage),
     Status(StatusGetResult),
+    ToolsListed(Vec<ToolCatalogRecord>),
     ConversationsList(Vec<ConversationRecord>),
     ConversationsCreated(ConversationRecord),
     ConversationsGot(ConversationRecord),
@@ -1702,6 +1723,7 @@ pub enum ResponsePayload {
     TasksRunsRead(TaskRunRecord),
     TasksInbox(TaskInboxResult),
     TasksScheduler(SchedulerStatusRecord),
+    TasksTemplatesListed(Vec<TaskTemplateRecord>),
     TasksParsedCron(ParseCronResult),
     RssSubscriptionsListed(Vec<RssSubscriptionRecord>),
     RssSubscribed(RssSubscriptionRecord),

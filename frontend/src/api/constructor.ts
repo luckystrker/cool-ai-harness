@@ -5,6 +5,9 @@ import type { MacroToolCreate, ToolCatalogItem } from "./types"
 import type { JsonValue } from "./generated/cool_protocol"
 
 export const constructorApi = {
+  // Tool names feed role/profile configs that the Python runtime still
+  // executes, so the Rust `tools.list` catalog (6 builtin tools) cannot back
+  // this picker yet; it would offer names Python cannot resolve.
   tools: () => api.get<ToolCatalogItem[]>("/api/agent-constructor/tools"),
   macros: async () =>
     (await sdk.constructorMacros({ includeInactive: false })).map(toMacroTool),

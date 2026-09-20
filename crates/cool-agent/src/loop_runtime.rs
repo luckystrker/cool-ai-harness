@@ -24,7 +24,7 @@ use crate::context::{
     load_project_instructions,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
-use crate::tools::{ToolContext, ToolRegistry, ToolResult};
+use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
 
 #[derive(Clone, Debug)]
 pub struct AgentLimits {
@@ -248,6 +248,11 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn new(provider: Arc<dyn ModelDriver>, tools: ToolRegistry) -> Self {
         Self { provider, tools }
+    }
+
+    /// The runtime's registered tool catalog (name-sorted).
+    pub fn tool_catalog(&self) -> Vec<ToolCatalogEntry> {
+        self.tools.catalog()
     }
 
     pub async fn run(

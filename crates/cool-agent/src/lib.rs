@@ -22,6 +22,6 @@ pub use provider::{
     ScriptedDriver, Usage,
 };
 pub use tools::{
-    PythonFallbackTool, Tool, ToolContext, ToolDefinition, ToolError, ToolHandler, ToolRegistry,
-    ToolResult, builtin_registry,
+    PythonFallbackTool, Tool, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError,
+    ToolHandler, ToolRegistry, ToolResult, builtin_registry, capability_name,
 };

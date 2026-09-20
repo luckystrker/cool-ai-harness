@@ -2000,6 +2000,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "tools.list"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "conversations.list"
             },
             "params": {
@@ -3701,6 +3718,23 @@
             "method": {
               "type": "string",
               "const": "tasks.scheduler"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "tasks.templates"
             },
             "params": {
               "$ref": "#/$defs/EmptyParams"
@@ -7226,6 +7260,14 @@
       "description": "One provider row. The encrypted API key is intentionally absent.",
       "type": "object",
       "properties": {
+        "apiKeyHint": {
+          "description": "Masked hint for the stored API key (`abc…wxyz`), or `None` when no key is\nset. Never the key itself; mirrors the Python `ProviderOut.api_key_hint`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "baseUrl": {
           "type": [
             "string",
@@ -8012,6 +8054,26 @@
             },
             "value": {
               "$ref": "#/$defs/StatusGetResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tools_listed"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolCatalogRecord"
+              }
             }
           },
           "additionalProperties": false,
@@ -9810,6 +9872,26 @@
             },
             "value": {
               "$ref": "#/$defs/SchedulerStatusRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tasks_templates_listed"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TaskTemplateRecord"
+              }
             }
           },
           "additionalProperties": false,
@@ -12412,6 +12494,14 @@
             "null"
           ]
         },
+        "template": {
+          "description": "Built-in workflow template slug. When set, the server fills the prompt,\ncron schedule, workflow type, tool whitelist and delivery channels from\nthe matching [`TaskTemplateRecord`] unless the caller supplied them.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "timeoutS": {
           "type": [
             "number",
@@ -12591,6 +12681,13 @@
             "null"
           ]
         },
+        "nextRuns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "profileId": {
           "type": [
             "integer",
@@ -12622,6 +12719,14 @@
         "runCount": {
           "type": "integer",
           "format": "int64"
+        },
+        "scheduleDescription": {
+          "description": "Derived server-side (like the Python `TaskOut`): human-readable schedule\ntext and upcoming fire times for a valid cron schedule.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "timeoutS": {
           "type": [
@@ -12859,6 +12964,55 @@
       "required": [
         "taskId",
         "limit"
+      ]
+    },
+    "TaskTemplateRecord": {
+      "description": "A built-in recurring-workflow preset surfaced by `tasks.templates` so the UI\ncan prefill the create form.",
+      "type": "object",
+      "properties": {
+        "cronExpression": {
+          "type": "string"
+        },
+        "deliveryChannels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "maxIterations": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "toolsWhitelist": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "slug",
+        "name",
+        "description",
+        "prompt",
+        "cronExpression",
+        "maxIterations",
+        "deliveryChannels"
       ]
     },
     "TaskUpdateParams": {
@@ -13203,6 +13357,40 @@
         "approvalId",
         "revision",
         "decision"
+      ]
+    },
+    "ToolCatalogRecord": {
+      "description": "One tool registered in the running Rust agent runtime, as shown by the\nagent-constructor and subagent tool pickers. `dangerous` marks a tool whose\ndefault decision is `Ask` (requires approval); macro-backed tools are\nflagged via the `macro_` name prefix.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dangerous": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "isMacro": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "dangerous",
+        "capabilities",
+        "parameters",
+        "isMacro"
       ]
     },
     "ToolCompleted": {

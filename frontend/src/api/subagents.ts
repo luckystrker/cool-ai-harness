@@ -11,6 +11,8 @@ import type { JsonValue } from "./generated/cool_protocol"
 
 export const subagentsApi = {
   // --- Tools ---
+  // Role tool names are executed by the Python subagent runtime, so the picker
+  // stays on the Python registry until the Rust subagent executor lands.
   listTools: () => api.get<string[]>("/api/subagents/tools"),
 
   // --- Roles ---

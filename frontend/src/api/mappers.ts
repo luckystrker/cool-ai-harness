@@ -61,7 +61,9 @@ import type {
   TaskInbox,
   TaskRun,
   TaskRunDetail,
+  TaskTemplate,
   ToolCall,
+  ToolCatalogItem,
   ToolPermissions,
   ToolResultPayload,
   TopTool,
@@ -483,8 +485,7 @@ export function toProvider(record: protocol.ProviderRecord): Provider {
     is_fallback: record.isFallback,
     is_default: record.isDefault,
     chat_models: asStringArray(record.chatModels),
-    // The canonical record does not expose the masked key hint (M11 gap).
-    api_key_hint: null,
+    api_key_hint: record.apiKeyHint ?? null,
   }
 }
 
@@ -863,9 +864,8 @@ export function toScheduledTask(record: protocol.TaskRecord): ScheduledTask {
     failure_count: record.failureCount,
     created_at: record.createdAt,
     updated_at: record.updatedAt,
-    // The canonical record does not derive schedule text / upcoming fire times.
-    schedule_description: null,
-    next_runs: [],
+    schedule_description: record.scheduleDescription ?? null,
+    next_runs: record.nextRuns ?? [],
   }
 }
 
@@ -1054,6 +1054,30 @@ export function toRunTimeline(record: protocol.TimelineRecord): RunTimeline {
     ),
   }
   return { run, iterations, total_duration_ms: record.totalDurationMs }
+}
+
+export function toToolCatalogItem(record: protocol.ToolCatalogRecord): ToolCatalogItem {
+  return {
+    name: record.name,
+    description: record.description,
+    dangerous: record.dangerous,
+    capabilities: record.capabilities,
+    parameters: asObject(record.parameters) ?? {},
+    is_macro: record.isMacro,
+  }
+}
+
+export function toTaskTemplate(record: protocol.TaskTemplateRecord): TaskTemplate {
+  return {
+    slug: record.slug,
+    name: record.name,
+    description: record.description,
+    prompt: record.prompt,
+    cron_expression: record.cronExpression,
+    tools_whitelist: record.toolsWhitelist,
+    max_iterations: record.maxIterations,
+    delivery_channels: record.deliveryChannels,
+  }
 }
 
 export function toRunComparison(record: protocol.RunComparisonRecord): RunComparison {

@@ -38,11 +38,14 @@ pub(super) async fn dispatch(
     command: Command,
 ) -> Result<ResponsePayload, Unhandled> {
     let payload = match command {
-        Command::ProvidersList(params) => ResponsePayload::ProvidersListed(convert(
+        Command::ProvidersList(params) => ResponsePayload::ProvidersListed(
             store
                 .list_providers(&actor.id, params.include_inactive)
-                .map_err(store_error)?,
-        )?),
+                .map_err(store_error)?
+                .into_iter()
+                .map(|provider| provider_record(provider, secrets))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         Command::ProvidersCreate(params) => {
             let encrypted = params
                 .api_key
@@ -74,12 +77,13 @@ pub(super) async fn dispatch(
                     Ok(provider)
                 },
             )?;
-            ResponsePayload::ProvidersCreated(convert(created)?)
+            ResponsePayload::ProvidersCreated(provider_record(created, secrets)?)
         }
-        Command::ProvidersGet(params) => ResponsePayload::ProvidersGot(convert(
+        Command::ProvidersGet(params) => ResponsePayload::ProvidersGot(provider_record(
             store
                 .get_provider(&actor.id, params.id)
                 .map_err(store_error)?,
+            secrets,
         )?),
         Command::ProvidersUpdate(params) => {
             let encrypted = params
@@ -106,7 +110,7 @@ pub(super) async fn dispatch(
                 &fingerprint(&params),
                 || store.update_provider(&actor.id, provider_id, &patch),
             )?;
-            ResponsePayload::ProvidersUpdated(convert(updated)?)
+            ResponsePayload::ProvidersUpdated(provider_record(updated, secrets)?)
         }
         Command::ProvidersDelete(params) => {
             let provider_id = params.id;
@@ -268,13 +272,18 @@ pub(super) async fn dispatch(
             if params.enabled == Some(false) {
                 tasks.retain(|task| !task.enabled);
             }
-            ResponsePayload::TasksListed(convert(tasks)?)
+            ResponsePayload::TasksListed(
+                tasks
+                    .into_iter()
+                    .map(task_record)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
         }
-        Command::TasksGet(params) => ResponsePayload::TasksGot(convert(
+        Command::TasksGet(params) => ResponsePayload::TasksGot(task_record(
             store.get_task(&actor.id, params.id).map_err(store_error)?,
         )?),
         Command::TasksCreate(params) => {
-            let new: NewScheduledTask = bridge(&params)?;
+            let new = task_create_payload(&params)?;
             let created = idempotent(
                 store,
                 actor,
@@ -283,7 +292,7 @@ pub(super) async fn dispatch(
                 &fingerprint(&params),
                 || store.create_task(&actor.id, &new),
             )?;
-            ResponsePayload::TasksCreated(convert(created)?)
+            ResponsePayload::TasksCreated(task_record(created)?)
         }
         Command::TasksUpdate(params) => {
             let patch: ScheduledTaskPatch = bridge(&params)?;
@@ -296,7 +305,7 @@ pub(super) async fn dispatch(
                 &fingerprint(&params),
                 || store.update_task(&actor.id, task_id, &patch),
             )?;
-            ResponsePayload::TasksUpdated(convert(updated)?)
+            ResponsePayload::TasksUpdated(task_record(updated)?)
         }
         Command::TasksDelete(params) => {
             let task_id = params.id;
@@ -770,6 +779,35 @@ pub(super) async fn dispatch(
     Ok(payload)
 }
 
+/// Convert a provider row and attach the masked key hint (never the key).
+fn provider_record(
+    provider: Provider,
+    secrets: Option<&SecretKeyring>,
+) -> Result<ProviderRecord, ProtocolError> {
+    let hint = provider.api_key_encrypted.as_deref().map(|stored| {
+        match secrets.and_then(|keyring| keyring.decrypt(stored).ok()) {
+            Some(plaintext) => mask_secret(&plaintext),
+            None => "<undecryptable>".to_owned(),
+        }
+    });
+    let mut record: ProviderRecord = convert(provider)?;
+    record.api_key_hint = hint;
+    Ok(record)
+}
+
+/// Port of the Python `_mask`: `abc…wxyz` for long secrets, `…` otherwise.
+fn mask_secret(secret: &str) -> String {
+    let characters = secret.chars().collect::<Vec<_>>();
+    if characters.len() <= 8 {
+        return "…".to_owned();
+    }
+    let head = characters[..3].iter().collect::<String>();
+    let tail = characters[characters.len() - 4..]
+        .iter()
+        .collect::<String>();
+    format!("{head}…{tail}")
+}
+
 fn provider_models(provider: &Provider) -> Vec<ModelInfoRecord> {
     let Some(items) = provider.chat_models.as_ref().and_then(Value::as_array) else {
         return Vec::new();
@@ -838,6 +876,79 @@ fn scheduler_status(tasks: &[ScheduledTask]) -> SchedulerStatusRecord {
         timezone: "UTC".to_owned(),
         max_concurrent_tasks: 3,
         jobs,
+    }
+}
+
+/// Convert a store task row into its protocol mirror and derive the
+/// `schedule_description`/`next_runs` fields the Python `TaskOut` computes.
+fn task_record(task: ScheduledTask) -> Result<TaskRecord, ProtocolError> {
+    let mut record: TaskRecord = convert(task)?;
+    // Match Python's `next_cron_runs(..., timezone=task.timezone)`: an unknown
+    // zone falls back to UTC, exactly like `resolve_timezone`.
+    let offset = cool_store::scheduler::timezone_offset_seconds(&record.timezone).unwrap_or(0);
+    if let Some(expression) = record.cron_expression.clone()
+        && let Ok(runs) =
+            cool_store::scheduler::cron_next_runs_at(&expression, offset, super::now_seconds(), 3)
+    {
+        record.schedule_description = Some(describe_cron(&expression));
+        record.next_runs = runs.into_iter().map(format_run_time).collect();
+    }
+    Ok(record)
+}
+
+fn format_run_time(timestamp: i64) -> String {
+    format!(
+        "{}Z",
+        cool_store::python_datetime(timestamp, 0).replace(' ', "T")
+    )
+}
+
+/// Build the store create payload, expanding an optional built-in template the
+/// same way the Python endpoint does: the template supplies prompt, cron,
+/// workflow type, tool whitelist and delivery channels only where the caller
+/// left them unset.
+fn task_create_payload(params: &TaskCreateParams) -> Result<NewScheduledTask, ProtocolError> {
+    let mut new: NewScheduledTask = bridge(params)?;
+    if let Some(slug) = params.template.as_deref() {
+        let preset = crate::task_templates()
+            .into_iter()
+            .find(|template| template.slug == slug)
+            .ok_or_else(|| invalid_input(format!("unknown template {slug:?}")))?;
+        if new.prompt.is_empty() {
+            new.prompt = preset.prompt;
+        }
+        // Python uses `body.x or preset.x`, so an empty string/list also falls
+        // back to the preset (not just a missing value).
+        if new.cron_expression.as_deref().unwrap_or("").is_empty() {
+            new.cron_expression = Some(preset.cron_expression);
+        }
+        if new.workflow_type.is_none() {
+            new.workflow_type = Some(preset.slug);
+        }
+        if json_value_is_empty(new.tools_whitelist.as_ref()) {
+            new.tools_whitelist = preset
+                .tools_whitelist
+                .map(|tools| Value::Array(tools.into_iter().map(Value::String).collect()));
+        }
+        if json_value_is_empty(new.delivery_channels.as_ref()) {
+            new.delivery_channels = Some(Value::Array(
+                preset
+                    .delivery_channels
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ));
+        }
+    }
+    Ok(new)
+}
+
+fn json_value_is_empty(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(Value::String(text)) => text.is_empty(),
+        Some(_) => false,
     }
 }
 

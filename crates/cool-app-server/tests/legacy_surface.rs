@@ -1020,6 +1020,11 @@ async fn providers_encrypt_secrets_and_expose_cached_models() {
         panic!("unexpected payload");
     };
     assert!(provider.is_default);
+    assert_eq!(
+        provider.api_key_hint.as_deref(),
+        Some("sk-…text"),
+        "the response exposes only a masked hint, never the key"
+    );
 
     let stored = store
         .get_provider("local-user", provider.id)
@@ -1037,6 +1042,19 @@ async fn providers_encrypt_secrets_and_expose_cached_models() {
         models,
         ResponsePayload::ProvidersModels(models)
             if models.len() == 1 && models[0].context_window == Some(128000)
+    ));
+
+    let listed = request(
+        &client,
+        Command::ProvidersList(ProviderListParams {
+            include_inactive: false,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        listed,
+        ResponsePayload::ProvidersListed(providers)
+            if providers.iter().any(|p| p.api_key_hint.as_deref() == Some("sk-…text"))
     ));
 
     let updated = request(
@@ -1057,7 +1075,9 @@ async fn providers_encrypt_secrets_and_expose_cached_models() {
     .await;
     assert!(matches!(
         updated,
-        ResponsePayload::ProvidersUpdated(provider) if provider.label.as_deref() == Some("Renamed")
+        ResponsePayload::ProvidersUpdated(provider)
+            if provider.label.as_deref() == Some("Renamed")
+                && provider.api_key_hint.as_deref() == Some("sk-…cond")
     ));
     let stored = store
         .get_provider("local-user", provider.id)
@@ -1248,6 +1268,7 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
             misfire_policy: "run".to_owned(),
             prompt: "summarize".to_owned(),
             workflow_type: None,
+            template: None,
             profile_id: None,
             model: None,
             tools_whitelist: None,
@@ -1267,6 +1288,11 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
         panic!("unexpected payload");
     };
     assert!(task.next_run_at.is_some());
+    assert!(
+        task.schedule_description.is_some(),
+        "cron tasks derive a human-readable schedule"
+    );
+    assert_eq!(task.next_runs.len(), 3, "cron tasks derive upcoming runs");
 
     let run = request(
         &client,
@@ -1392,6 +1418,208 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
         }),
     )
     .await;
+}
+
+#[tokio::test]
+async fn tasks_create_expands_a_builtin_template() {
+    let (server, _store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let created = request(
+        &client,
+        Command::TasksCreate(TaskCreateParams {
+            idempotency_key: key("task-template"),
+            name: "digest".to_owned(),
+            description: None,
+            trigger_type: "cron".to_owned(),
+            cron_expression: None,
+            interval_seconds: None,
+            run_at: None,
+            timezone: "UTC".to_owned(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            misfire_policy: "skip".to_owned(),
+            prompt: String::new(),
+            workflow_type: None,
+            template: Some("news-digest".to_owned()),
+            profile_id: None,
+            model: None,
+            tools_whitelist: None,
+            capability_policy: None,
+            working_directory: None,
+            approval_policy: "deny_external".to_owned(),
+            delivery_channels: None,
+            delivery_config: None,
+            max_iterations: 10,
+            max_cost_per_run: None,
+            timeout_s: None,
+            enabled: true,
+        }),
+    )
+    .await;
+    let ResponsePayload::TasksCreated(task) = created else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(task.workflow_type.as_deref(), Some("news-digest"));
+    assert_eq!(task.cron_expression.as_deref(), Some("0 8 * * *"));
+    assert!(
+        task.prompt.contains("daily digest"),
+        "prompt: {}",
+        task.prompt
+    );
+    let tools = task
+        .tools_whitelist
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .expect("template supplies a tool whitelist");
+    assert!(tools.iter().any(|tool| tool == "web_search"));
+    let channels = task
+        .delivery_channels
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .expect("template supplies delivery channels");
+    assert_eq!(channels, &[serde_json::Value::String("ui".to_owned())]);
+    assert!(task.schedule_description.is_some());
+    assert_eq!(task.next_runs.len(), 3);
+
+    let unknown = client
+        .request(Command::TasksCreate(TaskCreateParams {
+            idempotency_key: key("task-template-bad"),
+            name: "bad".to_owned(),
+            description: None,
+            trigger_type: "cron".to_owned(),
+            cron_expression: None,
+            interval_seconds: None,
+            run_at: None,
+            timezone: "UTC".to_owned(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            misfire_policy: "skip".to_owned(),
+            prompt: String::new(),
+            workflow_type: None,
+            template: Some("no-such-template".to_owned()),
+            profile_id: None,
+            model: None,
+            tools_whitelist: None,
+            capability_policy: None,
+            working_directory: None,
+            approval_policy: "deny_external".to_owned(),
+            delivery_channels: None,
+            delivery_config: None,
+            max_iterations: 10,
+            max_cost_per_run: None,
+            timeout_s: None,
+            enabled: true,
+        }))
+        .await;
+    assert!(unknown.is_err(), "unknown template fails closed");
+}
+
+#[tokio::test]
+async fn task_next_runs_respect_the_task_timezone() {
+    let (server, _store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let created = request(
+        &client,
+        Command::TasksCreate(TaskCreateParams {
+            idempotency_key: key("task-tz"),
+            name: "tz".to_owned(),
+            description: None,
+            trigger_type: "cron".to_owned(),
+            cron_expression: Some("0 8 * * *".to_owned()),
+            interval_seconds: None,
+            run_at: None,
+            timezone: "+03:00".to_owned(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            misfire_policy: "skip".to_owned(),
+            prompt: "hi".to_owned(),
+            workflow_type: None,
+            template: None,
+            profile_id: None,
+            model: None,
+            tools_whitelist: None,
+            capability_policy: None,
+            working_directory: None,
+            approval_policy: "deny_external".to_owned(),
+            delivery_channels: None,
+            delivery_config: None,
+            max_iterations: 10,
+            max_cost_per_run: None,
+            timeout_s: None,
+            enabled: true,
+        }),
+    )
+    .await;
+    let ResponsePayload::TasksCreated(task) = created else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(task.next_runs.len(), 3);
+    // 08:00 local at UTC+03:00 is 05:00 UTC.
+    assert!(
+        task.next_runs[0].contains("T05:00:00"),
+        "next_runs = {:?}",
+        task.next_runs
+    );
+}
+
+#[tokio::test]
+async fn tasks_create_expands_template_when_fields_are_empty() {
+    let (server, _store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let created = request(
+        &client,
+        Command::TasksCreate(TaskCreateParams {
+            idempotency_key: key("task-template-empty"),
+            name: "digest".to_owned(),
+            description: None,
+            trigger_type: "cron".to_owned(),
+            cron_expression: Some(String::new()),
+            interval_seconds: None,
+            run_at: None,
+            timezone: "UTC".to_owned(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            misfire_policy: "skip".to_owned(),
+            prompt: String::new(),
+            workflow_type: None,
+            template: Some("code-review".to_owned()),
+            profile_id: None,
+            model: None,
+            tools_whitelist: Some(serde_json::json!([])),
+            capability_policy: None,
+            working_directory: None,
+            approval_policy: "deny_external".to_owned(),
+            delivery_channels: Some(serde_json::json!([])),
+            delivery_config: None,
+            max_iterations: 10,
+            max_cost_per_run: None,
+            timeout_s: None,
+            enabled: true,
+        }),
+    )
+    .await;
+    // Python's `body.x or preset.x` treats empty string/list as unset.
+    let ResponsePayload::TasksCreated(task) = created else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(task.workflow_type.as_deref(), Some("code-review"));
+    assert_eq!(task.cron_expression.as_deref(), Some("0 18 * * 1-5"));
+    assert!(
+        task.tools_whitelist
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "read_file")),
+        "empty whitelist falls back to the preset"
+    );
+    assert!(
+        task.delivery_channels
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|channels| channels.len() == 1)
+    );
 }
 
 #[tokio::test]

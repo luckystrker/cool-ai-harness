@@ -43,8 +43,10 @@ identity is one in-process `AppServer::serve_io` connection driven by
 (loopback, optional token) and `server` (token + TLS/reverse-proxy boundary)
 profiles are validated at startup and fail closed. `sdk/typescript/src/http.ts`
 adds the fetch/SSE `CoolTransport`. The React `frontend/src/api/*` cutover,
-Telegram adapter, OpenCode Bun/Python workers and packaging/upgrade tests remain
-pending; `docs/migration/checkpoints/M11.md` tracks them.
+OpenCode Bun/Python workers and packaging/upgrade tests remain pending;
+`docs/migration/checkpoints/M11.md` tracks them. The Telegram adapter and
+`server`-profile operationalization are parked in
+[`docs/backlog/telegram-adapter.md`](docs/backlog/telegram-adapter.md).
 
 Supporting roots: `backend/tests` (pytest suite), `backend/evals`
 (scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),

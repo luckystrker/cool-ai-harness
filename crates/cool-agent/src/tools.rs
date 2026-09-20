@@ -24,6 +24,30 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
+/// One tool as surfaced by the runtime's catalog (agent-constructor /
+/// subagent tool pickers). `dangerous` marks a tool whose default decision is
+/// `Ask`, i.e. one that requires an approval before it can run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub capabilities: Vec<String>,
+    pub dangerous: bool,
+}
+
+/// Stable wire name for a capability, matching the Python `Capability.value`.
+pub fn capability_name(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Read => "read",
+        Capability::Write => "write",
+        Capability::Execute => "execute",
+        Capability::Network => "network",
+        Capability::Git => "git",
+        Capability::SendExternal => "send_external",
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolResult {
     pub output: Value,
@@ -188,6 +212,32 @@ impl ToolRegistry {
             .values()
             .map(|tool| tool.definition.clone())
             .collect()
+    }
+
+    /// Rich, deterministic (name-sorted) catalog for the UI tool pickers.
+    pub fn catalog(&self) -> Vec<ToolCatalogEntry> {
+        let mut entries = self
+            .tools
+            .values()
+            .map(|tool| {
+                let mut capabilities = tool
+                    .capabilities
+                    .iter()
+                    .map(|capability| capability_name(*capability).to_owned())
+                    .collect::<Vec<_>>();
+                // Match the Python catalog's `sorted(cap.value ...)`.
+                capabilities.sort_unstable();
+                ToolCatalogEntry {
+                    name: tool.definition.name.clone(),
+                    description: tool.definition.description.clone(),
+                    parameters: tool.definition.parameters.clone(),
+                    capabilities,
+                    dangerous: tool.default_decision == Decision::Ask,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries
     }
 
     pub fn extend(&self, tools: impl IntoIterator<Item = Tool>) -> Result<Self, ToolError> {

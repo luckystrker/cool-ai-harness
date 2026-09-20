@@ -8,7 +8,9 @@ use cool_agent::{
 };
 use cool_app_server::client::new_idempotency_key;
 use cool_app_server::{AppClient, AppServer, RunLifecycle, ServerConfig};
-use cool_protocol::{CanonicalEvent, StatusEntry, StatusGetResult};
+use cool_protocol::{
+    CanonicalEvent, Command, EmptyParams, ResponsePayload, StatusEntry, StatusGetResult,
+};
 use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
 use serde_json::json;
@@ -414,6 +416,88 @@ async fn status_get_reports_the_configured_lifecycle_snapshot() {
     assert_eq!(status.plugins[0].status, "enabled");
     assert_eq!(status.workers[0].status, "running");
     assert_eq!(status.mcp_servers, ["demo/files"]);
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn tools_list_reports_the_runtime_catalog() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+    let (client, task) = connected_client(server).await;
+    let payload = client
+        .request(Command::ToolsList(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::ToolsListed(catalog) = payload else {
+        panic!("tools.list must return ToolsListed, got {payload:?}");
+    };
+    let names: Vec<&str> = catalog.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(names.contains(&"read_file"), "catalog: {names:?}");
+    assert!(names.contains(&"shell"), "catalog: {names:?}");
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        names, sorted,
+        "catalog must be name-sorted and deterministic"
+    );
+
+    let read = catalog
+        .iter()
+        .find(|entry| entry.name == "read_file")
+        .unwrap();
+    assert!(!read.dangerous);
+    assert!(read.capabilities.contains(&"read".to_owned()));
+    assert!(!read.is_macro);
+
+    let shell = catalog.iter().find(|entry| entry.name == "shell").unwrap();
+    assert!(
+        shell.dangerous,
+        "approval-gated tools are flagged dangerous"
+    );
+    assert!(shell.capabilities.contains(&"execute".to_owned()));
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn tasks_templates_reports_the_static_catalog() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+    let (client, task) = connected_client(server).await;
+    let payload = client
+        .request(Command::TasksTemplates(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::TasksTemplatesListed(templates) = payload else {
+        panic!("tasks.templates must return TasksTemplatesListed, got {payload:?}");
+    };
+    let slugs: Vec<&str> = templates
+        .iter()
+        .map(|template| template.slug.as_str())
+        .collect();
+    assert_eq!(
+        slugs,
+        [
+            "news-digest",
+            "code-review",
+            "memory-review",
+            "health-check"
+        ]
+    );
+    let digest = templates.iter().find(|t| t.slug == "news-digest").unwrap();
+    assert_eq!(digest.cron_expression, "0 8 * * *");
+    assert_eq!(digest.max_iterations, 12);
+    assert_eq!(digest.delivery_channels, ["ui"]);
+    assert!(
+        digest
+            .tools_whitelist
+            .as_ref()
+            .is_some_and(|tools| tools.contains(&"web_search".to_owned()))
+    );
+    assert!(!digest.prompt.is_empty());
+
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }

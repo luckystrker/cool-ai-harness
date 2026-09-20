@@ -51,6 +51,7 @@ export class CoolSdk {
   runSubscribe(params: protocol.RunSubscribeParams) { return this.send<protocol.RunSubscribedResult>({ method: "run.subscribe", params }); }
   approvalResolve(params: protocol.ApprovalResolveParams) { return this.send<protocol.ApprovalResolvedResult>({ method: "approval.resolve", params }); }
   statusGet(params: protocol.StatusGetParams) { return this.send<protocol.StatusGetResult>({ method: "status.get", params }); }
+  toolsList(params: protocol.EmptyParams) { return this.send<protocol.ToolCatalogRecord[]>({ method: "tools.list", params }); }
 
   conversationsList(params: protocol.ConversationListParams) { return this.send<protocol.ConversationRecord[]>({ method: "conversations.list", params }); }
   conversationsCreate(params: protocol.ConversationCreateParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.create", params }); }
@@ -153,6 +154,7 @@ export class CoolSdk {
   tasksRunsRead(params: protocol.TaskRunReadParams) { return this.send<protocol.TaskRunRecord>({ method: "tasks.runs_read", params }); }
   tasksInbox(params: protocol.TaskInboxParams) { return this.send<protocol.TaskInboxResult>({ method: "tasks.inbox", params }); }
   tasksScheduler(params: protocol.EmptyParams) { return this.send<protocol.SchedulerStatusRecord>({ method: "tasks.scheduler", params }); }
+  tasksTemplates(params: protocol.EmptyParams) { return this.send<protocol.TaskTemplateRecord[]>({ method: "tasks.templates", params }); }
   tasksParseCron(params: protocol.ParseCronParams) { return this.send<protocol.ParseCronResult>({ method: "tasks.parse_cron", params }); }
   rssSubscriptionsList(params: protocol.RssSubscriptionListParams) { return this.send<protocol.RssSubscriptionRecord[]>({ method: "rss.subscriptions_list", params }); }
   rssSubscribe(params: protocol.RssSubscribeParams) { return this.send<protocol.RssSubscriptionRecord>({ method: "rss.subscribe", params }); }

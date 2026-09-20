@@ -6,8 +6,9 @@ import {
   toTaskInbox,
   toTaskRun,
   toTaskRunDetail,
+  toTaskTemplate,
 } from "./mappers"
-import type { ScheduledTaskCreate, ScheduledTaskUpdate, TaskTemplate } from "./types"
+import type { ScheduledTaskCreate, ScheduledTaskUpdate } from "./types"
 import type { JsonValue } from "./generated/cool_protocol"
 
 export const tasksApi = {
@@ -15,14 +16,8 @@ export const tasksApi = {
   list: async (params?: { enabled?: boolean }) =>
     (await sdk.tasksList({ enabled: params?.enabled ?? null })).map(toScheduledTask),
   get: async (id: number) => toScheduledTask(await sdk.tasksGet({ id })),
-  create: async (body: ScheduledTaskCreate) => {
-    // `template` materializes a built-in workflow server-side; the canonical
-    // create command has no template parameter yet, so that path stays on the
-    // Python runtime (documented M11 gap).
-    if (body.template) {
-      return api.post<import("./types").ScheduledTask>("/api/tasks", body)
-    }
-    return toScheduledTask(
+  create: async (body: ScheduledTaskCreate) =>
+    toScheduledTask(
       await sdk.tasksCreate({
         idempotencyKey: idempotencyKey(),
         name: body.name,
@@ -37,6 +32,7 @@ export const tasksApi = {
         misfirePolicy: body.misfire_policy ?? "skip",
         prompt: body.prompt ?? "",
         workflowType: null,
+        template: body.template ?? null,
         profileId: body.profile_id ?? null,
         model: body.model ?? null,
         toolsWhitelist: (body.tools_whitelist as unknown as JsonValue) ?? null,
@@ -50,8 +46,7 @@ export const tasksApi = {
         timeoutS: body.timeout_s ?? null,
         enabled: body.enabled ?? true,
       })
-    )
-  },
+    ),
   update: async (id: number, body: ScheduledTaskUpdate) =>
     toScheduledTask(
       await sdk.tasksUpdate({
@@ -110,7 +105,7 @@ export const tasksApi = {
     ),
 
   // --- Helpers ---
-  templates: () => api.get<TaskTemplate[]>("/api/tasks/templates"),
+  templates: async () => (await sdk.tasksTemplates({})).map(toTaskTemplate),
   scheduler: () => api.get<import("./types").SchedulerStatus>("/api/tasks/scheduler"),
   /** Natural language ("every day at 8pm") or cron -> cron + next run times. */
   parseCron: async (text: string) => toParseCron(await sdk.tasksParseCron({ text })),

@@ -28,8 +28,8 @@ use cool_protocol::{
     RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
     RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
     SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
-    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TextDelta, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TaskTemplateRecord, TextDelta,
+    ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -1199,6 +1199,22 @@ impl AppServer {
                     .send(&outbound, success(id, ResponsePayload::Status(status)))
                     .await;
             }
+            Command::ToolsList(_) => {
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(id, ResponsePayload::ToolsListed(self.tool_catalog())),
+                    )
+                    .await;
+            }
+            Command::TasksTemplates(_) => {
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(id, ResponsePayload::TasksTemplatesListed(task_templates())),
+                    )
+                    .await;
+            }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
@@ -1231,6 +1247,25 @@ impl AppServer {
             outbound_queue: self.inner.config.outbound_queue as u16,
             event_page_limit: self.inner.config.event_page_limit,
         }
+    }
+
+    /// Project the runtime's registered tools into the protocol catalog record.
+    /// `is_macro` mirrors the legacy convention that macro-backed tools are
+    /// named with a `macro_` prefix.
+    fn tool_catalog(&self) -> Vec<ToolCatalogRecord> {
+        self.inner
+            .runtime
+            .tool_catalog()
+            .into_iter()
+            .map(|entry| ToolCatalogRecord {
+                is_macro: entry.name.starts_with("macro_"),
+                name: entry.name,
+                description: entry.description,
+                dangerous: entry.dangerous,
+                capabilities: entry.capabilities,
+                parameters: entry.parameters,
+            })
+            .collect()
     }
 
     async fn send(&self, outbound: &Outbound, frame: ServerFrame) -> bool {
@@ -3066,6 +3101,83 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for StdioIo<R, W> {
     }
 }
 
+/// Built-in recurring-workflow templates (the Rust mirror of the Python
+/// `app.tasks.templates.TASK_TEMPLATES` catalog). The catalog is static data
+/// owned by the runtime; it carries no secrets and does not touch the store.
+pub fn task_templates() -> Vec<TaskTemplateRecord> {
+    fn template(
+        slug: &str,
+        name: &str,
+        description: &str,
+        prompt: &str,
+        cron_expression: &str,
+        tools_whitelist: &[&str],
+        max_iterations: i64,
+    ) -> TaskTemplateRecord {
+        TaskTemplateRecord {
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            prompt: prompt.to_owned(),
+            cron_expression: cron_expression.to_owned(),
+            tools_whitelist: Some(
+                tools_whitelist
+                    .iter()
+                    .map(|tool| (*tool).to_owned())
+                    .collect(),
+            ),
+            max_iterations,
+            delivery_channels: vec!["ui".to_owned()],
+        }
+    }
+    vec![
+        template(
+            "news-digest",
+            "Daily news / research digest",
+            "Search the web for updates on your topics and produce a short digest.",
+            "Prepare a concise daily digest of notable news and research on my \
+             topics of interest. Search the web, group findings by theme, keep \
+             each item to one or two sentences, and include source links.",
+            "0 8 * * *",
+            &["web_search", "web_fetch", "memory_recall"],
+            12,
+        ),
+        template(
+            "code-review",
+            "Code review / cleanup",
+            "Review recent changes in the working directory and report issues.",
+            "Review the code in my working directory. Look for bugs, dead code, \
+             missing error handling and style violations. Report the findings \
+             grouped by file, most important first, with concrete suggestions.",
+            "0 18 * * 1-5",
+            &["read_file", "list_files"],
+            15,
+        ),
+        template(
+            "memory-review",
+            "Memory review",
+            "Periodically revisit long-term memory: stale, duplicate or unconfirmed items.",
+            "Review my long-term memory. Recall the most important stored items, \
+             point out anything stale, duplicated or contradictory, and suggest \
+             what should be updated or forgotten. Do not delete anything yourself.",
+            "0 9 * * 1",
+            &["memory_recall", "memory_list"],
+            8,
+        ),
+        template(
+            "health-check",
+            "Health check / monitoring",
+            "Probe the configured endpoints and report anything unhealthy.",
+            "Check that my monitored endpoints respond correctly. Report status, \
+             latency and any failures. Keep the report to a few lines when \
+             everything is healthy.",
+            "0 */6 * * *",
+            &["web_fetch"],
+            6,
+        ),
+    ]
+}
+
 pub fn capabilities() -> BTreeSet<String> {
     [
         "approval_resolution",
@@ -3085,6 +3197,8 @@ pub fn capabilities() -> BTreeSet<String> {
         "session_steer",
         "streaming_models",
         "stdio",
+        "task_templates",
+        "tool_catalog",
         "trusted_tools",
     ]
     .into_iter()

@@ -194,13 +194,31 @@ pub fn cron_next_runs(
     after: i64,
     count: usize,
 ) -> Result<Vec<i64>, ScheduleError> {
+    cron_next_runs_at(expression, 0, after, count)
+}
+
+/// Like [`cron_next_runs`] but interpreted in a fixed offset (seconds east of
+/// UTC), matching the timezone-aware Python `next_cron_runs`.
+pub fn cron_next_runs_at(
+    expression: &str,
+    offset: i64,
+    after: i64,
+    count: usize,
+) -> Result<Vec<i64>, ScheduleError> {
     let mut cursor = after;
     let mut runs = Vec::with_capacity(count);
     for _ in 0..count {
-        cursor = next_cron_after(expression, 0, cursor)?;
+        cursor = next_cron_after(expression, offset, cursor)?;
         runs.push(cursor);
     }
     Ok(runs)
+}
+
+/// Resolve a task timezone name to a fixed offset in seconds east of UTC.
+/// Unknown names return `None` so callers can fall back to UTC, mirroring the
+/// Python `resolve_timezone` fallback.
+pub fn timezone_offset_seconds(name: &str) -> Option<i64> {
+    timezone_offset(name).ok()
 }
 
 /// Whether `moment` (UTC unix seconds) falls inside the task's quiet-hours

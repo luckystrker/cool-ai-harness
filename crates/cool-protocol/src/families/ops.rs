@@ -25,6 +25,10 @@ pub struct ProviderRecord {
     pub is_fallback: bool,
     pub is_default: bool,
     pub chat_models: Option<Value>,
+    /// Masked hint for the stored API key (`abc…wxyz`), or `None` when no key is
+    /// set. Never the key itself; mirrors the Python `ProviderOut.api_key_hint`.
+    #[serde(default)]
+    pub api_key_hint: Option<String>,
 }
 
 /// One model advertised by a provider row's cached catalog.
@@ -342,6 +346,12 @@ pub struct TaskRecord {
     pub failure_count: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Derived server-side (like the Python `TaskOut`): human-readable schedule
+    /// text and upcoming fire times for a valid cron schedule.
+    #[serde(default)]
+    pub schedule_description: Option<String>,
+    #[serde(default)]
+    pub next_runs: Vec<String>,
 }
 
 /// One scheduled-task run row.
@@ -428,6 +438,22 @@ pub struct TaskRunCancelResult {
     pub cancelled: bool,
 }
 
+/// A built-in recurring-workflow preset surfaced by `tasks.templates` so the UI
+/// can prefill the create form.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TaskTemplateRecord {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    pub cron_expression: String,
+    pub tools_whitelist: Option<Vec<String>>,
+    pub max_iterations: i64,
+    pub delivery_channels: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
@@ -453,6 +479,11 @@ pub struct TaskCreateParams {
     pub misfire_policy: String,
     pub prompt: String,
     pub workflow_type: Option<String>,
+    /// Built-in workflow template slug. When set, the server fills the prompt,
+    /// cron schedule, workflow type, tool whitelist and delivery channels from
+    /// the matching [`TaskTemplateRecord`] unless the caller supplied them.
+    #[serde(default)]
+    pub template: Option<String>,
     pub profile_id: Option<i64>,
     pub model: Option<String>,
     pub tools_whitelist: Option<Value>,
