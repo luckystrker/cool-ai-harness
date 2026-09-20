@@ -11,7 +11,7 @@ use cool_store::domains::profiles::{AgentProfilePatch, NewAgentProfile};
 use cool_store::domains::providers::{NewProvider, Provider, ProviderPatch};
 use cool_store::domains::rss::NewRssSubscription;
 use cool_store::domains::tasks::{NewScheduledTask, ScheduledTask, ScheduledTaskPatch};
-use cool_store::domains::webhooks::{NewWebhookEndpoint, NewWebhookEvent, WebhookEndpointPatch};
+use cool_store::domains::webhooks::{NewWebhookEndpoint, WebhookEndpointPatch};
 use cool_store::{LegacyStore, StoreError};
 use serde_json::Value;
 
@@ -534,33 +534,6 @@ pub(super) async fn dispatch(
                 )
                 .map_err(store_error)?,
         )?),
-        Command::WebhooksReplay(params) => {
-            let event_id = params.event_id;
-            let endpoint_id = params.endpoint_id;
-            let replayed = idempotent(
-                store,
-                actor,
-                "webhooks.replay",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || {
-                    let event = store.get_webhook_event(&actor.id, event_id)?;
-                    if event.endpoint_id != endpoint_id {
-                        return Err(StoreError::NotFound("webhook event"));
-                    }
-                    store.record_webhook_event(
-                        endpoint_id,
-                        &NewWebhookEvent {
-                            event_type: event.event_type.clone(),
-                            payload: event.payload.clone(),
-                            signature_valid: event.signature_valid,
-                            status: Some("received"),
-                        },
-                    )
-                },
-            )?;
-            ResponsePayload::WebhooksReplayed(convert(replayed)?)
-        }
         Command::ProfilesList(params) => ResponsePayload::ProfilesListed(convert(
             store
                 .list_profiles(params.include_inactive)

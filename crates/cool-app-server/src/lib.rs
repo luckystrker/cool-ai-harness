@@ -42,6 +42,7 @@ use cool_state::{
     ImportedHistoryEvent, StoreError,
 };
 use cool_store::LegacyStore;
+use cool_store::domains::webhooks::NewWebhookEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
@@ -1399,6 +1400,45 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
+            Command::WebhooksReplay(params) => {
+                let frame = match (
+                    self.inner.config.legacy_store.as_deref(),
+                    self.inner.task_executor.as_ref(),
+                ) {
+                    (Some(store), Some(executor)) => {
+                        let actor = local_actor();
+                        let fingerprint = legacy::fingerprint(&params);
+                        match store
+                            .run_idempotent_async(
+                                &actor.id,
+                                "webhooks.replay",
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                                || {
+                                    replay_webhook(
+                                        store,
+                                        executor,
+                                        &actor,
+                                        params.event_id,
+                                        params.endpoint_id,
+                                    )
+                                },
+                            )
+                            .await
+                        {
+                            Ok(outcome) => match legacy::convert(outcome.value) {
+                                Ok(record) => {
+                                    success(id, ResponsePayload::WebhooksReplayed(record))
+                                }
+                                Err(error) => failure(id, error),
+                            },
+                            Err(error) => failure(id, legacy::store_error(error)),
+                        }
+                    }
+                    _ => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
@@ -2569,6 +2609,77 @@ fn runtime_actor() -> ActorRef {
         id: "cool-app-server".to_owned(),
         kind: ActorKind::System,
     }
+}
+
+/// Replay one stored webhook event: record a new authenticated event row and
+/// re-dispatch it through the task executor (linked task or ad-hoc one-shot),
+/// mirroring `app/webhooks/service.py::replay_event`.
+async fn replay_webhook(
+    store: &LegacyStore,
+    executor: &Arc<TaskExecutor>,
+    actor: &ActorRef,
+    event_id: i64,
+    endpoint_id: i64,
+) -> Result<cool_store::domains::webhooks::WebhookEvent, cool_store::StoreError> {
+    let event = store.get_webhook_event(&actor.id, event_id)?;
+    if event.endpoint_id != endpoint_id {
+        return Err(cool_store::StoreError::NotFound("webhook event"));
+    }
+    let endpoint = store.get_endpoint(&actor.id, endpoint_id)?;
+    // A replay is treated as an authenticated arrival, like Python forcing
+    // `signature_valid=True`.
+    let replay = store.record_webhook_event(
+        endpoint_id,
+        &NewWebhookEvent {
+            event_type: event.event_type.clone(),
+            payload: event.payload.clone(),
+            signature_valid: true,
+            status: Some("processing"),
+        },
+    )?;
+    let task_run_id = if let Some(task_id) = endpoint.task_id {
+        match executor.dispatch_task(actor, task_id).await {
+            Ok(run) => Some(run.id),
+            Err(error) => {
+                store.update_webhook_event(replay.id, "failed", Some(&error_text(&error)), None)?;
+                return store.get_webhook_event(&actor.id, replay.id);
+            }
+        }
+    } else if let Some(template) = endpoint
+        .prompt_template
+        .as_deref()
+        .filter(|template| !template.is_empty())
+    {
+        // Python `event.payload or {}`: a null payload becomes an empty object.
+        let payload_value = event
+            .payload
+            .clone()
+            .filter(|value| !value.is_null())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let payload = serde_json::to_string(&payload_value).unwrap_or_default();
+        let prompt = template.replace("{event}", &payload.chars().take(4000).collect::<String>());
+        let name = format!(
+            "[Webhook] {}: {}",
+            endpoint.name,
+            event.event_type.as_deref().unwrap_or("event")
+        );
+        match executor.dispatch_adhoc(actor, name, prompt).await {
+            Ok(run) => Some(run.id),
+            Err(error) => {
+                store.update_webhook_event(replay.id, "failed", Some(&error_text(&error)), None)?;
+                return store.get_webhook_event(&actor.id, replay.id);
+            }
+        }
+    } else {
+        None
+    };
+    store.update_webhook_event(replay.id, "completed", None, task_run_id)?;
+    store.get_webhook_event(&actor.id, replay.id)
+}
+
+/// Webhook event error text, capped like Python's `str(exc)[:1000]`.
+fn error_text(error: &cool_store::StoreError) -> String {
+    error.to_string().chars().take(1000).collect()
 }
 
 /// Most recent legacy messages projected into one session import. Older

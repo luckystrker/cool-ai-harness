@@ -1,4 +1,3 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
 import { toWebhookEndpoint, toWebhookEvent } from "./mappers"
 import type { JsonValue } from "./generated/cool_protocol"
@@ -65,8 +64,12 @@ export const webhooksApi = {
         limit: params?.limit ?? 50,
       })
     ).map(toWebhookEvent),
-  replay: (endpointId: number, eventId: number) =>
-    api.post<import("./types").WebhookEvent>(
-      `/api/webhooks/${endpointId}/events/${eventId}/replay`
+  replay: async (endpointId: number, eventId: number) =>
+    toWebhookEvent(
+      await sdk.webhooksReplay({
+        idempotencyKey: idempotencyKey(),
+        endpointId,
+        eventId,
+      })
     ),
 }

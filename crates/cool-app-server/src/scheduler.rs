@@ -28,8 +28,8 @@ use cool_protocol::{
 use cool_security::{Capability, CapabilityPolicy, Decision, Workspace, mask_secrets};
 use cool_store::LegacyStore;
 use cool_store::domains::tasks::{
-    APPROVAL_ALLOW_ALL, NewTaskRun, ScheduledTask, TASK_RUN_CANCELLED, TASK_RUN_COMPLETED,
-    TASK_RUN_FAILED, TASK_RUN_RUNNING, TaskRun,
+    APPROVAL_ALLOW_ALL, NewScheduledTask, NewTaskRun, ScheduledTask, TASK_RUN_CANCELLED,
+    TASK_RUN_COMPLETED, TASK_RUN_FAILED, TASK_RUN_RUNNING, TaskRun,
 };
 use cool_store::scheduler::{self, Decision as ScheduleDecision, Scheduler, SchedulerConfig};
 use serde_json::Value;
@@ -182,6 +182,58 @@ impl TaskExecutor {
             )
             .await?;
         Ok(result.value)
+    }
+
+    /// Fire an existing task immediately for an out-of-band trigger (webhook
+    /// replay), returning the durable run row. Actor-scoped like `tasks.run`.
+    /// Quiet hours are enforced (Python `schedule_task_execution` without
+    /// `ignore_quiet_hours`), so a blocked task yields a durable skipped run.
+    /// The local single-actor executor assumption is inherited from `enqueue`.
+    pub async fn dispatch_task(
+        self: &Arc<Self>,
+        actor: &ActorRef,
+        task_id: i64,
+    ) -> Result<TaskRun, cool_store::StoreError> {
+        let task = self.store.get_task(&actor.id, task_id)?;
+        match scheduler::quiet_hours(&task, crate::legacy::now_seconds()) {
+            Ok(true) => {
+                let reason = format!(
+                    "quiet hours {} - {}",
+                    task.quiet_hours_start.as_deref().unwrap_or(""),
+                    task.quiet_hours_end.as_deref().unwrap_or("")
+                );
+                self.store.record_skipped_run(&actor.id, task.id, &reason)
+            }
+            Ok(false) => self.enqueue(task, "manual").await,
+            Err(error) => self.store.record_skipped_run(
+                &actor.id,
+                task.id,
+                &format!("unsupported schedule: {error}"),
+            ),
+        }
+    }
+
+    /// Create a one-shot disabled task for an ad-hoc prompt and run it now
+    /// (Python `_dispatch_adhoc`), returning the durable run row.
+    pub async fn dispatch_adhoc(
+        self: &Arc<Self>,
+        actor: &ActorRef,
+        name: String,
+        prompt: String,
+    ) -> Result<TaskRun, cool_store::StoreError> {
+        let task = self.store.create_task(
+            &actor.id,
+            &NewScheduledTask {
+                name,
+                prompt,
+                trigger_type: "date".to_owned(),
+                run_at: Some(cool_store::python_datetime(crate::legacy::now_seconds(), 0)),
+                // One-shot: never recurs.
+                enabled: false,
+                ..NewScheduledTask::default()
+            },
+        )?;
+        self.enqueue(task, "manual").await
     }
 
     /// Cancel a task run: signal the live execution (if any) and flip the row.

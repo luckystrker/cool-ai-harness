@@ -990,8 +990,8 @@
       "file": "webhooks.ts",
       "member": "replay",
       "http": "POST /api/webhooks/{id}/events/{event}/replay",
-      "status": "deferred",
-      "rationale": "Rust webhooks.replay re-enqueues a durable event row but does not re-dispatch it to the task executor, so the replay action stays in the Python runtime"
+      "status": "sdk",
+      "command": "webhooks.replay"
     },
     {
       "file": "wiki.ts",

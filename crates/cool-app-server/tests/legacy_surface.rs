@@ -1868,7 +1868,9 @@ async fn rss_webhooks_and_wiki_are_protocol_visible() {
             &NewWebhookEvent {
                 event_type: Some("push".to_owned()),
                 payload: Some(json!({"ref": "main"})),
-                signature_valid: true,
+                // An inbound event whose signature failed; the replay still
+                // treats it as authenticated (Python parity).
+                signature_valid: false,
                 status: Some("processed"),
             },
         )
@@ -1896,7 +1898,11 @@ async fn rss_webhooks_and_wiki_are_protocol_visible() {
     .await;
     assert!(matches!(
         replayed,
-        ResponsePayload::WebhooksReplayed(row) if row.id != event.id && row.status == "received"
+        ResponsePayload::WebhooksReplayed(row)
+            if row.id != event.id
+                && row.status == "completed"
+                && row.signature_valid
+                && row.task_run_id.is_none()
     ));
 
     let article = request(
@@ -2224,4 +2230,228 @@ async fn legacy_idempotency_replay_does_not_repeat_mutations() {
         .list_memory_items("local-user", &filter)
         .expect("rows");
     assert_eq!(rows.len(), 1, "replay must not create a second memory");
+}
+
+#[tokio::test]
+async fn webhook_replay_redispatches_through_the_task_executor() {
+    use cool_store::domains::tasks::NewScheduledTask;
+    use cool_store::domains::webhooks::NewWebhookEndpoint;
+
+    let (server, store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    // A linked task: replaying an event fires the task and records task_run_id.
+    let linked = store
+        .create_task(
+            "local-user",
+            &NewScheduledTask {
+                name: "linked".to_owned(),
+                prompt: "do the linked thing".to_owned(),
+                trigger_type: "interval".to_owned(),
+                interval_seconds: Some(3600),
+                ..NewScheduledTask::default()
+            },
+        )
+        .expect("task");
+    let endpoint = request(
+        &client,
+        Command::WebhooksCreate(WebhookCreateParams {
+            idempotency_key: key("hook-linked"),
+            name: "linked-hook".to_owned(),
+            source_type: Some("custom".to_owned()),
+            event_filter: None,
+            task_id: Some(linked.id),
+            prompt_template: None,
+            enabled: Some(true),
+        }),
+    )
+    .await;
+    let ResponsePayload::WebhooksCreated(endpoint) = endpoint else {
+        panic!("unexpected payload");
+    };
+    let event = store
+        .record_webhook_event(
+            endpoint.id,
+            &NewWebhookEvent {
+                event_type: Some("push".to_owned()),
+                payload: Some(json!({"ref": "main"})),
+                signature_valid: false,
+                status: Some("received"),
+            },
+        )
+        .expect("event");
+    let replayed = request(
+        &client,
+        Command::WebhooksReplay(WebhookReplayParams {
+            idempotency_key: key("replay-linked"),
+            endpoint_id: endpoint.id,
+            event_id: event.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::WebhooksReplayed(row) = replayed else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(row.status, "completed");
+    assert!(row.signature_valid);
+    let run_id = row.task_run_id.expect("linked task run id");
+    let run = store.get_task_run("local-user", run_id).expect("task run");
+    assert_eq!(run.task_id, linked.id);
+
+    // An ad-hoc endpoint: replay creates a one-shot disabled task and a run.
+    let adhoc = store
+        .create_endpoint(
+            "local-user",
+            &NewWebhookEndpoint {
+                name: "adhoc".to_owned(),
+                source_type: "custom".to_owned(),
+                prompt_template: Some("Process {event} now".to_owned()),
+                ..NewWebhookEndpoint::default()
+            },
+        )
+        .expect("endpoint");
+    let event = store
+        .record_webhook_event(
+            adhoc.id,
+            &NewWebhookEvent {
+                event_type: Some("custom".to_owned()),
+                payload: Some(json!({"id": 7})),
+                signature_valid: true,
+                status: Some("received"),
+            },
+        )
+        .expect("event");
+    let replayed = request(
+        &client,
+        Command::WebhooksReplay(WebhookReplayParams {
+            idempotency_key: key("replay-adhoc"),
+            endpoint_id: adhoc.id,
+            event_id: event.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::WebhooksReplayed(row) = replayed else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(row.status, "completed");
+    let run_id = row.task_run_id.expect("ad-hoc task run id");
+    let run = store.get_task_run("local-user", run_id).expect("task run");
+    let tasks = store.list_tasks("local-user", false).expect("tasks");
+    let created = tasks
+        .iter()
+        .find(|task| task.id == run.task_id)
+        .expect("ad-hoc task was created");
+    assert!(!created.enabled, "one-shot task must be disabled");
+    assert!(created.name.starts_with("[Webhook]"), "{}", created.name);
+    assert!(created.prompt.contains("\"id\":7") || created.prompt.contains("\"id\": 7"));
+}
+
+#[tokio::test]
+async fn webhook_replay_marks_a_missing_linked_task_failed() {
+    use cool_store::domains::webhooks::NewWebhookEndpoint;
+
+    let (server, store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+    let endpoint = store
+        .create_endpoint(
+            "local-user",
+            &NewWebhookEndpoint {
+                name: "missing".to_owned(),
+                source_type: "custom".to_owned(),
+                task_id: Some(99_999),
+                ..NewWebhookEndpoint::default()
+            },
+        )
+        .expect("endpoint");
+    let event = store
+        .record_webhook_event(
+            endpoint.id,
+            &NewWebhookEvent {
+                event_type: Some("push".to_owned()),
+                payload: None,
+                signature_valid: false,
+                status: Some("received"),
+            },
+        )
+        .expect("event");
+    let replayed = request(
+        &client,
+        Command::WebhooksReplay(WebhookReplayParams {
+            idempotency_key: key("replay-missing"),
+            endpoint_id: endpoint.id,
+            event_id: event.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::WebhooksReplayed(row) = replayed else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(row.status, "failed");
+    assert!(row.task_run_id.is_none());
+    assert!(
+        row.error.as_deref().is_some_and(|error| !error.is_empty()),
+        "dispatch failure must record an error"
+    );
+}
+
+#[tokio::test]
+async fn webhook_replay_respects_task_quiet_hours() {
+    use cool_store::domains::tasks::NewScheduledTask;
+    use cool_store::domains::webhooks::NewWebhookEndpoint;
+
+    let (server, store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+    let task = store
+        .create_task(
+            "local-user",
+            &NewScheduledTask {
+                name: "quiet".to_owned(),
+                prompt: "blocked".to_owned(),
+                trigger_type: "interval".to_owned(),
+                interval_seconds: Some(3600),
+                quiet_hours_start: Some("00:00".to_owned()),
+                quiet_hours_end: Some("23:59".to_owned()),
+                ..NewScheduledTask::default()
+            },
+        )
+        .expect("task");
+    let endpoint = store
+        .create_endpoint(
+            "local-user",
+            &NewWebhookEndpoint {
+                name: "quiet-hook".to_owned(),
+                source_type: "custom".to_owned(),
+                task_id: Some(task.id),
+                ..NewWebhookEndpoint::default()
+            },
+        )
+        .expect("endpoint");
+    let event = store
+        .record_webhook_event(
+            endpoint.id,
+            &NewWebhookEvent {
+                event_type: Some("push".to_owned()),
+                payload: Some(json!({})),
+                signature_valid: true,
+                status: Some("received"),
+            },
+        )
+        .expect("event");
+    let replayed = request(
+        &client,
+        Command::WebhooksReplay(WebhookReplayParams {
+            idempotency_key: key("replay-quiet"),
+            endpoint_id: endpoint.id,
+            event_id: event.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::WebhooksReplayed(row) = replayed else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(row.status, "completed");
+    let run = store
+        .get_task_run("local-user", row.task_run_id.expect("skipped run id"))
+        .expect("run");
+    assert_eq!(run.status, "skipped");
 }
