@@ -274,6 +274,17 @@ pub struct PlanRecord {
     pub updated_at: String,
 }
 
+/// Result of starting a plan execution: the durable plan and the run that
+/// carries its canonical `plan.*` events.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PlanExecuteResult {
+    pub plan_id: i64,
+    pub run_id: String,
+    pub status: String,
+}
+
 /// One plan step row.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

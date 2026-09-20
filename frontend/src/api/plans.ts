@@ -1,4 +1,10 @@
-import { idempotencyKey, sdk } from "./sdk"
+import {
+  coolApiBaseUrl,
+  coolApiToken,
+  idempotencyKey,
+  sdk,
+  streamRunEvents,
+} from "./sdk"
 import { toPlan, toPlanTemplate } from "./mappers"
 import type { JsonValue } from "./generated/cool_protocol"
 import type { Plan, PlanTemplate } from "./types"
@@ -55,9 +61,9 @@ export const plansApi = {
       await sdk.plansCancel({ idempotencyKey: idempotencyKey(), conversationId, planId })
     ),
 
-  /** Execute an approved plan (returns SSE stream URL for manual handling). */
-  executeUrl: (conversationId: number, planId: number) =>
-    `/api/conversations/${conversationId}/plans/${planId}/execute`,
+  /** Start an approved plan's execution and return its durable run. */
+  execute: async (conversationId: number, planId: number) =>
+    sdk.plansExecute({ idempotencyKey: idempotencyKey(), conversationId, planId }),
 
   // --- Templates ---
 
@@ -88,52 +94,61 @@ export interface PlanExecuteEvent {
 /**
  * Stream an approved plan's execution.
  *
- * Plan execution still runs in the Python runtime (the canonical runtime has
- * no plan executor yet), so this stays on the per-plan SSE transport and is a
- * documented `sse/stream` exception in the protocol inventory.
+ * `plans.execute` starts a durable canonical run; its `plan.*` events are
+ * streamed over the canonical cursor/reconnect transport and re-projected into
+ * the legacy `{kind, payload}` shape the plan card consumes.
  */
 export async function* executePlan(
   conversationId: number,
   planId: number,
   signal?: AbortSignal
 ): AsyncGenerator<PlanExecuteEvent> {
-  const resp = await fetch(
-    `/api/conversations/${conversationId}/plans/${planId}/execute`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      signal,
-    }
-  )
-  if (!resp.ok || !resp.body) {
-    throw new Error(`Execution failed (${resp.status})`)
-  }
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let sepIdx: number
-      while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
-        const frame = buffer.slice(0, sepIdx)
-        buffer = buffer.slice(sepIdx + 2)
-        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"))
-        if (!dataLine) continue
-        try {
-          const parsed = JSON.parse(dataLine.slice(5).trim())
-          const payload = parsed?.payload ?? parsed
-          const kind = parsed?.kind ?? ""
-          yield { kind, payload: (payload ?? {}) as Record<string, unknown> }
-        } catch {
-          // Skip malformed frames.
+  const { runId } = await sdk.plansExecute({
+    idempotencyKey: idempotencyKey(),
+    conversationId,
+    planId,
+  })
+  for await (const envelope of streamRunEvents(runId, {
+    baseUrl: coolApiBaseUrl,
+    signal,
+    ...(coolApiToken ? { token: coolApiToken } : {}),
+  })) {
+    const event = envelope.event
+    switch (event.kind) {
+      case "plan.step_started":
+      case "plan.step_completed":
+        yield {
+          kind: event.kind === "plan.step_started" ? "plan_step_start" : "plan_step_complete",
+          payload: {
+            plan_id: event.payload.planId,
+            position: event.payload.position,
+            title: event.payload.title,
+            status: event.payload.status,
+            result_summary: event.payload.resultSummary,
+          },
         }
-      }
+        break
+      case "plan.progress":
+        yield {
+          kind: "plan_progress",
+          payload: {
+            plan_id: event.payload.planId,
+            completed: event.payload.completedSteps,
+            total: event.payload.totalSteps,
+            status: event.payload.status,
+          },
+        }
+        break
+      case "run.completed":
+      case "run.failed":
+      case "run.cancelled":
+        // Terminal signal so the card does not stay stuck in `executing` when
+        // a step failed and left later steps pending.
+        yield { kind: event.kind.replace(".", "_"), payload: {} }
+        break
+      default:
+        break
     }
-  } finally {
-    reader.releaseLock()
   }
 }
 

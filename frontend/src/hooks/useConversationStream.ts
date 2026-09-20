@@ -344,9 +344,10 @@ export function useConversationStream() {
       case "plan.created": {
         const p = canonical.payload
         acc.plan = {
-          // Canonical plan ids are model-supplied strings; the live card is a
-          // read-only projection until plan approval moves to the protocol.
-          id: 0,
+          // The app server persists a durable plan when the run's session is
+          // bound to a conversation and stamps its numeric id; a plan without
+          // a store id cannot be approved/executed through the protocol.
+          id: p.storePlanId ?? 0,
           conversation_id: convIdRef.current ?? 0,
           run_id: null,
           title: p.title,

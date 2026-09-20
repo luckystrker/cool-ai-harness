@@ -817,6 +817,30 @@ impl DurableStore {
         }
     }
 
+    /// The legacy conversation a durable session was linked from, if any.
+    ///
+    /// Actor-scoped: a link owned by another actor fails closed with
+    /// `ActorMismatch`.
+    pub fn conversation_id_for_session(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let connection = self.connection()?;
+        let row: Option<(String, i64)> = connection
+            .query_row(
+                "SELECT actor_id, conversation_id FROM rust_conversation_links WHERE session_id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((owner, conversation_id)) if owner == actor_id => Ok(Some(conversation_id)),
+            Some(_) => Err(StoreError::ActorMismatch),
+            None => Ok(None),
+        }
+    }
+
     /// Newest-first run summaries of one actor-owned session.
     pub fn list_session_runs(
         &self,

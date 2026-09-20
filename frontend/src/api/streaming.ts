@@ -263,7 +263,15 @@ function legacyToCanonical(event: AgentEvent): EventEnvelope[] {
         ...base,
         event: {
           kind: "plan.created",
-          payload: { planId, title: (payload.title as string | null) ?? null, totalSteps: planSteps.length, steps: planSteps },
+          payload: {
+            planId,
+            title: (payload.title as string | null) ?? null,
+            totalSteps: planSteps.length,
+            steps: planSteps,
+            // Legacy plan events carry no durable store id; the app server
+            // stamps it for canonical plan-mode runs.
+            storePlanId: null,
+          },
         },
       }
       const stepEvents = planSteps.flatMap((common): EventEnvelope[] => {

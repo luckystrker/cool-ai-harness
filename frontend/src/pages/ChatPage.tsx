@@ -24,7 +24,7 @@ import { artifactsApi } from "@/api/artifacts"
 import { executePlan, plansApi } from "@/api/plans"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
-import type { Message, Provider, RunOut, ToolPermissions } from "@/api/types"
+import type { Message, Plan, Provider, RunOut, ToolPermissions } from "@/api/types"
 import { Markdown } from "@/components/chat/Markdown"
 import { MessageBubble, type MessageViewModel } from "@/components/chat/MessageBubble"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
@@ -320,8 +320,17 @@ export function ChatPage() {
     if (!planMsg?.plan) return
     const planId = planMsg.plan.id
     try {
-      // Plan execution still runs in the Python runtime; stream its plan events.
+      // plans.execute starts a durable canonical run; its plan.* events are
+      // streamed over the canonical cursor/reconnect transport.
       for await (const { kind, payload } of executePlan(convId, planId)) {
+        if (kind === "run_completed" || kind === "run_failed" || kind === "run_cancelled") {
+          const status: Plan["status"] =
+            kind === "run_completed" ? "completed" : kind === "run_cancelled" ? "cancelled" : "failed"
+          setPendingMsgs((cur) =>
+            cur.map((m) => (m.plan ? { ...m, plan: { ...m.plan, status } } : m))
+          )
+          continue
+        }
         if (kind === "plan_step_start" || kind === "plan_step_complete" || kind === "plan_progress") {
           setPendingMsgs((cur) =>
             cur.map((m) => {

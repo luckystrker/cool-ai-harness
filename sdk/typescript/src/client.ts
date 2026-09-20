@@ -94,6 +94,7 @@ export class CoolSdk {
   plansGet(params: protocol.PlanIdParams) { return this.send<protocol.PlanRecord>({ method: "plans.get", params }); }
   plansUpdate(params: protocol.PlanUpdateParams) { return this.send<protocol.PlanRecord>({ method: "plans.update", params }); }
   plansApprove(params: protocol.PlanApproveParams) { return this.send<protocol.PlanRecord>({ method: "plans.approve", params }); }
+  plansExecute(params: protocol.IdempotentPlanIdParams) { return this.send<protocol.PlanExecuteResult>({ method: "plans.execute", params }); }
   plansCancel(params: protocol.IdempotentPlanIdParams) { return this.send<protocol.PlanRecord>({ method: "plans.cancel", params }); }
   plansTemplatesList(params: protocol.EmptyParams) { return this.send<protocol.PlanTemplateRecord[]>({ method: "plans.templates_list", params }); }
   plansTemplatesCreate(params: protocol.PlanTemplateCreateParams) { return this.send<protocol.PlanTemplateRecord>({ method: "plans.templates_create", params }); }

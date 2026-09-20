@@ -22,7 +22,8 @@
           "planId": "plan-1",
           "title": "Ship",
           "totalSteps": 1,
-          "steps": []
+          "steps": [],
+          "storePlanId": null
         }
       }
     },

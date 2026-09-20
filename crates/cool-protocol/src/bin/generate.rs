@@ -593,6 +593,7 @@ fn generated_typescript() -> String {
         RunEventsLegacyParams,
         ToolCallRecord,
         PlanRecord,
+        PlanExecuteResult,
         PlanStepRecord,
         PlanTemplateRecord,
         PlanListParams,

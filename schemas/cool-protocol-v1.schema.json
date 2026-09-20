@@ -2714,6 +2714,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "plans.execute"
+            },
+            "params": {
+              "$ref": "#/$defs/IdempotentPlanIdParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "plans.cancel"
             },
             "params": {
@@ -6620,6 +6637,15 @@
             "$ref": "#/$defs/PlanStep"
           }
         },
+        "storePlanId": {
+          "description": "Durable `plans.id` the runtime persisted for this model plan, when the\nrun's session is bound to a legacy conversation. Clients use it to\napprove/execute the plan through the App Protocol; `None` when the\nsession is not conversation-bound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
         "title": {
           "type": [
             "string",
@@ -6636,6 +6662,27 @@
       "required": [
         "planId",
         "totalSteps"
+      ]
+    },
+    "PlanExecuteResult": {
+      "description": "Result of starting a plan execution: the durable plan and the run that\ncarries its canonical `plan.*` events.",
+      "type": "object",
+      "properties": {
+        "planId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "planId",
+        "runId",
+        "status"
       ]
     },
     "PlanIdParams": {
@@ -8810,6 +8857,23 @@
             },
             "value": {
               "$ref": "#/$defs/PlanRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plans_executed"
+            },
+            "value": {
+              "$ref": "#/$defs/PlanExecuteResult"
             }
           },
           "additionalProperties": false,

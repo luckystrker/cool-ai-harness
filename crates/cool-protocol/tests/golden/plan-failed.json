@@ -22,7 +22,8 @@
           "planId": "plan-failed",
           "title": "Fail",
           "totalSteps": 1,
-          "steps": []
+          "steps": [],
+          "storePlanId": null
         }
       }
     },

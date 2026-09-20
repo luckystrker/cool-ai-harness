@@ -17,24 +17,27 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cool_agent::{
-    AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, CancelSignal,
-    EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver, ToolContext, Usage,
-    builtin_registry, history_from_events, mask_canonical_event, planning_system_prompt,
+    AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
+    CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
+    ToolContext, Usage, builtin_registry, history_from_events, mask_canonical_event,
+    planning_system_prompt,
 };
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalResolvedResult, CanonicalEvent, Command, ContentPart, EventCursor,
-    EventEnvelope, EventPage, HistoryItem, InitializeResult, ItemEvent, JsonRpcV2,
-    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
-    RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
-    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
-    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
+    ContentPart, EventCursor, EventEnvelope, EventPage, HistoryItem, IdempotentPlanIdParams,
+    InitializeResult, ItemEvent, JsonRpcV2, PlanCreated, PlanExecuteResult, PlanProgress,
+    PlanProgressStatus, PlanStep as ProtocolPlanStep, PromptAcceptedResult, ProtocolError,
+    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
+    SessionConversationResult, SessionCreatedResult, SessionForkedResult, SessionHistoryResult,
+    SessionListResult, SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary,
+    StatusGetResult, StreamFrame, SubagentRunCancelResult, TaskRunCancelResult, TaskTemplateRecord,
+    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
+    V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -139,6 +142,9 @@ struct Inner {
     task_executor: Option<Arc<TaskExecutor>>,
     /// Foreground subagent executor, present when a legacy store is configured.
     subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// Durable plan id persisted for each run's first `plan.created`, so one
+    /// run's repeated `update_plan` calls do not create duplicate drafts.
+    planned_runs: std::sync::Mutex<HashMap<String, i64>>,
 }
 
 #[async_trait]
@@ -339,6 +345,7 @@ impl AppServer {
                 lifecycle: None,
                 task_executor,
                 subagent_executor,
+                planned_runs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1439,6 +1446,16 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
+            Command::PlansExecute(params) => {
+                let frame = match self
+                    .start_plan_execution(&params, &outbound, &connection)
+                    .await
+                {
+                    Ok(result) => success(id, ResponsePayload::PlansExecuted(result)),
+                    Err(error) => failure(id, error),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
@@ -1948,6 +1965,570 @@ impl AppServer {
         });
     }
 
+    /// Start a canonical plan execution: resolve the conversation's session,
+    /// open a durable run, register it for cancellation/subscription, and spawn
+    /// the step loop. Idempotent through `start_run`'s `(actor, key)` record.
+    async fn start_plan_execution(
+        &self,
+        params: &IdempotentPlanIdParams,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) -> Result<PlanExecuteResult, ProtocolError> {
+        let actor = local_actor();
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return Err(error(-32010, "legacy_store_unavailable", false));
+        };
+        let plan = legacy
+            .get_plan(&actor.id, params.conversation_id, params.plan_id)
+            .map_err(legacy::store_error)?;
+        let key = params.idempotency_key.as_str();
+        let fingerprint = fingerprint(params);
+        // A replay of the same key returns the original run before the
+        // `approved` guard (the plan is `executing` by then).
+        if let Ok(Some(run_id)) = self.inner.store.lookup_idempotent::<String>(
+            &actor.id,
+            "session.prompt",
+            key,
+            &fingerprint,
+        ) {
+            let status = self
+                .inner
+                .store
+                .run(&run_id, &actor.id)
+                .map(|run| run.status.as_str().to_owned())
+                .unwrap_or_else(|_| "running".to_owned());
+            return Ok(PlanExecuteResult {
+                plan_id: plan.id,
+                run_id,
+                status,
+            });
+        }
+        if plan.status != "approved" {
+            return Err(legacy::invalid_input(format!(
+                "plan {} is not approved",
+                plan.id
+            )));
+        }
+        let steps = legacy
+            .list_plan_steps(plan.id)
+            .map_err(legacy::store_error)?;
+        let session_id = self.ensure_conversation_session(params.conversation_id)?;
+        let outcome = self
+            .inner
+            .store
+            .start_run(&actor.id, key, &fingerprint, &session_id)
+            .map_err(store_error)?;
+        let run_id = outcome.value;
+        if !outcome.created {
+            let status = self
+                .inner
+                .store
+                .run(&run_id, &actor.id)
+                .map(|run| run.status.as_str().to_owned())
+                .unwrap_or_else(|_| "running".to_owned());
+            return Ok(PlanExecuteResult {
+                plan_id: plan.id,
+                run_id,
+                status,
+            });
+        }
+        // Transition to `executing` synchronously before spawning: a later
+        // `plans.execute` for the same plan is then rejected instead of running
+        // a second time (e.g. after a cancel cleared the active-run guard).
+        legacy
+            .set_plan_status(&actor.id, params.conversation_id, plan.id, "executing")
+            .map_err(legacy::store_error)?;
+        let (cancel, receiver) = watch::channel(None);
+        self.inner.state.lock().await.runs.insert(
+            run_id.clone(),
+            RunRecord {
+                cancel,
+                terminal: false,
+            },
+        );
+        let connection_id = connection.lock().await.id.clone();
+        self.inner
+            .run_owners
+            .lock()
+            .await
+            .insert(run_id.clone(), connection_id);
+        let plan_id = plan.id;
+        let server = self.clone();
+        let outbound = outbound.clone();
+        let spawned = run_id.clone();
+        tokio::spawn(async move {
+            server
+                .run_plan(spawned.clone(), plan, steps, outbound, receiver)
+                .await;
+            if let Some(record) = server.inner.state.lock().await.runs.get_mut(&spawned) {
+                record.terminal = true;
+            }
+        });
+        Ok(PlanExecuteResult {
+            plan_id,
+            run_id,
+            status: "running".to_owned(),
+        })
+    }
+
+    /// Find-or-create the canonical session for a conversation using a stable
+    /// key, importing the legacy transcript once (same projection as
+    /// `session.for_conversation`).
+    fn ensure_conversation_session(&self, conversation_id: i64) -> Result<String, ProtocolError> {
+        let actor = local_actor();
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return Err(error(-32010, "legacy_store_unavailable", false));
+        };
+        let key = format!("plan-execute-link:{conversation_id}");
+        let fingerprint = format!("plan-execute-link:{conversation_id}");
+        if let Ok(Some(link)) = self.inner.store.lookup_idempotent::<ConversationLink>(
+            &actor.id,
+            "session.for_conversation",
+            &key,
+            &fingerprint,
+        ) {
+            return Ok(link.session_id);
+        }
+        let conversation = legacy
+            .get_conversation(&actor.id, conversation_id)
+            .map_err(legacy::store_error)?;
+        let window = legacy
+            .recent_messages(&actor.id, conversation_id, MAX_IMPORTED_MESSAGES)
+            .map_err(legacy::store_error)?;
+        let mut messages = window.messages;
+        let trimmed = trim_orphan_tool_rows(&mut messages);
+        let truncated = window.has_more || trimmed > 0;
+        let history = legacy_history_events(&messages);
+        let link = self
+            .inner
+            .store
+            .link_conversation(
+                &actor.id,
+                &key,
+                &fingerprint,
+                conversation_id,
+                conversation.title.as_deref(),
+                conversation.working_directory.as_deref(),
+                &history,
+                truncated,
+            )
+            .map_err(store_error)?;
+        Ok(link.session_id)
+    }
+
+    /// Execute an approved plan's steps, emitting canonical `plan.*` events into
+    /// the durable run and finalizing the plan and run.
+    async fn run_plan(
+        &self,
+        run_id: String,
+        plan: cool_store::domains::plans::Plan,
+        steps: Vec<cool_store::domains::plans::PlanStep>,
+        outbound: Outbound,
+        cancel_rx: watch::Receiver<Option<String>>,
+    ) {
+        let actor = local_actor();
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return;
+        };
+        let sink = AppServerEventSink {
+            server: self.clone(),
+            run_id: run_id.clone(),
+            outbound: outbound.clone(),
+            steer_cursor: Arc::new(AtomicU64::new(0)),
+            own_user_items: Arc::new(Mutex::new(HashSet::new())),
+        };
+        let ordered = topological_order(&steps);
+        let total = ordered.len() as u32;
+        let _ = sink
+            .emit(CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: Some("plan".to_owned()),
+            }))
+            .await;
+        let _ = sink
+            .emit(CanonicalEvent::PlanCreated(PlanCreated {
+                plan_id: plan.id.to_string(),
+                title: plan.title.clone(),
+                total_steps: total,
+                steps: ordered
+                    .iter()
+                    .map(|step| protocol_plan_step(&plan, step, &step.status, None))
+                    .collect(),
+                store_plan_id: Some(plan.id),
+            }))
+            .await;
+        let _ = sink
+            .emit(CanonicalEvent::PlanProgress(PlanProgress {
+                plan_id: plan.id.to_string(),
+                completed_steps: 0,
+                total_steps: total,
+                message: None,
+                status: PlanProgressStatus::Executing,
+            }))
+            .await;
+        let conversation = legacy
+            .get_conversation(&actor.id, plan.conversation_id)
+            .ok();
+        let model = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.model.clone())
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        let workspace = match conversation
+            .as_ref()
+            .and_then(|conversation| conversation.working_directory.as_deref())
+        {
+            Some(path) => match Workspace::new(path) {
+                Ok(workspace) => workspace,
+                Err(_) => {
+                    let _ = self
+                        .finish_plan(&sink, legacy, &actor, &plan, "failed", 0, total)
+                        .await;
+                    return;
+                }
+            },
+            None => self.inner.workspace.clone(),
+        };
+        let mut statuses = steps
+            .iter()
+            .map(|step| (step.position, step.status.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut history = plan_history(legacy, &actor.id, plan.conversation_id);
+        let mut completed = 0_u32;
+        let mut failed = false;
+        let mut cancelled = false;
+        for step in &ordered {
+            if cancel_rx.borrow().is_some() || plan_is_cancelled(legacy, &actor, &plan) {
+                cancelled = true;
+                break;
+            }
+            if !dependencies_met(step, &statuses) {
+                statuses.insert(step.position, "skipped".to_owned());
+                let _ = legacy.update_plan_step_status(
+                    plan.id,
+                    step.position,
+                    "skipped",
+                    Some("Skipped: dependencies not met"),
+                    None,
+                );
+                let _ = sink
+                    .emit(CanonicalEvent::PlanStepCompleted(protocol_plan_step(
+                        &plan,
+                        step,
+                        "skipped",
+                        Some("Skipped: dependencies not met"),
+                    )))
+                    .await;
+                continue;
+            }
+            statuses.insert(step.position, "running".to_owned());
+            let _ = legacy.update_plan_step_status(plan.id, step.position, "running", None, None);
+            let _ = sink
+                .emit(CanonicalEvent::PlanStepStarted(protocol_plan_step(
+                    &plan, step, "running", None,
+                )))
+                .await;
+            let (summary, step_failed) = self
+                .execute_plan_step(&plan, step, &history, &workspace, &model, &cancel_rx)
+                .await;
+            let summary = mask_secrets(&summary);
+            if step_failed {
+                // A step that stopped because the plan was cancelled is not a
+                // step failure; the plan and its run are cancelled instead.
+                if cancel_rx.borrow().is_some() || plan_is_cancelled(legacy, &actor, &plan) {
+                    cancelled = true;
+                    break;
+                }
+                statuses.insert(step.position, "failed".to_owned());
+                let _ = legacy.update_plan_step_status(
+                    plan.id,
+                    step.position,
+                    "failed",
+                    Some(&summary),
+                    None,
+                );
+                let _ = sink
+                    .emit(CanonicalEvent::PlanStepCompleted(protocol_plan_step(
+                        &plan,
+                        step,
+                        "failed",
+                        Some(&summary),
+                    )))
+                    .await;
+                failed = true;
+                break;
+            }
+            statuses.insert(step.position, "completed".to_owned());
+            let _ = legacy.update_plan_step_status(
+                plan.id,
+                step.position,
+                "completed",
+                Some(&summary),
+                None,
+            );
+            completed += 1;
+            history.push(Message::text(
+                MessageRole::Assistant,
+                format!("[Step: {}]\n{summary}", step.title),
+            ));
+            let _ = sink
+                .emit(CanonicalEvent::PlanStepCompleted(protocol_plan_step(
+                    &plan,
+                    step,
+                    "completed",
+                    Some(&summary),
+                )))
+                .await;
+            let _ = sink
+                .emit(CanonicalEvent::PlanProgress(PlanProgress {
+                    plan_id: plan.id.to_string(),
+                    completed_steps: completed,
+                    total_steps: total,
+                    message: Some(format!("current step {}", step.position)),
+                    status: PlanProgressStatus::Executing,
+                }))
+                .await;
+        }
+        let final_status = if cancelled {
+            "cancelled"
+        } else if failed {
+            "failed"
+        } else {
+            "completed"
+        };
+        let _ = self
+            .finish_plan(&sink, legacy, &actor, &plan, final_status, completed, total)
+            .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_plan(
+        &self,
+        sink: &AppServerEventSink,
+        legacy: &LegacyStore,
+        actor: &ActorRef,
+        plan: &cool_store::domains::plans::Plan,
+        status: &str,
+        completed: u32,
+        total: u32,
+    ) -> Result<(), ProtocolError> {
+        // A concurrent `plans.cancel` wins: do not clobber a terminal plan.
+        let stored = legacy
+            .get_plan(&actor.id, plan.conversation_id, plan.id)
+            .ok();
+        let effective = match stored.as_ref().map(|plan| plan.status.as_str()) {
+            Some("cancelled") => "cancelled",
+            Some("completed") => "completed",
+            Some("failed") => "failed",
+            _ => status,
+        };
+        let already_terminal = stored.as_ref().is_some_and(|plan| {
+            matches!(plan.status.as_str(), "cancelled" | "completed" | "failed")
+        });
+        if !already_terminal {
+            let _ = legacy.set_plan_status(&actor.id, plan.conversation_id, plan.id, effective);
+        }
+        match effective {
+            "completed" => {
+                let _ = sink
+                    .emit(CanonicalEvent::PlanProgress(PlanProgress {
+                        plan_id: plan.id.to_string(),
+                        completed_steps: completed,
+                        total_steps: total,
+                        message: None,
+                        status: PlanProgressStatus::Completed,
+                    }))
+                    .await;
+                let _ = sink
+                    .emit(CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "plan_completed".to_owned(),
+                        error_code: None,
+                    }))
+                    .await;
+            }
+            "failed" => {
+                let _ = sink
+                    .emit(CanonicalEvent::PlanProgress(PlanProgress {
+                        plan_id: plan.id.to_string(),
+                        completed_steps: completed,
+                        total_steps: total,
+                        message: None,
+                        status: PlanProgressStatus::Failed,
+                    }))
+                    .await;
+                let _ = sink
+                    .emit(CanonicalEvent::RunFailed(RunTerminal {
+                        reason: "plan_failed".to_owned(),
+                        error_code: None,
+                    }))
+                    .await;
+            }
+            _ => {
+                let _ = sink
+                    .emit(CanonicalEvent::RunCancelled(RunTerminal {
+                        reason: "plan_cancelled".to_owned(),
+                        error_code: None,
+                    }))
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_plan_step(
+        &self,
+        plan: &cool_store::domains::plans::Plan,
+        step: &cool_store::domains::plans::PlanStep,
+        history: &[Message],
+        workspace: &Workspace,
+        model: &str,
+        cancel_rx: &watch::Receiver<Option<String>>,
+    ) -> (String, bool) {
+        let prompt = plan_step_prompt(step);
+        match step
+            .delegate_role
+            .as_deref()
+            .filter(|role| !role.is_empty())
+        {
+            Some(role_name) => {
+                self.execute_plan_step_via_subagent(plan, step, &prompt, role_name, cancel_rx)
+                    .await
+            }
+            None => {
+                self.execute_plan_step_direct(prompt, history, workspace, model, cancel_rx)
+                    .await
+            }
+        }
+    }
+
+    async fn execute_plan_step_direct(
+        &self,
+        prompt: String,
+        history: &[Message],
+        workspace: &Workspace,
+        model: &str,
+        cancel_rx: &watch::Receiver<Option<String>>,
+    ) -> (String, bool) {
+        let request = AgentRequest {
+            model: model.to_owned(),
+            history: history.to_vec(),
+            user_input: prompt,
+            system_prompt: None,
+            mode: Some("plan_step".to_owned()),
+            temperature: 0.0,
+            max_tokens: None,
+            limits: AgentLimits {
+                max_iterations: 5,
+                ..AgentLimits::default()
+            },
+            tool_names: None,
+            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone()),
+        };
+        let sink = PlanStepSink::default();
+        let outcome = self
+            .inner
+            .runtime
+            .run(
+                request,
+                &sink,
+                &AutoApprovalGate {
+                    outcome: ApprovalOutcome::Approved,
+                },
+                CancelSignal::from_receiver(cancel_rx.clone()),
+            )
+            .await;
+        match outcome {
+            Ok(RunOutcome::Completed { .. }) => (truncate_chars(&sink.text(), 500), false),
+            Ok(RunOutcome::Cancelled { .. }) => ("Failed: cancelled".to_owned(), true),
+            Ok(RunOutcome::Failed { code, .. }) => (format!("Failed: {code}"), true),
+            Err(error) => (format!("Failed: {error}"), true),
+        }
+    }
+
+    async fn execute_plan_step_via_subagent(
+        &self,
+        plan: &cool_store::domains::plans::Plan,
+        step: &cool_store::domains::plans::PlanStep,
+        prompt: &str,
+        role_name: &str,
+        cancel_rx: &watch::Receiver<Option<String>>,
+    ) -> (String, bool) {
+        let actor = local_actor();
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return ("Failed: legacy store unavailable".to_owned(), true);
+        };
+        let Some(executor) = self.inner.subagent_executor.as_ref() else {
+            return ("Failed: subagent executor unavailable".to_owned(), true);
+        };
+        let role = match legacy.list_subagent_roles() {
+            Ok(roles) => roles.into_iter().find(|role| role.name == role_name),
+            Err(error) => return (format!("Failed: {error}"), true),
+        };
+        let Some(role) = role else {
+            return (
+                format!("Failed: subagent role '{role_name}' not found"),
+                true,
+            );
+        };
+        let spec = SubagentLaunchSpec {
+            parent_conversation_id: plan.conversation_id,
+            role_id: Some(role.id),
+            profile_id: None,
+            parent_run_id: None,
+            name: Some(format!("plan-step-{}:{role_name}", step.position)),
+            prompt: prompt.to_owned(),
+            model: None,
+        };
+        let key = format!("plan-step:{}:{}", plan.id, step.position);
+        let run = match executor.launch(&actor.id, spec, &key, &key).await {
+            Ok(run) => run,
+            Err(error) => return (format!("Failed: {error}"), true),
+        };
+        let deadline = Instant::now() + Duration::from_secs(900);
+        loop {
+            // `plans.cancel` does not signal the run's cancel channel, so also
+            // observe the plan status here; otherwise the child could keep
+            // running until the hard timeout after the plan was cancelled.
+            if cancel_rx.borrow().is_some() || plan_is_cancelled(legacy, &actor, plan) {
+                let _ = executor
+                    .cancel(&actor.id, run.id, &format!("{key}:cancel"), &key)
+                    .await;
+                return ("Failed: cancelled".to_owned(), true);
+            }
+            match legacy.get_subagent_run(&actor.id, run.id) {
+                Ok(current) if current.status == "completed" => {
+                    return (
+                        current
+                            .result_summary
+                            .clone()
+                            .unwrap_or_else(|| "Completed via subagent".to_owned()),
+                        false,
+                    );
+                }
+                Ok(current) if ["failed", "cancelled"].contains(&current.status.as_str()) => {
+                    return (
+                        format!(
+                            "Failed: {}",
+                            current.error.clone().unwrap_or(current.status)
+                        ),
+                        true,
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => return (format!("Failed: {error}"), true),
+            }
+            if Instant::now() >= deadline {
+                // Stop the child too, so it cannot keep executing after the
+                // plan and its run are terminal.
+                let _ = executor
+                    .cancel(&actor.id, run.id, &format!("{key}:timeout"), &key)
+                    .await;
+                return ("Failed: subagent timed out".to_owned(), true);
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn finish_cancelled(
         &self,
         run_id: &str,
@@ -2029,6 +2610,9 @@ impl AppServer {
             .ok()?;
         if let Some(run) = self.inner.state.lock().await.runs.get_mut(run_id) {
             run.terminal = terminal;
+        }
+        if terminal && let Ok(mut planned) = self.inner.planned_runs.lock() {
+            planned.remove(run_id);
         }
         Some(envelope)
     }
@@ -2385,7 +2969,8 @@ impl EventSink for AppServerEventSink {
 
 impl AppServerEventSink {
     async fn emit_once(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
-        let event = mask_canonical_event(event)?;
+        let mut event = mask_canonical_event(event)?;
+        self.persist_plan_created(&mut event);
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
             let run = self
                 .server
@@ -2467,6 +3052,65 @@ impl AppServerEventSink {
             ));
         }
         Ok(envelope)
+    }
+
+    /// Persist a durable draft plan for a `plan.created` event whose run is
+    /// bound to a legacy conversation, stamping the store id so the client can
+    /// approve/execute it through the App Protocol. Best-effort: a run with no
+    /// conversation link leaves `store_plan_id` as `None`.
+    fn persist_plan_created(&self, event: &mut CanonicalEvent) {
+        let CanonicalEvent::PlanCreated(plan) = event else {
+            return;
+        };
+        if plan.store_plan_id.is_some() {
+            return;
+        }
+        // One durable draft per run: a second `update_plan` call reuses the id.
+        if let Ok(known) = self.server.inner.planned_runs.lock()
+            && let Some(id) = known.get(&self.run_id)
+        {
+            plan.store_plan_id = Some(*id);
+            return;
+        }
+        let Some(legacy) = self.server.inner.config.legacy_store.as_deref() else {
+            return;
+        };
+        let actor = local_actor();
+        let Ok(run) = self.server.inner.store.run(&self.run_id, &actor.id) else {
+            return;
+        };
+        let Ok(Some(conversation_id)) = self
+            .server
+            .inner
+            .store
+            .conversation_id_for_session(&actor.id, &run.session_id)
+        else {
+            return;
+        };
+        let steps = serde_json::Value::Array(
+            plan.steps
+                .iter()
+                .map(|step| {
+                    serde_json::json!({
+                        "position": step.position,
+                        "title": step.title,
+                    })
+                })
+                .collect(),
+        );
+        let Ok(created) = legacy.create_plan(
+            &actor.id,
+            conversation_id,
+            None,
+            plan.title.as_deref(),
+            &steps,
+        ) else {
+            return;
+        };
+        plan.store_plan_id = Some(created.id);
+        if let Ok(mut known) = self.server.inner.planned_runs.lock() {
+            known.insert(self.run_id.clone(), created.id);
+        }
     }
 }
 
@@ -2594,6 +3238,183 @@ struct SocketCleanup(std::path::PathBuf);
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Captures the concatenated content deltas of one plan step; a plan step does
+/// not project its own transcript.
+#[derive(Default)]
+struct PlanStepSink {
+    text: std::sync::Mutex<String>,
+}
+
+impl PlanStepSink {
+    fn text(&self) -> String {
+        self.text
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl EventSink for PlanStepSink {
+    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        if let CanonicalEvent::ContentDelta(delta) = &event
+            && let Ok(mut text) = self.text.lock()
+        {
+            text.push_str(&delta.text);
+        }
+        Ok(preview_event_envelope("plan-step", event))
+    }
+}
+
+/// Kahn topological order of plan steps by `position`; unknown dependencies are
+/// ignored and any remaining (cycle) steps append in position order (Python
+/// `planning._topological_order`).
+fn topological_order(
+    steps: &[cool_store::domains::plans::PlanStep],
+) -> Vec<cool_store::domains::plans::PlanStep> {
+    let by_position = steps
+        .iter()
+        .map(|step| (step.position, step))
+        .collect::<BTreeMap<_, _>>();
+    let mut in_degree = steps
+        .iter()
+        .map(|step| (step.position, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependents: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for step in steps {
+        for dependency in depends_on(step) {
+            if by_position.contains_key(&dependency) {
+                *in_degree.entry(step.position).or_default() += 1;
+                dependents
+                    .entry(dependency)
+                    .or_default()
+                    .push(step.position);
+            }
+        }
+    }
+    let mut queue = in_degree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(position, _)| *position)
+        .collect::<Vec<_>>();
+    queue.sort();
+    let mut order = Vec::with_capacity(steps.len());
+    while !queue.is_empty() {
+        let position = queue.remove(0);
+        if let Some(step) = by_position.get(&position) {
+            order.push((*step).clone());
+        }
+        for dependent in dependents.get(&position).cloned().unwrap_or_default() {
+            if let Some(degree) = in_degree.get_mut(&dependent) {
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    queue.push(dependent);
+                }
+            }
+        }
+        queue.sort();
+    }
+    let seen = order
+        .iter()
+        .map(|step| step.position)
+        .collect::<BTreeSet<_>>();
+    let mut remaining = steps
+        .iter()
+        .filter(|step| !seen.contains(&step.position))
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining.sort_by_key(|step| step.position);
+    order.extend(remaining);
+    order
+}
+
+fn depends_on(step: &cool_store::domains::plans::PlanStep) -> Vec<i64> {
+    step.depends_on
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .map(|items| items.iter().filter_map(serde_json::Value::as_i64).collect())
+        .unwrap_or_default()
+}
+
+/// A step runs when every known dependency is completed or skipped.
+fn dependencies_met(
+    step: &cool_store::domains::plans::PlanStep,
+    statuses: &BTreeMap<i64, String>,
+) -> bool {
+    depends_on(step).iter().all(|dependency| {
+        statuses
+            .get(dependency)
+            .is_none_or(|status| status == "completed" || status == "skipped")
+    })
+}
+
+fn protocol_plan_step(
+    plan: &cool_store::domains::plans::Plan,
+    step: &cool_store::domains::plans::PlanStep,
+    status: &str,
+    result_summary: Option<&str>,
+) -> ProtocolPlanStep {
+    ProtocolPlanStep {
+        plan_id: plan.id.to_string(),
+        position: step.position as u32,
+        title: step.title.clone(),
+        status: status.to_owned(),
+        result_summary: result_summary.map(str::to_owned),
+    }
+}
+
+/// True when an operator cancelled the plan while it was executing.
+fn plan_is_cancelled(
+    legacy: &LegacyStore,
+    actor: &ActorRef,
+    plan: &cool_store::domains::plans::Plan,
+) -> bool {
+    legacy
+        .get_plan(&actor.id, plan.conversation_id, plan.id)
+        .is_ok_and(|stored| stored.status == "cancelled")
+}
+
+/// Bounded conversation history for plan-step context (user/assistant turns).
+fn plan_history(legacy: &LegacyStore, actor_id: &str, conversation_id: i64) -> Vec<Message> {
+    // Newest 200 turns, oldest-first: bounded and recent.
+    let Ok(window) = legacy.recent_messages(actor_id, conversation_id, 200) else {
+        return Vec::new();
+    };
+    window
+        .messages
+        .iter()
+        .filter_map(|message| match message.role.as_str() {
+            "user" => message
+                .content
+                .clone()
+                .map(|content| Message::text(MessageRole::User, content)),
+            "assistant" => message
+                .content
+                .clone()
+                .filter(|content| !content.is_empty())
+                .map(|content| Message::text(MessageRole::Assistant, content)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn plan_step_prompt(step: &cool_store::domains::plans::PlanStep) -> String {
+    let mut prompt = format!("Execute this plan step:\n\n**{}**\n", step.title);
+    if let Some(description) = step.description.as_deref() {
+        prompt.push_str(&format!("\n{description}\n"));
+    }
+    prompt.push_str("\nComplete this step and provide a brief summary of what was accomplished.");
+    prompt
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() > limit {
+        text.chars().take(limit).collect()
+    } else {
+        text.to_owned()
     }
 }
 
@@ -3481,6 +4302,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "durable_sessions",
         "event_catch_up",
         "local_socket",
+        "plan_execution",
         "recovery",
         "run_cancellation",
         "run_subscribe",

@@ -279,6 +279,8 @@ pub enum Command {
     PlansUpdate(PlanUpdateParams),
     #[serde(rename = "plans.approve")]
     PlansApprove(PlanApproveParams),
+    #[serde(rename = "plans.execute")]
+    PlansExecute(IdempotentPlanIdParams),
     #[serde(rename = "plans.cancel")]
     PlansCancel(IdempotentPlanIdParams),
     #[serde(rename = "plans.templates_list")]
@@ -929,6 +931,12 @@ pub struct PlanCreated {
     /// never emit their own `plan.step_*` event.
     #[serde(default)]
     pub steps: Vec<PlanStep>,
+    /// Durable `plans.id` the runtime persisted for this model plan, when the
+    /// run's session is bound to a legacy conversation. Clients use it to
+    /// approve/execute the plan through the App Protocol; `None` when the
+    /// session is not conversation-bound.
+    #[serde(default)]
+    pub store_plan_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1663,6 +1671,7 @@ pub enum ResponsePayload {
     PlansGot(PlanRecord),
     PlansUpdated(PlanRecord),
     PlansApproved(PlanRecord),
+    PlansExecuted(PlanExecuteResult),
     PlansCancelled(PlanRecord),
     PlansTemplatesListed(Vec<PlanTemplateRecord>),
     PlansTemplatesCreated(PlanTemplateRecord),

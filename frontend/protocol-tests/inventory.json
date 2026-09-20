@@ -407,17 +407,17 @@
     },
     {
       "file": "plans.ts",
-      "member": "executeUrl",
+      "member": "execute",
       "http": "POST /api/conversations/{id}/plans/{plan}/execute",
-      "status": "sse/stream",
-      "rationale": "step execution streams canonical plan events; M11 moves it to the canonical stream"
+      "status": "sdk",
+      "command": "plans.execute"
     },
     {
       "file": "plans.ts",
       "member": "executePlan",
-      "http": "POST /api/conversations/{id}/plans/{plan}/execute",
+      "http": "GET /api/events?runId=",
       "status": "sse/stream",
-      "rationale": "plan execution is still a Python runtime action; the helper streams its per-plan SSE frames out of the page layer until the canonical runtime owns a plan executor"
+      "rationale": "the helper starts plans.execute and follows the durable run on the canonical cursor/reconnect stream via streamRunEvents, re-projecting plan.* events into the card shape"
     },
     {
       "file": "plans.ts",

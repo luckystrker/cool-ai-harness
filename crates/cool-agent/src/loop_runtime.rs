@@ -768,6 +768,9 @@ async fn emit_plan_events(
         title: result.output["title"].as_str().map(str::to_owned),
         total_steps: steps.len() as u32,
         steps: plan_steps.clone(),
+        // The app-server fills this in when the run's session is bound to a
+        // legacy conversation; the runtime does not persist plans.
+        store_plan_id: None,
     }))
     .await?;
     let mut completed = 0_u32;
