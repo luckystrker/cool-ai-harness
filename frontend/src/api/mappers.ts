@@ -53,6 +53,7 @@ import type {
   RunOut,
   RunTimeline,
   ScheduledTask,
+  SchedulerStatus,
   SpendRow,
   SpendTimeSeriesPoint,
   SubagentRole,
@@ -1077,6 +1078,20 @@ export function toTaskTemplate(record: protocol.TaskTemplateRecord): TaskTemplat
     tools_whitelist: record.toolsWhitelist,
     max_iterations: record.maxIterations,
     delivery_channels: record.deliveryChannels,
+  }
+}
+
+export function toSchedulerStatus(record: protocol.SchedulerStatusRecord): SchedulerStatus {
+  return {
+    enabled: record.enabled,
+    running: record.running,
+    timezone: record.timezone,
+    max_concurrent_tasks: record.maxConcurrentTasks,
+    jobs: record.jobs.map((job) => ({
+      id: job.id,
+      name: job.name,
+      next_run_time: job.nextRunTime,
+    })),
   }
 }
 

@@ -1,8 +1,8 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
 import {
   toParseCron,
   toScheduledTask,
+  toSchedulerStatus,
   toTaskInbox,
   toTaskRun,
   toTaskRunDetail,
@@ -83,13 +83,16 @@ export const tasksApi = {
   },
 
   // --- Runs ---
-  /** Trigger a run now; returns the queued run (execution continues server-side). */
-  runNow: (id: number) => api.post<import("./types").TaskRun>(`/api/tasks/${id}/run`),
+  /** Trigger a run now; returns the running run (execution continues server-side). */
+  runNow: async (id: number) =>
+    toTaskRun(await sdk.tasksRun({ idempotencyKey: idempotencyKey(), id })),
   listRuns: async (id: number, params?: { limit?: number }) =>
     (await sdk.tasksRunsList({ taskId: id, limit: params?.limit ?? 50 })).map(toTaskRun),
   getRun: async (runId: number) => toTaskRunDetail(await sdk.tasksRunsGet({ id: runId })),
-  cancelRun: (runId: number) =>
-    api.post<{ task_run_id: number; cancelled: boolean }>(`/api/tasks/runs/${runId}/cancel`),
+  cancelRun: async (runId: number) => {
+    const result = await sdk.tasksRunsCancel({ idempotencyKey: idempotencyKey(), id: runId })
+    return { task_run_id: result.taskRunId, cancelled: result.cancelled }
+  },
   markRead: async (runId: number, isRead = true) =>
     toTaskRun(
       await sdk.tasksRunsRead({ idempotencyKey: idempotencyKey(), id: runId, isRead })
@@ -106,7 +109,7 @@ export const tasksApi = {
 
   // --- Helpers ---
   templates: async () => (await sdk.tasksTemplates({})).map(toTaskTemplate),
-  scheduler: () => api.get<import("./types").SchedulerStatus>("/api/tasks/scheduler"),
+  scheduler: async () => toSchedulerStatus(await sdk.tasksScheduler({})),
   /** Natural language ("every day at 8pm") or cron -> cron + next run times. */
   parseCron: async (text: string) => toParseCron(await sdk.tasksParseCron({ text })),
 }

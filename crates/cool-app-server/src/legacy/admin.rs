@@ -10,7 +10,7 @@ use cool_store::domains::conversations::{MessagePage, NewConversation, NewMessag
 use cool_store::domains::profiles::{AgentProfilePatch, NewAgentProfile};
 use cool_store::domains::providers::{NewProvider, Provider, ProviderPatch};
 use cool_store::domains::rss::NewRssSubscription;
-use cool_store::domains::tasks::{NewScheduledTask, NewTaskRun, ScheduledTask, ScheduledTaskPatch};
+use cool_store::domains::tasks::{NewScheduledTask, ScheduledTask, ScheduledTaskPatch};
 use cool_store::domains::webhooks::{NewWebhookEndpoint, NewWebhookEvent, WebhookEndpointPatch};
 use cool_store::{LegacyStore, StoreError};
 use serde_json::Value;
@@ -322,32 +322,6 @@ pub(super) async fn dispatch(
             )?;
             ResponsePayload::TasksDeleted(deleted)
         }
-        Command::TasksRun(params) => {
-            let task_id = params.id;
-            let run = idempotent(
-                store,
-                actor,
-                "tasks.run",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || {
-                    let task = store.get_task(&actor.id, task_id)?;
-                    store.create_task_run(
-                        &actor.id,
-                        task_id,
-                        &NewTaskRun {
-                            trigger_source: "manual".to_owned(),
-                            prompt: task.prompt.clone(),
-                            status: "queued".to_owned(),
-                            approval_policy: Some(task.approval_policy.clone()),
-                            approval_reason: None,
-                            skip_reason: None,
-                        },
-                    )
-                },
-            )?;
-            ResponsePayload::TasksRan(convert(run)?)
-        }
         Command::TasksRunsList(params) => ResponsePayload::TasksRunsListed(convert(
             store
                 .list_task_runs(&actor.id, params.task_id, Some(usize::from(params.limit)))
@@ -374,21 +348,6 @@ pub(super) async fn dispatch(
             ResponsePayload::TasksRunsGot(TaskRunDetailRecord {
                 run: convert(run)?,
                 messages: convert(messages)?,
-            })
-        }
-        Command::TasksRunsCancel(params) => {
-            let run_id = params.id;
-            let run = idempotent(
-                store,
-                actor,
-                "tasks.runs_cancel",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || store.cancel_task_run(&actor.id, run_id),
-            )?;
-            ResponsePayload::TasksRunsCancelled(TaskRunCancelResult {
-                task_run_id: run.id,
-                cancelled: run.status == "cancelled",
             })
         }
         Command::TasksRunsRead(params) => {
@@ -419,10 +378,6 @@ pub(super) async fn dispatch(
                 unread_count,
                 runs: convert(runs)?,
             })
-        }
-        Command::TasksScheduler(_) => {
-            let tasks = store.list_tasks(&actor.id, false).map_err(store_error)?;
-            ResponsePayload::TasksScheduler(scheduler_status(&tasks))
         }
         Command::TasksParseCron(params) => {
             ResponsePayload::TasksParsedCron(parse_cron(&params.text))
@@ -860,27 +815,6 @@ fn clone_profile(
     })
 }
 
-fn scheduler_status(tasks: &[ScheduledTask]) -> SchedulerStatusRecord {
-    let jobs = tasks
-        .iter()
-        .filter(|task| task.enabled)
-        .map(|task| SchedulerJobRecord {
-            id: task.id.to_string(),
-            name: task.name.clone(),
-            next_run_time: task.next_run_at.clone(),
-        })
-        .collect();
-    SchedulerStatusRecord {
-        enabled: true,
-        running: false,
-        timezone: "UTC".to_owned(),
-        max_concurrent_tasks: 3,
-        jobs,
-    }
-}
-
-/// Convert a store task row into its protocol mirror and derive the
-/// `schedule_description`/`next_runs` fields the Python `TaskOut` computes.
 fn task_record(task: ScheduledTask) -> Result<TaskRecord, ProtocolError> {
     let mut record: TaskRecord = convert(task)?;
     // Match Python's `next_cron_runs(..., timezone=task.timezone)`: an unknown

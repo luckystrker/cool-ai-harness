@@ -5,8 +5,10 @@
 
 pub mod client;
 mod legacy;
+mod scheduler;
 
 pub use client::{AppClient, ClientError};
+pub use scheduler::TaskExecutor;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -28,8 +30,9 @@ use cool_protocol::{
     RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
     RunTerminal, ServerFrame, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
     SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
-    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TaskTemplateRecord, TextDelta,
-    ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, TaskRunCancelResult,
+    TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested,
+    TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -128,6 +131,9 @@ struct Inner {
     /// `run.subscribe` subscribers per run, keyed by connection id.
     run_subscribers: Mutex<HashMap<String, HashMap<String, Outbound>>>,
     lifecycle: Option<Arc<dyn RunLifecycle>>,
+    /// Background task scheduler/executor, present when a legacy store is
+    /// configured (`--legacy-store`).
+    task_executor: Option<Arc<TaskExecutor>>,
 }
 
 #[async_trait]
@@ -293,6 +299,16 @@ impl AppServer {
             !config.write_timeout.is_zero(),
             "write_timeout must be positive"
         );
+        let task_executor = config.legacy_store.as_ref().map(|legacy| {
+            Arc::new(TaskExecutor::new(
+                Arc::clone(legacy),
+                runtime.clone(),
+                workspace.clone(),
+                policy.clone(),
+                default_model.clone(),
+                cool_store::scheduler::SchedulerConfig::default(),
+            ))
+        });
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -306,8 +322,15 @@ impl AppServer {
                 run_owners: Mutex::new(HashMap::new()),
                 run_subscribers: Mutex::new(HashMap::new()),
                 lifecycle: None,
+                task_executor,
             }),
         }
+    }
+
+    /// The background task executor, if a legacy store is configured. Callers
+    /// (the CLI) start its loop with [`TaskExecutor::spawn_loop`].
+    pub fn task_executor(&self) -> Option<Arc<TaskExecutor>> {
+        self.inner.task_executor.clone()
     }
 
     pub fn with_run_lifecycle(mut self, lifecycle: Arc<dyn RunLifecycle>) -> Self {
@@ -1214,6 +1237,51 @@ impl AppServer {
                         success(id, ResponsePayload::TasksTemplatesListed(task_templates())),
                     )
                     .await;
+            }
+            Command::TasksRun(params) => {
+                let frame = match self.inner.task_executor.as_ref() {
+                    Some(executor) => match executor
+                        .run_now(&local_actor(), params.id, params.idempotency_key.as_str())
+                        .await
+                    {
+                        Ok(run) => match legacy::convert(run) {
+                            Ok(record) => success(id, ResponsePayload::TasksRan(record)),
+                            Err(error) => failure(id, error),
+                        },
+                        Err(error) => failure(id, legacy::store_error(error)),
+                    },
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::TasksRunsCancel(params) => {
+                let frame = match self.inner.task_executor.as_ref() {
+                    Some(executor) => match executor
+                        .cancel(&local_actor(), params.id, params.idempotency_key.as_str())
+                        .await
+                    {
+                        Ok(run) => success(
+                            id,
+                            ResponsePayload::TasksRunsCancelled(TaskRunCancelResult {
+                                task_run_id: run.id,
+                                cancelled: run.status == "cancelled",
+                            }),
+                        ),
+                        Err(error) => failure(id, legacy::store_error(error)),
+                    },
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::TasksScheduler(_) => {
+                let frame = match self.inner.task_executor.as_ref() {
+                    Some(executor) => match executor.status(&local_actor()) {
+                        Ok(status) => success(id, ResponsePayload::TasksScheduler(status)),
+                        Err(error) => failure(id, legacy::store_error(error)),
+                    },
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
             }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {

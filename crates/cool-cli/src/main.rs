@@ -260,6 +260,9 @@ async fn build_server(
     if let Some(extensions) = extensions {
         server = server.with_run_lifecycle(Arc::new(CliExtensions(extensions)));
     }
+    if let Some(executor) = server.task_executor() {
+        executor.spawn_loop(std::time::Duration::from_secs(15));
+    }
     Ok(server)
 }
 

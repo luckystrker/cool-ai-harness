@@ -59,7 +59,7 @@ const DAY_NAMES: [&str; 7] = [
 ];
 
 /// Runtime tuning for the deterministic scheduler engine.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerConfig {
     /// Seconds a late fire may still run before the misfire policy applies.
@@ -299,6 +299,10 @@ impl Scheduler {
         now: i64,
     ) -> Result<Vec<Decision>, ScheduleError> {
         let mut decisions = Vec::new();
+        // Reserve in-flight state only after the whole batch has been evaluated,
+        // so a mid-batch error (an unsupported timezone in quiet hours) cannot
+        // leave earlier tasks marked running with no matching `complete`.
+        let mut reserved = Vec::new();
         for task in tasks {
             if !task.enabled {
                 continue;
@@ -338,14 +342,23 @@ impl Scheduler {
                 });
                 continue;
             }
-            self.running.insert(task.id);
-            self.pending.insert(task.id, due);
+            reserved.push((task.id, due));
             decisions.push(Decision::Execute {
                 task_id: task.id,
                 scheduled_for: due,
             });
         }
+        for (task_id, due) in reserved {
+            self.running.insert(task_id);
+            self.pending.insert(task_id, due);
+        }
         Ok(decisions)
+    }
+
+    /// Mark a task in-flight before a manual run, so a concurrent tick does not
+    /// double-fire it.
+    pub fn mark_running(&mut self, task_id: i64) {
+        self.running.insert(task_id);
     }
 
     /// Clear a task's in-flight state once its run has finished.

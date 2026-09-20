@@ -1305,7 +1305,7 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
     let ResponsePayload::TasksRan(run) = run else {
         panic!("unexpected payload");
     };
-    assert_eq!(run.status, "queued");
+    assert_eq!(run.status, "running");
 
     let run_detail = request(
         &client,
@@ -1397,6 +1397,27 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
         assert_eq!(parsed.next_runs.len(), 3);
     }
 
+    // The Rust executor runs the task; wait for it to reach a terminal state so
+    // the cancel below deterministically exercises the no-op path.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let payload = request(
+                &client,
+                Command::TasksRunsGet(LegacyIdParams { id: run.id }),
+            )
+            .await;
+            let ResponsePayload::TasksRunsGot(detail) = payload else {
+                panic!("unexpected payload");
+            };
+            if ["completed", "failed", "cancelled"].contains(&detail.run.status.as_str()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("task run finishes");
+
     let cancelled = request(
         &client,
         Command::TasksRunsCancel(IdempotentIdParams {
@@ -1407,7 +1428,8 @@ async fn tasks_scheduler_inbox_and_cron_parse_are_store_backed() {
     .await;
     assert!(matches!(
         cancelled,
-        ResponsePayload::TasksRunsCancelled(result) if result.cancelled
+        ResponsePayload::TasksRunsCancelled(result)
+            if result.task_run_id == run.id && !result.cancelled
     ));
 
     request(
@@ -1620,6 +1642,130 @@ async fn tasks_create_expands_template_when_fields_are_empty() {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|channels| channels.len() == 1)
     );
+}
+
+#[tokio::test]
+async fn tasks_run_executes_through_the_rust_runtime() {
+    let (server, _store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let created = request(
+        &client,
+        Command::TasksCreate(TaskCreateParams {
+            idempotency_key: key("task-exec"),
+            name: "digest".to_owned(),
+            description: None,
+            trigger_type: "cron".to_owned(),
+            cron_expression: Some("0 8 * * *".to_owned()),
+            interval_seconds: None,
+            run_at: None,
+            timezone: "UTC".to_owned(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            misfire_policy: "skip".to_owned(),
+            prompt: "nightly digest".to_owned(),
+            workflow_type: None,
+            template: None,
+            profile_id: None,
+            model: None,
+            tools_whitelist: None,
+            capability_policy: None,
+            working_directory: None,
+            approval_policy: "deny_external".to_owned(),
+            delivery_channels: None,
+            delivery_config: None,
+            max_iterations: 5,
+            max_cost_per_run: None,
+            timeout_s: None,
+            enabled: true,
+        }),
+    )
+    .await;
+    let ResponsePayload::TasksCreated(task) = created else {
+        panic!("unexpected payload");
+    };
+
+    let queued = request(
+        &client,
+        Command::TasksRun(IdempotentIdParams {
+            idempotency_key: key("task-exec-run"),
+            id: task.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::TasksRan(run) = queued else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(run.status, "running");
+    assert_eq!(run.trigger_source, "manual");
+
+    // Replaying the same idempotency key returns the original run and must not
+    // start a second execution.
+    let replay = request(
+        &client,
+        Command::TasksRun(IdempotentIdParams {
+            idempotency_key: key("task-exec-run"),
+            id: task.id,
+        }),
+    )
+    .await;
+    let ResponsePayload::TasksRan(replay_run) = replay else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(replay_run.id, run.id, "replay returns the original run");
+    let listed = request(
+        &client,
+        Command::TasksRunsList(TaskRunsParams {
+            task_id: task.id,
+            limit: 10,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(listed, ResponsePayload::TasksRunsListed(runs) if runs.len() == 1),
+        "a replayed key must not create a second run"
+    );
+
+    let detail = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let payload = request(
+                &client,
+                Command::TasksRunsGet(LegacyIdParams { id: run.id }),
+            )
+            .await;
+            let ResponsePayload::TasksRunsGot(detail) = payload else {
+                panic!("unexpected payload");
+            };
+            if ["completed", "failed", "cancelled"].contains(&detail.run.status.as_str()) {
+                break detail;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("task run finishes");
+    assert_eq!(detail.run.status, "completed");
+    assert_eq!(detail.run.output.as_deref(), Some("nightly digest"));
+    assert!(detail.run.usage.is_some(), "usage is recorded");
+
+    let status = request(&client, Command::TasksScheduler(EmptyParams {})).await;
+    assert!(matches!(
+        status,
+        ResponsePayload::TasksScheduler(status) if status.running && status.jobs.len() == 1
+    ));
+
+    let cancelled = request(
+        &client,
+        Command::TasksRunsCancel(IdempotentIdParams {
+            idempotency_key: key("task-exec-cancel"),
+            id: run.id,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        cancelled,
+        ResponsePayload::TasksRunsCancelled(result) if result.task_run_id == run.id
+    ));
 }
 
 #[tokio::test]

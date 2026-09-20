@@ -202,7 +202,7 @@ fn misfire_skip_respects_grace_and_policy() {
     skipping.misfire_policy = "skip".to_string();
     skipping.next_run_at = Some(python_datetime(overdue, 0));
 
-    let mut scheduler = Scheduler::new(config.clone());
+    let mut scheduler = Scheduler::new(config);
     let decisions = scheduler.plan(&[skipping], now).expect("plan");
     match &decisions[..] {
         [Decision::Skip { task_id, reason }] => {

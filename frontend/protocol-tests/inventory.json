@@ -836,8 +836,8 @@
       "file": "tasks.ts",
       "member": "runNow",
       "http": "POST /api/tasks/{id}/run",
-      "status": "deferred",
-      "rationale": "Rust tasks.run only inserts a queued task-run row; the task executor/scheduler that actually runs it lives in the Python runtime, so the action stays deferred"
+      "status": "sdk",
+      "command": "tasks.run"
     },
     {
       "file": "tasks.ts",
@@ -857,8 +857,8 @@
       "file": "tasks.ts",
       "member": "cancelRun",
       "http": "POST /api/tasks/runs/{run}/cancel",
-      "status": "deferred",
-      "rationale": "Rust tasks.runs_cancel only flips the durable row; the live task/agent run is cancelled by the Python executor, so cancelling through the canonical command would report success while the run keeps executing"
+      "status": "sdk",
+      "command": "tasks.runs_cancel"
     },
     {
       "file": "tasks.ts",
@@ -885,8 +885,8 @@
       "file": "tasks.ts",
       "member": "scheduler",
       "http": "GET /api/tasks/scheduler",
-      "status": "deferred",
-      "rationale": "Rust tasks.scheduler returns a store-backed projection (enabled=true/running=false synthesized from the task rows), not the live scheduler engine; the live runtime state stays in Python"
+      "status": "sdk",
+      "command": "tasks.scheduler"
     },
     {
       "file": "tasks.ts",
