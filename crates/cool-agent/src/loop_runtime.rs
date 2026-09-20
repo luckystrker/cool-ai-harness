@@ -325,6 +325,8 @@ impl AgentRuntime {
                 sink.emit(CanonicalEvent::SessionCompacted(SessionCompacted {
                     retained_items: compacted.messages.len() as u32,
                     summary_item_id: None,
+                    summary: None,
+                    compact_up_to_cursor: None,
                 }))
                 .await?;
             }

@@ -75,7 +75,17 @@ export type CanonicalEvent = { "kind": "session.created", "payload": SessionEven
 
 export type SessionEvent = { title: string | null, projectKey: string | null, };
 
-export type SessionCompacted = { retainedItems: number, summaryItemId: string | null, };
+export type SessionCompacted = { retainedItems: number, summaryItemId: string | null, 
+/**
+ * Rolling summary text, when the compaction produced one. `session.history`
+ * projects it as a summary item so the chat can render the compacted block.
+ */
+summary: string | null, 
+/**
+ * Cursor of the newest compacted history item. Items with a cursor `<=`
+ * this value are covered by `summary`.
+ */
+compactUpToCursor: number | null, };
 
 export type RunStarted = { model: string | null, mode: string | null, };
 
@@ -202,7 +212,11 @@ model: string | null,
  * Cumulative usage reported by the model call that produced the assistant
  * item (absent for user/tool items and imported history).
  */
-usage: UsageUpdated | null, };
+usage: UsageUpdated | null, 
+/**
+ * Set only on a `role: "summary"` item: the `session.compacted` cutoff.
+ */
+compactUpToCursor: number | null, };
 
 export type SessionForkedResult = { sessionId: string, forkedFrom: string, };
 

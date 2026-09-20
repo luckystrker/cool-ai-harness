@@ -42,7 +42,6 @@ use tokio::process::Command as ProcessCommand;
 use tokio::time::timeout;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
-const KEEP_RECENT_MESSAGES: usize = 10;
 
 /// Dispatch a legacy-surface command against the opened store.
 pub(crate) async fn dispatch(
@@ -129,18 +128,6 @@ pub(crate) async fn dispatch(
                 },
             )?;
             Ok(ResponsePayload::ConversationsDeleted(deleted))
-        }
-        Command::ConversationsCompact(params) => {
-            let conversation_id = params.id;
-            let compacted = idempotent(
-                store,
-                actor,
-                "conversations.compact",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || compact_conversation(store, &actor.id, conversation_id),
-            )?;
-            Ok(ResponsePayload::ConversationsCompacted(compacted))
         }
         Command::ConversationsApprovals(params) => {
             let records = store
@@ -355,96 +342,6 @@ pub(crate) async fn dispatch(
             }
         },
     }
-}
-
-/// Compaction fallback for the Rust core: older messages are condensed into a
-/// deterministic extractive summary stored in `working_memory`. The Python
-/// facade summarizes with an LLM; M11 replaces this fallback with the provider
-/// runtime while the message count/cutoff semantics stay identical.
-fn compact_conversation(
-    store: &LegacyStore,
-    actor_id: &str,
-    conversation_id: i64,
-) -> Result<CompactResult, StoreError> {
-    let page = MessagePage {
-        before_id: None,
-        after_id: None,
-        limit: Some(500),
-    };
-    let messages = store.list_messages(actor_id, conversation_id, &page)?;
-    let message_count = messages.len() as u64;
-    if messages.len() <= KEEP_RECENT_MESSAGES {
-        return Ok(CompactResult {
-            status: "skipped".to_owned(),
-            reason: Some(format!(
-                "Too few messages ({message_count} < {})",
-                KEEP_RECENT_MESSAGES + 1
-            )),
-            message_count: Some(message_count),
-            messages_compacted: None,
-            messages_kept: None,
-            summary_length: None,
-        });
-    }
-    let existing = store.get_working_memory(actor_id, conversation_id)?;
-    let previous_cutoff = existing
-        .as_ref()
-        .filter(|memory| memory.summary.is_some())
-        .and_then(|memory| memory.summary_up_to_message_id);
-    let older = &messages[..messages.len() - KEEP_RECENT_MESSAGES];
-    let fresh = older
-        .iter()
-        .filter(|message| previous_cutoff.is_none_or(|cutoff| message.id > cutoff))
-        .collect::<Vec<_>>();
-    if fresh.is_empty() {
-        return Ok(CompactResult {
-            status: "skipped".to_owned(),
-            reason: Some("No new messages to compact".to_owned()),
-            message_count: Some(message_count),
-            messages_compacted: None,
-            messages_kept: Some(KEEP_RECENT_MESSAGES as u64),
-            summary_length: None,
-        });
-    }
-    let mut transcript = String::new();
-    if let Some(memory) = &existing
-        && let Some(summary) = &memory.summary
-    {
-        transcript.push_str("[Previous summary of the earlier conversation]\n");
-        transcript.push_str(summary);
-        transcript.push('\n');
-    }
-    for message in &fresh {
-        let content = message.content.clone().unwrap_or_default();
-        let content = if content.chars().count() > 300 {
-            format!("{}...", content.chars().take(300).collect::<String>())
-        } else {
-            content
-        };
-        transcript.push_str(&format!("{}: {}\n", message.role, content));
-    }
-    let state = existing
-        .as_ref()
-        .map(|memory| memory.state.clone())
-        .unwrap_or_else(|| json!({}));
-    let last_compacted = fresh.last().map(|message| message.id);
-    let summary_length = transcript.chars().count() as i64;
-    store.upsert_working_memory(
-        actor_id,
-        conversation_id,
-        &state,
-        Some(&transcript),
-        last_compacted,
-        Some(summary_length),
-    )?;
-    Ok(CompactResult {
-        status: "compacted".to_owned(),
-        reason: None,
-        message_count: Some(message_count),
-        messages_compacted: Some(fresh.len() as u64),
-        messages_kept: Some(KEEP_RECENT_MESSAGES as u64),
-        summary_length: Some(summary_length as u64),
-    })
 }
 
 fn replay_run(

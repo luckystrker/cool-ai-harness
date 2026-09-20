@@ -5401,6 +5401,16 @@
     "HistoryItem": {
       "type": "object",
       "properties": {
+        "compactUpToCursor": {
+          "description": "Set only on a `role: \"summary\"` item: the `session.compacted` cutoff.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "content": {
           "type": [
             "string",
@@ -11252,10 +11262,28 @@
     "SessionCompacted": {
       "type": "object",
       "properties": {
+        "compactUpToCursor": {
+          "description": "Cursor of the newest compacted history item. Items with a cursor `<=`\nthis value are covered by `summary`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "retainedItems": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "summary": {
+          "description": "Rolling summary text, when the compaction produced one. `session.history`\nprojects it as a summary item so the chat can render the compacted block.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "summaryItemId": {
           "type": [

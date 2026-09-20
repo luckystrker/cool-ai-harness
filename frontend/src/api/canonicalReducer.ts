@@ -143,6 +143,10 @@ export function replayCanonicalEvents(events: EventEnvelope[]): ClientState {
         state.subagents[canonical.payload.subagentRunId] =
           canonical.payload.status === "cancelled" ? "cancelled" : "failed";
         break;
+      case "session.compacted":
+        // The rolling summary is read from `session.history`'s summary item;
+        // the live event carries no additional reducer state.
+        break;
       case "worker.started":
       case "worker.restarted":
         state.workers[canonical.payload.workerId] = "running";

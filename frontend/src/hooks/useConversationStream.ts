@@ -433,6 +433,11 @@ export function useConversationStream() {
       case "subagent.progress":
         // Progress updates are too frequent to render inline; skip.
         break
+      case "session.compacted": {
+        acc.content += `\n\n> 🗜️ **Compacted** — older turns summarized (kept ${canonical.payload.retainedItems} recent items).\n`
+        flush(acc)
+        break
+      }
       default:
         break
     }

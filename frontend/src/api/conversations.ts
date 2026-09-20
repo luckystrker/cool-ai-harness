@@ -53,22 +53,42 @@ async function sessionFor(convId: number): Promise<string> {
  * canonical session log is the transcript source of truth. Older history is
  * still projected into it once by `session.for_conversation`.
  */
-async function canonicalMessages(convId: number, sessionId: string): Promise<Message[]> {
+async function canonicalMessages(
+  convId: number,
+  sessionId: string
+): Promise<{ messages: Message[]; compactSummary: string | null; compactCutoff: number | null }> {
   const pages: Message[][] = []
   let cursor: number | null = null
+  let summaryCursor: number | null = null
+  let compactSummary: string | null = null
+  let compactCutoff: number | null = null
   for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
     const result = await sdk.sessionHistory({
       sessionId,
       limit: HISTORY_PAGE_LIMIT,
       beforeCursor: cursor,
     })
-    pages.push(result.items.map((item) => toMessage(item, convId)))
+    const visible: Message[] = []
+    for (const item of result.items) {
+      // A summary item is the canonical rolling-summary projection, not a
+      // chat message; the newest one wins.
+      if (item.role === "summary") {
+        if (summaryCursor === null || item.cursor > summaryCursor) {
+          summaryCursor = item.cursor
+          compactSummary = item.content
+          compactCutoff = item.compactUpToCursor ?? null
+        }
+        continue
+      }
+      visible.push(toMessage(item, convId))
+    }
+    pages.push(visible)
     if (!result.hasMore || result.nextCursor === null) break
     cursor = result.nextCursor
   }
   // Pages arrive newest-first; each page is chronological inside.
   pages.reverse()
-  return pages.flat()
+  return { messages: pages.flat(), compactSummary, compactCutoff }
 }
 
 export const conversationsApi = {
@@ -93,8 +113,13 @@ export const conversationsApi = {
       sdk.conversationsGet({ id }),
       sessionFor(id),
     ])
-    const messages = await canonicalMessages(id, sessionId)
-    return { ...toConversation(record), messages }
+    const { messages, compactSummary, compactCutoff } = await canonicalMessages(id, sessionId)
+    return {
+      ...toConversation(record),
+      messages,
+      compact_summary: compactSummary,
+      compact_up_to_message_id: compactCutoff,
+    }
   },
 
   update: async (id: number, body: ConversationUpdate): Promise<Conversation> =>

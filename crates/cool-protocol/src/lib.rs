@@ -819,6 +819,15 @@ pub struct SessionEvent {
 pub struct SessionCompacted {
     pub retained_items: u32,
     pub summary_item_id: Option<String>,
+    /// Rolling summary text, when the compaction produced one. `session.history`
+    /// projects it as a summary item so the chat can render the compacted block.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Cursor of the newest compacted history item. Items with a cursor `<=`
+    /// this value are covered by `summary`.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub compact_up_to_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1499,6 +1508,10 @@ pub struct HistoryItem {
     /// Cumulative usage reported by the model call that produced the assistant
     /// item (absent for user/tool items and imported history).
     pub usage: Option<UsageUpdated>,
+    /// Set only on a `role: "summary"` item: the `session.compacted` cutoff.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub compact_up_to_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]

@@ -28,16 +28,16 @@ use cool_agent::{
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
-    ContentPart, EventCursor, EventEnvelope, EventPage, HistoryItem, IdempotentPlanIdParams,
-    InitializeResult, ItemEvent, JsonRpcV2, PlanCreated, PlanExecuteResult, PlanProgress,
-    PlanProgressStatus, PlanStep as ProtocolPlanStep, PromptAcceptedResult, ProtocolError,
-    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, HistoryItem,
+    IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2, PlanCreated, PlanExecuteResult,
+    PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PromptAcceptedResult,
+    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
     RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
-    SessionConversationResult, SessionCreatedResult, SessionForkedResult, SessionHistoryResult,
-    SessionListResult, SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary,
-    StatusGetResult, StreamFrame, SubagentRunCancelResult, TaskRunCancelResult, TaskTemplateRecord,
-    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
-    V1Version,
+    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
+    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, SubagentRunCancelResult,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -1456,6 +1456,46 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
+            Command::ConversationsCompact(params) => {
+                let frame = match self.inner.config.legacy_store.as_deref() {
+                    None => failure(id, error(-32010, "legacy_store_unavailable", false)),
+                    Some(legacy) => {
+                        let actor = local_actor();
+                        // Resolve the canonical session before the mutation so
+                        // the idempotent closure only writes.
+                        let session_id = match self.ensure_conversation_session(params.id) {
+                            Ok(session_id) => session_id,
+                            Err(error) => {
+                                let _ = self.send(&outbound, failure(id, error)).await;
+                                return;
+                            }
+                        };
+                        let fingerprint = legacy::fingerprint(&params);
+                        match legacy
+                            .run_idempotent_async(
+                                &actor.id,
+                                "conversations.compact",
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                                || async {
+                                    self.compact_conversation(&actor, params.id, &session_id)
+                                        .await
+                                },
+                            )
+                            .await
+                        {
+                            Ok(outcome) => match legacy::convert(outcome.value) {
+                                Ok(record) => {
+                                    success(id, ResponsePayload::ConversationsCompacted(record))
+                                }
+                                Err(error) => failure(id, error),
+                            },
+                            Err(error) => failure(id, legacy::store_error(error)),
+                        }
+                    }
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
@@ -2114,6 +2154,234 @@ impl AppServer {
             )
             .map_err(store_error)?;
         Ok(link.session_id)
+    }
+
+    /// Compact a conversation: summarize the older canonical items with the
+    /// provider runtime, persist the legacy `working_memory` (parity) and append
+    /// a canonical `session.compacted` event so the chat can render the rolling
+    /// summary without the legacy detail endpoint.
+    async fn compact_conversation(
+        &self,
+        actor: &ActorRef,
+        conversation_id: i64,
+        session_id: &str,
+    ) -> Result<CompactResult, cool_store::StoreError> {
+        /// Python `memory_summary_threshold_messages` default (compaction runs
+        /// when the item count is below it).
+        const THRESHOLD: usize = 30;
+        /// Python `keep_recent` (hardcoded in the compact endpoint).
+        const KEEP: usize = 10;
+        let legacy = self
+            .inner
+            .config
+            .legacy_store
+            .as_deref()
+            .ok_or(cool_store::StoreError::NotALegacyStore)?;
+        let mut items = self.collect_session_items(session_id)?;
+        // The previous rolling summary/cutoff live on the canonical summary
+        // item (newest wins); the legacy message-id column is a different id
+        // space and is not a valid cursor.
+        let previous = items
+            .iter()
+            .filter(|item| item.role == "summary")
+            .max_by_key(|item| item.cursor)
+            .map(|item| (item.content.clone(), item.compact_up_to_cursor));
+        items.retain(|item| item.role != "summary");
+        let message_count = items.len() as u64;
+        if items.len() < THRESHOLD {
+            return Ok(CompactResult {
+                status: "skipped".to_owned(),
+                reason: Some(format!("Too few messages ({message_count} < {THRESHOLD})")),
+                message_count: Some(message_count),
+                messages_compacted: None,
+                messages_kept: None,
+                summary_length: None,
+            });
+        }
+        let compacted = &items[..items.len() - KEEP];
+        let cutoff = compacted.last().map(|item| item.cursor);
+        let previous_cutoff = previous.as_ref().and_then(|(_, cutoff)| *cutoff);
+        let previous_summary = previous.as_ref().and_then(|(summary, _)| summary.clone());
+        let fresh = compacted
+            .iter()
+            .filter(|item| previous_cutoff.is_none_or(|cutoff| item.cursor > cutoff))
+            .collect::<Vec<_>>();
+        if fresh.is_empty() {
+            return Ok(CompactResult {
+                status: "skipped".to_owned(),
+                reason: Some("No new messages to compact".to_owned()),
+                message_count: Some(message_count),
+                messages_compacted: None,
+                messages_kept: Some(KEEP as u64),
+                summary_length: None,
+            });
+        }
+        let mut transcript = String::new();
+        if let Some(summary) = &previous_summary {
+            transcript.push_str("[Previous summary of the earlier conversation]\n");
+            transcript.push_str(summary);
+            transcript.push('\n');
+        }
+        for item in &fresh {
+            let content = item.content.clone().unwrap_or_default();
+            transcript.push_str(&format!(
+                "{}: {}\n",
+                item.role,
+                truncate_chars(&content, 300)
+            ));
+        }
+        let model = legacy
+            .get_conversation(&actor.id, conversation_id)
+            .ok()
+            .and_then(|conversation| conversation.model)
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        // Mask before truncating so a secret cannot be split across a cut and
+        // survive the pattern matcher; a provider failure falls back to a
+        // deterministic extractive summary so compaction never loses context.
+        let fallback = truncate_chars(&mask_secrets(&transcript), 4000);
+        let summary = self
+            .summarize_conversation(&transcript, &model)
+            .await
+            .map(|text| truncate_chars(&text, 8000))
+            .unwrap_or(fallback);
+        let summary_length = summary.chars().count() as i64;
+        // Project the canonical summary first: if it fails, fail the command
+        // (leaving the legacy working memory untouched) rather than advancing
+        // one store without the other.
+        if let Some(cutoff) = cutoff {
+            self.project_compaction(&actor.id, session_id, KEEP as u32, &summary, cutoff)
+                .map_err(|error| cool_store::StoreError::Corruption(error.to_string()))?;
+        }
+        let existing = legacy.get_working_memory(&actor.id, conversation_id)?;
+        let state = existing
+            .as_ref()
+            .map(|memory| memory.state.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        // The canonical summary item is the source of truth for freshness, so
+        // the legacy message-id cutoff column is intentionally left unset.
+        legacy.upsert_working_memory(
+            &actor.id,
+            conversation_id,
+            &state,
+            Some(&summary),
+            None,
+            Some(summary_length),
+        )?;
+        Ok(CompactResult {
+            status: "compacted".to_owned(),
+            reason: None,
+            message_count: Some(message_count),
+            messages_compacted: Some(fresh.len() as u64),
+            messages_kept: Some(KEEP as u64),
+            summary_length: Some(summary_length as u64),
+        })
+    }
+
+    /// Whole chronological canonical transcript (bounded), used by compaction.
+    fn collect_session_items(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<HistoryItem>, cool_store::StoreError> {
+        let limit = self.inner.config.event_page_limit.min(100);
+        let mut items = Vec::new();
+        let mut cursor = None;
+        for _ in 0..64 {
+            let page = self
+                .session_history(&RpcId::Null, session_id, limit, cursor)
+                .map_err(|_| {
+                    cool_store::StoreError::Corruption("session history read".to_owned())
+                })?;
+            let has_more = page.has_more;
+            cursor = page.next_cursor;
+            items.extend(page.items);
+            if !has_more || cursor.is_none() {
+                break;
+            }
+        }
+        items.sort_by_key(|item| item.cursor);
+        Ok(items)
+    }
+
+    /// One provider call producing the rolling summary (masked).
+    async fn summarize_conversation(&self, transcript: &str, model: &str) -> Option<String> {
+        let request = AgentRequest {
+            model: model.to_owned(),
+            history: Vec::new(),
+            user_input: transcript.to_owned(),
+            system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
+            mode: Some("compact".to_owned()),
+            temperature: 0.0,
+            max_tokens: Some(1000),
+            limits: AgentLimits {
+                max_iterations: 1,
+                ..AgentLimits::default()
+            },
+            tool_names: Some(BTreeSet::new()),
+            tool_context: ToolContext::new(self.inner.workspace.clone(), self.inner.policy.clone()),
+        };
+        let sink = PlanStepSink::default();
+        let (_sender, signal) = CancelSignal::channel();
+        let outcome = self
+            .inner
+            .runtime
+            .run(
+                request,
+                &sink,
+                &AutoApprovalGate {
+                    outcome: ApprovalOutcome::Approved,
+                },
+                signal,
+            )
+            .await
+            .ok()?;
+        if !matches!(outcome, RunOutcome::Completed { .. }) {
+            return None;
+        }
+        let text = mask_secrets(sink.text().trim());
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Append the canonical `session.compacted` projection on an auxiliary run.
+    fn project_compaction(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+        retained: u32,
+        summary: &str,
+        cutoff: u64,
+    ) -> Result<(), cool_state::StoreError> {
+        let run_id = self.inner.store.start_auxiliary_run(actor_id, session_id)?;
+        let envelope = |event: CanonicalEvent| EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: rfc3339_now(),
+            actor: ActorRef {
+                id: "cool-agent".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-app-server-compact".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event,
+            extensions: Default::default(),
+        };
+        let compacted = envelope(CanonicalEvent::SessionCompacted(SessionCompacted {
+            retained_items: retained,
+            summary_item_id: None,
+            summary: Some(summary.to_owned()),
+            compact_up_to_cursor: Some(cutoff),
+        }));
+        self.inner.store.append_event_auto(actor_id, compacted)?;
+        let terminal = envelope(CanonicalEvent::RunCompleted(RunTerminal {
+            reason: "compact".to_owned(),
+            error_code: None,
+        }));
+        self.inner.store.append_event_auto(actor_id, terminal)?;
+        Ok(())
     }
 
     /// Execute an approved plan's steps, emitting canonical `plan.*` events into
@@ -3508,6 +3776,9 @@ fn error_text(error: &cool_store::StoreError) -> String {
 /// command, so the canonical session keeps a bounded working context.
 const MAX_IMPORTED_MESSAGES: usize = 10_000;
 
+/// System directive for `conversations.compact` (rolling summary).
+const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
+
 fn session_conversation_payload(link: ConversationLink) -> ResponsePayload {
     ResponsePayload::SessionForConversation(SessionConversationResult {
         session_id: link.session_id,
@@ -3829,6 +4100,7 @@ fn history_entries_from_window(
                         name: None,
                         model,
                         usage,
+                        compact_up_to_cursor: None,
                     },
                 });
             }
@@ -3853,6 +4125,7 @@ fn history_entries_from_window(
                         name: Some(tool.name.clone()),
                         model: None,
                         usage: None,
+                        compact_up_to_cursor: None,
                     },
                 });
             }
@@ -3880,6 +4153,33 @@ fn history_entries_from_window(
                         name: Some(tool.name.clone()),
                         model: None,
                         usage: None,
+                        compact_up_to_cursor: None,
+                    },
+                });
+            }
+            CanonicalEvent::SessionCompacted(compacted) => {
+                let Some(summary) = compacted.summary.as_ref().filter(|text| !text.is_empty())
+                else {
+                    continue;
+                };
+                reasoning.clear();
+                group_start = None;
+                pending_usage = None;
+                entries.push(HistoryEntry {
+                    start_cursor: *cursor,
+                    item: HistoryItem {
+                        cursor: *cursor,
+                        occurred_at: envelope.occurred_at.clone(),
+                        run_id: envelope.run_id.clone(),
+                        role: "summary".to_owned(),
+                        content: Some(summary.clone()),
+                        reasoning: None,
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                        name: None,
+                        model: None,
+                        usage: None,
+                        compact_up_to_cursor: compacted.compact_up_to_cursor,
                     },
                 });
             }
