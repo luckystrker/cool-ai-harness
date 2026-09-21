@@ -1915,6 +1915,8 @@ mod tests {
             "memory_forget",
             "memory_update",
             "memory_list",
+            "set_working_memory",
+            "get_working_memory",
             "entity_lookup",
         ] {
             assert!(registry.get(name).is_some(), "{name} must be registered");
@@ -2046,6 +2048,85 @@ mod tests {
             .await
             .unwrap();
         assert!(entities.output.as_array().unwrap().is_empty());
+
+        // Working memory fails closed without a bound conversation.
+        let set_wm = registry.get("set_working_memory").unwrap();
+        assert!(
+            set_wm
+                .execute(&context, json!({"key": "k", "value": "v"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        // With a bound conversation the scratchpad merges JSON values.
+        let conversation = store
+            .create_conversation(
+                "local-user",
+                &cool_store::domains::conversations::NewConversation::default(),
+            )
+            .unwrap();
+        let bound = context.clone().with_conversation(Some(conversation.id));
+        // Seed a compaction summary so a set must preserve it (not replace the row).
+        store
+            .upsert_working_memory(
+                "local-user",
+                conversation.id,
+                &json!({"seed": true}),
+                Some("prior summary"),
+                Some(7),
+                Some(42),
+            )
+            .unwrap();
+        let set = set_wm
+            .execute(&bound, json!({"key": "goal", "value": "{\"step\": 2}"}))
+            .await
+            .unwrap();
+        assert!(!set.is_error, "set_working_memory failed: {:?}", set.output);
+        // Setting a second key merges rather than replacing the whole state.
+        let second = set_wm
+            .execute(&bound, json!({"key": "hypothesis", "value": "cache miss"}))
+            .await
+            .unwrap();
+        assert!(!second.is_error);
+        let get_wm = registry.get("get_working_memory").unwrap();
+        let value = get_wm
+            .execute(&bound, json!({"key": "goal"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            value
+                .output
+                .get("value")
+                .and_then(|value| value.get("step"))
+                .and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+        let all = get_wm.execute(&bound, json!({})).await.unwrap();
+        assert_eq!(
+            all.output
+                .get("goal")
+                .and_then(|value| value.get("step"))
+                .and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+        assert_eq!(
+            all.output
+                .get("hypothesis")
+                .and_then(serde_json::Value::as_str),
+            Some("cache miss")
+        );
+        assert_eq!(
+            all.output.get("seed").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        // The compaction fields survive a scratchpad write.
+        let row = store
+            .get_working_memory("local-user", conversation.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.summary.as_deref(), Some("prior summary"));
+        assert_eq!(row.summary_up_to_message_id, Some(7));
+        assert_eq!(row.token_estimate, Some(42));
     }
 
     #[test]

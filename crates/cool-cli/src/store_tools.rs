@@ -84,6 +84,30 @@ pub fn store_tool_registry(store: Arc<LegacyStore>) -> Result<Vec<Tool>, ToolErr
         ),
         Tool::new(
             definition(
+                "set_working_memory",
+                "Set a key-value pair in the working memory scratchpad for the current conversation. Useful for tracking goals, hypotheses, and entity states.",
+                json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            SetWorkingMemory {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "get_working_memory",
+                "Read from the working memory scratchpad. Pass a key to get a specific value, or omit key to get the entire state.",
+                json!({"type":"object","properties":{"key":{"type":"string"}},"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            GetWorkingMemory {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
                 "entity_lookup",
                 "Look up a named entity (person, project, service, tool, concept) by name or alias and return its structured records.",
                 json!({"type":"object","properties":{"query":{"type":"string"},"entity_type":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"],"additionalProperties":false}),
@@ -278,6 +302,105 @@ impl ToolHandler for MemoryList {
     }
 }
 
+struct SetWorkingMemory {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for SetWorkingMemory {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["key", "value"])?;
+        let key = required_string(&arguments, "key")?.to_owned();
+        let value = required_string(&arguments, "value")?;
+        let Some(conversation_id) = context.conversation_id else {
+            return Ok(ToolResult::error(
+                "no_active_conversation",
+                "No active conversation for working memory",
+            ));
+        };
+        // Read-modify-write so the scratchpad merges (Python
+        // `update_working_memory_state`) instead of replacing the whole state.
+        let existing = match self
+            .store
+            .get_working_memory(&context.actor_id, conversation_id)
+        {
+            Ok(existing) => existing,
+            Err(error) => {
+                return Ok(ToolResult::error("memory_store_failed", error.to_string()).masked());
+            }
+        };
+        let mut state = existing
+            .as_ref()
+            .map(|row| row.state.clone())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        state
+            .as_object_mut()
+            .expect("state is an object")
+            .insert(key.clone(), parse_working_value(value));
+        let result = self.store.upsert_working_memory(
+            &context.actor_id,
+            conversation_id,
+            &state,
+            existing.as_ref().and_then(|row| row.summary.as_deref()),
+            existing
+                .as_ref()
+                .and_then(|row| row.summary_up_to_message_id),
+            existing.as_ref().and_then(|row| row.token_estimate),
+        );
+        match result {
+            Ok(_) => Ok(ToolResult::ok(json!({"key": key, "status": "set"})).masked()),
+            Err(error) => Ok(ToolResult::error("memory_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct GetWorkingMemory {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for GetWorkingMemory {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["key"])?;
+        let key = optional_string(&arguments, "key")?;
+        let Some(conversation_id) = context.conversation_id else {
+            return Ok(ToolResult::error(
+                "no_active_conversation",
+                "No active conversation for working memory",
+            ));
+        };
+        let existing = match self
+            .store
+            .get_working_memory(&context.actor_id, conversation_id)
+        {
+            Ok(existing) => existing,
+            Err(error) => {
+                return Ok(ToolResult::error("memory_store_failed", error.to_string()).masked());
+            }
+        };
+        match key {
+            Some(key) => {
+                let value = existing
+                    .and_then(|row| row.state.get(&key).cloned())
+                    .unwrap_or(Value::Null);
+                Ok(ToolResult::ok(json!({"key": key, "value": value})).masked())
+            }
+            None => Ok(
+                ToolResult::ok(existing.map(|row| row.state).unwrap_or_else(|| json!({}))).masked(),
+            ),
+        }
+    }
+}
+
 struct EntityLookup {
     store: Arc<LegacyStore>,
 }
@@ -398,4 +521,10 @@ fn optional_string_array(arguments: &Value, name: &str) -> Result<Option<Vec<Str
 
 fn bounded(value: Option<i64>, default: i64, min: i64, max: i64) -> i64 {
     value.unwrap_or(default).clamp(min, max)
+}
+
+/// Working-memory values are strings that may carry JSON (Python tries
+/// `json.loads` and falls back to the raw string).
+fn parse_working_value(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_owned()))
 }
