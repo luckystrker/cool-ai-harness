@@ -1,14 +1,13 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
-import { toMacroTool } from "./mappers"
-import type { MacroToolCreate, ToolCatalogItem } from "./types"
+import { toMacroTool, toToolCatalogItem } from "./mappers"
+import type { MacroToolCreate } from "./types"
 import type { JsonValue } from "./generated/cool_protocol"
 
 export const constructorApi = {
-  // Tool names feed role/profile configs that the Python runtime still
-  // executes, so the Rust `tools.list` catalog (6 builtin tools) cannot back
-  // this picker yet; it would offer names Python cannot resolve.
-  tools: () => api.get<ToolCatalogItem[]>("/api/agent-constructor/tools"),
+  // The canonical runtime catalog (`tools.list`) is the single picker source for
+  // profile/role tool_names. Agent-constructor macros still execute in Python,
+  // so a Python-only tool name (network/ML/browser) is not offered here.
+  tools: async () => (await sdk.toolsList({})).map(toToolCatalogItem),
   macros: async () =>
     (await sdk.constructorMacros({ includeInactive: false })).map(toMacroTool),
   createMacro: async (body: MacroToolCreate) =>

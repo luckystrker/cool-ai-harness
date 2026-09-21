@@ -1,4 +1,3 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
 import { toSubagentRole, toSubagentRun, toSubagentRunDetail } from "./mappers"
 import type {
@@ -11,9 +10,9 @@ import type { JsonValue } from "./generated/cool_protocol"
 
 export const subagentsApi = {
   // --- Tools ---
-  // Role tool names are executed by the Python subagent runtime, so the picker
-  // stays on the Python registry until the Rust subagent executor lands.
-  listTools: () => api.get<string[]>("/api/subagents/tools"),
+  // Role tool names are executed by the Rust subagent runtime, so the picker
+  // uses the canonical runtime catalog (`tools.list`).
+  listTools: async () => (await sdk.toolsList({})).map((tool) => tool.name),
 
   // --- Roles ---
   listRoles: async () => (await sdk.subagentsRolesList({})).map(toSubagentRole),

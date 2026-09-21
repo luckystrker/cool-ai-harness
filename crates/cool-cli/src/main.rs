@@ -2226,6 +2226,30 @@ mod tests {
         assert!(!removed.is_error);
         let listed = rss_list.execute(&context, json!({})).await.unwrap();
         assert!(listed.output.as_array().unwrap().is_empty());
+
+        // WS2(d): the canonical catalog is a valid picker source — it contains the
+        // builtins and the ported store families, with unique names.
+        let catalog: Vec<String> = registry
+            .catalog()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        for expected in [
+            "read_file",
+            "shell",
+            "memory_recall",
+            "read_wiki",
+            "rss_list",
+        ] {
+            assert!(
+                catalog.iter().any(|name| name == expected),
+                "catalog is missing {expected}"
+            );
+        }
+        let mut unique = catalog.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), catalog.len(), "catalog names must be unique");
     }
 
     #[test]

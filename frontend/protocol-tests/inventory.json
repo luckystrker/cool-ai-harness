@@ -464,9 +464,9 @@
     {
       "file": "subagents.ts",
       "member": "listTools",
-      "http": "GET /api/subagents/tools",
-      "status": "deferred",
-      "rationale": "the canonical tools.list catalog is the Rust runtime's builtins; subagent role tool_names are still executed by the Python subagent runtime, so the picker stays deferred until that executor is replaced in Rust"
+      "http": "POST /api/rpc (tools.list)",
+      "status": "sdk",
+      "command": "tools.list"
     },
     {
       "file": "subagents.ts",
@@ -1108,9 +1108,9 @@
     {
       "file": "constructor.ts",
       "member": "tools",
-      "http": "GET /api/agent-constructor/tools",
-      "status": "deferred",
-      "rationale": "the canonical tools.list command exposes the Rust runtime's 6 builtin tools, but this picker feeds profile/role tool_names that the Python runtime still executes; cutting it over would offer names Python cannot resolve, so it stays deferred until the Rust tool/subagent executor replaces the Python one"
+      "http": "POST /api/rpc (tools.list)",
+      "status": "sdk",
+      "command": "tools.list"
     },
     {
       "file": "constructor.ts",
