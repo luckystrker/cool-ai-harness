@@ -203,6 +203,10 @@ pub enum Command {
     ExtensionsPluginEnabled(PluginEnabledParams),
     #[serde(rename = "extensions.hook_review")]
     ExtensionsHookReview(HookReviewParams),
+    #[serde(rename = "settings.system_prompt")]
+    SettingsSystemPrompt(EmptyParams),
+    #[serde(rename = "settings.system_prompt_set")]
+    SettingsSystemPromptSet(SystemPromptSetParams),
     #[serde(rename = "conversations.list")]
     ConversationsList(ConversationListParams),
     #[serde(rename = "conversations.create")]
@@ -1652,6 +1656,7 @@ pub enum ResponsePayload {
     ExtensionsStatus(ExtensionStatusResult),
     ExtensionsPluginEnabled(PluginRecord),
     ExtensionsHookReviewed(HookRecord),
+    SettingsSystemPrompt(SystemPromptRecord),
     ConversationsList(Vec<ConversationRecord>),
     ConversationsCreated(ConversationRecord),
     ConversationsGot(ConversationRecord),

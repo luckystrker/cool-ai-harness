@@ -2068,6 +2068,40 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "settings.system_prompt"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "settings.system_prompt_set"
+            },
+            "params": {
+              "$ref": "#/$defs/SystemPromptSetParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "conversations.list"
             },
             "params": {
@@ -8537,6 +8571,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "settings_system_prompt"
+            },
+            "value": {
+              "$ref": "#/$defs/SystemPromptRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "conversations_list"
             },
             "value": {
@@ -12927,6 +12978,44 @@
         "startedAt",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "SystemPromptRecord": {
+      "description": "The effective default system prompt and where it comes from. `source` is\n`inline` when an operator-set prompt is stored, otherwise `builtin` (Rust\nships no bundled prompt file, so an unset default is empty and no system\nmessage is sent).",
+      "type": "object",
+      "properties": {
+        "isCustom": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prompt",
+        "isCustom",
+        "source"
+      ]
+    },
+    "SystemPromptSetParams": {
+      "description": "Set the default system prompt. An empty (or whitespace-only) prompt clears it\nand resets the effective state to the built-in default.",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "prompt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "prompt"
       ]
     },
     "TaskCreateParams": {

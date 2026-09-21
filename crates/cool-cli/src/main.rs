@@ -11,7 +11,7 @@ use cool_agent::{
     builtin_registry,
 };
 use cool_app_server::{
-    AppClient, AppServer, ExtensionAdmin, RunLifecycle, ServerConfig, capabilities,
+    AppClient, AppServer, AppSettings, ExtensionAdmin, RunLifecycle, ServerConfig, capabilities,
 };
 use cool_extensions::{
     CompatibilityAdapter, ExtensionRuntime, HookDeclaration, InstalledPlugin, McpToolPolicy,
@@ -21,7 +21,7 @@ use cool_extensions::{
 use cool_protocol::{
     ApprovalOutcome, CanonicalEvent, ExtensionDiagnosticRecord, ExtensionStatusResult, HookRecord,
     McpServerRecord, McpToolPolicyRecord, PluginRecord, SkillRecord, StatusEntry, StatusGetResult,
-    WorkerRecord,
+    SystemPromptRecord, WorkerRecord,
 };
 use cool_security::{
     CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace, mask_secrets,
@@ -280,6 +280,11 @@ async fn build_server(
                 runtime: extensions,
             }));
     }
+    // Application settings persist on the data root so a UI change survives a
+    // restart instead of living in process memory.
+    server = server.with_app_settings(Arc::new(FileAppSettings::new(
+        data_dir.join("settings.json"),
+    )));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }
@@ -807,6 +812,100 @@ fn redact_location(value: &str) -> String {
         return mask_secrets(url.as_str());
     }
     mask_secrets(value)
+}
+
+/// File-backed application settings on the data root. One JSON document so the
+/// surface can grow; today it holds the default system prompt. Writes are
+/// atomic (unique temp + rename); the prompt is the user's own config, so it is
+/// stored as-is and never logged (it is user content, not a secret to mask).
+///
+/// The document rejects unknown fields, so a typo fails closed instead of being
+/// silently ignored; adding a second setting later is a deliberate
+/// read-compatible migration, not an automatic one.
+struct FileAppSettings {
+    path: std::path::PathBuf,
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct SettingsDocument {
+    system_prompt: String,
+}
+
+/// Bounds the persisted prompt so one setting cannot grow the settings file (or
+/// the settings frame) without limit.
+const MAX_SYSTEM_PROMPT_CHARS: usize = 100_000;
+
+impl FileAppSettings {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn read_document(&self) -> Result<SettingsDocument, String> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice::<SettingsDocument>(&bytes)
+                .map_err(|error| format!("settings file is invalid: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SettingsDocument::default())
+            }
+            Err(error) => Err(format!("settings file could not be read: {error}")),
+        }
+    }
+
+    fn write_document(&self, document: &SettingsDocument) -> Result<(), String> {
+        let payload = serde_json::to_vec_pretty(document)
+            .map_err(|error| format!("settings could not be encoded: {error}"))?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("settings directory could not be created: {error}"))?;
+        }
+        // A unique temp name (pid + nanos) keeps concurrent writers from tearing
+        // each other's temp file; the rename is the atomic commit.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = self
+            .path
+            .with_extension(format!("{}.{nanos}.tmp", std::process::id()));
+        std::fs::write(&temporary, payload)
+            .map_err(|error| format!("settings could not be written: {error}"))?;
+        std::fs::rename(&temporary, &self.path)
+            .map_err(|error| format!("settings could not be replaced: {error}"))
+    }
+}
+
+fn system_prompt_record(prompt: String) -> SystemPromptRecord {
+    let is_custom = !prompt.trim().is_empty();
+    SystemPromptRecord {
+        prompt,
+        is_custom,
+        source: if is_custom { "inline" } else { "builtin" }.to_owned(),
+    }
+}
+
+#[async_trait]
+impl AppSettings for FileAppSettings {
+    async fn system_prompt(&self) -> Result<SystemPromptRecord, String> {
+        Ok(system_prompt_record(self.read_document()?.system_prompt))
+    }
+
+    async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String> {
+        if prompt.chars().count() > MAX_SYSTEM_PROMPT_CHARS {
+            return Err(format!(
+                "system prompt is too long (max {MAX_SYSTEM_PROMPT_CHARS} characters)"
+            ));
+        }
+        let stored = if prompt.trim().is_empty() {
+            String::new()
+        } else {
+            prompt.to_owned()
+        };
+        self.write_document(&SettingsDocument {
+            system_prompt: stored.clone(),
+        })?;
+        Ok(system_prompt_record(stored))
+    }
 }
 
 /// `cool serve`: the browser-facing HTTP/SSE facade over the Rust runtime.
@@ -1753,6 +1852,43 @@ mod tests {
         let corrupt = extension_status(&store, &runtime).await.unwrap();
         assert_eq!(corrupt.mcp_tool_policy.enabled, Some(Vec::new()));
         assert!(corrupt.mcp_tool_policy.disabled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_app_settings_round_trips_and_bounds() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("settings.json");
+        let settings = FileAppSettings::new(path.clone());
+
+        let record = settings.system_prompt().await.unwrap();
+        assert_eq!(record.prompt, "");
+        assert!(!record.is_custom);
+
+        let record = settings.set_system_prompt("You are Cool.").await.unwrap();
+        assert!(record.is_custom);
+        assert_eq!(record.source, "inline");
+        assert!(path.is_file(), "the settings file is written");
+        assert_eq!(
+            settings.system_prompt().await.unwrap().prompt,
+            "You are Cool."
+        );
+        // Replaying the same write is idempotent.
+        settings.set_system_prompt("You are Cool.").await.unwrap();
+        assert_eq!(
+            settings.system_prompt().await.unwrap().prompt,
+            "You are Cool."
+        );
+
+        // A whitespace-only value clears the default.
+        let record = settings.set_system_prompt("   ").await.unwrap();
+        assert!(!record.is_custom);
+        assert_eq!(record.source, "builtin");
+
+        // A corrupt file fails closed and an oversized prompt is rejected.
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(settings.system_prompt().await.is_err());
+        let oversized = "x".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
+        assert!(settings.set_system_prompt(&oversized).await.is_err());
     }
 
     #[test]

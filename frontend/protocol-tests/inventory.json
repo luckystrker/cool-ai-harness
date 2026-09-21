@@ -123,16 +123,16 @@
     {
       "file": "settings.ts",
       "member": "getSystemPrompt",
-      "http": "GET /api/settings/system-prompt",
-      "status": "deferred",
-      "rationale": "process-local settings object, not persisted in the legacy store; M11 settings runtime moves it to the Rust config surface"
+      "http": "POST /api/rpc (settings.system_prompt)",
+      "status": "sdk",
+      "command": "settings.system_prompt"
     },
     {
       "file": "settings.ts",
       "member": "updateSystemPrompt",
-      "http": "PUT /api/settings/system-prompt",
-      "status": "deferred",
-      "rationale": "process-local settings object, not persisted in the legacy store; M11 settings runtime moves it to the Rust config surface"
+      "http": "POST /api/rpc (settings.system_prompt_set)",
+      "status": "sdk",
+      "command": "settings.system_prompt_set"
     },
     {
       "file": "mcp.ts",

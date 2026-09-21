@@ -579,6 +579,8 @@ fn generated_typescript() -> String {
         ExtensionStatusResult,
         PluginEnabledParams,
         HookReviewParams,
+        SystemPromptRecord,
+        SystemPromptSetParams,
         LegacyIdParams,
         IdempotentIdParams,
         IdempotentParams,

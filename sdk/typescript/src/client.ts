@@ -55,6 +55,8 @@ export class CoolSdk {
   extensionsStatus(params: protocol.EmptyParams) { return this.send<protocol.ExtensionStatusResult>({ method: "extensions.status", params }); }
   extensionsPluginEnabled(params: protocol.PluginEnabledParams) { return this.send<protocol.PluginRecord>({ method: "extensions.plugin_enabled", params }); }
   extensionsHookReview(params: protocol.HookReviewParams) { return this.send<protocol.HookRecord>({ method: "extensions.hook_review", params }); }
+  settingsSystemPrompt(params: protocol.EmptyParams) { return this.send<protocol.SystemPromptRecord>({ method: "settings.system_prompt", params }); }
+  settingsSystemPromptSet(params: protocol.SystemPromptSetParams) { return this.send<protocol.SystemPromptRecord>({ method: "settings.system_prompt_set", params }); }
 
   conversationsList(params: protocol.ConversationListParams) { return this.send<protocol.ConversationRecord[]>({ method: "conversations.list", params }); }
   conversationsCreate(params: protocol.ConversationCreateParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.create", params }); }

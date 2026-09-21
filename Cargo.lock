@@ -334,6 +334,7 @@ dependencies = [
  "cool-store",
  "cool-tui",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

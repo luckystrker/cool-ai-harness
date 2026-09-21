@@ -36,8 +36,9 @@ use cool_protocol::{
     RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
     SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
     SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, StatusGetResult,
-    StreamFrame, SubagentRunCancelResult, TaskRunCancelResult, TaskTemplateRecord, TextDelta,
-    ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    StreamFrame, SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult,
+    TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested,
+    TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -140,6 +141,9 @@ struct Inner {
     /// Read-only extension admin surface, present when an extension host is
     /// configured (the CLI installs one over its `PluginStore`).
     extension_admin: Option<Arc<dyn ExtensionAdmin>>,
+    /// Persistent application settings, present when the host configures a
+    /// settings file (the CLI stores one on the data root).
+    app_settings: Option<Arc<dyn AppSettings>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -198,6 +202,19 @@ pub trait ExtensionAdmin: Send + Sync {
     ) -> Result<HookRecord, String> {
         Err("extension admin does not support mutations".to_owned())
     }
+}
+
+/// Mutable application settings owned by the web UI. The app server never
+/// persists settings itself; the host (the CLI) stores them on the data root so
+/// they survive a restart instead of living in process memory.
+#[async_trait]
+pub trait AppSettings: Send + Sync {
+    /// The effective default system prompt (an unset default is an empty
+    /// `builtin` record).
+    async fn system_prompt(&self) -> Result<SystemPromptRecord, String>;
+
+    /// Persist the default system prompt; an empty value clears it.
+    async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String>;
 }
 
 #[derive(Default)]
@@ -382,6 +399,7 @@ impl AppServer {
                 run_subscribers: Mutex::new(HashMap::new()),
                 lifecycle: None,
                 extension_admin: None,
+                app_settings: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -406,6 +424,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("extension admin must be configured before the server is cloned")
             .extension_admin = Some(admin);
+        self
+    }
+
+    pub fn with_app_settings(mut self, settings: Arc<dyn AppSettings>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("app settings must be configured before the server is cloned")
+            .app_settings = Some(settings);
         self
     }
 
@@ -1305,7 +1330,7 @@ impl AppServer {
                         Ok(status) => success(id, ResponsePayload::ExtensionsStatus(status)),
                         Err(message) => failure(
                             id,
-                            extension_error(-32015, "extension_state_failed", &message),
+                            masked_detail_error(-32015, "extension_state_failed", &message),
                         ),
                     },
                     None => success(
@@ -1328,7 +1353,7 @@ impl AppServer {
                             }
                             Err(message) => failure(
                                 id,
-                                extension_error(-32017, "extension_mutation_failed", &message),
+                                masked_detail_error(-32017, "extension_mutation_failed", &message),
                             ),
                         }
                     }
@@ -1355,11 +1380,44 @@ impl AppServer {
                             }
                             Err(message) => failure(
                                 id,
-                                extension_error(-32017, "extension_mutation_failed", &message),
+                                masked_detail_error(-32017, "extension_mutation_failed", &message),
                             ),
                         }
                     }
                     None => failure(id, error(-32016, "extension_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SettingsSystemPrompt(_) => {
+                let frame = match &self.inner.app_settings {
+                    Some(settings) => match settings.system_prompt().await {
+                        Ok(record) => success(id, ResponsePayload::SettingsSystemPrompt(record)),
+                        Err(message) => {
+                            failure(id, masked_detail_error(-32018, "settings_failed", &message))
+                        }
+                    },
+                    // No settings file configured: report the built-in default
+                    // (empty, so runs send no system message) rather than fail.
+                    None => success(
+                        id,
+                        ResponsePayload::SettingsSystemPrompt(SystemPromptRecord {
+                            prompt: String::new(),
+                            is_custom: false,
+                            source: "builtin".to_owned(),
+                        }),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SettingsSystemPromptSet(params) => {
+                let frame = match &self.inner.app_settings {
+                    Some(settings) => match settings.set_system_prompt(&params.prompt).await {
+                        Ok(record) => success(id, ResponsePayload::SettingsSystemPrompt(record)),
+                        Err(message) => {
+                            failure(id, masked_detail_error(-32018, "settings_failed", &message))
+                        }
+                    },
+                    None => failure(id, error(-32019, "settings_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -2049,7 +2107,13 @@ impl AppServer {
                     Some("plan".to_owned()),
                 )
             } else {
-                (prompt.system_prompt, None)
+                // A normal turn uses the caller's prompt when present, otherwise
+                // the persisted default (empty means no system message).
+                let system_prompt = match prompt.system_prompt {
+                    Some(system_prompt) => Some(system_prompt),
+                    None => default_system_prompt(&server).await,
+                };
+                (system_prompt, None)
             };
             let request = AgentRequest {
                 model: prompt
@@ -4450,17 +4514,30 @@ fn error(rpc_code: i32, cool_code: &str, retryable: bool) -> ProtocolError {
     }
 }
 
-/// Extension-host failures carry their message in `safe_details` after masking
-/// secret-shaped text, so the admin UI can show why a read or mutation failed.
-/// The message may still reference a plugin/data path (not a secret); the local
-/// facade is single-user and the value is only returned to the same operator.
-fn extension_error(rpc_code: i32, cool_code: &str, message: &str) -> ProtocolError {
+/// Host-surface failures (extension admin, settings) carry their message in
+/// `safe_details` after masking secret-shaped text, so the UI can show why a read
+/// or mutation failed. The message may still reference a plugin/data path (not a
+/// secret); the local facade is single-user and the value is only returned to the
+/// same operator.
+fn masked_detail_error(rpc_code: i32, cool_code: &str, message: &str) -> ProtocolError {
     let mut protocol_error = error(rpc_code, cool_code, false);
     protocol_error.safe_details.insert(
         "detail".to_owned(),
         serde_json::Value::String(mask_secrets(message)),
     );
     protocol_error
+}
+
+/// The persisted default system prompt, applied when a normal (non-plan) turn
+/// does not supply one. An unset/empty default means no system message, and a
+/// settings read failure degrades to no system prompt rather than failing the
+/// turn.
+async fn default_system_prompt(server: &AppServer) -> Option<String> {
+    let settings = server.inner.app_settings.as_ref()?;
+    match settings.system_prompt().await {
+        Ok(record) if !record.prompt.trim().is_empty() => Some(record.prompt),
+        _ => None,
+    }
 }
 
 fn store_error(value: StoreError) -> ProtocolError {
@@ -4732,6 +4809,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "run_cancellation",
         "run_subscribe",
         "session_fork",
+        "settings",
         "session_history",
         "session_history_cursor",
         "session_list",

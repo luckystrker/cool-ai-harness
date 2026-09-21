@@ -14,11 +14,13 @@ mod content;
 mod extensions;
 mod knowledge;
 mod ops;
+mod settings;
 
 pub use content::*;
 pub use extensions::*;
 pub use knowledge::*;
 pub use ops::*;
+pub use settings::*;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

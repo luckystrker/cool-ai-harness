@@ -7,11 +7,14 @@ use cool_agent::{
     ToolError, ToolHandler, ToolResult, builtin_registry,
 };
 use cool_app_server::client::new_idempotency_key;
-use cool_app_server::{AppClient, AppServer, ExtensionAdmin, RunLifecycle, ServerConfig};
+use cool_app_server::{
+    AppClient, AppServer, AppSettings, ExtensionAdmin, RunLifecycle, ServerConfig,
+};
 use cool_protocol::{
     CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
     HookRecord, HookReviewParams, McpServerRecord, McpToolPolicyRecord, PluginEnabledParams,
-    PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult, WorkerRecord,
+    PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult, SystemPromptRecord,
+    SystemPromptSetParams, WorkerRecord,
 };
 use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
@@ -1134,6 +1137,279 @@ async fn caller_system_prompt_reaches_non_planning_runs() {
         message.role == cool_agent::MessageRole::System
             && message.content.as_deref() == Some("be terse")
     }));
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+fn prompt_record(prompt: String) -> SystemPromptRecord {
+    let is_custom = !prompt.trim().is_empty();
+    SystemPromptRecord {
+        prompt,
+        is_custom,
+        source: if is_custom { "inline" } else { "builtin" }.to_owned(),
+    }
+}
+
+#[derive(Default)]
+struct MemorySettings {
+    prompt: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl AppSettings for MemorySettings {
+    async fn system_prompt(&self) -> Result<SystemPromptRecord, String> {
+        Ok(prompt_record(self.prompt.lock().unwrap().clone()))
+    }
+
+    async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String> {
+        let stored = if prompt.trim().is_empty() {
+            String::new()
+        } else {
+            prompt.to_owned()
+        };
+        *self.prompt.lock().unwrap() = stored.clone();
+        Ok(prompt_record(stored))
+    }
+}
+
+#[tokio::test]
+async fn settings_system_prompt_defaults_empty_and_round_trips_with_a_host() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No settings host -> a built-in (empty) default; a write fails closed.
+    let (client, task) = connected_client(server.clone()).await;
+    let payload = client
+        .request(Command::SettingsSystemPrompt(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::SettingsSystemPrompt(record) = payload else {
+        panic!("settings.system_prompt must return SettingsSystemPrompt, got {payload:?}");
+    };
+    assert_eq!(record.prompt, "");
+    assert!(!record.is_custom);
+    assert_eq!(record.source, "builtin");
+    let error = client
+        .request(Command::SettingsSystemPromptSet(SystemPromptSetParams {
+            idempotency_key: key("settings-no-host"),
+            prompt: "hello".to_owned(),
+        }))
+        .await
+        .expect_err("a write without a settings host must fail");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "settings_unavailable");
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    // With a host the value round-trips; a whitespace-only value clears it.
+    let server = server.with_app_settings(Arc::new(MemorySettings::default()));
+    let (client, task) = connected_client(server).await;
+    let payload = client
+        .request(Command::SettingsSystemPromptSet(SystemPromptSetParams {
+            idempotency_key: key("settings-set"),
+            prompt: "You are terse.".to_owned(),
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::SettingsSystemPrompt(record) = payload else {
+        panic!("settings.system_prompt_set must return SettingsSystemPrompt, got {payload:?}");
+    };
+    assert_eq!(record.prompt, "You are terse.");
+    assert!(record.is_custom);
+    assert_eq!(record.source, "inline");
+
+    let payload = client
+        .request(Command::SettingsSystemPrompt(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::SettingsSystemPrompt(record) = payload else {
+        panic!("settings.system_prompt must return SettingsSystemPrompt, got {payload:?}");
+    };
+    assert_eq!(record.prompt, "You are terse.");
+
+    client
+        .request(Command::SettingsSystemPromptSet(SystemPromptSetParams {
+            idempotency_key: key("settings-clear"),
+            prompt: "   ".to_owned(),
+        }))
+        .await
+        .unwrap();
+    let payload = client
+        .request(Command::SettingsSystemPrompt(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::SettingsSystemPrompt(record) = payload else {
+        panic!("settings.system_prompt must return SettingsSystemPrompt, got {payload:?}");
+    };
+    assert!(record.prompt.is_empty());
+    assert!(!record.is_custom);
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn persisted_default_system_prompt_reaches_a_normal_turn() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::echo());
+    let settings = Arc::new(MemorySettings::default());
+    *settings.prompt.lock().unwrap() = "be brief".to_owned();
+    let server = scripted_server(provider.clone(), directory.path()).with_app_settings(settings);
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("settings-turn", None, None)
+        .await
+        .unwrap();
+
+    // A normal turn with no caller prompt uses the persisted default.
+    let events = client.subscribe();
+    let run_id = client
+        .prompt_with(
+            "settings-default",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "hello".to_owned(),
+            }],
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+        .run_id;
+    drain_run(events, &run_id).await;
+
+    // A caller prompt still wins over the persisted default.
+    let events = client.subscribe();
+    let run_id = client
+        .prompt_with(
+            "settings-override",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "again".to_owned(),
+            }],
+            None,
+            false,
+            Some("be terse"),
+        )
+        .await
+        .unwrap()
+        .run_id;
+    drain_run(events, &run_id).await;
+
+    let requests = provider.requests().await;
+    let system = |index: usize| -> Option<String> {
+        requests[index]
+            .messages
+            .iter()
+            .find(|message| message.role == cool_agent::MessageRole::System)
+            .and_then(|message| message.content.clone())
+    };
+    assert_eq!(system(0).as_deref(), Some("be brief"));
+    assert_eq!(system(1).as_deref(), Some("be terse"));
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+struct FailingSettings;
+
+#[async_trait]
+impl AppSettings for FailingSettings {
+    async fn system_prompt(&self) -> Result<SystemPromptRecord, String> {
+        Err("settings file is invalid: boom".to_owned())
+    }
+
+    async fn set_system_prompt(&self, _prompt: &str) -> Result<SystemPromptRecord, String> {
+        Err("settings file is invalid: boom".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn plan_mode_ignores_the_persisted_default_prompt() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("plan drafted".to_owned()),
+        ModelEvent::Finish { reason: None },
+    ])]));
+    let settings = Arc::new(MemorySettings::default());
+    *settings.prompt.lock().unwrap() = "be brief".to_owned();
+    let server = scripted_server(provider.clone(), directory.path()).with_app_settings(settings);
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("plan-settings", None, None)
+        .await
+        .unwrap();
+    let events = client.subscribe();
+    let run_id = client
+        .prompt_with(
+            "plan-default",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "design it".to_owned(),
+            }],
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap()
+        .run_id;
+    drain_run(events, &run_id).await;
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .first()
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(system.contains("PLANNING MODE"), "{system}");
+    assert!(!system.contains("be brief"), "plan mode owns the prompt");
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn a_settings_read_failure_does_not_fail_a_turn() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::echo());
+    let server = scripted_server(provider.clone(), directory.path())
+        .with_app_settings(Arc::new(FailingSettings));
+    let (client, task) = connected_client(server).await;
+    let session_id = client
+        .create_session("failing-settings", None, None)
+        .await
+        .unwrap();
+    let events = client.subscribe();
+    let run_id = client
+        .prompt_with(
+            "failing-settings-prompt",
+            &session_id,
+            vec![cool_protocol::ContentPart::Text {
+                text: "hello".to_owned(),
+            }],
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+        .run_id;
+    // The turn still completes; a settings read failure only drops the default.
+    let emitted = drain_run(events, &run_id).await;
+    assert!(
+        emitted
+            .iter()
+            .any(|event| matches!(event, CanonicalEvent::RunCompleted(_))),
+        "the run must complete despite the settings read failure"
+    );
+    let requests = provider.requests().await;
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| message.role != cool_agent::MessageRole::System),
+        "a failed settings read must not inject a system message"
+    );
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }
