@@ -1,3 +1,5 @@
+mod store_tools;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::IsTerminal;
@@ -27,6 +29,7 @@ use cool_security::{
     CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace, mask_secrets,
 };
 use cool_state::DurableStore;
+use cool_store::LegacyStore;
 use serde_json::json;
 
 #[tokio::main]
@@ -255,12 +258,12 @@ async fn build_server(
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
     let config = ServerConfig {
         secrets: configured_secrets(),
-        legacy_store: legacy,
+        legacy_store: legacy.clone(),
         ..ServerConfig::default()
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
     let workspace = current_workspace()?;
-    let (registry, extensions, plugin_store) = extension_registry(data_dir).await;
+    let (registry, extensions, plugin_store) = extension_registry(data_dir, legacy).await;
     let agent = AgentRuntime::new(provider, registry);
     let mut server = AppServer::with_agent_runtime(
         config,
@@ -293,12 +296,19 @@ async fn build_server(
 
 async fn extension_registry(
     data_dir: &std::path::Path,
+    legacy_store: Option<Arc<LegacyStore>>,
 ) -> (
     cool_agent::ToolRegistry,
     Option<ExtensionRuntime>,
     Option<PluginStore>,
 ) {
     let mut registry = builtin_registry();
+    // Store-backed parity tools exist only when the CLI serves a legacy store.
+    if let Some(store) = legacy_store
+        && let Ok(tools) = store_tools::store_tool_registry(store)
+    {
+        registry = registry.extend(tools).unwrap_or(registry);
+    }
     let Ok(store) = PluginStore::open(data_dir.join("plugins")) else {
         return (registry, None, None);
     };
@@ -1889,6 +1899,153 @@ mod tests {
         assert!(settings.system_prompt().await.is_err());
         let oversized = "x".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
         assert!(settings.set_system_prompt(&oversized).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn store_memory_tools_execute_against_a_legacy_store() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("harness.db");
+        let store = Arc::new(open_legacy_store(&database).unwrap());
+        let registry = builtin_registry()
+            .extend(store_tools::store_tool_registry(store.clone()).unwrap())
+            .unwrap();
+        for name in [
+            "memory_remember",
+            "memory_recall",
+            "memory_forget",
+            "memory_update",
+            "memory_list",
+            "entity_lookup",
+        ] {
+            assert!(registry.get(name).is_some(), "{name} must be registered");
+        }
+        let context = ToolContext::new(
+            Workspace::new(temporary.path()).unwrap(),
+            CapabilityPolicy::new(Some(Decision::Allow)),
+        )
+        .with_actor("local-user");
+
+        let remember = registry.get("memory_remember").unwrap();
+        let result = remember
+            .execute(
+                &context,
+                json!({"content": "the build uses Rust", "importance": 0.9}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "remember failed: {:?}", result.output);
+        // An agent-sourced write lands in pending_confirmation, matching Python,
+        // so it is not in the active list until confirmed.
+        assert_eq!(
+            result.output.get("status").and_then(|value| value.as_str()),
+            Some("pending_confirmation")
+        );
+
+        let list = registry.get("memory_list").unwrap();
+        let listed = list.execute(&context, json!({})).await.unwrap();
+        assert!(listed.output.as_array().unwrap().is_empty());
+
+        // Seed an active (user_explicit) memory to exercise list/recall/update.
+        let active = store
+            .create_memory_item(
+                "local-user",
+                &cool_store::domains::memory::NewMemoryItem {
+                    content: "the build uses Rust".to_owned(),
+                    source: "user_explicit".to_owned(),
+                    ..cool_store::domains::memory::NewMemoryItem::default()
+                },
+            )
+            .unwrap();
+        let id = active.id;
+
+        let listed = list.execute(&context, json!({})).await.unwrap();
+        assert_eq!(listed.output.as_array().unwrap().len(), 1);
+
+        // Recall is a lexical filter over active memories, not semantic ranking.
+        let recall = registry.get("memory_recall").unwrap();
+        let hit = recall
+            .execute(&context, json!({"query": "rust"}))
+            .await
+            .unwrap();
+        assert_eq!(hit.output.as_array().unwrap().len(), 1);
+        let miss = recall
+            .execute(&context, json!({"query": "python"}))
+            .await
+            .unwrap();
+        assert!(miss.output.as_array().unwrap().is_empty());
+
+        let update = registry.get("memory_update").unwrap();
+        let updated = update
+            .execute(
+                &context,
+                json!({"memory_id": id, "content": "the build uses Rust 2024"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated
+                .output
+                .get("content")
+                .and_then(|value| value.as_str()),
+            Some("the build uses Rust 2024")
+        );
+
+        // An agent-sourced update is capped at the agent importance maximum.
+        let clamped = update
+            .execute(&context, json!({"memory_id": id, "importance": 1.0}))
+            .await
+            .unwrap();
+        assert_eq!(
+            clamped
+                .output
+                .get("importance")
+                .and_then(|value| value.as_f64()),
+            Some(0.9)
+        );
+
+        // A soft forget archives, so the active list drops it.
+        let forget = registry.get("memory_forget").unwrap();
+        let forgotten = forget
+            .execute(&context, json!({"memory_id": id}))
+            .await
+            .unwrap();
+        assert!(!forgotten.is_error);
+        let listed = list.execute(&context, json!({})).await.unwrap();
+        assert!(listed.output.as_array().unwrap().is_empty());
+
+        // A hard forget removes the row entirely.
+        let hard = forget
+            .execute(&context, json!({"memory_id": id, "hard": true}))
+            .await
+            .unwrap();
+        assert!(!hard.is_error);
+        assert!(store.get_memory_item("local-user", id).is_err());
+
+        // Malformed input is rejected and an empty entity table is handled.
+        assert!(
+            remember
+                .execute(&context, json!({"bogus": 1}))
+                .await
+                .is_err()
+        );
+        assert!(
+            remember
+                .execute(&context, json!("not an object"))
+                .await
+                .is_err()
+        );
+        assert!(
+            remember
+                .execute(&context, json!({"content": ""}))
+                .await
+                .is_err()
+        );
+        let lookup = registry.get("entity_lookup").unwrap();
+        let entities = lookup
+            .execute(&context, json!({"query": "anything"}))
+            .await
+            .unwrap();
+        assert!(entities.output.as_array().unwrap().is_empty());
     }
 
     #[test]

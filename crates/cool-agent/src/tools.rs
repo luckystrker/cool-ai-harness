@@ -124,6 +124,12 @@ pub struct ToolContext {
     /// embeddings keep this false unless they supply an OS-isolated worker.
     pub allow_trusted_host_processes: bool,
     pub cancel: Option<CancelSignal>,
+    /// Server-derived actor for store-backed tools. Never read from tool
+    /// arguments.
+    pub actor_id: String,
+    /// Conversation bound to the run, when known; store-backed tools that are
+    /// conversation-scoped use it.
+    pub conversation_id: Option<i64>,
 }
 
 impl ToolContext {
@@ -137,7 +143,23 @@ impl ToolContext {
             allowed_secret_environment: BTreeSet::new(),
             allow_trusted_host_processes: false,
             cancel: None,
+            actor_id: "local-user".to_owned(),
+            conversation_id: None,
         }
+    }
+
+    /// Sets the server-derived actor that store-backed tools scope their reads
+    /// and writes to.
+    pub fn with_actor(mut self, actor_id: impl Into<String>) -> Self {
+        self.actor_id = actor_id.into();
+        self
+    }
+
+    /// Binds the run's conversation so conversation-scoped store tools resolve
+    /// the right rows.
+    pub fn with_conversation(mut self, conversation_id: Option<i64>) -> Self {
+        self.conversation_id = conversation_id;
+        self
     }
 }
 

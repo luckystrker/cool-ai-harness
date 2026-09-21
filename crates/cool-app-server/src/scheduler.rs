@@ -388,7 +388,8 @@ impl TaskExecutor {
             max_tokens: None,
             limits,
             tool_names,
-            tool_context: ToolContext::new(workspace, task_policy(&self.policy, &task)),
+            tool_context: ToolContext::new(workspace, task_policy(&self.policy, &task))
+                .with_actor(crate::local_actor().id),
         };
         // The task's approval policy is enforced by the capability policy: a
         // `deny_external` task denies `send_external`, everything else is

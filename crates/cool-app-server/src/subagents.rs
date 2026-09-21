@@ -413,7 +413,8 @@ impl SubagentExecutor {
             tool_context: ToolContext::new(
                 workspace,
                 subagent_policy(&self.policy, resolved.capability_policy.as_ref()),
-            ),
+            )
+            .with_actor(crate::local_actor().id),
         };
         let child_sink = LegacyTranscriptSink {
             store: Arc::clone(&self.store),

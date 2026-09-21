@@ -2092,7 +2092,7 @@ impl AppServer {
             let approvals = AppServerApprovalGate {
                 server: server.clone(),
                 run_id: run_id.clone(),
-                session_id: run.session_id,
+                session_id: run.session_id.clone(),
                 outbound: outbound.clone(),
             };
             let masked_prompt = mask_secrets(&prompt.content);
@@ -2130,6 +2130,15 @@ impl AppServer {
                 tool_context: ToolContext::new(
                     server.inner.workspace.clone(),
                     server.inner.policy.clone(),
+                )
+                .with_actor(local_actor().id)
+                .with_conversation(
+                    server
+                        .inner
+                        .store
+                        .conversation_id_for_session(&local_actor().id, &run.session_id)
+                        .ok()
+                        .flatten(),
                 ),
             };
             let lifecycle_sink =
@@ -2491,7 +2500,8 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: Some(BTreeSet::new()),
-            tool_context: ToolContext::new(self.inner.workspace.clone(), self.inner.policy.clone()),
+            tool_context: ToolContext::new(self.inner.workspace.clone(), self.inner.policy.clone())
+                .with_actor(local_actor().id),
         };
         let sink = PlanStepSink::default();
         let (_sender, signal) = CancelSignal::channel();
@@ -2864,7 +2874,8 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: None,
-            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone()),
+            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone())
+                .with_actor(local_actor().id),
         };
         let sink = PlanStepSink::default();
         let outcome = self
