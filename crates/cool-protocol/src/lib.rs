@@ -197,6 +197,12 @@ pub enum Command {
     StatusGet(StatusGetParams),
     #[serde(rename = "tools.list")]
     ToolsList(EmptyParams),
+    #[serde(rename = "extensions.status")]
+    ExtensionsStatus(EmptyParams),
+    #[serde(rename = "extensions.plugin_enabled")]
+    ExtensionsPluginEnabled(PluginEnabledParams),
+    #[serde(rename = "extensions.hook_review")]
+    ExtensionsHookReview(HookReviewParams),
     #[serde(rename = "conversations.list")]
     ConversationsList(ConversationListParams),
     #[serde(rename = "conversations.create")]
@@ -1643,6 +1649,9 @@ pub enum ResponsePayload {
     EventPage(EventPage),
     Status(StatusGetResult),
     ToolsListed(Vec<ToolCatalogRecord>),
+    ExtensionsStatus(ExtensionStatusResult),
+    ExtensionsPluginEnabled(PluginRecord),
+    ExtensionsHookReviewed(HookRecord),
     ConversationsList(Vec<ConversationRecord>),
     ConversationsCreated(ConversationRecord),
     ConversationsGot(ConversationRecord),

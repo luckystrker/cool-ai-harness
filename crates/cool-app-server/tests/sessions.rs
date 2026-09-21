@@ -7,15 +7,21 @@ use cool_agent::{
     ToolError, ToolHandler, ToolResult, builtin_registry,
 };
 use cool_app_server::client::new_idempotency_key;
-use cool_app_server::{AppClient, AppServer, RunLifecycle, ServerConfig};
+use cool_app_server::{AppClient, AppServer, ExtensionAdmin, RunLifecycle, ServerConfig};
 use cool_protocol::{
-    CanonicalEvent, Command, EmptyParams, ResponsePayload, StatusEntry, StatusGetResult,
+    CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
+    HookRecord, HookReviewParams, McpServerRecord, McpToolPolicyRecord, PluginEnabledParams,
+    PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult, WorkerRecord,
 };
 use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::{sleep, timeout};
+
+fn key(prefix: &str) -> cool_protocol::IdempotencyKey {
+    cool_protocol::IdempotencyKey::new(new_idempotency_key(prefix)).unwrap()
+}
 
 struct SlowTool;
 
@@ -416,6 +422,323 @@ async fn status_get_reports_the_configured_lifecycle_snapshot() {
     assert_eq!(status.plugins[0].status, "enabled");
     assert_eq!(status.workers[0].status, "running");
     assert_eq!(status.mcp_servers, ["demo/files"]);
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+struct StaticExtensionAdmin;
+
+#[async_trait]
+impl ExtensionAdmin for StaticExtensionAdmin {
+    async fn status(&self) -> Result<ExtensionStatusResult, String> {
+        Ok(ExtensionStatusResult {
+            plugins: vec![PluginRecord {
+                name: "demo".to_owned(),
+                version: "1.2.0".to_owned(),
+                enabled: true,
+                source_type: "local".to_owned(),
+                source: "fixtures/demo".to_owned(),
+                revision: String::new(),
+                content_hash: "a".repeat(64),
+                installed_at: "2026-09-20T00:00:00.000Z".to_owned(),
+                required_capabilities: vec!["execute".to_owned()],
+                resolved_dependencies: vec!["git".to_owned()],
+                diagnostics: vec![ExtensionDiagnosticRecord {
+                    code: "vendor_translated".to_owned(),
+                    level: "info".to_owned(),
+                    message: "translated".to_owned(),
+                    path: "mcp.json".to_owned(),
+                }],
+                content_verified: true,
+            }],
+            workers: vec![WorkerRecord {
+                id: "opencode-compatibility".to_owned(),
+                status: "failed".to_owned(),
+                attempt: 2,
+                code: Some("crash".to_owned()),
+            }],
+            hooks: vec![HookRecord {
+                plugin: "demo".to_owned(),
+                id: "audit".to_owned(),
+                event: "PreToolUse".to_owned(),
+                handler: "command:/usr/bin/audit".to_owned(),
+                order: 0,
+                parallel: false,
+                capabilities: vec!["execute".to_owned()],
+                trust_hash: "b".repeat(64),
+                approved: false,
+            }],
+            skills: vec![SkillRecord {
+                name: "changelog".to_owned(),
+                description: "Write a changelog".to_owned(),
+                plugin: "demo".to_owned(),
+                allowed_tools: vec!["read_file".to_owned()],
+            }],
+            mcp_servers: vec![McpServerRecord {
+                plugin: "demo".to_owned(),
+                name: "files".to_owned(),
+                transport: "stdio".to_owned(),
+                endpoint: "/usr/bin/mcp-files".to_owned(),
+            }],
+            mcp_tool_policy: McpToolPolicyRecord {
+                enabled: Some(vec!["read".to_owned()]),
+                disabled: vec!["write".to_owned()],
+            },
+        })
+    }
+}
+
+struct FailingExtensionAdmin;
+
+#[async_trait]
+impl ExtensionAdmin for FailingExtensionAdmin {
+    async fn status(&self) -> Result<ExtensionStatusResult, String> {
+        Err("plugin store is invalid: boom".to_owned())
+    }
+}
+
+#[derive(Default)]
+struct MutatingExtensionAdmin {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ExtensionAdmin for MutatingExtensionAdmin {
+    async fn status(&self) -> Result<ExtensionStatusResult, String> {
+        Ok(ExtensionStatusResult::default())
+    }
+
+    async fn set_plugin_enabled(
+        &self,
+        actor: &str,
+        plugin: &str,
+        enabled: bool,
+    ) -> Result<PluginRecord, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("enable:{actor}:{plugin}:{enabled}"));
+        Ok(PluginRecord {
+            name: plugin.to_owned(),
+            version: "1.0.0".to_owned(),
+            enabled,
+            source_type: "local".to_owned(),
+            source: "fixtures/demo".to_owned(),
+            revision: String::new(),
+            content_hash: "c".repeat(64),
+            installed_at: "2026-09-20T00:00:00.000Z".to_owned(),
+            required_capabilities: Vec::new(),
+            resolved_dependencies: Vec::new(),
+            diagnostics: Vec::new(),
+            content_verified: true,
+        })
+    }
+
+    async fn set_hook_review(
+        &self,
+        actor: &str,
+        plugin: &str,
+        hook: &str,
+        trust_hash: &str,
+        approved: bool,
+    ) -> Result<HookRecord, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("review:{actor}:{plugin}:{hook}:{approved}"));
+        Ok(HookRecord {
+            plugin: plugin.to_owned(),
+            id: hook.to_owned(),
+            event: "PreToolUse".to_owned(),
+            handler: "command:audit".to_owned(),
+            order: 0,
+            parallel: false,
+            capabilities: vec!["execute".to_owned()],
+            trust_hash: trust_hash.to_owned(),
+            approved,
+        })
+    }
+}
+
+#[tokio::test]
+async fn extension_mutations_are_actor_scoped_and_require_an_admin() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No admin configured -> the mutation fails closed (the read answers empty).
+    let (client, task) = connected_client(server.clone()).await;
+    let error = client
+        .request(Command::ExtensionsPluginEnabled(PluginEnabledParams {
+            idempotency_key: key("enable-no-admin"),
+            plugin: "demo".to_owned(),
+            enabled: true,
+        }))
+        .await
+        .expect_err("a mutation without an admin must fail");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "extension_admin_unavailable");
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let admin = Arc::new(MutatingExtensionAdmin::default());
+    let server = server.with_extension_admin(admin.clone());
+    let (client, task) = connected_client(server.clone()).await;
+
+    let payload = client
+        .request(Command::ExtensionsPluginEnabled(PluginEnabledParams {
+            idempotency_key: key("enable"),
+            plugin: "demo".to_owned(),
+            enabled: false,
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::ExtensionsPluginEnabled(record) = payload else {
+        panic!("extensions.plugin_enabled must return ExtensionsPluginEnabled, got {payload:?}");
+    };
+    assert_eq!(record.name, "demo");
+    assert!(!record.enabled);
+
+    let payload = client
+        .request(Command::ExtensionsHookReview(HookReviewParams {
+            idempotency_key: key("review"),
+            plugin: "demo".to_owned(),
+            hook: "audit".to_owned(),
+            trust_hash: "d".repeat(64),
+            approved: true,
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::ExtensionsHookReviewed(hook) = payload else {
+        panic!("extensions.hook_review must return ExtensionsHookReviewed, got {payload:?}");
+    };
+    assert_eq!(hook.id, "audit");
+    assert!(hook.approved);
+    assert_eq!(hook.trust_hash, "d".repeat(64));
+
+    // A replay reaches the host again: the store mutation is naturally
+    // idempotent, so repeating it is safe.
+    client
+        .request(Command::ExtensionsPluginEnabled(PluginEnabledParams {
+            idempotency_key: key("enable-replay"),
+            plugin: "demo".to_owned(),
+            enabled: false,
+        }))
+        .await
+        .unwrap();
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+    assert_eq!(
+        admin.seen.lock().unwrap().as_slice(),
+        [
+            "enable:local-user:demo:false",
+            "review:local-user:demo:audit:true",
+            "enable:local-user:demo:false",
+        ],
+        "the server-derived actor must reach the host for every mutation"
+    );
+
+    // The read-only default for an admin that only supports reads fails closed
+    // with a canonical mutation error rather than pretending success.
+    let server = server.with_extension_admin(Arc::new(FailingExtensionAdmin));
+    let (client, task) = connected_client(server).await;
+    let error = client
+        .request(Command::ExtensionsHookReview(HookReviewParams {
+            idempotency_key: key("review-failing"),
+            plugin: "demo".to_owned(),
+            hook: "audit".to_owned(),
+            trust_hash: "d".repeat(64),
+            approved: true,
+        }))
+        .await
+        .expect_err("a read-only admin must reject a mutation");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "extension_mutation_failed");
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn extensions_status_reports_the_admin_snapshot_and_fails_closed() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::echo());
+    let server = AppServer::with_agent_runtime(
+        ServerConfig::default(),
+        DurableStore::in_memory().unwrap(),
+        AgentRuntime::new(provider, builtin_registry()),
+        Workspace::new(directory.path()).unwrap(),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted",
+    )
+    .unwrap();
+
+    // No extension host configured -> an empty snapshot, not an error.
+    let (client, task) = connected_client(server.clone()).await;
+    let payload = client
+        .request(Command::ExtensionsStatus(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::ExtensionsStatus(empty) = payload else {
+        panic!("extensions.status must return ExtensionsStatus, got {payload:?}");
+    };
+    assert!(empty.plugins.is_empty());
+    assert!(empty.workers.is_empty());
+    assert!(empty.hooks.is_empty());
+    assert!(empty.skills.is_empty());
+    assert!(empty.mcp_servers.is_empty());
+    assert!(empty.mcp_tool_policy.enabled.is_none());
+    assert!(empty.mcp_tool_policy.disabled.is_empty());
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let server = server.with_extension_admin(Arc::new(StaticExtensionAdmin));
+    let (client, task) = connected_client(server.clone()).await;
+    let payload = client
+        .request(Command::ExtensionsStatus(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::ExtensionsStatus(snapshot) = payload else {
+        panic!("extensions.status must return ExtensionsStatus, got {payload:?}");
+    };
+    assert_eq!(snapshot.plugins[0].name, "demo");
+    assert!(snapshot.plugins[0].content_verified);
+    assert_eq!(snapshot.plugins[0].required_capabilities, ["execute"]);
+    assert_eq!(snapshot.workers[0].status, "failed");
+    assert_eq!(snapshot.workers[0].attempt, 2);
+    assert_eq!(snapshot.workers[0].code.as_deref(), Some("crash"));
+    assert!(!snapshot.hooks[0].approved);
+    assert_eq!(snapshot.hooks[0].trust_hash, "b".repeat(64));
+    assert_eq!(snapshot.skills[0].name, "changelog");
+    assert_eq!(snapshot.mcp_servers[0].transport, "stdio");
+    assert_eq!(
+        snapshot.mcp_tool_policy.enabled.as_deref(),
+        Some(["read".to_owned()].as_slice())
+    );
+    assert_eq!(snapshot.mcp_tool_policy.disabled, ["write"]);
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    // A failing store read is a canonical failure, never a silent empty catalog.
+    let server = server.with_extension_admin(Arc::new(FailingExtensionAdmin));
+    let (client, task) = connected_client(server).await;
+    let error = client
+        .request(Command::ExtensionsStatus(EmptyParams {}))
+        .await
+        .expect_err("a failing extension host must fail the command");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "extension_state_failed");
+    assert_eq!(
+        error.safe_details.get("detail"),
+        Some(&serde_json::Value::String(
+            "plugin store is invalid: boom".to_owned()
+        ))
+    );
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }

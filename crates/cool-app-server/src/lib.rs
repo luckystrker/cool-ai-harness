@@ -28,16 +28,16 @@ use cool_agent::{
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
-    CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, HistoryItem,
-    IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2, PlanCreated, PlanExecuteResult,
-    PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PromptAcceptedResult,
-    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
-    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
-    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
-    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRunSummary,
-    SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, ExtensionStatusResult,
+    HistoryItem, HookRecord, IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2,
+    PlanCreated, PlanExecuteResult, PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep,
+    PluginRecord, PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId,
+    RpcNotification, RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted,
+    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
+    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
+    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, StatusGetResult,
+    StreamFrame, SubagentRunCancelResult, TaskRunCancelResult, TaskTemplateRecord, TextDelta,
+    ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -137,6 +137,9 @@ struct Inner {
     /// `run.subscribe` subscribers per run, keyed by connection id.
     run_subscribers: Mutex<HashMap<String, HashMap<String, Outbound>>>,
     lifecycle: Option<Arc<dyn RunLifecycle>>,
+    /// Read-only extension admin surface, present when an extension host is
+    /// configured (the CLI installs one over its `PluginStore`).
+    extension_admin: Option<Arc<dyn ExtensionAdmin>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -159,6 +162,41 @@ pub trait RunLifecycle: Send + Sync {
     /// Extension status for `status.get`. `None` reports no extension runtime.
     async fn status(&self) -> Option<StatusGetResult> {
         None
+    }
+}
+
+/// Read-only admin view of the installed extension host (plugins, workers, hook
+/// review state, skills and plugin-bundled MCP servers) for the web admin
+/// surface. The app server owns no extension state; it renders whatever the
+/// host reports. Implementations must never expose secrets.
+#[async_trait]
+pub trait ExtensionAdmin: Send + Sync {
+    /// Snapshot the installed extension state. An error is reported to the
+    /// caller rather than silently degrading to an empty catalog.
+    async fn status(&self) -> Result<ExtensionStatusResult, String>;
+
+    /// Enable or disable one installed plugin. Implementations must re-verify a
+    /// plugin before enabling it and return an error on a tampered tree.
+    async fn set_plugin_enabled(
+        &self,
+        _actor: &str,
+        _plugin: &str,
+        _enabled: bool,
+    ) -> Result<PluginRecord, String> {
+        Err("extension admin does not support mutations".to_owned())
+    }
+
+    /// Approve or reject one hook declaration. Implementations must verify the
+    /// submitted trust hash matches the current declaration.
+    async fn set_hook_review(
+        &self,
+        _actor: &str,
+        _plugin: &str,
+        _hook: &str,
+        _trust_hash: &str,
+        _approved: bool,
+    ) -> Result<HookRecord, String> {
+        Err("extension admin does not support mutations".to_owned())
     }
 }
 
@@ -343,6 +381,7 @@ impl AppServer {
                 run_owners: Mutex::new(HashMap::new()),
                 run_subscribers: Mutex::new(HashMap::new()),
                 lifecycle: None,
+                extension_admin: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -360,6 +399,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("run lifecycle must be configured before the server is cloned")
             .lifecycle = Some(lifecycle);
+        self
+    }
+
+    pub fn with_extension_admin(mut self, admin: Arc<dyn ExtensionAdmin>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("extension admin must be configured before the server is cloned")
+            .extension_admin = Some(admin);
         self
     }
 
@@ -1252,6 +1298,70 @@ impl AppServer {
                         success(id, ResponsePayload::ToolsListed(self.tool_catalog())),
                     )
                     .await;
+            }
+            Command::ExtensionsStatus(_) => {
+                let frame = match &self.inner.extension_admin {
+                    Some(admin) => match admin.status().await {
+                        Ok(status) => success(id, ResponsePayload::ExtensionsStatus(status)),
+                        Err(message) => failure(
+                            id,
+                            extension_error(-32015, "extension_state_failed", &message),
+                        ),
+                    },
+                    None => success(
+                        id,
+                        ResponsePayload::ExtensionsStatus(ExtensionStatusResult::default()),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ExtensionsPluginEnabled(params) => {
+                let frame = match &self.inner.extension_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin
+                            .set_plugin_enabled(&actor, &params.plugin, params.enabled)
+                            .await
+                        {
+                            Ok(record) => {
+                                success(id, ResponsePayload::ExtensionsPluginEnabled(record))
+                            }
+                            Err(message) => failure(
+                                id,
+                                extension_error(-32017, "extension_mutation_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32016, "extension_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ExtensionsHookReview(params) => {
+                let frame = match &self.inner.extension_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin
+                            .set_hook_review(
+                                &actor,
+                                &params.plugin,
+                                &params.hook,
+                                &params.trust_hash,
+                                params.approved,
+                            )
+                            .await
+                        {
+                            Ok(record) => {
+                                success(id, ResponsePayload::ExtensionsHookReviewed(record))
+                            }
+                            Err(message) => failure(
+                                id,
+                                extension_error(-32017, "extension_mutation_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32016, "extension_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
             }
             Command::TasksTemplates(_) => {
                 let _ = self
@@ -4340,6 +4450,19 @@ fn error(rpc_code: i32, cool_code: &str, retryable: bool) -> ProtocolError {
     }
 }
 
+/// Extension-host failures carry their message in `safe_details` after masking
+/// secret-shaped text, so the admin UI can show why a read or mutation failed.
+/// The message may still reference a plugin/data path (not a secret); the local
+/// facade is single-user and the value is only returned to the same operator.
+fn extension_error(rpc_code: i32, cool_code: &str, message: &str) -> ProtocolError {
+    let mut protocol_error = error(rpc_code, cool_code, false);
+    protocol_error.safe_details.insert(
+        "detail".to_owned(),
+        serde_json::Value::String(mask_secrets(message)),
+    );
+    protocol_error
+}
+
 fn store_error(value: StoreError) -> ProtocolError {
     match value {
         StoreError::IdempotencyConflict => error(-32006, "idempotency_conflict", false),
@@ -4601,6 +4724,8 @@ pub fn capabilities() -> BTreeSet<String> {
         "conversation_sessions",
         "durable_sessions",
         "event_catch_up",
+        "extension_admin",
+        "extension_admin_write",
         "local_socket",
         "plan_execution",
         "recovery",

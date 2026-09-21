@@ -10,15 +10,21 @@ use cool_agent::{
     ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink, ToolContext,
     builtin_registry,
 };
-use cool_app_server::{AppClient, AppServer, RunLifecycle, ServerConfig, capabilities};
-use cool_extensions::{
-    CompatibilityAdapter, ExtensionRuntime, InstalledPlugin, McpToolPolicy, OpenCodeWorkerConfig,
-    PluginLoader, PluginStore, WorkerLaunchSpec, discover_plugin_tools_with_policy,
-    opencode_launch_spec,
+use cool_app_server::{
+    AppClient, AppServer, ExtensionAdmin, RunLifecycle, ServerConfig, capabilities,
 };
-use cool_protocol::{ApprovalOutcome, CanonicalEvent, StatusEntry, StatusGetResult};
+use cool_extensions::{
+    CompatibilityAdapter, ExtensionRuntime, HookDeclaration, InstalledPlugin, McpToolPolicy,
+    OpenCodeWorkerConfig, PluginBundle, PluginLoader, PluginStore, WorkerLaunchSpec,
+    discover_plugin_tools_with_policy, opencode_launch_spec,
+};
+use cool_protocol::{
+    ApprovalOutcome, CanonicalEvent, ExtensionDiagnosticRecord, ExtensionStatusResult, HookRecord,
+    McpServerRecord, McpToolPolicyRecord, PluginRecord, SkillRecord, StatusEntry, StatusGetResult,
+    WorkerRecord,
+};
 use cool_security::{
-    CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace,
+    CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace, mask_secrets,
 };
 use cool_state::DurableStore;
 use serde_json::json;
@@ -254,7 +260,7 @@ async fn build_server(
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
     let workspace = current_workspace()?;
-    let (registry, extensions) = extension_registry(data_dir).await;
+    let (registry, extensions, plugin_store) = extension_registry(data_dir).await;
     let agent = AgentRuntime::new(provider, registry);
     let mut server = AppServer::with_agent_runtime(
         config,
@@ -265,8 +271,14 @@ async fn build_server(
         model,
     )
     .map_err(|error| runtime("durable_recovery_failed", &error.to_string()))?;
-    if let Some(extensions) = extensions {
-        server = server.with_run_lifecycle(Arc::new(CliExtensions(extensions)));
+    if let (Some(extensions), Some(store)) = (extensions, plugin_store) {
+        let extensions = Arc::new(extensions);
+        server = server
+            .with_run_lifecycle(Arc::new(CliExtensions(extensions.clone())))
+            .with_extension_admin(Arc::new(CliExtensionAdmin {
+                store,
+                runtime: extensions,
+            }));
     }
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
@@ -276,10 +288,14 @@ async fn build_server(
 
 async fn extension_registry(
     data_dir: &std::path::Path,
-) -> (cool_agent::ToolRegistry, Option<ExtensionRuntime>) {
+) -> (
+    cool_agent::ToolRegistry,
+    Option<ExtensionRuntime>,
+    Option<PluginStore>,
+) {
     let mut registry = builtin_registry();
     let Ok(store) = PluginStore::open(data_dir.join("plugins")) else {
-        return (registry, None);
+        return (registry, None, None);
     };
     let runtime = ExtensionRuntime::from_store(&store).ok();
     if let Some(runtime) = &runtime {
@@ -311,7 +327,7 @@ async fn extension_registry(
         McpToolPolicy::default()
     };
     let Ok(entries) = store.load_enabled_isolated() else {
-        return (registry, runtime);
+        return (registry, runtime, Some(store));
     };
     for bundle in entries.into_iter().flatten() {
         let Some(manifest) = bundle.manifest else {
@@ -347,7 +363,7 @@ async fn extension_registry(
             }
         }
     }
-    (registry, runtime)
+    (registry, runtime, Some(store))
 }
 
 fn current_workspace() -> Result<Workspace, (i32, serde_json::Value)> {
@@ -357,7 +373,7 @@ fn current_workspace() -> Result<Workspace, (i32, serde_json::Value)> {
     .map_err(|error| runtime("workspace_failed", &error.to_string()))
 }
 
-struct CliExtensions(ExtensionRuntime);
+struct CliExtensions(Arc<ExtensionRuntime>);
 
 #[async_trait]
 impl RunLifecycle for CliExtensions {
@@ -414,6 +430,383 @@ impl RunLifecycle for CliExtensions {
             mcp_servers: self.0.mcp_server_names(),
         })
     }
+}
+
+/// Extension admin over the installed plugin store. Reads never mutate the store
+/// and never expose a secret; mutations are the two narrow state changes the M8
+/// review UI needs (enable/disable a plugin, approve/reject a hook) and append an
+/// audit line. Neither can widen a capability, reach the DB/auth store or touch
+/// the worker supervisor.
+struct CliExtensionAdmin {
+    store: PluginStore,
+    runtime: Arc<ExtensionRuntime>,
+}
+
+impl CliExtensionAdmin {
+    /// Best-effort admin audit: a failed append never masks the mutation result.
+    /// The write goes through the store's append lock and is documented as a
+    /// residual (it is not transactional with the mutation).
+    fn audit(&self, record: serde_json::Value) {
+        let _ = self.store.append_admin_audit(record);
+    }
+
+    /// Audits a rejected review attempt (an invalid target or a stale trust
+    /// hash) and returns the message the caller sees, so every attempt — not
+    /// only a state change — is recorded.
+    fn audit_reject(
+        &self,
+        actor: &str,
+        plugin: &str,
+        hook: &str,
+        outcome: &str,
+        message: impl Into<String>,
+    ) -> String {
+        self.audit(json!({
+            "actor": actor,
+            "action": "hook_review",
+            "plugin": plugin,
+            "hook": hook,
+            "outcome": outcome,
+        }));
+        message.into()
+    }
+}
+
+#[async_trait]
+impl ExtensionAdmin for CliExtensionAdmin {
+    async fn status(&self) -> Result<ExtensionStatusResult, String> {
+        extension_status(&self.store, &self.runtime).await
+    }
+
+    async fn set_plugin_enabled(
+        &self,
+        actor: &str,
+        plugin: &str,
+        enabled: bool,
+    ) -> Result<PluginRecord, String> {
+        // `PluginStore::set_enabled` fails closed when enabling a tree whose
+        // content hash no longer matches.
+        let entry = match self.store.set_enabled(plugin, enabled) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.audit(json!({
+                    "actor": actor,
+                    "action": "plugin_enabled",
+                    "plugin": plugin,
+                    "enabled": enabled,
+                    "outcome": "failed",
+                }));
+                return Err(error.to_string());
+            }
+        };
+        self.audit(json!({
+            "actor": actor,
+            "action": "plugin_enabled",
+            "plugin": plugin,
+            "enabled": enabled,
+            "outcome": "ok",
+        }));
+        let bundle = load_bundle(&entry);
+        Ok(plugin_record(
+            &entry,
+            content_verified(&entry, bundle.as_ref()),
+        ))
+    }
+
+    async fn set_hook_review(
+        &self,
+        actor: &str,
+        plugin: &str,
+        hook: &str,
+        trust_hash: &str,
+        approved: bool,
+    ) -> Result<HookRecord, String> {
+        let entry = match self.store.get(plugin) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Err(self.audit_reject(
+                    actor,
+                    plugin,
+                    hook,
+                    "plugin_not_found",
+                    format!("plugin is not installed: {plugin}"),
+                ));
+            }
+            Err(error) => {
+                return Err(self.audit_reject(
+                    actor,
+                    plugin,
+                    hook,
+                    "store_error",
+                    error.to_string(),
+                ));
+            }
+        };
+        let Some(bundle) = load_bundle(&entry) else {
+            return Err(self.audit_reject(
+                actor,
+                plugin,
+                hook,
+                "plugin_not_loadable",
+                format!("plugin is not loadable: {plugin}"),
+            ));
+        };
+        let Some(declaration) = bundle.hooks.iter().find(|item| item.id == hook) else {
+            return Err(self.audit_reject(
+                actor,
+                plugin,
+                hook,
+                "hook_not_declared",
+                format!("hook is not declared: {plugin}/{hook}"),
+            ));
+        };
+        // The submitted hash must match the declaration the operator reviewed,
+        // or a stale approval could be replayed onto a changed definition.
+        if declaration.trust_hash != trust_hash {
+            return Err(self.audit_reject(
+                actor,
+                plugin,
+                hook,
+                "trust_mismatch",
+                format!(
+                    "hook trust hash does not match the reviewed definition for {plugin}/{hook}"
+                ),
+            ));
+        }
+        let result = if approved {
+            self.store.set_hook_review(plugin, hook, trust_hash)
+        } else {
+            self.store.clear_hook_review(plugin, hook)
+        };
+        if let Err(error) = result {
+            self.audit(json!({
+                "actor": actor,
+                "action": "hook_review",
+                "plugin": plugin,
+                "hook": hook,
+                "approved": approved,
+                "outcome": "failed",
+            }));
+            return Err(error.to_string());
+        }
+        self.audit(json!({
+            "actor": actor,
+            "action": "hook_review",
+            "plugin": plugin,
+            "hook": hook,
+            "trustHash": trust_hash,
+            "approved": approved,
+            "outcome": "ok",
+        }));
+        Ok(hook_record(plugin, declaration, approved))
+    }
+}
+
+fn load_bundle(entry: &InstalledPlugin) -> Option<PluginBundle> {
+    PluginLoader
+        .load(
+            std::path::Path::new(&entry.install_path),
+            std::path::Path::new(&entry.data_path),
+        )
+        .ok()
+}
+
+/// Same integrity rule as `PluginStore::load_entry`: a plugin is only "verified"
+/// when its tree still hashes to the recorded content hash and its manifest
+/// still has the recorded identity. The runtime refuses to load enabled plugins
+/// that fail this, so the admin must not project their hooks/skills/MCP servers.
+fn content_verified(entry: &InstalledPlugin, bundle: Option<&PluginBundle>) -> bool {
+    bundle.is_some_and(|bundle| {
+        bundle.content_hash == entry.content_hash
+            && bundle
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.name == entry.name)
+    })
+}
+
+fn plugin_record(entry: &InstalledPlugin, content_verified: bool) -> PluginRecord {
+    PluginRecord {
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        enabled: entry.enabled,
+        source_type: entry.source_type.clone(),
+        source: redact_location(&entry.source),
+        revision: entry.revision.clone(),
+        content_hash: entry.content_hash.clone(),
+        installed_at: entry.installed_at.clone(),
+        required_capabilities: entry.required_capabilities.clone(),
+        resolved_dependencies: entry.resolved_dependencies.clone(),
+        diagnostics: entry
+            .diagnostics
+            .iter()
+            .map(|diagnostic| ExtensionDiagnosticRecord {
+                code: diagnostic.get("code").cloned().unwrap_or_default(),
+                level: diagnostic.get("level").cloned().unwrap_or_default(),
+                message: diagnostic.get("message").cloned().unwrap_or_default(),
+                path: diagnostic.get("path").cloned().unwrap_or_default(),
+            })
+            .collect(),
+        content_verified,
+    }
+}
+
+fn hook_record(plugin: &str, hook: &HookDeclaration, approved: bool) -> HookRecord {
+    let handler = match &hook.handler {
+        cool_extensions::HookHandler::Command { command, .. } => {
+            format!("command:{}", command.to_string_lossy())
+        }
+        cool_extensions::HookHandler::Mcp { server, tool, .. } => {
+            format!("mcp:{server}/{tool}")
+        }
+    };
+    HookRecord {
+        plugin: plugin.to_owned(),
+        id: hook.id.clone(),
+        event: hook.event.clone(),
+        handler,
+        order: hook.order,
+        parallel: hook.parallel,
+        capabilities: hook
+            .capabilities
+            .iter()
+            .map(|value| value.as_str().to_owned())
+            .collect(),
+        trust_hash: hook.trust_hash.clone(),
+        approved,
+    }
+}
+
+async fn extension_status(
+    store: &PluginStore,
+    runtime: &ExtensionRuntime,
+) -> Result<ExtensionStatusResult, String> {
+    let entries = store.list().map_err(|error| error.to_string())?;
+    let mut plugins = Vec::with_capacity(entries.len());
+    let mut hooks = Vec::new();
+    let mut skills = Vec::new();
+    let mut mcp_servers = Vec::new();
+    for entry in &entries {
+        let bundle = load_bundle(entry);
+        let verified = content_verified(entry, bundle.as_ref());
+        plugins.push(plugin_record(entry, verified));
+        if !entry.enabled || !verified {
+            continue;
+        }
+        let Some(bundle) = bundle else { continue };
+        let reviewed = store.reviewed_hook_hashes(&entry.name).unwrap_or_default();
+        for hook in &bundle.hooks {
+            let approved = reviewed
+                .get(&hook.id)
+                .is_some_and(|hash| hash == &hook.trust_hash);
+            hooks.push(hook_record(&entry.name, hook, approved));
+        }
+        for skill in &bundle.skills {
+            skills.push(SkillRecord {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                plugin: entry.name.clone(),
+                allowed_tools: skill.allowed_tools.clone(),
+            });
+        }
+        for server in &bundle.mcp_servers {
+            let (transport, endpoint) = match server {
+                cool_extensions::McpServer::Stdio { command, .. } => {
+                    ("stdio", redact_location(&command.to_string_lossy()))
+                }
+                cool_extensions::McpServer::StreamableHttp { url, .. } => {
+                    ("streamable_http", redact_location(url))
+                }
+            };
+            mcp_servers.push(McpServerRecord {
+                plugin: entry.name.clone(),
+                name: server.name().to_owned(),
+                transport: transport.to_owned(),
+                endpoint,
+            });
+        }
+    }
+    // The last lifecycle event for a worker id wins (started/restarted report
+    // it running, failed reports the crash), matching `status.get`.
+    let mut workers: BTreeMap<String, WorkerRecord> = BTreeMap::new();
+    for event in runtime.status_events().await {
+        match event {
+            CanonicalEvent::WorkerStarted(worker) | CanonicalEvent::WorkerRestarted(worker) => {
+                workers.insert(
+                    worker.worker_id.clone(),
+                    WorkerRecord {
+                        id: worker.worker_id,
+                        status: "running".to_owned(),
+                        attempt: i64::from(worker.attempt),
+                        code: worker.code,
+                    },
+                );
+            }
+            CanonicalEvent::WorkerFailed(worker) => {
+                workers.insert(
+                    worker.worker_id.clone(),
+                    WorkerRecord {
+                        id: worker.worker_id,
+                        status: "failed".to_owned(),
+                        attempt: i64::from(worker.attempt),
+                        code: worker.code,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(ExtensionStatusResult {
+        plugins,
+        workers: workers.into_values().collect(),
+        hooks,
+        skills,
+        mcp_servers,
+        mcp_tool_policy: load_mcp_tool_policy(store.root()),
+    })
+}
+
+/// Reads the MCP tool policy the extension registry applies to plugin-bundled
+/// tools. A *missing* file means "no policy" (allow non-disabled tools), exactly
+/// like the runtime; a present-but-unreadable or corrupt file fails closed and
+/// is projected as an explicit deny-all so the UI can see the degraded state.
+fn load_mcp_tool_policy(root: &std::path::Path) -> McpToolPolicyRecord {
+    let path = root.join("mcp-tool-policy.json");
+    if !path.exists() {
+        return McpToolPolicyRecord::default();
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<McpToolPolicy>(&bytes) {
+            Ok(policy) => McpToolPolicyRecord {
+                enabled: policy.enabled.map(|items| items.into_iter().collect()),
+                disabled: policy.disabled.into_iter().collect(),
+            },
+            Err(_) => deny_all_policy(),
+        },
+        Err(_) => deny_all_policy(),
+    }
+}
+
+fn deny_all_policy() -> McpToolPolicyRecord {
+    McpToolPolicyRecord {
+        enabled: Some(Vec::new()),
+        disabled: Vec::new(),
+    }
+}
+
+/// Redacts a location string before it reaches the web admin surface. A URL's
+/// userinfo, query and fragment can carry a token (a Git source may embed
+/// credentials; an MCP HTTP endpoint may carry an access token in a query
+/// string), so they are stripped; any remaining secret-shaped text is masked.
+fn redact_location(value: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(value) {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+        return mask_secrets(url.as_str());
+    }
+    mask_secrets(value)
 }
 
 /// `cool serve`: the browser-facing HTTP/SSE facade over the Rust runtime.
@@ -1152,6 +1545,223 @@ mod tests {
             config.workspace.is_none(),
             "a workspace must be opt-in via COOL_OPENCODE_WORKSPACE"
         );
+    }
+
+    fn write_admin_fixture(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("skills/demo")).unwrap();
+        std::fs::create_dir_all(root.join("io.github.luckystrker.cool/hooks")).unwrap();
+        std::fs::write(
+            root.join("plugin.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"admin-demo","version":"1.2.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\nDo the thing.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("mcp.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"files":{"type":"stdio","command":"mcp-files"},"remote":{"type":"streamable-http","url":"https://mcp.example.com/rpc?token=secret-value"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("io.github.luckystrker.cool/hooks/hooks.json"),
+            r#"{"version":1,"hooks":[{"id":"audit","event":"PreToolUse","handler":{"type":"command","command":"echo","args":["hi"]}}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn extension_status_maps_the_installed_plugin_store() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data_dir = temporary.path().join("data");
+        let source = temporary.path().join("plugin-source");
+        write_admin_fixture(&source);
+
+        let store = PluginStore::open(data_dir.join("plugins")).unwrap();
+        let installed = store.install_local(&source).unwrap();
+        assert_eq!(installed.name, "admin-demo");
+        // The store installs disabled; an admin snapshot must report that and
+        // only enumerate skills/hooks/servers for enabled plugins.
+        let disabled = extension_status(&store, &ExtensionRuntime::from_store(&store).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(disabled.plugins.len(), 1);
+        assert!(!disabled.plugins[0].enabled);
+        assert!(disabled.skills.is_empty());
+        assert!(disabled.mcp_servers.is_empty());
+
+        store.set_enabled("admin-demo", true).unwrap();
+        let runtime = std::sync::Arc::new(ExtensionRuntime::from_store(&store).unwrap());
+        let status = extension_status(&store, &runtime).await.unwrap();
+        assert!(status.plugins[0].enabled);
+        assert!(status.plugins[0].content_verified);
+        assert_eq!(status.plugins[0].version, "1.2.0");
+        assert_eq!(status.skills.len(), 1);
+        assert_eq!(status.skills[0].name, "demo");
+        assert_eq!(status.skills[0].plugin, "admin-demo");
+        assert_eq!(status.mcp_servers.len(), 2);
+        assert_eq!(status.mcp_servers[0].name, "files");
+        assert_eq!(status.mcp_servers[0].transport, "stdio");
+        assert_eq!(status.mcp_servers[0].endpoint, "mcp-files");
+        assert_eq!(status.mcp_servers[1].name, "remote");
+        assert_eq!(status.mcp_servers[1].transport, "streamable_http");
+        assert_eq!(
+            status.mcp_servers[1].endpoint, "https://mcp.example.com/rpc",
+            "an endpoint query token must not reach the admin surface"
+        );
+        assert_eq!(status.hooks.len(), 1);
+        assert_eq!(status.hooks[0].id, "audit");
+        assert_eq!(status.hooks[0].event, "PreToolUse");
+        assert!(!status.hooks[0].approved);
+        assert!(!status.hooks[0].trust_hash.is_empty());
+        assert!(status.mcp_tool_policy.enabled.is_none());
+        assert!(status.mcp_tool_policy.disabled.is_empty());
+
+        // Approving the exact trust hash flips the review state; a stale hash
+        // must not.
+        store
+            .set_hook_review("admin-demo", "audit", "deadbeef")
+            .unwrap();
+        let stale = extension_status(&store, &runtime).await.unwrap();
+        assert!(!stale.hooks[0].approved);
+        let trust_hash = status.hooks[0].trust_hash.clone();
+        store
+            .set_hook_review("admin-demo", "audit", &trust_hash)
+            .unwrap();
+        let approved = extension_status(&store, &runtime).await.unwrap();
+        assert!(approved.hooks[0].approved);
+
+        // Durable admin mutations through the trait: enable/disable + review.
+        let admin = CliExtensionAdmin {
+            store: store.clone(),
+            runtime: runtime.clone(),
+        };
+        let disabled = admin
+            .set_plugin_enabled("tester", "admin-demo", false)
+            .await
+            .unwrap();
+        assert!(!disabled.enabled && disabled.content_verified);
+        let enabled = admin
+            .set_plugin_enabled("tester", "admin-demo", true)
+            .await
+            .unwrap();
+        assert!(enabled.enabled && enabled.content_verified);
+        // A real-store enable/disable replay is idempotent.
+        assert!(
+            admin
+                .set_plugin_enabled("tester", "admin-demo", true)
+                .await
+                .is_ok()
+        );
+
+        // Reject is idempotent: clearing an approved review twice succeeds and
+        // leaves it unapproved.
+        let rejected = admin
+            .set_hook_review("tester", "admin-demo", "audit", &trust_hash, false)
+            .await
+            .unwrap();
+        assert!(!rejected.approved);
+        assert!(
+            admin
+                .set_hook_review("tester", "admin-demo", "audit", &trust_hash, false)
+                .await
+                .is_ok()
+        );
+        assert!(!extension_status(&store, &runtime).await.unwrap().hooks[0].approved);
+        let reapproved = admin
+            .set_hook_review("tester", "admin-demo", "audit", &trust_hash, true)
+            .await
+            .unwrap();
+        assert!(reapproved.approved);
+        assert!(extension_status(&store, &runtime).await.unwrap().hooks[0].approved);
+
+        // A stale hash cannot be approved, and unknown targets fail closed.
+        assert!(
+            admin
+                .set_hook_review("tester", "admin-demo", "audit", "deadbeef", true)
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .set_plugin_enabled("tester", "missing", true)
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .set_hook_review("tester", "admin-demo", "missing", &trust_hash, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .set_hook_review("tester", "missing", "audit", &trust_hash, true)
+                .await
+                .is_err()
+        );
+
+        // Every attempt is recorded in the admin audit log with the actor.
+        let audit =
+            std::fs::read_to_string(store.root().join("extension-admin-audit.jsonl")).unwrap();
+        assert!(audit.contains("\"actor\":\"tester\""));
+        assert!(audit.contains("\"action\":\"plugin_enabled\""));
+        assert!(audit.contains("\"action\":\"hook_review\""));
+        assert!(audit.contains("\"outcome\":\"trust_mismatch\""));
+        assert!(audit.contains("\"outcome\":\"plugin_not_found\""));
+        assert!(audit.contains("\"outcome\":\"hook_not_declared\""));
+
+        // A tampered tree (content no longer matches the recorded hash) is
+        // reported as unverified, and its hooks/skills/servers are not
+        // projected, matching the runtime's refusal to load it.
+        let installed = store.get("admin-demo").unwrap().unwrap();
+        std::fs::write(
+            std::path::Path::new(&installed.install_path).join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Tampered\n---\nChanged.\n",
+        )
+        .unwrap();
+        let tampered = extension_status(&store, &runtime).await.unwrap();
+        assert!(tampered.plugins[0].enabled);
+        assert!(!tampered.plugins[0].content_verified);
+        assert!(tampered.hooks.is_empty());
+        assert!(tampered.skills.is_empty());
+        assert!(tampered.mcp_servers.is_empty());
+
+        // Enabling a tampered tree fails closed through the admin mutation and
+        // the failure is audited.
+        assert!(
+            admin
+                .set_plugin_enabled("tester", "admin-demo", true)
+                .await
+                .is_err()
+        );
+        let audit =
+            std::fs::read_to_string(store.root().join("extension-admin-audit.jsonl")).unwrap();
+        let tamper_failed = audit.lines().any(|line| {
+            line.contains("\"plugin\":\"admin-demo\"") && line.contains("\"outcome\":\"failed\"")
+        });
+        assert!(
+            tamper_failed,
+            "the tamper failure must be audited distinctly: {audit}"
+        );
+
+        // A present-but-corrupt policy fails closed (deny-all projection),
+        // unlike a missing file which means "no policy".
+        std::fs::write(store.root().join("mcp-tool-policy.json"), b"{not json").unwrap();
+        let corrupt = extension_status(&store, &runtime).await.unwrap();
+        assert_eq!(corrupt.mcp_tool_policy.enabled, Some(Vec::new()));
+        assert!(corrupt.mcp_tool_policy.disabled.is_empty());
+    }
+
+    #[test]
+    fn redact_location_strips_url_credentials_and_query() {
+        assert_eq!(
+            redact_location("https://user:token@example.com/repo?access_token=abc#frag"),
+            "https://example.com/repo"
+        );
+        assert_eq!(redact_location("/srv/plugins/demo"), "/srv/plugins/demo");
     }
 
     #[test]

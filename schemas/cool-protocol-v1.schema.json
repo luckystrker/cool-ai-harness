@@ -2017,6 +2017,57 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "extensions.status"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "extensions.plugin_enabled"
+            },
+            "params": {
+              "$ref": "#/$defs/PluginEnabledParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "extensions.hook_review"
+            },
+            "params": {
+              "$ref": "#/$defs/HookReviewParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "conversations.list"
             },
             "params": {
@@ -5226,6 +5277,80 @@
         "hasMore"
       ]
     },
+    "ExtensionDiagnosticRecord": {
+      "description": "One diagnostic emitted while loading an installed plugin.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "level",
+        "message",
+        "path"
+      ]
+    },
+    "ExtensionStatusResult": {
+      "description": "Read-only snapshot of the extension admin surface: installed plugins,\nsupervised workers, hook review state, discovered skills, plugin-bundled MCP\nservers and the MCP tool policy.",
+      "type": "object",
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookRecord"
+          }
+        },
+        "mcpServers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpServerRecord"
+          }
+        },
+        "mcpToolPolicy": {
+          "$ref": "#/$defs/McpToolPolicyRecord",
+          "default": {
+            "disabled": [],
+            "enabled": null
+          }
+        },
+        "plugins": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PluginRecord"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SkillRecord"
+          }
+        },
+        "workers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkerRecord"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "GitBranchesRecord": {
       "type": "object",
       "properties": {
@@ -5484,6 +5609,84 @@
         "occurredAt",
         "runId",
         "role"
+      ]
+    },
+    "HookRecord": {
+      "description": "One hook declaration from an enabled plugin plus its review state. `approved`\nis true only when the stored review hash matches the hook's exact trust hash,\nso changing the command/args/env/matcher resets approval.",
+      "type": "object",
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "event": {
+          "type": "string"
+        },
+        "handler": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "order": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "parallel": {
+          "type": "boolean"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "trustHash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plugin",
+        "id",
+        "event",
+        "handler",
+        "order",
+        "parallel",
+        "capabilities",
+        "trustHash",
+        "approved"
+      ]
+    },
+    "HookReviewParams": {
+      "description": "Approve or reject one hook declaration. `trust_hash` must equal the hook's\ncurrent trust hash, so an operator cannot approve a definition they did not\nreview; a mismatch fails closed.",
+      "type": "object",
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "hook": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "trustHash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "plugin",
+        "hook",
+        "trustHash",
+        "approved"
       ]
     },
     "IdempotencyKey": {
@@ -5813,6 +6016,57 @@
       "required": [
         "idempotencyKey",
         "id"
+      ]
+    },
+    "McpServerRecord": {
+      "description": "One MCP server bundled by an enabled plugin.",
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "transport": {
+          "description": "`stdio` or `streamable_http`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plugin",
+        "name",
+        "transport",
+        "endpoint"
+      ]
+    },
+    "McpToolPolicyRecord": {
+      "description": "The configured MCP tool policy. `enabled` is `None` when the policy keeps\nevery non-disabled tool; `disabled` always applies.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "disabled"
       ]
     },
     "MemoryActivityBucketRecord": {
@@ -6946,6 +7200,94 @@
       },
       "required": [
         "conversationId"
+      ]
+    },
+    "PluginEnabledParams": {
+      "description": "Enable or disable one installed plugin. Disabling never loads the tree;\nenabling re-verifies the content hash and fails closed on a tampered tree.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "plugin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "plugin",
+        "enabled"
+      ]
+    },
+    "PluginRecord": {
+      "description": "One installed plugin as seen by the admin surface.",
+      "type": "object",
+      "properties": {
+        "contentHash": {
+          "type": "string"
+        },
+        "contentVerified": {
+          "description": "True only when the on-disk tree still matches the recorded content hash\n*and* its manifest identity. An enabled plugin with\n`contentVerified: false` is treated as failed by the runtime (its hooks,\nskills and MCP servers are not loaded) even though the install record\nremains visible for diagnosis.",
+          "type": "boolean"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExtensionDiagnosticRecord"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "installedAt": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "requiredCapabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolvedDependencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "enabled",
+        "sourceType",
+        "source",
+        "revision",
+        "contentHash",
+        "installedAt",
+        "requiredCapabilities",
+        "resolvedDependencies",
+        "diagnostics",
+        "contentVerified"
       ]
     },
     "PluginStatusEvent": {
@@ -8131,6 +8473,57 @@
               "items": {
                 "$ref": "#/$defs/ToolCatalogRecord"
               }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "extensions_status"
+            },
+            "value": {
+              "$ref": "#/$defs/ExtensionStatusResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "extensions_plugin_enabled"
+            },
+            "value": {
+              "$ref": "#/$defs/PluginRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "extensions_hook_reviewed"
+            },
+            "value": {
+              "$ref": "#/$defs/HookRecord"
             }
           },
           "additionalProperties": false,
@@ -11739,6 +12132,34 @@
         "createdAt"
       ]
     },
+    "SkillRecord": {
+      "description": "One skill parsed from an enabled plugin's `SKILL.md` tree.",
+      "type": "object",
+      "properties": {
+        "allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "plugin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "plugin",
+        "allowedTools"
+      ]
+    },
     "SpendBucketRecord": {
       "type": "object",
       "properties": {
@@ -14265,6 +14686,35 @@
       "additionalProperties": false,
       "required": [
         "workerId",
+        "attempt"
+      ]
+    },
+    "WorkerRecord": {
+      "description": "One compatibility worker supervised by the extension runtime.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`running`, `failed` or `restarted`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
         "attempt"
       ]
     },

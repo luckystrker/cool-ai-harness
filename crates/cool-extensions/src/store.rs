@@ -455,6 +455,68 @@ impl PluginStore {
         Ok(self.read_reviews()?.remove(plugin).unwrap_or_default())
     }
 
+    /// Clears a previous hook approval. Removing an absent review is a no-op so
+    /// a reject is idempotent.
+    pub fn clear_hook_review(&self, plugin: &str, hook: &str) -> Result<(), StoreError> {
+        let _guard = self.write_lock.lock().map_err(|_| StoreError::Poisoned)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join("rust-extensions.lock"))?;
+        lock.lock()?;
+        if !self.read()?.plugins.contains_key(plugin) {
+            return Err(StoreError::Invalid(format!(
+                "plugin is not installed: {plugin}"
+            )));
+        }
+        let mut reviews = self.read_reviews()?;
+        if let Some(entry) = reviews.get_mut(plugin) {
+            entry.remove(hook);
+            if entry.is_empty() {
+                reviews.remove(plugin);
+            }
+        }
+        let result = self.write_reviews(&reviews);
+        lock.unlock()?;
+        result
+    }
+
+    /// Appends one JSON line to the extension admin audit log, stamping `at` if
+    /// the caller did not supply it. The audit log records who changed which
+    /// review/enable state and is separate from the hook *invocation* audit.
+    pub fn append_admin_audit(&self, mut record: serde_json::Value) -> Result<(), StoreError> {
+        use std::io::Write as _;
+        let _guard = self.write_lock.lock().map_err(|_| StoreError::Poisoned)?;
+        // Same lock order as the other mutations (in-process lock, then the
+        // cross-process lock file), so a CLI and a server cannot interleave an
+        // audit line with a lockfile/review write.
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join("rust-extensions.lock"))?;
+        lock.lock()?;
+        if let Some(object) = record.as_object_mut() {
+            object
+                .entry("at".to_owned())
+                .or_insert_with(|| serde_json::Value::String(timestamp()));
+        }
+        let path = self.root.join("extension-admin-audit.jsonl");
+        let append = (|| -> Result<(), StoreError> {
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            let line = serde_json::to_string(&record)?;
+            writeln!(file, "{line}")?;
+            // `File::flush` is a no-op; sync so the audit line survives a crash.
+            file.sync_data()?;
+            Ok(())
+        })();
+        lock.unlock()?;
+        append
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

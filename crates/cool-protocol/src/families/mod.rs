@@ -11,10 +11,12 @@
 //! (provider API keys, webhook secrets) by construction.
 
 mod content;
+mod extensions;
 mod knowledge;
 mod ops;
 
 pub use content::*;
+pub use extensions::*;
 pub use knowledge::*;
 pub use ops::*;
 
