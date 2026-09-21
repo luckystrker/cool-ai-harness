@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cool_agent::{Tool, ToolContext, ToolDefinition, ToolError, ToolHandler, ToolResult};
-use cool_security::Decision;
-use cool_store::LegacyStore;
+use cool_security::{Capability, Decision};
 use cool_store::domains::memory::{
     MAX_AGENT_IMPORTANCE, MEMORY_STATUS_ACTIVE, MemoryFilter, MemoryItemPatch, NewMemoryItem,
     SCOPE_CONVERSATION,
 };
+use cool_store::domains::rss::NewRssSubscription;
+use cool_store::domains::wiki::{NewWikiArticle, WikiArticlePatch, WikiFilter};
+use cool_store::{LegacyStore, StoreError};
 use serde_json::{Value, json};
 
 /// Registers the store-backed memory tools over one legacy store.
@@ -103,6 +105,90 @@ pub fn store_tool_registry(store: Arc<LegacyStore>) -> Result<Vec<Tool>, ToolErr
             [],
             Decision::Allow,
             GetWorkingMemory {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "read_wiki",
+                "Read a wiki article by id, or find one by title.",
+                json!({"type":"object","properties":{"article_id":{"type":"integer"},"title":{"type":"string"}},"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            ReadWiki {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "write_wiki",
+                "Create a new wiki article from Markdown content.",
+                json!({"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"category":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}},"required":["title","content"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            WriteWiki {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "search_wiki",
+                "Search wiki articles by title and content substring, optionally filtered by category.",
+                json!({"type":"object","properties":{"query":{"type":"string"},"category":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50}},"required":["query"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            SearchWiki {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "update_wiki",
+                "Update an existing wiki article's title, content, category, or tags.",
+                json!({"type":"object","properties":{"article_id":{"type":"integer"},"title":{"type":"string"},"content":{"type":"string"},"category":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}},"required":["article_id"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            UpdateWiki {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "rss_list",
+                "List RSS/Atom subscriptions (optionally filtered by category).",
+                json!({"type":"object","properties":{"category":{"type":"string"}},"additionalProperties":false}),
+            ),
+            [Capability::Read],
+            Decision::Allow,
+            RssList {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "rss_subscribe",
+                "Subscribe to an RSS/Atom feed URL.",
+                json!({"type":"object","properties":{"url":{"type":"string"},"category":{"type":"string"}},"required":["url"],"additionalProperties":false}),
+            ),
+            [Capability::Network],
+            Decision::Allow,
+            RssSubscribe {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "rss_unsubscribe",
+                "Remove an RSS subscription and its stored entries.",
+                json!({"type":"object","properties":{"subscription_id":{"type":"integer"}},"required":["subscription_id"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            RssUnsubscribe {
                 store: store.clone(),
             },
         ),
@@ -397,6 +483,246 @@ impl ToolHandler for GetWorkingMemory {
             None => Ok(
                 ToolResult::ok(existing.map(|row| row.state).unwrap_or_else(|| json!({}))).masked(),
             ),
+        }
+    }
+}
+
+struct ReadWiki {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for ReadWiki {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["article_id", "title"])?;
+        let article_id = optional_i64(&arguments, "article_id")?;
+        let title = optional_string(&arguments, "title")?;
+        if article_id.is_none() && title.is_none() {
+            return Err(ToolError::InvalidArguments(
+                "article_id or title is required".to_owned(),
+            ));
+        }
+        let article = if let Some(article_id) = article_id {
+            match self.store.get_article(&context.actor_id, article_id) {
+                Ok(article) => article,
+                Err(StoreError::NotFound(_)) => {
+                    return Ok(ToolResult::error("wiki_not_found", "article not found").masked());
+                }
+                Err(error) => {
+                    return Ok(ToolResult::error("wiki_store_failed", error.to_string()).masked());
+                }
+            }
+        } else {
+            // Python matches the *title* only (case-insensitive contains) over the
+            // recent non-archived articles; the store's `search` LIKE also covers
+            // content/category/tags, so filter by title here.
+            let query = title.expect("title is present").to_lowercase();
+            let filter = WikiFilter {
+                archived: Some(false),
+                limit: Some(100),
+                ..WikiFilter::default()
+            };
+            match self.store.list_articles(&context.actor_id, &filter) {
+                Ok(articles) => match articles
+                    .into_iter()
+                    .find(|article| article.title.to_lowercase().contains(&query))
+                {
+                    Some(article) => article,
+                    None => {
+                        return Ok(ToolResult::error(
+                            "wiki_not_found",
+                            "no article matches that title",
+                        )
+                        .masked());
+                    }
+                },
+                Err(error) => {
+                    return Ok(ToolResult::error("wiki_store_failed", error.to_string()).masked());
+                }
+            }
+        };
+        Ok(ToolResult::ok(serde_json::to_value(&article).unwrap_or(Value::Null)).masked())
+    }
+}
+
+struct WriteWiki {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for WriteWiki {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["title", "content", "category", "tags"])?;
+        let new = NewWikiArticle {
+            title: required_string(&arguments, "title")?.to_owned(),
+            content: required_string(&arguments, "content")?.to_owned(),
+            category: optional_string(&arguments, "category")?
+                .unwrap_or_else(|| "general".to_owned()),
+            tags: optional_string_array(&arguments, "tags")?.map(Value::from),
+            source: "agent".to_owned(),
+            source_memory_id: None,
+            project_key: None,
+            metadata: None,
+        };
+        match self.store.create_article(&context.actor_id, &new) {
+            Ok(article) => {
+                Ok(ToolResult::ok(serde_json::to_value(&article).unwrap_or(Value::Null)).masked())
+            }
+            Err(error) => Ok(ToolResult::error("wiki_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct SearchWiki {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for SearchWiki {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["query", "category", "limit"])?;
+        let filter = WikiFilter {
+            search: Some(required_string(&arguments, "query")?.to_owned()),
+            category: optional_string(&arguments, "category")?,
+            archived: Some(false),
+            limit: Some(bounded(optional_i64(&arguments, "limit")?, 10, 1, 50) as usize),
+            ..WikiFilter::default()
+        };
+        match self.store.list_articles(&context.actor_id, &filter) {
+            Ok(articles) => {
+                let payload = articles
+                    .into_iter()
+                    .map(|article| serde_json::to_value(&article).unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(ToolResult::ok(Value::Array(payload)).masked())
+            }
+            Err(error) => Ok(ToolResult::error("wiki_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct UpdateWiki {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for UpdateWiki {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &["article_id", "title", "content", "category", "tags"],
+        )?;
+        let article_id = required_i64(&arguments, "article_id")?;
+        let patch = WikiArticlePatch {
+            title: optional_string(&arguments, "title")?,
+            content: optional_string(&arguments, "content")?,
+            category: optional_string(&arguments, "category")?,
+            tags: optional_string_array(&arguments, "tags")?.map(Value::from),
+            ..WikiArticlePatch::default()
+        };
+        match self
+            .store
+            .update_article(&context.actor_id, article_id, &patch)
+        {
+            Ok(article) => {
+                Ok(ToolResult::ok(serde_json::to_value(&article).unwrap_or(Value::Null)).masked())
+            }
+            Err(error) => Ok(ToolResult::error("wiki_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct RssList {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for RssList {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["category"])?;
+        let category = optional_string(&arguments, "category")?;
+        match self
+            .store
+            .list_subscriptions(&context.actor_id, category.as_deref(), None)
+        {
+            Ok(subscriptions) => {
+                let payload = subscriptions
+                    .into_iter()
+                    .map(|subscription| serde_json::to_value(&subscription).unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(ToolResult::ok(Value::Array(payload)).masked())
+            }
+            Err(error) => Ok(ToolResult::error("rss_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct RssSubscribe {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for RssSubscribe {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["url", "category"])?;
+        let new = NewRssSubscription {
+            url: required_string(&arguments, "url")?.to_owned(),
+            category: optional_string(&arguments, "category")?,
+            ..NewRssSubscription::default()
+        };
+        match self.store.create_subscription(&context.actor_id, &new) {
+            Ok(subscription) => Ok(ToolResult::ok(
+                serde_json::to_value(&subscription).unwrap_or(Value::Null),
+            )
+            .masked()),
+            Err(error) => Ok(ToolResult::error("rss_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct RssUnsubscribe {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for RssUnsubscribe {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["subscription_id"])?;
+        let subscription_id = required_i64(&arguments, "subscription_id")?;
+        match self
+            .store
+            .delete_subscription(&context.actor_id, subscription_id)
+        {
+            Ok(()) => Ok(ToolResult::ok(json!({"subscription_id": subscription_id})).masked()),
+            Err(error) => Ok(ToolResult::error("rss_store_failed", error.to_string()).masked()),
         }
     }
 }

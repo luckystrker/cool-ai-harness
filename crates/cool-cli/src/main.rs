@@ -1902,7 +1902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_memory_tools_execute_against_a_legacy_store() {
+    async fn store_tools_execute_against_a_legacy_store() {
         let temporary = tempfile::tempdir().unwrap();
         let database = temporary.path().join("harness.db");
         let store = Arc::new(open_legacy_store(&database).unwrap());
@@ -1918,6 +1918,13 @@ mod tests {
             "set_working_memory",
             "get_working_memory",
             "entity_lookup",
+            "read_wiki",
+            "write_wiki",
+            "search_wiki",
+            "update_wiki",
+            "rss_list",
+            "rss_subscribe",
+            "rss_unsubscribe",
         ] {
             assert!(registry.get(name).is_some(), "{name} must be registered");
         }
@@ -2127,6 +2134,98 @@ mod tests {
         assert_eq!(row.summary.as_deref(), Some("prior summary"));
         assert_eq!(row.summary_up_to_message_id, Some(7));
         assert_eq!(row.token_estimate, Some(42));
+
+        // Wiki round-trip: write, read by id, search, update, read.
+        let write_wiki = registry.get("write_wiki").unwrap();
+        let created = write_wiki
+            .execute(
+                &context,
+                json!({"title": "Rust notes", "content": "# Notes\nmemory tools", "category": "project"}),
+            )
+            .await
+            .unwrap();
+        assert!(!created.is_error, "write_wiki failed: {:?}", created.output);
+        let article_id = created
+            .output
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap();
+        let read_wiki = registry.get("read_wiki").unwrap();
+        let read = read_wiki
+            .execute(&context, json!({"article_id": article_id}))
+            .await
+            .unwrap();
+        assert_eq!(
+            read.output.get("title").and_then(|value| value.as_str()),
+            Some("Rust notes")
+        );
+        let found = read_wiki
+            .execute(&context, json!({"title": "Rust"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.output.get("id").and_then(serde_json::Value::as_i64),
+            Some(article_id)
+        );
+        // A title lookup ignores a content-only match ("memory" is only in the
+        // body, while `search_wiki` finds it).
+        assert!(
+            read_wiki
+                .execute(&context, json!({"title": "memory"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(read_wiki.execute(&context, json!({})).await.is_err());
+        let search_wiki = registry.get("search_wiki").unwrap();
+        let hits = search_wiki
+            .execute(&context, json!({"query": "memory tools"}))
+            .await
+            .unwrap();
+        assert_eq!(hits.output.as_array().unwrap().len(), 1);
+        let update_wiki = registry.get("update_wiki").unwrap();
+        let updated = update_wiki
+            .execute(
+                &context,
+                json!({"article_id": article_id, "content": "# Notes\nupdated"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated
+                .output
+                .get("content")
+                .and_then(|value| value.as_str()),
+            Some("# Notes\nupdated")
+        );
+
+        // RSS store round-trip (the network fetch is Python-only).
+        let subscribe = registry.get("rss_subscribe").unwrap();
+        let subscription = subscribe
+            .execute(&context, json!({"url": "https://example.com/feed.xml"}))
+            .await
+            .unwrap();
+        assert!(
+            !subscription.is_error,
+            "rss_subscribe failed: {:?}",
+            subscription.output
+        );
+        let subscription_id = subscription
+            .output
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap();
+        let rss_list = registry.get("rss_list").unwrap();
+        let listed = rss_list.execute(&context, json!({})).await.unwrap();
+        assert_eq!(listed.output.as_array().unwrap().len(), 1);
+        let unsubscribe = registry.get("rss_unsubscribe").unwrap();
+        let removed = unsubscribe
+            .execute(&context, json!({"subscription_id": subscription_id}))
+            .await
+            .unwrap();
+        assert!(!removed.is_error);
+        let listed = rss_list.execute(&context, json!({})).await.unwrap();
+        assert!(listed.output.as_array().unwrap().is_empty());
     }
 
     #[test]
