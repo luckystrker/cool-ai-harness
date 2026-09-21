@@ -40,6 +40,24 @@ fn main() {
                 match method {
                     Some("codex.request") => json!({"output": translated}),
                     Some("claude.request") => json!({"content": translated}),
+                    Some("opencode.request") => json!({"result": translated}),
+                    _ => translated,
+                }
+            };
+            Some(json!({"id":id,"ok":true,"result":result,"error":null}))
+        }),
+        "worker-env" => json_lines(|request| {
+            let id = request.get("id").cloned().unwrap_or(Value::Null);
+            let method = request.get("method").and_then(Value::as_str);
+            let result = if method == Some("handshake") {
+                json!({"protocolVersion":1,"capabilities":["request","cancel","heartbeat","shutdown","deadlines","structured_errors",format!("{}_protocol", request["params"]["adapter"].as_str().unwrap())]})
+            } else {
+                let environment: serde_json::Map<String, Value> = std::env::vars()
+                    .map(|(name, value)| (name, Value::String(value)))
+                    .collect();
+                let translated = json!({"environment": environment});
+                match method {
+                    Some("opencode.request") => json!({"result": translated}),
                     _ => translated,
                 }
             };

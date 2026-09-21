@@ -201,13 +201,19 @@ pub(crate) async fn authorize(
     request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path() == "/api/health" {
-        return next.run(request).await;
-    }
     if state.auth.require_loopback_peer && !peer.ip().is_loopback() {
         return deny(StatusCode::FORBIDDEN, "loopback_required");
     }
-    if !state.auth.authorized(request.headers(), request.uri()) {
+    // Only the API surface is token-gated. The React bundle and the SPA shell
+    // are not secrets, and a browser navigation cannot attach a bearer token —
+    // gating them would make a token-configured deployment unusable. The API
+    // still requires the token (and `/api/health` stays public liveness).
+    let path = request.uri().path();
+    let api_surface = path.starts_with("/api/");
+    if api_surface
+        && path != "/api/health"
+        && !state.auth.authorized(request.headers(), request.uri())
+    {
         return deny(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     if !state

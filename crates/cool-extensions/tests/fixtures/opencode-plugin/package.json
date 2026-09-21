@@ -1,0 +1,8 @@
+{
+  "name": "opencode-demo",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@opencode-ai/plugin": "0.1.0"
+  }
+}

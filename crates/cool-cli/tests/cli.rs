@@ -163,6 +163,205 @@ fn app_server_legacy_store_flag_reads_python_data_without_adopting() {
     );
 }
 
+/// Seeds `harness.db` with the baseline schema and one legacy conversation.
+fn seed_legacy_conversation(database: &std::path::Path, title: &str) {
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .execute_batch(cool_store::BASELINE_SCHEMA_SQL)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO users(created_at, updated_at, id, external_id, username, display_name, is_active)
+             VALUES ('2026-01-01 00:00:00.000000', '2026-01-01 00:00:00.000000', 1, 'local', 'local', 'Local', 1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO conversations(created_at, updated_at, id, user_id, title, is_pinned, is_archived)
+             VALUES ('2026-01-01 00:00:00.000000', '2026-01-01 00:00:00.000000', 1, 1, ?1, 0, 0)",
+            rusqlite::params![title],
+        )
+        .unwrap();
+}
+
+/// Runs `cool app-server --legacy-store` over a data dir and returns the
+/// conversation titles the canonical `conversations.list` family reports.
+fn legacy_conversation_titles(data_dir: &std::path::Path) -> Vec<String> {
+    let mut child = cool()
+        .args(["app-server", "--data-dir"])
+        .arg(data_dir)
+        .arg("--legacy-store")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "cool.command",
+            "params": {
+                "protocolVersion": 1,
+                "commandId": "upgrade-init",
+                "command": {
+                    "method": "initialize",
+                    "params": {
+                        "clientName": "cli-test",
+                        "clientVersion": "1",
+                        "supportedProtocolVersions": [1],
+                        "capabilities": []
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "cool.command",
+            "params": {
+                "protocolVersion": 1,
+                "commandId": "upgrade-list",
+                "command": {
+                    "method": "conversations.list",
+                    "params": {
+                        "includeMachineOwned": false,
+                        "archived": null,
+                        "pinned": null,
+                        "folder": null,
+                        "search": null,
+                        "limit": 10,
+                        "offset": 0
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let mut lines = reader.lines();
+    let _initialized = lines.next().expect("initialize response").unwrap();
+    let listed: Value =
+        serde_json::from_str(&lines.next().expect("list response").unwrap()).unwrap();
+    let titles = listed["result"]["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|conversation| conversation["title"].as_str().map(str::to_owned))
+        .collect();
+    drop(stdin);
+    let _ = child.wait();
+    titles
+}
+
+#[test]
+fn store_adopt_backs_up_serves_and_restores_legacy_data() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data_dir = temporary.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let database = data_dir.join("harness.db");
+    seed_legacy_conversation(&database, "Upgrade chat");
+
+    // Before adoption the doctor reports a Python-owned store and the explicit
+    // legacy flag reads it without writing.
+    let doctor = cool()
+        .arg("doctor")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .output()
+        .unwrap();
+    assert!(doctor.status.success());
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(report["legacyStore"]["status"], "python-owned");
+
+    // Adoption is an explicit operator action: it takes a verified backup and
+    // records the Rust migration owner.
+    let adopt = cool()
+        .args(["store", "adopt", "--data-dir"])
+        .arg(&data_dir)
+        .output()
+        .unwrap();
+    assert!(
+        adopt.status.success(),
+        "adopt failed: {}",
+        String::from_utf8_lossy(&adopt.stderr)
+    );
+    let adopted: Value = serde_json::from_slice(&adopt.stdout).expect("adopt JSON");
+    assert_eq!(adopted["status"], "ok");
+    assert_eq!(adopted["adopted"], true);
+    assert_eq!(adopted["alembicRevision"], "0022");
+    assert_eq!(adopted["rustOwned"], true);
+    let backup = std::path::PathBuf::from(adopted["backupPath"].as_str().expect("backup path"));
+    assert!(backup.is_file(), "adoption must leave a verified backup");
+
+    let store = cool_store::LegacyStore::open_read_only(&database).unwrap();
+    assert!(store.is_rust_owned().unwrap());
+    assert_eq!(store.alembic_revision().unwrap().as_deref(), Some("0022"));
+    drop(store);
+
+    // The new binary now serves the adopted store: the legacy row survives and
+    // a fresh rust-core.db is created next to it.
+    assert_eq!(
+        legacy_conversation_titles(&data_dir),
+        vec!["Upgrade chat".to_owned()]
+    );
+    assert!(data_dir.join("rust-core.db").is_file());
+
+    // Re-adoption is idempotent and takes no new backup.
+    let again = cool()
+        .args(["store", "adopt", "--data-dir"])
+        .arg(&data_dir)
+        .output()
+        .unwrap();
+    assert!(again.status.success());
+    let again: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(again["adopted"], false);
+    assert!(again["backupPath"].is_null());
+
+    // Rollback restores the pre-adoption snapshot: the store is no longer
+    // Rust-owned and the conversation is intact.
+    cool_store::restore_backup(&backup, &database).expect("restore backup");
+    let rolled_back = cool_store::LegacyStore::open_read_only(&database).unwrap();
+    assert!(!rolled_back.is_rust_owned().unwrap());
+    assert_eq!(
+        rolled_back.alembic_revision().unwrap().as_deref(),
+        Some("0022")
+    );
+    drop(rolled_back);
+    assert_eq!(
+        legacy_conversation_titles(&data_dir),
+        vec!["Upgrade chat".to_owned()]
+    );
+}
+
+#[test]
+fn app_server_legacy_store_initializes_a_fresh_baseline_without_python() {
+    // A fresh data root has no Python store; the explicit entrypoint initializes
+    // the baseline and takes Rust ownership so the legacy families are served.
+    let temporary = tempfile::tempdir().unwrap();
+    let data_dir = temporary.path().join("fresh");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    assert!(
+        legacy_conversation_titles(&data_dir).is_empty(),
+        "a fresh baseline has no conversations"
+    );
+    let database = data_dir.join("harness.db");
+    let store = cool_store::LegacyStore::open_read_only(&database).unwrap();
+    assert!(store.is_rust_owned().unwrap());
+    assert_eq!(store.alembic_revision().unwrap().as_deref(), Some("0022"));
+}
+
 #[test]
 fn plugin_lifecycle_commands_cover_install_list_validate_and_doctor() {
     let temporary = tempfile::tempdir().unwrap();

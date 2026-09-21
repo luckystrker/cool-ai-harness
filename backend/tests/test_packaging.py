@@ -281,28 +281,30 @@ def test_release_image_and_compose_keep_one_service_and_one_entrypoint() -> None
     dockerfile = (repo / "Dockerfile").read_text(encoding="utf-8")
     compose = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))
 
+    # One image, one entrypoint. Node and Rust are build-time stages only; the
+    # runtime is the Rust binary plus the version-matched React bundle.
     assert "FROM node:22-bookworm-slim AS frontend-build" in dockerfile
-    assert "COPY --from=frontend-build" in dockerfile
-    assert "COPY skills /opt/cool/skills" in dockerfile
-    assert "git" in dockerfile
+    assert "COPY --from=frontend-build /src/frontend/dist" in dockerfile
+    # The SPA imports the generated SDK from ../sdk, so the image must copy it.
+    assert "COPY sdk /src/sdk" in dockerfile
+    assert "FROM rust:" in dockerfile
+    assert "cargo build --release" in dockerfile
+    assert "COPY --from=core-build /src/target/release/cool" in dockerfile
+    assert "tini" in dockerfile
     assert "USER cool" in dockerfile
-    assert 'CMD ["cool", "serve", "--host", "0.0.0.0", "--port", "8000"]' in dockerfile
+    assert '"cool", "serve"' in dockerfile
+    assert '"--legacy-store"' in dockerfile
+    # The legacy Python runtime is not the production packaging.
+    assert "python:" not in dockerfile
+    assert "pip install" not in dockerfile
+    assert "playwright" not in dockerfile
     assert not (repo / "backend" / "Dockerfile").exists()
 
     assert list(compose["services"]) == ["cool"]
-    assert compose["services"]["cool"]["env_file"] == [
-        {"path": ".env", "required": False}
-    ]
-    assert compose["services"]["cool"]["ports"] == [
-        "127.0.0.1:${COOL_PORT:-8000}:8000"
-    ]
-    assert compose["services"]["cool"]["command"] == [
-        "cool",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-    ]
-    assert compose["services"]["cool"]["volumes"] == ["cool-state:/var/lib/cool"]
-    assert "DATABASE_URL" not in compose["services"]["cool"]["environment"]
+    service = compose["services"]["cool"]
+    assert service["env_file"] == [{"path": ".env", "required": False}]
+    assert service["ports"] == ["127.0.0.1:${COOL_PORT:-8000}:8000"]
+    assert service["volumes"] == ["cool-state:/var/lib/cool"]
+    assert service["environment"]["COOL_DATA_DIR"] == "/var/lib/cool"
+    assert "command" not in service
+    assert "DATABASE_URL" not in service["environment"]

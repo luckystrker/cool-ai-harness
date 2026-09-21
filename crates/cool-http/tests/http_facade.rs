@@ -287,9 +287,9 @@ async fn events_stream_replays_durable_events_and_ends_on_terminal() {
     assert!(body.contains("run.completed"), "events:\n{body}");
 
     // Canonical reconnect: a cursor past the terminal seq replays no durable
-    // run events, so the client cannot double-apply anything. The stream then
-    // stays live for future events (the run is already terminal, so none
-    // arrive) instead of fabricating a synthetic terminal frame.
+    // run events, so the client cannot double-apply anything. `run.subscribe`
+    // reports the run is already terminal, so the stream ends instead of
+    // hanging on keepalives waiting for an event that can never arrive.
     let replay = read_sse_for(
         &client,
         &format!(
@@ -300,6 +300,52 @@ async fn events_stream_replays_durable_events_and_ends_on_terminal() {
     )
     .await;
     assert!(!replay.contains("event: run.event"), "replay:\n{replay}");
+    assert!(replay.contains("event: end"), "replay:\n{replay}");
+}
+
+#[tokio::test]
+async fn a_second_identity_streams_a_foreign_live_run_through_run_subscribe() {
+    // A run started by one browser identity must be followable by a second
+    // identity through the canonical `run.subscribe` fan-out. Without it the
+    // follower's catch-up would drain the durable backlog while the run is
+    // still live and then wait forever for events it is not registered for.
+    let serving = start(
+        durable_server_with(256, Duration::from_millis(800)),
+        ServeOptions::default(),
+    )
+    .await;
+    let owner = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("owner client");
+    let run = create_and_prompt(&owner, &serving.base).await;
+
+    let follower = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("follower client");
+    // Establish a cookie identity first: an anonymous SSE GET is refused.
+    let health = follower
+        .get(format!("{}/api/health", serving.base))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    let body = read_sse_for(
+        &follower,
+        &format!(
+            "{}/api/events?runId={run}&afterSeq=0&limit=64",
+            serving.base
+        ),
+        Duration::from_secs(12),
+    )
+    .await;
+    assert!(
+        body.contains("run.completed"),
+        "foreign live stream:\n{body}"
+    );
+    assert!(body.contains("event: end"), "foreign live stream:\n{body}");
 }
 
 #[tokio::test]
@@ -619,6 +665,85 @@ async fn configured_token_gates_the_api_but_not_health() {
         .send()
         .await
         .expect("request");
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn configured_token_does_not_gate_static_assets() {
+    // The SPA shell must load without a bearer token so the browser can read
+    // `?token=`; only the API surface is gated.
+    let directory = tempfile::tempdir().expect("tempdir");
+    std::fs::write(directory.path().join("index.html"), "<h1>cool-spa</h1>").expect("index write");
+    let options = ServeOptions {
+        token: Some("0123456789abcdef".to_owned()),
+        assets: Some(directory.path().to_path_buf()),
+        ..ServeOptions::default()
+    };
+    let serving = start(durable_server(), options).await;
+    let client = reqwest::Client::new();
+
+    let root = client
+        .get(format!("{}/", serving.base))
+        .send()
+        .await
+        .expect("root");
+    assert_eq!(root.status(), reqwest::StatusCode::OK);
+    assert!(root.text().await.expect("body").contains("cool-spa"));
+
+    // The API surface still requires the token.
+    let unauthorized = client
+        .post(format!("{}/api/rpc", serving.base))
+        .json(&request(
+            1,
+            Command::SessionList(SessionListParams {
+                project_key: None,
+                limit: 10,
+            }),
+        ))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let authorized = client
+        .post(format!("{}/api/rpc", serving.base))
+        .bearer_auth("0123456789abcdef")
+        .json(&request(
+            1,
+            Command::SessionList(SessionListParams {
+                project_key: None,
+                limit: 10,
+            }),
+        ))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn configured_token_gates_the_event_stream() {
+    let options = ServeOptions {
+        token: Some("0123456789abcdef".to_owned()),
+        ..ServeOptions::default()
+    };
+    let serving = start(durable_server(), options).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/api/events?runId=whatever", serving.base))
+        .send()
+        .await
+        .expect("events");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let authorized = client
+        .get(format!("{}/api/events?runId=missing", serving.base))
+        .bearer_auth("0123456789abcdef")
+        .send()
+        .await
+        .expect("events");
+    // Establish a cookie identity is not required here: the token is the
+    // credential and the missing run still reports a canonical error.
     assert_eq!(authorized.status(), reqwest::StatusCode::OK);
 }
 

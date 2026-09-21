@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "opencode-demo",
+  "version": "0.1.0",
+  "description": "Executable OpenCode compatibility fixture for the isolated Bun worker"
+}

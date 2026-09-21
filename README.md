@@ -41,12 +41,48 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ### 2. Run the packaged app (recommended)
 
 ```bash
+# the container binds inside its own network namespace, so it needs a token
+echo "COOL_API_TOKEN=$(openssl rand -hex 24)" >> .env
 docker compose up --build
 ```
 
-Open http://127.0.0.1:8000. The production image builds the React SPA and serves
-the UI, API, SSE, and WebSocket from one process and one port. State persists in
-the Docker-managed `cool-state` volume.
+Open http://127.0.0.1:8000. The production image is a **Rust core + React
+bundle**: one `cool` binary serves the UI, the canonical App Protocol API
+(`POST /api/rpc`), and the cursor/reconnect event stream (`GET /api/events`) from
+one process and one port. The runtime stage contains neither Python nor Node;
+Bun is never installed (the OpenCode worker is an opt-in sidecar). State persists
+in the Docker-managed `cool-state` volume. The port is published on loopback
+only; the `server` profile for VPS deployment requires a TLS/reverse-proxy
+boundary.
+
+The container requires a shared token for the API surface. Open the SPA once
+with it — `http://127.0.0.1:8000/?token=<COOL_API_TOKEN>` — and the bundle stores
+it for the tab and strips it from the URL; the static bundle is public while
+`/api/rpc` and `/api/events` stay token-gated.
+
+#### Upgrading an existing Python install
+
+A legacy data root (`harness.db` at the Alembic baseline plus `rust-core.db`)
+keeps serving read-only until an operator adopts it:
+
+```bash
+cool store adopt --data-dir /var/lib/cool   # verified backup, then Rust owns migrations
+cool serve --data-dir /var/lib/cool --assets frontend/dist --legacy-store
+```
+
+In the container the image CMD already serves the legacy families
+(`--legacy-store`). A fresh volume gets a baseline `harness.db`; an existing
+Python-owned one stays read-only until it is adopted:
+
+```bash
+docker compose run --rm cool cool store adopt --data-dir /var/lib/cool
+docker compose up
+```
+
+Adoption takes a verified backup before the first Rust write and records the
+migration owner, so the pre-adoption snapshot can be restored. Re-running adopt
+is idempotent; a database at another Alembic revision fails closed. Never run
+Alembic and the Rust store against the same file.
 
 ### 3. Unified source install
 
@@ -55,14 +91,18 @@ cd frontend
 npm ci
 npm run build
 
-cd ../backend
-pip install -e ".[dev]"
-cool serve
+cd ..
+cargo build --release -p cool-cli
+./target/release/cool serve --assets frontend/dist --legacy-store
 ```
 
-This also opens the complete application at http://127.0.0.1:8000. For frontend
-hot reload, run `cool serve` in one terminal and `npm run dev` from `frontend/`
-in another; Vite remains the development-only split mode.
+This opens the complete application at http://127.0.0.1:8000 (App Protocol API +
+SPA). `--legacy-store` initializes a fresh baseline store on first run, or serves
+an existing Python-owned data root read-only until you adopt it (see above). For
+frontend hot reload, run `cool serve` in one terminal and `npm run dev`
+from `frontend/` in another; Vite remains the development-only split mode. The
+legacy Python/FastAPI backend in `backend/` still exists during the migration
+and is not the production packaging.
 
 ### 4. Smoke test
 

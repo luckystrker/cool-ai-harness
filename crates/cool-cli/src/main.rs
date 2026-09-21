@@ -12,8 +12,9 @@ use cool_agent::{
 };
 use cool_app_server::{AppClient, AppServer, RunLifecycle, ServerConfig, capabilities};
 use cool_extensions::{
-    CompatibilityAdapter, ExtensionRuntime, InstalledPlugin, McpToolPolicy, PluginLoader,
-    PluginStore, WorkerLaunchSpec, discover_plugin_tools_with_policy,
+    CompatibilityAdapter, ExtensionRuntime, InstalledPlugin, McpToolPolicy, OpenCodeWorkerConfig,
+    PluginLoader, PluginStore, WorkerLaunchSpec, discover_plugin_tools_with_policy,
+    opencode_launch_spec,
 };
 use cool_protocol::{ApprovalOutcome, CanonicalEvent, StatusEntry, StatusGetResult};
 use cool_security::{
@@ -137,6 +138,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
         "acp" => run_acp(default_data_dir()).await,
         "tui" | "chat" => run_tui(args.collect()).await,
         "serve" => serve_command(args.collect()).await,
+        "store" => store_command(args.collect()).await,
         "--version" | "-V" => {
             println!("cool {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -193,21 +195,30 @@ fn inspect_legacy_store(data_dir: &std::path::Path) -> serde_json::Value {
 ///
 /// A Rust-owned store opens normally (ownership is verified and pending Rust
 /// migrations run). A Python-owned store is opened **read-only**: adoption is a
-/// migration decision, not a side effect of starting a server. This is only
-/// reachable through the explicit `--legacy-store` flag.
+/// migration decision (`cool store adopt`), not a side effect of starting a
+/// server. When the data root is fresh (no `harness.db` yet) the baseline
+/// schema is initialized and Rust takes ownership in one transaction, so a
+/// base install with no Python still serves the legacy families.
 fn open_legacy_store(
     database: &std::path::Path,
 ) -> Result<cool_store::LegacyStore, (i32, serde_json::Value)> {
-    let read_only = match cool_store::LegacyStore::open_read_only(database) {
-        Ok(store) => !store
-            .meta()
-            .map(|meta| meta.owner.as_deref() == Some("rust"))
-            .unwrap_or(false),
-        Err(error) => return Err(runtime("legacy_store_failed", &error.to_string())),
-    };
-    let options = cool_store::StoreOptions {
-        read_only,
-        ..cool_store::StoreOptions::default()
+    let options = if database.exists() {
+        let read_only = match cool_store::LegacyStore::open_read_only(database) {
+            Ok(store) => !store
+                .meta()
+                .map(|meta| meta.owner.as_deref() == Some("rust"))
+                .unwrap_or(false),
+            Err(error) => return Err(runtime("legacy_store_failed", &error.to_string())),
+        };
+        cool_store::StoreOptions {
+            read_only,
+            ..cool_store::StoreOptions::default()
+        }
+    } else {
+        cool_store::StoreOptions {
+            initialize_if_missing: true,
+            ..cool_store::StoreOptions::default()
+        }
     };
     cool_store::LegacyStore::open(database, &options)
         .map_err(|error| runtime("legacy_store_failed", &error.to_string()))
@@ -225,20 +236,17 @@ async fn build_server(
     data_dir: &std::path::Path,
     legacy_store: bool,
 ) -> Result<AppServer, (i32, serde_json::Value)> {
-    let store = DurableStore::open(data_dir.join("rust-core.db"))
-        .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
+    // Resolve the legacy store before creating rust-core.db so a misconfigured
+    // `--legacy-store` exits without touching the data directory. A fresh data
+    // root is initialized at the baseline; an existing Python-owned store stays
+    // read-only until `cool store adopt`.
     let legacy = if legacy_store {
-        let database = data_dir.join("harness.db");
-        if !database.exists() {
-            return Err(runtime(
-                "legacy_store_missing",
-                "harness.db was not found under the data directory",
-            ));
-        }
-        Some(Arc::new(open_legacy_store(&database)?))
+        Some(Arc::new(open_legacy_store(&data_dir.join("harness.db"))?))
     } else {
         None
     };
+    let store = DurableStore::open(data_dir.join("rust-core.db"))
+        .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
     let config = ServerConfig {
         secrets: configured_secrets(),
         legacy_store: legacy,
@@ -277,6 +285,7 @@ async fn extension_registry(
     if let Some(runtime) = &runtime {
         start_configured_worker(runtime, CompatibilityAdapter::Codex, "COOL_CODEX_WORKER").await;
         start_configured_worker(runtime, CompatibilityAdapter::Claude, "COOL_CLAUDE_WORKER").await;
+        start_configured_opencode_worker(runtime, data_dir).await;
     }
     let policy_path = data_dir.join("plugins").join("mcp-tool-policy.json");
     let tool_policy = if policy_path.exists() {
@@ -483,6 +492,9 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
     {
         options.token = Some(token);
     }
+    // Validate the deployment profile before any startup side effect:
+    // `build_server` opens/creates stores and spawns the scheduler loop.
+    cool_http::validate_options(&options).map_err(|error| usage(&error.to_string()))?;
     let bind = options.bind;
     let profile = cool_http::profile_name(options.profile);
     let server = build_server(&data_dir, legacy_store).await?;
@@ -499,6 +511,69 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
         .serve(listener)
         .await
         .map_err(|error| runtime("serve_failed", &error.to_string()))
+}
+
+/// Explicit, operator-driven adoption of the legacy Python database.
+///
+/// `cool serve`/`app-server` deliberately open a Python-owned `harness.db`
+/// read-only (adoption is a migration decision, not a startup side effect). This
+/// command performs that decision: it opens the baseline store writable, which
+/// takes a verified backup before the first Rust write and records the Rust
+/// migration owner, then prints the adoption report. Re-running it is
+/// idempotent (no second backup) and a database at another Alembic revision
+/// fails closed.
+async fn store_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
+    let mut action: Option<String> = None;
+    let mut data_dir = default_data_dir();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "adopt" => action = Some("adopt".to_owned()),
+            "--data-dir" => {
+                data_dir = PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing data directory"))?,
+                );
+            }
+            _ => return Err(usage("unknown store argument")),
+        }
+    }
+    match action.as_deref() {
+        Some("adopt") => {}
+        _ => return Err(usage("store needs an action: adopt")),
+    }
+    let database = data_dir.join("harness.db");
+    if !database.exists() {
+        return Err(runtime(
+            "legacy_store_missing",
+            "harness.db was not found under the data directory",
+        ));
+    }
+    let store = cool_store::LegacyStore::open(&database, &cool_store::StoreOptions::default())
+        .map_err(|error| runtime("store_adopt_failed", &error.to_string()))?;
+    let report = store.adoption_report();
+    let (adopted, revision, backup) = match report {
+        Some(report) => (
+            report.adopted,
+            report.adopted_revision.clone(),
+            report
+                .backup
+                .as_ref()
+                .map(|backup| backup.path.to_string_lossy().into_owned()),
+        ),
+        None => (false, String::new(), None),
+    };
+    print_json(&json!({
+        "status": "ok",
+        "database": database.to_string_lossy(),
+        "adopted": adopted,
+        "alembicRevision": revision,
+        "schemaVersion": store.schema_version().ok(),
+        "rustOwned": store.is_rust_owned().unwrap_or(false),
+        "backupPath": backup,
+    }))?;
+    Ok(())
 }
 
 async fn run_acp(data_dir: PathBuf) -> Result<(), (i32, serde_json::Value)> {
@@ -826,6 +901,87 @@ async fn start_configured_worker(
         .await;
 }
 
+/// Resolved OpenCode worker configuration from the process environment.
+struct OpenCodeWorkerEnv {
+    entry: PathBuf,
+    bun: PathBuf,
+    root: PathBuf,
+    data: PathBuf,
+    workspace: Option<PathBuf>,
+}
+
+/// Pure env-resolution for the OpenCode worker so the base install stays
+/// unchanged: no `COOL_OPENCODE_WORKER` entry means no worker at all. `bun`
+/// defaults to the bare name (resolved through `PATH` at spawn time), the
+/// install root defaults to the entry's directory, and the writable data root
+/// defaults to `<fallback_data>` (under the plugin store's data area but outside
+/// any installation root). A workspace is granted only when the operator opts
+/// in with `COOL_OPENCODE_WORKSPACE`, so the default never hands the plugin the
+/// tree that contains its own installation.
+fn opencode_worker_config(
+    entry: Option<PathBuf>,
+    bun: Option<PathBuf>,
+    root: Option<PathBuf>,
+    data: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+    fallback_data: &std::path::Path,
+) -> Option<OpenCodeWorkerEnv> {
+    let entry = entry?;
+    let bun = bun.unwrap_or_else(|| PathBuf::from("bun"));
+    let root = root.or_else(|| entry.parent().map(std::path::Path::to_path_buf))?;
+    let data = data.unwrap_or_else(|| fallback_data.to_path_buf());
+    Some(OpenCodeWorkerEnv {
+        entry,
+        bun,
+        root,
+        data,
+        workspace,
+    })
+}
+
+/// Starts the experimental OpenCode Bun worker when `COOL_OPENCODE_WORKER`
+/// points at an executable plugin entry. A missing Bun, an invalid plugin tree
+/// or a denied capability is reported as a plugin status and never aborts
+/// startup, so the Python/Bun-free base install is unaffected.
+async fn start_configured_opencode_worker(runtime: &ExtensionRuntime, data_dir: &std::path::Path) {
+    let Some(config) = opencode_worker_config(
+        env::var_os("COOL_OPENCODE_WORKER").map(PathBuf::from),
+        env::var_os("COOL_BUN_PATH").map(PathBuf::from),
+        env::var_os("COOL_OPENCODE_ROOT").map(PathBuf::from),
+        env::var_os("COOL_OPENCODE_DATA").map(PathBuf::from),
+        env::var_os("COOL_OPENCODE_WORKSPACE").map(PathBuf::from),
+        &data_dir.join("plugins").join("opencode-data"),
+    ) else {
+        return;
+    };
+    let core = CapabilityPolicy::new(Some(Decision::Ask));
+    let spec = OpenCodeWorkerConfig {
+        bun: config.bun,
+        plugin_root: config.root,
+        plugin_data: config.data,
+        entry: config.entry,
+        granted_workspaces: config.workspace.into_iter().collect(),
+        environment: BTreeMap::new(),
+        required_capabilities: BTreeSet::new(),
+    };
+    match opencode_launch_spec(spec, &core) {
+        Ok(spec) => {
+            let _ = runtime
+                .start_worker(CompatibilityAdapter::OpenCode, spec)
+                .await;
+        }
+        Err(error) => {
+            runtime
+                .report_plugin_status(
+                    "core/opencode-worker",
+                    "failed",
+                    Some(format!("opencode_worker: {error}")),
+                )
+                .await;
+        }
+    }
+}
+
 async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
     let (scripted, prompt_parts) = match arguments.first().map(String::as_str) {
         Some("--scripted") => (true, &arguments[1..]),
@@ -960,6 +1116,59 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_worker_is_absent_without_the_env_entry() {
+        let fallback = std::path::Path::new("/data/plugins/opencode-data");
+        assert!(
+            opencode_worker_config(None, None, None, None, None, fallback).is_none(),
+            "the base install must not start an OpenCode worker without COOL_OPENCODE_WORKER"
+        );
+    }
+
+    #[test]
+    fn opencode_worker_defaults_bun_root_and_data() {
+        let fallback = std::path::Path::new("/data/plugins/opencode-data");
+        let config = opencode_worker_config(
+            Some(PathBuf::from("/plugins/demo/lib/index.ts")),
+            None,
+            None,
+            None,
+            None,
+            fallback,
+        )
+        .expect("entry configured");
+        assert_eq!(config.bun, PathBuf::from("bun"));
+        assert_eq!(config.root, PathBuf::from("/plugins/demo/lib"));
+        assert_eq!(config.data, fallback.to_path_buf());
+        assert!(
+            config.workspace.is_none(),
+            "a workspace must be opt-in via COOL_OPENCODE_WORKSPACE"
+        );
+    }
+
+    #[test]
+    fn opencode_worker_respects_explicit_overrides() {
+        let fallback = std::path::Path::new("/data/plugins/opencode-data");
+        let config = opencode_worker_config(
+            Some(PathBuf::from("/plugins/demo/lib/index.ts")),
+            Some(PathBuf::from("/opt/bun")),
+            Some(PathBuf::from("/plugins/demo")),
+            Some(PathBuf::from("/data/plugins/demo")),
+            Some(PathBuf::from("/workspace/project")),
+            fallback,
+        )
+        .expect("entry configured");
+        assert_eq!(config.bun, PathBuf::from("/opt/bun"));
+        assert_eq!(config.root, PathBuf::from("/plugins/demo"));
+        assert_eq!(config.data, PathBuf::from("/data/plugins/demo"));
+        assert_eq!(config.workspace, Some(PathBuf::from("/workspace/project")));
+    }
 }

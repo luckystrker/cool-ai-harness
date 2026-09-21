@@ -5,26 +5,21 @@ services:
       dockerfile: Dockerfile
     container_name: cool
     ports:
+      # Loopback-only by default: the host publishes the single cool port.
       - "127.0.0.1:${COOL_PORT:-8000}:8000"
     env_file:
       - path: .env
         required: false
-    # Keep every mutable path inside the single persisted cool-state volume.
-    # Path overrides from .env are intentionally source/direct-image settings.
+    # One persisted data root holds both SQLite stores and plugin state. The
+    # image entrypoint binds 0.0.0.0 inside the container namespace, so the
+    # local profile requires COOL_API_TOKEN (provide it in .env) and fails
+    # closed without it. The entrypoint serves the legacy families and
+    # initializes a fresh baseline store on first run.
     environment:
-      COOL_HOME: /var/lib/cool
-      COOL_CONFIG_FILE: /var/lib/cool/config.yaml
-      DATA_DIR: /var/lib/cool/data
-      WORKSPACES_DIR: /var/lib/cool/workspaces
-      SKILLS_DIR: /var/lib/cool/skills
-      ARTIFACTS_DIR: /var/lib/cool/data/artifacts
-      FRONTEND_DIST: /opt/cool/frontend/dist
-      ENVIRONMENT: production
-      DEBUG: "false"
+      COOL_DATA_DIR: /var/lib/cool
     volumes:
       - cool-state:/var/lib/cool
     restart: unless-stopped
-    command: ["cool", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
 volumes:
   cool-state:

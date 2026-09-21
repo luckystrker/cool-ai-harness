@@ -211,6 +211,15 @@ fn valid_client_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+/// Validates deployment-profile options without binding or building a server.
+///
+/// Callers should run this before any startup side effect (opening stores,
+/// creating files, spawning loops) so a misconfigured `serve` exits before it
+/// touches the data directory.
+pub fn validate_options(options: &ServeOptions) -> Result<(), ServeError> {
+    auth::AuthConfig::from_options(options).map(|_| ())
+}
+
 /// Stable human-readable profile name.
 pub fn profile_name(profile: ServeProfile) -> &'static str {
     match profile {

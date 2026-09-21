@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cool_extensions::{
-    CompatibilityAdapter, CompatibilityWorkerSupervisor, ExtensionRuntime, HookEngine, HookError,
-    HookInvocation, HookReviewStore, McpClient, McpServer, McpToolPolicy, PluginLoader,
-    PluginStore, WorkerError, WorkerLaunchSpec, WorkerOperationClass, WorkerProtocol,
-    WorkerRequestOutcome, discover_plugin_tools, discover_plugin_tools_with_policy,
-    narrowed_plugin_policy, plugin_status_event,
+    BUN_INSTALL_ENV, CompatibilityAdapter, CompatibilityWorkerSupervisor, ExtensionRuntime,
+    GRANTED_WORKSPACES_ENV, HookEngine, HookError, HookInvocation, HookReviewStore, McpClient,
+    McpServer, McpToolPolicy, OpenCodeSpecError, OpenCodeWorkerConfig, PLUGIN_DATA_ENV,
+    PLUGIN_ENTRY_ENV, PLUGIN_ROOT_ENV, PluginLoader, PluginStore, WorkerError, WorkerLaunchSpec,
+    WorkerOperationClass, WorkerProtocol, WorkerRequestOutcome, discover_plugin_tools,
+    discover_plugin_tools_with_policy, narrowed_plugin_policy, opencode_launch_spec,
+    opencode_worker_policy, plugin_status_event,
 };
 use cool_security::{Capability, CapabilityPolicy, Decision};
 use futures_util::future::join_all;
@@ -1160,4 +1162,541 @@ async fn runtime_status_snapshot_lists_plugins_workers_and_mcp_servers() {
             if payload.plugin_id == "demo" && payload.status == "enabled"
     )));
     assert_eq!(runtime.mcp_server_names(), ["demo/local"]);
+}
+
+fn opencode_fixture(root: &Path, data: &Path) -> PathBuf {
+    fs::create_dir_all(root.join("lib")).unwrap();
+    fs::create_dir_all(data).unwrap();
+    let entry = root.join("lib/index.ts");
+    fs::write(&entry, "export const plugin = true;\n").unwrap();
+    entry
+}
+
+#[tokio::test]
+async fn opencode_adapter_translates_request_and_response_envelopes() {
+    let supervisor = CompatibilityWorkerSupervisor::default();
+    supervisor
+        .start(
+            CompatibilityAdapter::OpenCode,
+            WorkerLaunchSpec {
+                program: helper(),
+                args: vec!["worker".to_owned()],
+                cwd: std::env::current_dir().unwrap(),
+                environment: BTreeMap::new(),
+                allowed_secret_environment: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let WorkerRequestOutcome::Completed { value, .. } = supervisor
+        .request(
+            CompatibilityAdapter::OpenCode,
+            "run",
+            json!({"input":"plugin"}),
+            WorkerOperationClass::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("OpenCode adapter request must complete")
+    };
+    assert_eq!(value["receivedMethod"], "opencode.request");
+    assert_eq!(value["params"]["operation"], "run");
+    assert_eq!(value["params"]["input"]["input"]["input"], "plugin");
+    assert_eq!(CompatibilityAdapter::OpenCode.protocol_name(), "opencode");
+    assert!(CompatibilityAdapter::OpenCode.is_executable());
+    assert!(!CompatibilityAdapter::Codex.is_executable());
+}
+
+#[tokio::test]
+async fn opencode_adapter_crash_isolates_core_and_does_not_replay() {
+    let supervisor = CompatibilityWorkerSupervisor::default();
+    supervisor
+        .start(
+            CompatibilityAdapter::OpenCode,
+            WorkerLaunchSpec {
+                program: helper(),
+                args: vec!["worker-crash-request".to_owned()],
+                cwd: std::env::current_dir().unwrap(),
+                environment: BTreeMap::new(),
+                allowed_secret_environment: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = supervisor
+        .request(
+            CompatibilityAdapter::OpenCode,
+            "run_plugin",
+            json!({"value":1}),
+            WorkerOperationClass::SideEffect,
+            Some("request-1"),
+        )
+        .await
+        .unwrap();
+    let WorkerRequestOutcome::UnknownOutcome { error, events } = outcome else {
+        panic!("a crashed OpenCode plugin request must stay unknown")
+    };
+    assert!(!error.is_empty());
+    assert_eq!(events.len(), 2, "failed + restarted");
+    assert!(
+        serde_json::to_value(&events[0]).unwrap()["kind"] == "worker.failed"
+            && serde_json::to_value(&events[1]).unwrap()["kind"] == "worker.restarted"
+    );
+    // The supervisor is still live after the restart and keeps the crash
+    // visible (a heartbeat against the crash-on-request worker reports it).
+    let heartbeat = supervisor.heartbeat().await;
+    assert!(
+        !heartbeat.is_empty(),
+        "a crashed worker must stay visible to the supervisor"
+    );
+}
+
+#[tokio::test]
+async fn opencode_adapter_without_a_configured_worker_is_unavailable() {
+    let supervisor = CompatibilityWorkerSupervisor::default();
+    let error = supervisor
+        .request(
+            CompatibilityAdapter::OpenCode,
+            "run",
+            Value::Null,
+            WorkerOperationClass::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, WorkerError::Exited));
+}
+
+#[tokio::test]
+async fn opencode_worker_does_not_receive_a_secret_environment() {
+    let mut environment = BTreeMap::new();
+    environment.insert("MY_SECRET".to_owned(), "s3cr3t".to_owned());
+    environment.insert("MY_API_KEY".to_owned(), "key-value".to_owned());
+    environment.insert("OPENAI_API_KEY".to_owned(), "sk-live".to_owned());
+    environment.insert("MY_FLAG".to_owned(), "1".to_owned());
+    let mut worker = WorkerProtocol::spawn(
+        CompatibilityAdapter::OpenCode,
+        helper(),
+        vec!["worker-env".to_owned()],
+        std::env::current_dir().unwrap(),
+        environment,
+        BTreeSet::new(),
+    )
+    .await
+    .unwrap();
+    let value = worker.request("env", Value::Null).await.unwrap();
+    let reported = value["environment"]
+        .as_object()
+        .expect("worker must report its environment");
+    assert!(!reported.contains_key("MY_SECRET"));
+    assert!(!reported.contains_key("MY_API_KEY"));
+    assert!(!reported.contains_key("OPENAI_API_KEY"));
+    assert_eq!(reported["MY_FLAG"], "1");
+    worker.stop().await.unwrap();
+}
+
+#[test]
+fn opencode_launch_spec_builds_an_isolated_bun_invocation() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    let workspace = temporary.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let entry = opencode_fixture(&root, &data);
+    let core = CapabilityPolicy::new(Some(Decision::Allow));
+    let spec = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root.clone(),
+            plugin_data: data.clone(),
+            entry: entry.clone(),
+            granted_workspaces: vec![workspace.clone()],
+            environment: BTreeMap::from([("MY_FLAG".to_owned(), "1".to_owned())]),
+            required_capabilities: BTreeSet::from([Capability::Read]),
+        },
+        &core,
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let data = data.canonicalize().unwrap();
+    let entry = entry.canonicalize().unwrap();
+    assert_eq!(spec.program, PathBuf::from("bun"));
+    assert_eq!(
+        spec.args,
+        vec!["run".to_owned(), entry.to_string_lossy().into_owned()]
+    );
+    assert_eq!(spec.cwd, data);
+    assert!(
+        spec.allowed_secret_environment.is_empty(),
+        "no secret is explicitly forwarded to an untrusted plugin"
+    );
+    assert_eq!(
+        spec.environment[PLUGIN_ROOT_ENV],
+        root.to_string_lossy().into_owned()
+    );
+    assert_eq!(
+        spec.environment[PLUGIN_DATA_ENV],
+        data.to_string_lossy().into_owned()
+    );
+    assert_eq!(
+        spec.environment[PLUGIN_ENTRY_ENV],
+        entry.to_string_lossy().into_owned()
+    );
+    assert_eq!(
+        spec.environment[BUN_INSTALL_ENV],
+        data.join("bun").to_string_lossy().into_owned()
+    );
+    assert_eq!(spec.environment["MY_FLAG"], "1");
+    let granted: Vec<String> =
+        serde_json::from_str(&spec.environment[GRANTED_WORKSPACES_ENV]).unwrap();
+    assert_eq!(
+        granted,
+        vec![
+            workspace
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
+}
+
+#[test]
+fn opencode_launch_spec_rejects_escape_and_reserved_environment() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    let entry = opencode_fixture(&root, &data);
+    let outside = temporary.path().join("outside.ts");
+    fs::write(&outside, "export const evil = true;\n").unwrap();
+    let core = CapabilityPolicy::new(Some(Decision::Allow));
+
+    let escaped = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root.clone(),
+            plugin_data: data.clone(),
+            entry: outside,
+            granted_workspaces: Vec::new(),
+            environment: BTreeMap::new(),
+            required_capabilities: BTreeSet::new(),
+        },
+        &core,
+    );
+    assert_eq!(escaped.unwrap_err(), OpenCodeSpecError::InvalidEntry);
+
+    let reserved = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root.clone(),
+            plugin_data: data.clone(),
+            entry,
+            granted_workspaces: Vec::new(),
+            environment: BTreeMap::from([("PATH".to_owned(), "evil".to_owned())]),
+            required_capabilities: BTreeSet::new(),
+        },
+        &core,
+    );
+    assert_eq!(
+        reserved.unwrap_err(),
+        OpenCodeSpecError::ReservedEnvironment("PATH".to_owned())
+    );
+}
+
+#[test]
+fn opencode_launch_spec_rejects_overlap_workspace_and_bad_entry() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    let entry = opencode_fixture(&root, &data);
+    let core = CapabilityPolicy::new(Some(Decision::Allow));
+    let config = |root: PathBuf,
+                  data: PathBuf,
+                  entry: PathBuf,
+                  granted: Vec<PathBuf>,
+                  environment: BTreeMap<String, String>| OpenCodeWorkerConfig {
+        bun: PathBuf::from("bun"),
+        plugin_root: root,
+        plugin_data: data,
+        entry,
+        granted_workspaces: granted,
+        environment,
+        required_capabilities: BTreeSet::new(),
+    };
+
+    // A data root nested inside the immutable install root is rejected, and
+    // rejected input must not create a directory inside the install tree.
+    let nested = root.join("data-inside");
+    assert_eq!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                nested.clone(),
+                entry.clone(),
+                Vec::new(),
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .unwrap_err(),
+        OpenCodeSpecError::InvalidRoot
+    );
+    assert!(
+        !nested.exists(),
+        "rejected input must not touch the install tree"
+    );
+
+    // The install root (and anything inside it) can never be a granted workspace.
+    assert_eq!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                data.clone(),
+                entry.clone(),
+                vec![root.clone()],
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .unwrap_err(),
+        OpenCodeSpecError::InvalidWorkspace
+    );
+    assert_eq!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                data.clone(),
+                entry.clone(),
+                vec![root.join("lib")],
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .unwrap_err(),
+        OpenCodeSpecError::InvalidWorkspace
+    );
+
+    // A non-executable extension and a missing entry are rejected.
+    let text = root.join("lib/notes.txt");
+    fs::write(&text, "not a plugin").unwrap();
+    assert_eq!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                data.clone(),
+                text,
+                Vec::new(),
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .unwrap_err(),
+        OpenCodeSpecError::InvalidEntry
+    );
+    assert_eq!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                data.clone(),
+                root.join("lib/missing.ts"),
+                Vec::new(),
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .unwrap_err(),
+        OpenCodeSpecError::InvalidEntry
+    );
+
+    // Reserved names are case-insensitive and include interpreter injection.
+    for name in ["path", "Node_Options", "LD_PRELOAD"] {
+        let environment = BTreeMap::from([(name.to_owned(), "x".to_owned())]);
+        assert_eq!(
+            opencode_launch_spec(
+                config(
+                    root.clone(),
+                    data.clone(),
+                    entry.clone(),
+                    Vec::new(),
+                    environment
+                ),
+                &core
+            )
+            .unwrap_err(),
+            OpenCodeSpecError::ReservedEnvironment(name.to_owned())
+        );
+    }
+
+    // A missing data root is created on demand so the documented CLI default
+    // can actually start the worker.
+    let fresh_data = temporary.path().join("fresh-data");
+    assert!(!fresh_data.exists());
+    assert!(
+        opencode_launch_spec(
+            config(
+                root.clone(),
+                fresh_data.clone(),
+                entry.clone(),
+                Vec::new(),
+                BTreeMap::new()
+            ),
+            &core
+        )
+        .is_ok()
+    );
+    assert!(fresh_data.is_dir());
+}
+
+#[cfg(unix)]
+fn create_dir_link(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_dir_link(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_dir(target, link).is_ok()
+        || std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn opencode_launch_spec_rejects_a_linked_data_ancestor() {
+    // A data root reached through a link whose ancestor resolves into the
+    // install tree must be rejected before anything is created. Skips on hosts
+    // that cannot create directory links.
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    let entry = opencode_fixture(&root, &data);
+    let link = temporary.path().join("outside-link");
+    if !create_dir_link(&root, &link) {
+        return;
+    }
+    let core = CapabilityPolicy::new(Some(Decision::Allow));
+    let error = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root.clone(),
+            plugin_data: link.join("nested-data"),
+            entry,
+            granted_workspaces: Vec::new(),
+            environment: BTreeMap::new(),
+            required_capabilities: BTreeSet::new(),
+        },
+        &core,
+    )
+    .unwrap_err();
+    assert_eq!(error, OpenCodeSpecError::InvalidRoot);
+    assert!(!root.join("nested-data").exists());
+}
+
+#[test]
+fn opencode_capability_mapping_narrows_and_fails_closed() {
+    let mut core = CapabilityPolicy::new(Some(Decision::Allow));
+    core.set(Capability::Network, Decision::Deny);
+    let policy = opencode_worker_policy(
+        &core,
+        &BTreeSet::from([Capability::Read, Capability::Network]),
+    );
+    assert_eq!(policy.resolve(Capability::Read), Decision::Allow);
+    assert_eq!(policy.resolve(Capability::Network), Decision::Deny);
+    assert_eq!(policy.resolve(Capability::Execute), Decision::Deny);
+
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    let entry = opencode_fixture(&root, &data);
+    let denied = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root,
+            plugin_data: data,
+            entry,
+            granted_workspaces: Vec::new(),
+            environment: BTreeMap::new(),
+            required_capabilities: BTreeSet::from([Capability::Network]),
+        },
+        &core,
+    );
+    assert_eq!(
+        denied.unwrap_err(),
+        OpenCodeSpecError::CapabilityDenied(Capability::Network)
+    );
+}
+
+#[test]
+fn opencode_fixture_has_pinned_supply_chain_metadata() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode-plugin");
+    let loader = PluginLoader;
+    let bundle = loader
+        .load(&root, &TempDir::new().unwrap().path().join("data"))
+        .unwrap();
+    assert!(bundle.loadable());
+    assert_eq!(bundle.manifest.as_ref().unwrap().name, "opencode-demo");
+    assert_eq!(bundle.content_hash.len(), 64);
+    assert!(loader.reject_links(&root).is_ok());
+
+    // The corpus records the version and resolved dependency metadata next to
+    // the content-addressed tree; the installer pins git sources to a SHA and
+    // the loader rejects symlinks/traversal (M11 section 6.8).
+    let dependencies: Value =
+        serde_json::from_slice(&fs::read(root.join("package.json")).unwrap()).unwrap();
+    assert_eq!(dependencies["version"], "0.1.0");
+    assert!(dependencies["dependencies"]["@opencode-ai/plugin"].is_string());
+
+    let data = TempDir::new().unwrap().path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let spec = opencode_launch_spec(
+        OpenCodeWorkerConfig {
+            bun: PathBuf::from("bun"),
+            plugin_root: root.clone(),
+            plugin_data: data,
+            entry: root.join("lib/index.ts"),
+            granted_workspaces: Vec::new(),
+            environment: BTreeMap::new(),
+            required_capabilities: BTreeSet::new(),
+        },
+        &CapabilityPolicy::new(Some(Decision::Allow)),
+    )
+    .unwrap();
+    assert_eq!(spec.args[0], "run");
+    assert!(spec.args[1].ends_with("index.ts"));
+}
+
+#[tokio::test]
+async fn opencode_worker_status_is_visible_through_the_status_surface() {
+    // The worker-status data is exposed without Bun by the existing
+    // `status_events` surface used by `status.get`/CLI diagnostics.
+    let temporary = TempDir::new().unwrap();
+    let store = PluginStore::open(temporary.path().join("plugins")).unwrap();
+    let runtime = ExtensionRuntime::from_store(&store).unwrap();
+    runtime
+        .start_worker(
+            CompatibilityAdapter::OpenCode,
+            WorkerLaunchSpec {
+                program: helper(),
+                args: vec!["worker".to_owned()],
+                cwd: std::env::current_dir().unwrap(),
+                environment: BTreeMap::new(),
+                allowed_secret_environment: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let status = runtime.status_events().await;
+    assert!(status.iter().any(|event| matches!(
+        event,
+        cool_protocol::CanonicalEvent::WorkerStarted(payload)
+            if payload.worker_id == "opencode-compatibility"
+    )));
 }

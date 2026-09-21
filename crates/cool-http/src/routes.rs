@@ -193,6 +193,9 @@ async fn events(
 
 #[derive(Debug)]
 enum Phase {
+    /// Register this browser connection as a `run.subscribe` follower of the
+    /// requested run before replaying its durable backlog.
+    Subscribe,
     Catchup,
     Live,
     End,
@@ -207,6 +210,10 @@ struct StreamState {
     limit: u16,
     phase: Phase,
     backlog: VecDeque<EventEnvelope>,
+    /// The requested run was already terminal when `run.subscribe` answered, so
+    /// the stream must end after the durable catch-up even when the client's
+    /// cursor is past the terminal seq (no live event will ever arrive).
+    already_terminal: bool,
     finished: bool,
 }
 
@@ -226,13 +233,44 @@ fn event_stream(
         cursor: after_seq,
         last_seq: after_seq.unwrap_or(0),
         limit,
-        phase: Phase::Catchup,
+        phase: Phase::Subscribe,
         backlog: VecDeque::new(),
+        already_terminal: false,
         finished: false,
     };
     stream::unfold(initial, |mut state| async move {
         loop {
             match state.phase {
+                Phase::Subscribe => {
+                    // A browser on a second identity can only receive a run's
+                    // live events after the runtime registers it as a
+                    // subscriber; `run.subscribe` also reports whether the run
+                    // already terminated so the stream cannot hang waiting for
+                    // an event that was already persisted.
+                    match state.client.run_subscribe(&state.run_id).await {
+                        Ok(result) => {
+                            state.already_terminal = result.terminal;
+                            state.phase = Phase::Catchup;
+                        }
+                        Err(ClientError::Protocol(error)) => {
+                            state.finished = true;
+                            state.phase = Phase::End;
+                            return Some((Ok(error_event(&error)), state));
+                        }
+                        Err(error) => {
+                            state.finished = true;
+                            state.phase = Phase::End;
+                            return Some((
+                                Ok(error_event(&protocol_error(
+                                    -32000,
+                                    "transport_closed",
+                                    &error.to_string(),
+                                ))),
+                                state,
+                            ));
+                        }
+                    }
+                }
                 Phase::Catchup => {
                     if let Some(envelope) = state.backlog.pop_front() {
                         state.last_seq = state.last_seq.max(envelope.seq);
@@ -251,8 +289,15 @@ fn event_stream(
                             state.backlog.extend(page.events);
                             // Drain the whole backlog before going live; only
                             // switch when this page is final and fully queued.
+                            // An already-terminal run ends after the backlog
+                            // instead of waiting for a fan-out that will never
+                            // come.
                             if !page.has_more && state.backlog.is_empty() {
-                                state.phase = Phase::Live;
+                                state.phase = if state.already_terminal {
+                                    Phase::End
+                                } else {
+                                    Phase::Live
+                                };
                             }
                         }
                         Err(ClientError::Protocol(error)) => {

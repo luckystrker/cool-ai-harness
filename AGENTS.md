@@ -42,9 +42,14 @@ identity is one in-process `AppServer::serve_io` connection driven by
 `GET /api/events` is the canonical cursor/reconnect SSE stream. The `local`
 (loopback, optional token) and `server` (token + TLS/reverse-proxy boundary)
 profiles are validated at startup and fail closed. `sdk/typescript/src/http.ts`
-adds the fetch/SSE `CoolTransport`. The React `frontend/src/api/*` cutover,
-OpenCode Bun/Python workers and packaging/upgrade tests remain pending;
-`docs/migration/checkpoints/M11.md` tracks them. The Telegram adapter and
+adds the fetch/SSE `CoolTransport`. The React `frontend/src/api/*` cutover and
+the live-stream canonicalization (`run.subscribe` fan-out in the SSE facade) have
+landed, as have the experimental OpenCode Bun compatibility worker
+(`crates/cool-extensions/src/opencode.rs`, opt-in via `COOL_OPENCODE_WORKER`) and
+the Rust single-binary packaging/upgrade path (`cool store adopt` + the multi-stage
+`Dockerfile`; `docs/migration/checkpoints/M11.md` tracks the local-vs-CI evidence).
+The worker permission-review web UI, the optional Python workers and the
+`server`-profile operationalization remain pending; the Telegram adapter and
 `server`-profile operationalization are parked in
 [`docs/backlog/telegram-adapter.md`](docs/backlog/telegram-adapter.md).
 

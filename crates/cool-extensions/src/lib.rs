@@ -6,6 +6,7 @@
 mod hooks;
 mod loader;
 mod mcp;
+mod opencode;
 mod runtime;
 mod store;
 mod worker;
@@ -18,6 +19,11 @@ pub use loader::{
 pub use mcp::{
     McpClient, McpError, McpTool, McpToolPolicy, discover_plugin_tools,
     discover_plugin_tools_with_policy,
+};
+pub use opencode::{
+    BUN_INSTALL_ENV, GRANTED_WORKSPACES_ENV, OpenCodeSpecError, OpenCodeWorkerConfig,
+    PLUGIN_DATA_ENV, PLUGIN_ENTRY_ENV, PLUGIN_ROOT_ENV, opencode_launch_spec,
+    opencode_worker_policy,
 };
 pub use runtime::ExtensionRuntime;
 pub use store::{InstalledPlugin, PluginStore, StoreError};

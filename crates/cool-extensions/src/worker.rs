@@ -30,6 +30,10 @@ const CORE_WORKER_CAPABILITIES: &[&str] = &[
 pub enum CompatibilityAdapter {
     Codex,
     Claude,
+    /// Executable OpenCode plugins, hosted only in an isolated Bun worker. This
+    /// is an experimental ABI subset: it speaks the same versioned worker RPC
+    /// as the declarative Codex/Claude adapters but runs vendor JavaScript.
+    OpenCode,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +204,7 @@ impl CompatibilityAdapter {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -207,7 +212,14 @@ impl CompatibilityAdapter {
         match self {
             Self::Codex => "codex_protocol",
             Self::Claude => "claude_protocol",
+            Self::OpenCode => "opencode_protocol",
         }
+    }
+
+    /// True for adapters that host executable vendor code (and therefore must
+    /// run in an isolated process and stay opt-in).
+    pub fn is_executable(self) -> bool {
+        matches!(self, Self::OpenCode)
     }
 
     fn translate_request(self, operation: &str, input: Value) -> (String, Value) {
@@ -221,6 +233,7 @@ impl CompatibilityAdapter {
         let field = match self {
             Self::Codex => "output",
             Self::Claude => "content",
+            Self::OpenCode => "result",
         };
         response.get(field).cloned().ok_or_else(|| {
             WorkerError::Protocol(format!(
