@@ -1162,6 +1162,27 @@
       "http": "POST /api/conversations/bulk",
       "status": "sdk",
       "command": "conversations.bulk"
+    },
+    {
+      "file": "extensions.ts",
+      "member": "status",
+      "http": "POST /api/rpc (extensions.status)",
+      "status": "sdk",
+      "command": "extensions.status"
+    },
+    {
+      "file": "extensions.ts",
+      "member": "setPluginEnabled",
+      "http": "POST /api/rpc (extensions.plugin_enabled)",
+      "status": "sdk",
+      "command": "extensions.plugin_enabled"
+    },
+    {
+      "file": "extensions.ts",
+      "member": "setHookReview",
+      "http": "POST /api/rpc (extensions.hook_review)",
+      "status": "sdk",
+      "command": "extensions.hook_review"
     }
   ]
 }

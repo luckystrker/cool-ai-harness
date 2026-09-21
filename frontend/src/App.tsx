@@ -36,6 +36,11 @@ const TasksPage = lazy(() =>
 const WikiPage = lazy(() =>
   import("@/pages/WikiPage").then((module) => ({ default: module.WikiPage }))
 )
+const ExtensionsPage = lazy(() =>
+  import("@/pages/ExtensionsPage").then((module) => ({
+    default: module.ExtensionsPage,
+  }))
+)
 
 function App() {
   return (
@@ -57,6 +62,7 @@ function App() {
           <Route path="/deep-research" element={<DeepResearchPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/inspector" element={<InspectorPage />} />
+          <Route path="/extensions" element={<ExtensionsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
