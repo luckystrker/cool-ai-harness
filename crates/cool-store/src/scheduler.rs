@@ -624,3 +624,268 @@ fn day_matches(spec: &CronSpec, year: i64, month: u32, day: u32) -> bool {
         (false, false) => true,
     }
 }
+
+const DOW_LABELS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+/// Best-effort natural-language schedule port of `tasks/cron.py`'s
+/// `parse_natural_schedule` for the recurring phrasings the UI/agent produce.
+/// Returns a 5-field cron expression, or `None` when the phrase is unknown.
+///
+/// Shared by the `tasks.parse_cron` protocol query and the store-backed
+/// `parse_cron`/`create_task`/`update_task` agent tools.
+pub fn parse_natural_schedule(text: &str) -> Option<String> {
+    let low = text.to_lowercase();
+    let tokens = low.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(*token, "every" | "each" | "каждые" | "каждый" | "каждую") {
+            continue;
+        }
+        let Some(number) = tokens
+            .get(index + 1)
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(unit) = tokens.get(index + 2) else {
+            continue;
+        };
+        if unit.starts_with("min") || unit.starts_with("минут") {
+            return Some(format!("*/{} * * * *", number.clamp(1, 59)));
+        }
+        if unit.starts_with("hour") || unit.starts_with("час") {
+            return Some(format!("0 */{} * * *", number.clamp(1, 23)));
+        }
+    }
+    let has = |needle: &str| low.contains(needle);
+    if has("every minute") || has("каждую минуту") || has("ежеминутно") {
+        return Some("* * * * *".to_owned());
+    }
+    if has("every hour") || has("hourly") || has("каждый час") || has("ежечасно") {
+        return Some("0 * * * *".to_owned());
+    }
+    let time = extract_time(&low);
+    let (hour, minute) = time.unwrap_or((9, 0));
+    if has("weekday") || has("по будням") || has("в будни") {
+        return Some(format!("{minute} {hour} * * 1-5"));
+    }
+    if has("weekend") || has("по выходным") || has("в выходные") {
+        return Some(format!("{minute} {hour} * * 0,6"));
+    }
+    if let Some(day) = find_weekday(&low) {
+        return Some(format!("{minute} {hour} * * {day}"));
+    }
+    if has("monthly") || has("ежемесячно") {
+        let day = find_day_of_month(&low).unwrap_or(1).clamp(1, 28);
+        return Some(format!("{minute} {hour} {day} * *"));
+    }
+    if has("weekly") || has("еженедельно") {
+        return Some(format!("{minute} {hour} * * 1"));
+    }
+    if has("daily") || has("every day") || has("каждый день") || has("ежедневно")
+    {
+        return Some(format!("{minute} {hour} * * *"));
+    }
+    time.map(|_| format!("{minute} {hour} * * *"))
+}
+
+fn extract_time(text: &str) -> Option<(u32, u32)> {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some((hour_text, minute_text)) = token.split_once([':', '.']) {
+            let (Ok(hour), Ok(minute)) = (hour_text.parse::<u32>(), minute_text.parse::<u32>())
+            else {
+                continue;
+            };
+            let hour = apply_meridiem(hour, tokens.get(index + 1).copied());
+            if hour <= 23 && minute <= 59 {
+                return Some((hour, minute));
+            }
+        }
+        let digits = token.trim_end_matches(|character: char| character.is_alphabetic());
+        let suffix = &token[digits.len()..];
+        if digits.is_empty() {
+            continue;
+        }
+        if let Ok(hour) = digits.parse::<u32>()
+            && !suffix.is_empty()
+        {
+            let hour = apply_meridiem(hour, Some(suffix));
+            if hour <= 23 {
+                return Some((hour, 0));
+            }
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(*token, "at" | "в") {
+            continue;
+        }
+        let Some(number) = tokens.get(index + 1) else {
+            continue;
+        };
+        let digits = number.trim_end_matches(|character: char| character.is_alphabetic());
+        let suffix = &number[digits.len()..];
+        if let Ok(hour) = digits.parse::<u32>() {
+            let marker = if suffix.is_empty() {
+                tokens.get(index + 2).copied()
+            } else {
+                Some(suffix)
+            };
+            let hour = apply_meridiem(hour, marker);
+            if hour <= 23 {
+                return Some((hour, 0));
+            }
+        }
+    }
+    None
+}
+
+fn apply_meridiem(hour: u32, marker: Option<&str>) -> u32 {
+    let Some(marker) = marker else {
+        return hour;
+    };
+    let marker = marker.to_lowercase();
+    if matches!(marker.as_str(), "pm" | "вечера" | "дня") {
+        return if hour >= 12 { hour } else { hour + 12 };
+    }
+    if matches!(marker.as_str(), "am" | "утра" | "ночи") {
+        return if hour == 12 { 0 } else { hour };
+    }
+    hour
+}
+
+fn find_weekday(text: &str) -> Option<u32> {
+    const NAMES: &[(&str, u32)] = &[
+        ("monday", 1),
+        ("mon", 1),
+        ("понедельн", 1),
+        ("tuesday", 2),
+        ("tue", 2),
+        ("вторник", 2),
+        ("вторн", 2),
+        ("wednesday", 3),
+        ("wed", 3),
+        ("сред", 3),
+        ("thursday", 4),
+        ("thu", 4),
+        ("четверг", 4),
+        ("четв", 4),
+        ("friday", 5),
+        ("fri", 5),
+        ("пятниц", 5),
+        ("пятн", 5),
+        ("saturday", 6),
+        ("sat", 6),
+        ("суббот", 6),
+        ("субб", 6),
+        ("sunday", 0),
+        ("sun", 0),
+        ("воскрес", 0),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| text.contains(name))
+        .map(|(_, day)| *day)
+}
+
+fn find_day_of_month(text: &str) -> Option<u32> {
+    for token in text.split_whitespace() {
+        let digits = token.trim_end_matches(|character: char| character.is_alphabetic());
+        let digits = digits.trim_end_matches('-');
+        if let Ok(day) = digits.parse::<u32>()
+            && (1..=31).contains(&day)
+        {
+            return Some(day);
+        }
+    }
+    None
+}
+
+/// Best-effort cron description matching `tasks/cron.describe_cron` for the
+/// shapes the UI produces; anything else falls back to the raw expression.
+pub fn describe_cron(expression: &str) -> String {
+    let fields = expression.split_whitespace().collect::<Vec<_>>();
+    let fields = if fields.len() == 6 {
+        fields[1..].to_vec()
+    } else {
+        fields
+    };
+    if fields.len() != 5 {
+        return expression.to_owned();
+    }
+    let (minute, hour, day, month, weekday) =
+        (fields[0], fields[1], fields[2], fields[3], fields[4]);
+    let at =
+        if minute.chars().all(|c| c.is_ascii_digit()) && hour.chars().all(|c| c.is_ascii_digit()) {
+            format!(
+                "at {:02}:{:02}",
+                hour.parse::<u32>().unwrap_or(0),
+                minute.parse::<u32>().unwrap_or(0)
+            )
+        } else {
+            String::new()
+        };
+    if let Some(step) = minute.strip_prefix("*/")
+        && hour == "*"
+        && day == "*"
+        && month == "*"
+        && weekday == "*"
+    {
+        return format!("every {step} minutes");
+    }
+    if let Some(step) = hour.strip_prefix("*/")
+        && minute.chars().all(|c| c.is_ascii_digit())
+        && day == "*"
+        && month == "*"
+        && weekday == "*"
+    {
+        return format!(
+            "every {step} hours at minute {}",
+            minute.parse::<u32>().unwrap_or(0)
+        );
+    }
+    if minute.chars().all(|c| c.is_ascii_digit())
+        && hour == "*"
+        && day == "*"
+        && month == "*"
+        && weekday == "*"
+    {
+        return format!("hourly at minute {}", minute.parse::<u32>().unwrap_or(0));
+    }
+    let when = if at.is_empty() {
+        format!("on cron {expression}")
+    } else {
+        at
+    };
+    if weekday != "*" && day == "*" {
+        if weekday == "1-5" {
+            return format!("every weekday {when}");
+        }
+        if weekday == "0,6" || weekday == "6,0" {
+            return format!("every weekend day {when}");
+        }
+        let labels = weekday
+            .split(',')
+            .filter_map(|part| part.parse::<usize>().ok())
+            .filter(|index| *index <= 6)
+            .map(|index| DOW_LABELS[index])
+            .collect::<Vec<_>>();
+        if !labels.is_empty() {
+            return format!("every {} {when}", labels.join(", "));
+        }
+    }
+    if day.chars().all(|c| c.is_ascii_digit()) && weekday == "*" {
+        return format!("monthly on day {} {when}", day.parse::<u32>().unwrap_or(1));
+    }
+    if day == "*" && weekday == "*" && month == "*" {
+        return format!("daily {when}");
+    }
+    expression.to_owned()
+}

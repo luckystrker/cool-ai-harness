@@ -17,7 +17,9 @@ use cool_store::domains::memory::{
     SCOPE_CONVERSATION,
 };
 use cool_store::domains::rss::NewRssSubscription;
+use cool_store::domains::tasks::{NewScheduledTask, ScheduledTask, ScheduledTaskPatch};
 use cool_store::domains::wiki::{NewWikiArticle, WikiArticlePatch, WikiFilter};
+use cool_store::scheduler::{describe_cron, parse_natural_schedule};
 use cool_store::{LegacyStore, StoreError};
 use serde_json::{Value, json};
 
@@ -200,7 +202,67 @@ pub fn store_tool_registry(store: Arc<LegacyStore>) -> Result<Vec<Tool>, ToolErr
             ),
             [],
             Decision::Allow,
-            EntityLookup { store },
+            EntityLookup {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "create_task",
+                "Create a recurring (cron) task that runs a prompt on a schedule and delivers the result. Use when the user asks for something to happen regularly ('every Monday at 9am send me a digest'). The schedule may be a cron expression or a natural-language phrase.",
+                json!({"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"schedule":{"type":"string"},"template":{"type":"string"},"timezone":{"type":"string"},"model":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"delivery_channels":{"type":"array","items":{"type":"string"}},"quiet_hours_start":{"type":"string"},"quiet_hours_end":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name"],"additionalProperties":false}),
+            ),
+            [Capability::Execute],
+            Decision::Ask,
+            CreateTask {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "list_tasks",
+                "List the user's recurring tasks with their schedule, next run time and last status.",
+                json!({"type":"object","properties":{"enabled_only":{"type":"boolean"}},"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            ListTasks {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "update_task",
+                "Update a recurring task: rename it, change its prompt, schedule, model, tools or delivery channels, or pause/resume it.",
+                json!({"type":"object","properties":{"task_id":{"type":"integer"},"name":{"type":"string"},"prompt":{"type":"string"},"schedule":{"type":"string"},"timezone":{"type":"string"},"model":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"delivery_channels":{"type":"array","items":{"type":"string"}},"enabled":{"type":"boolean"}},"required":["task_id"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            UpdateTask {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "delete_task",
+                "Delete a recurring task and its run history.",
+                json!({"type":"object","properties":{"task_id":{"type":"integer"}},"required":["task_id"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Ask,
+            DeleteTask {
+                store: store.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "parse_cron",
+                "Translate a natural-language schedule ('каждый день в 8 вечера', 'every weekday at 7:30') into a 5-field cron expression plus the next few run times.",
+                json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            ParseCron,
         ),
     ])
 }
@@ -760,6 +822,364 @@ impl ToolHandler for EntityLookup {
     }
 }
 
+struct CreateTask {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for CreateTask {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &[
+                "name",
+                "prompt",
+                "schedule",
+                "template",
+                "timezone",
+                "model",
+                "tools",
+                "delivery_channels",
+                "quiet_hours_start",
+                "quiet_hours_end",
+                "enabled",
+            ],
+        )?;
+        let name = required_string(&arguments, "name")?.to_owned();
+        // Python's `x or preset.x` treats an empty string/list as unset, so an
+        // empty prompt/schedule falls back to the template instead of failing.
+        let prompt = optional_string_lenient(&arguments, "prompt")?;
+        let schedule = optional_string_lenient(&arguments, "schedule")?;
+        let template = optional_string_lenient(&arguments, "template")?;
+        let timezone = optional_string_lenient(&arguments, "timezone")?;
+        let model = optional_string_lenient(&arguments, "model")?;
+        let tools = optional_string_array(&arguments, "tools")?.filter(|values| !values.is_empty());
+        let delivery_channels = optional_string_array(&arguments, "delivery_channels")?
+            .filter(|values| !values.is_empty());
+        let quiet_hours_start = optional_string_lenient(&arguments, "quiet_hours_start")?;
+        let quiet_hours_end = optional_string_lenient(&arguments, "quiet_hours_end")?;
+        let enabled = optional_bool(&arguments, "enabled")?.unwrap_or(true);
+
+        let preset = match template.as_deref() {
+            Some(slug) => {
+                match cool_app_server::task_templates()
+                    .into_iter()
+                    .find(|preset| preset.slug == slug)
+                {
+                    Some(preset) => Some(preset),
+                    None => {
+                        return Ok(ToolResult::error(
+                            "task_template_not_found",
+                            format!(
+                                "Unknown template {slug:?}. Available: news-digest, \
+                                 code-review, memory-review, health-check."
+                            ),
+                        )
+                        .masked());
+                    }
+                }
+            }
+            None => None,
+        };
+        // Python `prompt or preset.prompt`, then a required-prompt guard.
+        let effective_prompt = prompt
+            .or_else(|| preset.as_ref().map(|preset| preset.prompt.clone()))
+            .unwrap_or_default();
+        if effective_prompt.trim().is_empty() {
+            return Ok(ToolResult::error(
+                "task_prompt_required",
+                "A task needs a prompt (or a template that provides one).",
+            )
+            .masked());
+        }
+        let cron = match resolve_schedule(schedule.as_deref()) {
+            Ok(Some(cron)) => Some(cron),
+            Ok(None) => preset.as_ref().map(|preset| preset.cron_expression.clone()),
+            Err(message) => return Ok(ToolResult::error("invalid_schedule", message).masked()),
+        };
+        let Some(cron) = cron else {
+            return Ok(ToolResult::error(
+                "task_schedule_required",
+                "A task needs a schedule: pass a cron expression or a phrase like \
+                 'every day at 8pm'.",
+            )
+            .masked());
+        };
+        let tools = tools.or_else(|| {
+            preset
+                .as_ref()
+                .and_then(|preset| preset.tools_whitelist.clone())
+        });
+        let delivery_channels = delivery_channels.or_else(|| {
+            preset
+                .as_ref()
+                .map(|preset| preset.delivery_channels.clone())
+        });
+        let new = NewScheduledTask {
+            name,
+            trigger_type: cool_store::domains::tasks::TRIGGER_CRON.to_owned(),
+            cron_expression: Some(cron.clone()),
+            timezone: timezone.unwrap_or_else(|| "UTC".to_owned()),
+            quiet_hours_start,
+            quiet_hours_end,
+            prompt: effective_prompt,
+            workflow_type: preset.as_ref().map(|preset| preset.slug.clone()),
+            model,
+            tools_whitelist: tools.map(string_array_value),
+            // Python passes the run context workdir so the task runs where it was
+            // created; the store tools only know the run workspace.
+            working_directory: Some(context.workspace.root().to_string_lossy().into_owned()),
+            delivery_channels: delivery_channels.map(string_array_value),
+            max_iterations: preset
+                .as_ref()
+                .map(|preset| preset.max_iterations)
+                .unwrap_or(10),
+            enabled,
+            ..NewScheduledTask::default()
+        };
+        match self.store.create_task(&context.actor_id, &new) {
+            Ok(task) => Ok(ToolResult::ok(json!({
+                "created": task_summary(&task),
+                "schedule_description": describe_cron(&cron),
+            }))
+            .masked()),
+            Err(error) => Ok(ToolResult::error("task_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct ListTasks {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for ListTasks {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["enabled_only"])?;
+        let enabled_only = optional_bool(&arguments, "enabled_only")?.unwrap_or(false);
+        match self.store.list_tasks(&context.actor_id, enabled_only) {
+            Ok(tasks) => {
+                let payload = tasks.iter().map(task_summary).collect::<Vec<_>>();
+                Ok(ToolResult::ok(Value::Array(payload)).masked())
+            }
+            Err(error) => Ok(ToolResult::error("task_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct UpdateTask {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for UpdateTask {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &[
+                "task_id",
+                "name",
+                "prompt",
+                "schedule",
+                "timezone",
+                "model",
+                "tools",
+                "delivery_channels",
+                "enabled",
+            ],
+        )?;
+        let task_id = required_i64(&arguments, "task_id")?;
+        let mut patch = ScheduledTaskPatch::default();
+        let mut touched = false;
+        if let Some(value) = optional_string(&arguments, "name")? {
+            patch.name = Some(value);
+            touched = true;
+        }
+        if let Some(value) = optional_string(&arguments, "prompt")? {
+            patch.prompt = Some(value);
+            touched = true;
+        }
+        if let Some(value) = optional_string(&arguments, "timezone")? {
+            patch.timezone = Some(value);
+            touched = true;
+        }
+        if let Some(value) = optional_string(&arguments, "model")? {
+            patch.model = Some(value);
+            touched = true;
+        }
+        if let Some(value) = optional_string_array(&arguments, "tools")? {
+            patch.tools_whitelist = Some(string_array_value(value));
+            touched = true;
+        }
+        if let Some(value) = optional_string_array(&arguments, "delivery_channels")? {
+            patch.delivery_channels = Some(string_array_value(value));
+            touched = true;
+        }
+        if let Some(value) = optional_bool(&arguments, "enabled")? {
+            patch.enabled = Some(value);
+            touched = true;
+        }
+        if let Some(schedule) = optional_string(&arguments, "schedule")? {
+            match resolve_schedule(Some(&schedule)) {
+                Ok(Some(cron)) => {
+                    patch.cron_expression = Some(cron);
+                    patch.trigger_type = Some(cool_store::domains::tasks::TRIGGER_CRON.to_owned());
+                    touched = true;
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    return Ok(ToolResult::error("invalid_schedule", message).masked());
+                }
+            }
+        }
+        if !touched {
+            return Ok(ToolResult::error(
+                "nothing_to_update",
+                "Nothing to update: pass at least one field.",
+            )
+            .masked());
+        }
+        match self.store.update_task(&context.actor_id, task_id, &patch) {
+            Ok(task) => Ok(ToolResult::ok(json!({"updated": task_summary(&task)})).masked()),
+            Err(StoreError::NotFound(_)) => Ok(ToolResult::error(
+                "task_not_found",
+                format!("Task {task_id} not found."),
+            )
+            .masked()),
+            Err(error) => Ok(ToolResult::error("task_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct DeleteTask {
+    store: Arc<LegacyStore>,
+}
+
+#[async_trait]
+impl ToolHandler for DeleteTask {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["task_id"])?;
+        let task_id = required_i64(&arguments, "task_id")?;
+        match self.store.delete_task(&context.actor_id, task_id) {
+            Ok(()) => Ok(ToolResult::ok(json!({"deleted": task_id})).masked()),
+            Err(StoreError::NotFound(_)) => Ok(ToolResult::error(
+                "task_not_found",
+                format!("Task {task_id} not found."),
+            )
+            .masked()),
+            Err(error) => Ok(ToolResult::error("task_store_failed", error.to_string()).masked()),
+        }
+    }
+}
+
+struct ParseCron;
+
+#[async_trait]
+impl ToolHandler for ParseCron {
+    async fn execute(
+        &self,
+        _context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["text"])?;
+        let text = required_string(&arguments, "text")?;
+        match parse_natural_schedule(text) {
+            Some(cron) => {
+                let runs = cool_store::scheduler::cron_next_runs(&cron, now_seconds(), 3)
+                    .unwrap_or_default();
+                Ok(ToolResult::ok(json!({
+                    "cron_expression": cron,
+                    "description": describe_cron(&cron),
+                    "next_runs_utc": runs.into_iter().map(format_run_time).collect::<Vec<_>>(),
+                }))
+                .masked())
+            }
+            None => Ok(ToolResult::error(
+                "invalid_schedule",
+                format!(
+                    "Could not interpret {text:?} as a schedule. Try phrasings like \
+                     'every day at 8pm', 'каждый вторник в 18:30', 'every 30 minutes'."
+                ),
+            )
+            .masked()),
+        }
+    }
+}
+
+/// Turn cron-or-prose into a cron expression, mirroring Python
+/// `task_tools._resolve_schedule`.
+fn resolve_schedule(text: Option<&str>) -> Result<Option<String>, String> {
+    let Some(text) = text.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if cool_store::scheduler::cron_next_runs(text, now_seconds(), 1).is_ok() {
+        return Ok(Some(text.to_owned()));
+    }
+    match parse_natural_schedule(text) {
+        Some(cron) => Ok(Some(cron)),
+        None => Err(format!(
+            "Could not interpret the schedule {text:?}. Provide a 5-field cron \
+             expression (minute hour day-of-month month day-of-week) instead."
+        )),
+    }
+}
+
+/// Python `_task_summary` projection; `delivery_channels` defaults to `["ui"]`
+/// (an empty list counts as unset, matching Python's `or ["ui"]`).
+fn task_summary(task: &ScheduledTask) -> Value {
+    let delivery_channels = match &task.delivery_channels {
+        Some(Value::Array(items)) if !items.is_empty() => task.delivery_channels.clone(),
+        _ => Some(json!(["ui"])),
+    };
+    json!({
+        "id": task.id,
+        "name": task.name,
+        "trigger_type": task.trigger_type,
+        "cron_expression": task.cron_expression,
+        "schedule": task.cron_expression.as_deref().map(describe_cron),
+        "timezone": task.timezone,
+        "enabled": task.enabled,
+        "next_run_at": task.next_run_at,
+        "last_run_at": task.last_run_at,
+        "last_status": task.last_status,
+        "delivery_channels": delivery_channels.unwrap_or_else(|| json!(["ui"])),
+    })
+}
+
+fn string_array_value(values: Vec<String>) -> Value {
+    Value::Array(values.into_iter().map(Value::String).collect())
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn format_run_time(timestamp: i64) -> String {
+    format!(
+        "{}Z",
+        cool_store::python_datetime(timestamp, 0).replace(' ', "T")
+    )
+}
+
 fn reject_unknown(arguments: &Value, allowed: &[&str]) -> Result<(), ToolError> {
     let object = arguments
         .as_object()
@@ -786,6 +1206,18 @@ fn optional_string(arguments: &Value, name: &str) -> Result<Option<String>, Tool
         Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
         Some(_) => Err(ToolError::InvalidArguments(format!(
             "{name} must be a non-empty string"
+        ))),
+    }
+}
+
+/// Like [`optional_string`] but treats an empty string as absent (Python `x or
+/// default`). Used where a value falls back to a template/default.
+fn optional_string_lenient(arguments: &Value, name: &str) -> Result<Option<String>, ToolError> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok((!value.is_empty()).then(|| value.clone())),
+        Some(_) => Err(ToolError::InvalidArguments(format!(
+            "{name} must be a string"
         ))),
     }
 }
