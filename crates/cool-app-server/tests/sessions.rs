@@ -9,13 +9,15 @@ use cool_agent::{
 use cool_app_server::client::new_idempotency_key;
 use cool_app_server::{
     AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
+    SkillAdmin,
 };
 use cool_protocol::{
     CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
     HookRecord, HookReviewParams, McpAddServerParams, McpConnectResult, McpHealthResult,
     McpServerAdminRecord, McpServerListResult, McpServerNameParams, McpServerRecord,
     McpToolListResult, McpToolPolicyRecord, McpToolRecord, McpUpdateServerParams,
-    PluginEnabledParams, PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult,
+    PluginEnabledParams, PluginRecord, ResponsePayload, SkillAdminRecord, SkillCreateParams,
+    SkillCreateResult, SkillListResult, SkillRecord, StatusEntry, StatusGetResult,
     SystemPromptRecord, SystemPromptSetParams, WorkerRecord,
 };
 use cool_security::{CapabilityPolicy, Decision, Workspace};
@@ -893,6 +895,146 @@ async fn mcp_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
             "connect:local-user:demo",
             "remove:local-user:demo",
         ],
+        "the server-derived actor must reach the host for every mutation"
+    );
+}
+
+#[derive(Default)]
+struct RecordingSkillAdmin {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+fn skill_record(name: &str) -> SkillAdminRecord {
+    SkillAdminRecord {
+        name: name.to_owned(),
+        description: String::new(),
+        source: "user".to_owned(),
+        tags: Vec::new(),
+        tools: Vec::new(),
+        version: "1.0".to_owned(),
+        body: "body".to_owned(),
+    }
+}
+
+#[async_trait]
+impl SkillAdmin for RecordingSkillAdmin {
+    async fn list(&self, source: Option<&str>) -> Result<SkillListResult, String> {
+        if source == Some("plugin") {
+            return Ok(SkillListResult::default());
+        }
+        Ok(SkillListResult {
+            skills: vec![skill_record("demo")],
+        })
+    }
+
+    async fn create(
+        &self,
+        actor: &str,
+        params: &SkillCreateParams,
+    ) -> Result<SkillCreateResult, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("create:{actor}:{}", params.name));
+        Ok(SkillCreateResult {
+            name: params.name.clone(),
+            path: format!("/skills/{}", params.name),
+            scope: "user".to_owned(),
+        })
+    }
+
+    async fn delete(&self, actor: &str, name: &str) -> Result<(), String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("delete:{actor}:{name}"));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn skill_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No admin configured: a mutation fails closed and a read answers empty.
+    let (client, task) = connected_client(server.clone()).await;
+    let error = client
+        .request(Command::SkillsCreate(SkillCreateParams {
+            idempotency_key: key("skill-create-no-admin"),
+            name: "demo".to_owned(),
+            description: String::new(),
+            tags: Vec::new(),
+            tools: Vec::new(),
+            body: "body".to_owned(),
+            scope: "user".to_owned(),
+        }))
+        .await
+        .expect_err("a mutation without an admin must fail");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "skills_admin_unavailable");
+    let payload = client
+        .request(Command::SkillsList(
+            cool_protocol::SkillListParams::default(),
+        ))
+        .await
+        .unwrap();
+    let ResponsePayload::SkillsListed(list) = payload else {
+        panic!("skills.list must return SkillsListed, got {payload:?}");
+    };
+    assert!(list.skills.is_empty());
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let admin = Arc::new(RecordingSkillAdmin::default());
+    let server = server.with_skill_admin(admin.clone());
+    let (client, task) = connected_client(server).await;
+
+    let payload = client
+        .request(Command::SkillsCreate(SkillCreateParams {
+            idempotency_key: key("skill-create"),
+            name: "demo".to_owned(),
+            description: String::new(),
+            tags: Vec::new(),
+            tools: Vec::new(),
+            body: "body".to_owned(),
+            scope: "user".to_owned(),
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::SkillCreated(created) = payload else {
+        panic!("skills.create must return SkillCreated, got {payload:?}");
+    };
+    assert_eq!(created.name, "demo");
+    assert_eq!(created.scope, "user");
+
+    let payload = client
+        .request(Command::SkillsList(
+            cool_protocol::SkillListParams::default(),
+        ))
+        .await
+        .unwrap();
+    let ResponsePayload::SkillsListed(list) = payload else {
+        panic!("skills.list must return SkillsListed, got {payload:?}");
+    };
+    assert_eq!(list.skills.len(), 1);
+
+    let payload = client
+        .request(Command::SkillsDelete(cool_protocol::SkillDeleteParams {
+            idempotency_key: key("skill-delete"),
+            name: "demo".to_owned(),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(payload, ResponsePayload::SkillDeleted(_)));
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+    assert_eq!(
+        admin.seen.lock().unwrap().as_slice(),
+        ["create:local-user:demo", "delete:local-user:demo"],
         "the server-derived actor must reach the host for every mutation"
     );
 }

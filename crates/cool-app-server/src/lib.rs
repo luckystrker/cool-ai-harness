@@ -37,10 +37,10 @@ use cool_protocol::{
     RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
     RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult, SessionCreatedResult,
     SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
-    SessionRunSummary, SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame,
-    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
-    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
-    V1Version,
+    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
+    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -149,6 +149,8 @@ struct Inner {
     /// Operator-owned global MCP admin, present when the host configures it (the
     /// CLI installs one over its MCP config store + live session registry).
     mcp_admin: Option<Arc<dyn McpAdmin>>,
+    /// Operator-owned global skills store, present when the host configures it.
+    skill_admin: Option<Arc<dyn SkillAdmin>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -264,6 +266,27 @@ pub trait McpAdmin: Send + Sync {
 
     /// Reconnect every enabled server, refreshing its tools.
     async fn reconnect_all(&self, actor: &str) -> Result<McpServerListResult, String>;
+}
+
+/// Operator-owned global skills store (distinct from the plugin-bundled skills
+/// projected by [`ExtensionAdmin`]). The host (the CLI) owns the `SKILL.md`
+/// directory tree; the app server forwards and renders. A skill body is
+/// instructions, never executed here.
+#[async_trait]
+pub trait SkillAdmin: Send + Sync {
+    /// List skills, optionally filtered by source.
+    async fn list(&self, source: Option<&str>) -> Result<SkillListResult, String>;
+
+    /// Create a skill. Implementations must validate the name and reject a
+    /// duplicate.
+    async fn create(
+        &self,
+        actor: &str,
+        params: &SkillCreateParams,
+    ) -> Result<SkillCreateResult, String>;
+
+    /// Delete a skill by name. A missing skill is an error.
+    async fn delete(&self, actor: &str, name: &str) -> Result<(), String>;
 }
 
 #[derive(Default)]
@@ -450,6 +473,7 @@ impl AppServer {
                 extension_admin: None,
                 app_settings: None,
                 mcp_admin: None,
+                skill_admin: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -488,6 +512,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("mcp admin must be configured before the server is cloned")
             .mcp_admin = Some(admin);
+        self
+    }
+
+    pub fn with_skill_admin(mut self, admin: Arc<dyn SkillAdmin>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("skill admin must be configured before the server is cloned")
+            .skill_admin = Some(admin);
         self
     }
 
@@ -1624,6 +1655,57 @@ impl AppServer {
                         }
                     }
                     None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SkillsList(params) => {
+                let frame = match &self.inner.skill_admin {
+                    Some(admin) => match admin.list(params.source.as_deref()).await {
+                        Ok(result) => success(id, ResponsePayload::SkillsListed(result)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32023, "skills_admin_failed", &message),
+                        ),
+                    },
+                    None => success(
+                        id,
+                        ResponsePayload::SkillsListed(SkillListResult::default()),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SkillsCreate(params) => {
+                let frame = match &self.inner.skill_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.create(&actor, &params).await {
+                            Ok(result) => success(id, ResponsePayload::SkillCreated(result)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32023, "skills_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32022, "skills_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::SkillsDelete(params) => {
+                let frame = match &self.inner.skill_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.delete(&actor, &params.name).await {
+                            Ok(()) => success(
+                                id,
+                                ResponsePayload::SkillDeleted(LegacyOkResult { ok: true }),
+                            ),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32023, "skills_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32022, "skills_admin_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -5033,6 +5115,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "session_list",
         "session_runs",
         "session_steer",
+        "skills_admin",
         "streaming_models",
         "stdio",
         "task_templates",

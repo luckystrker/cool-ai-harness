@@ -16,6 +16,7 @@ mod knowledge;
 mod mcp;
 mod ops;
 mod settings;
+mod skills;
 
 pub use content::*;
 pub use extensions::*;
@@ -23,6 +24,7 @@ pub use knowledge::*;
 pub use mcp::*;
 pub use ops::*;
 pub use settings::*;
+pub use skills::*;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

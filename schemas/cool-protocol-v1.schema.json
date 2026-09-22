@@ -2255,6 +2255,57 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "skills.list"
+            },
+            "params": {
+              "$ref": "#/$defs/SkillListParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "skills.create"
+            },
+            "params": {
+              "$ref": "#/$defs/SkillCreateParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "skills.delete"
+            },
+            "params": {
+              "$ref": "#/$defs/SkillDeleteParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "conversations.list"
             },
             "params": {
@@ -9266,6 +9317,57 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "skills_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/SkillListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "skill_created"
+            },
+            "value": {
+              "$ref": "#/$defs/SkillCreateResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "skill_deleted"
+            },
+            "value": {
+              "$ref": "#/$defs/LegacyOkResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "conversations_list"
             },
             "value": {
@@ -12860,6 +12962,160 @@
         "sessionId",
         "createdAt"
       ]
+    },
+    "SkillAdminRecord": {
+      "description": "One skill in the global skills store.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string",
+          "default": ""
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the skill was loaded from (`user` for the Rust store).",
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "source",
+        "version"
+      ]
+    },
+    "SkillCreateParams": {
+      "description": "Create a new skill (`SKILL.md`) in the global store.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "description": "Accepted for parity with the Python API (`global`/`user`); the Rust store\nis a single directory and reports `user`.",
+          "type": "string",
+          "default": "global"
+        },
+        "tags": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "name",
+        "body"
+      ]
+    },
+    "SkillCreateResult": {
+      "description": "Result of creating a skill.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "scope"
+      ]
+    },
+    "SkillDeleteParams": {
+      "description": "Delete a skill from the global store by name.",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "name"
+      ]
+    },
+    "SkillListParams": {
+      "description": "List skills, optionally filtered by source.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "SkillListResult": {
+      "description": "All skills in the global store.",
+      "type": "object",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SkillAdminRecord"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "SkillRecord": {
       "description": "One skill parsed from an enabled plugin's `SKILL.md` tree.",

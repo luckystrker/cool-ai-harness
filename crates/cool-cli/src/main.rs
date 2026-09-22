@@ -1,4 +1,5 @@
 mod mcp_admin;
+mod skills_admin;
 mod store_tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -292,6 +293,8 @@ async fn build_server(
     // The operator-owned global MCP admin (config store + live session registry)
     // is always available; plugin-bundled MCP servers stay on `extensions.status`.
     server = server.with_mcp_admin(Arc::new(mcp_admin::CliMcpAdmin::new(data_dir)));
+    // The operator-owned global skills store (a SKILL.md tree on the data root).
+    server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }

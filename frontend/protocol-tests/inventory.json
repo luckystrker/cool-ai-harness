@@ -443,23 +443,23 @@
     {
       "file": "skills.ts",
       "member": "list",
-      "http": "GET /api/skills",
-      "status": "deferred",
-      "rationale": "skills are discovered from the filesystem by the M8 Rust skills runtime; there is no legacy SQL table, so M11 wires the SDK facade"
+      "http": "POST /api/rpc (skills.list)",
+      "status": "sdk",
+      "command": "skills.list"
     },
     {
       "file": "skills.ts",
       "member": "create",
-      "http": "POST /api/skills",
-      "status": "deferred",
-      "rationale": "writes a SKILL.md directory via the M8 skills runtime; not a store operation"
+      "http": "POST /api/rpc (skills.create)",
+      "status": "sdk",
+      "command": "skills.create"
     },
     {
       "file": "skills.ts",
       "member": "delete",
-      "http": "DELETE /api/skills/{name}",
-      "status": "deferred",
-      "rationale": "filesystem skill removal via the M8 skills runtime; not a store operation"
+      "http": "POST /api/rpc (skills.delete)",
+      "status": "sdk",
+      "command": "skills.delete"
     },
     {
       "file": "subagents.ts",

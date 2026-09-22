@@ -56,6 +56,7 @@ import type {
   RunTimeline,
   ScheduledTask,
   SchedulerStatus,
+  SkillInfo,
   SpendRow,
   SpendTimeSeriesPoint,
   SubagentRole,
@@ -110,6 +111,18 @@ function parsedJson(value: string | null): protocol.JsonValue | null {
 }
 
 /** `ConversationRecord` -> `Conversation` (breakpoints live in metadata). */
+export function toSkill(record: protocol.SkillAdminRecord): SkillInfo {
+  return {
+    name: record.name,
+    description: record.description,
+    source: record.source as SkillInfo["source"],
+    tags: record.tags,
+    tools: record.tools,
+    version: record.version,
+    body: record.body,
+  }
+}
+
 export function toMcpTool(record: protocol.McpToolRecord): MCPToolInfo {
   return {
     name: record.name,
