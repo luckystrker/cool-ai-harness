@@ -13,12 +13,14 @@
 mod content;
 mod extensions;
 mod knowledge;
+mod mcp;
 mod ops;
 mod settings;
 
 pub use content::*;
 pub use extensions::*;
 pub use knowledge::*;
+pub use mcp::*;
 pub use ops::*;
 pub use settings::*;
 

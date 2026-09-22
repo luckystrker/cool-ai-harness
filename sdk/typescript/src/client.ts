@@ -57,6 +57,15 @@ export class CoolSdk {
   extensionsHookReview(params: protocol.HookReviewParams) { return this.send<protocol.HookRecord>({ method: "extensions.hook_review", params }); }
   settingsSystemPrompt(params: protocol.EmptyParams) { return this.send<protocol.SystemPromptRecord>({ method: "settings.system_prompt", params }); }
   settingsSystemPromptSet(params: protocol.SystemPromptSetParams) { return this.send<protocol.SystemPromptRecord>({ method: "settings.system_prompt_set", params }); }
+  mcpListServers(params: protocol.EmptyParams) { return this.send<protocol.McpServerListResult>({ method: "mcp.list_servers", params }); }
+  mcpAddServer(params: protocol.McpAddServerParams) { return this.send<protocol.McpServerAdminRecord>({ method: "mcp.add_server", params }); }
+  mcpUpdateServer(params: protocol.McpUpdateServerParams) { return this.send<protocol.McpServerAdminRecord>({ method: "mcp.update_server", params }); }
+  mcpRemoveServer(params: protocol.McpServerNameParams) { return this.send<protocol.LegacyOkResult>({ method: "mcp.remove_server", params }); }
+  mcpConnect(params: protocol.McpServerNameParams) { return this.send<protocol.McpConnectResult>({ method: "mcp.connect", params }); }
+  mcpDisconnect(params: protocol.McpServerNameParams) { return this.send<protocol.McpConnectResult>({ method: "mcp.disconnect", params }); }
+  mcpHealth(params: protocol.McpServerNameParams) { return this.send<protocol.McpHealthResult>({ method: "mcp.health", params }); }
+  mcpListTools(params: protocol.EmptyParams) { return this.send<protocol.McpToolListResult>({ method: "mcp.list_tools", params }); }
+  mcpReconnectAll(params: protocol.EmptyParams) { return this.send<protocol.McpServerListResult>({ method: "mcp.reconnect_all", params }); }
 
   conversationsList(params: protocol.ConversationListParams) { return this.send<protocol.ConversationRecord[]>({ method: "conversations.list", params }); }
   conversationsCreate(params: protocol.ConversationCreateParams) { return this.send<protocol.ConversationRecord>({ method: "conversations.create", params }); }

@@ -207,6 +207,24 @@ pub enum Command {
     SettingsSystemPrompt(EmptyParams),
     #[serde(rename = "settings.system_prompt_set")]
     SettingsSystemPromptSet(SystemPromptSetParams),
+    #[serde(rename = "mcp.list_servers")]
+    McpListServers(EmptyParams),
+    #[serde(rename = "mcp.add_server")]
+    McpAddServer(McpAddServerParams),
+    #[serde(rename = "mcp.update_server")]
+    McpUpdateServer(McpUpdateServerParams),
+    #[serde(rename = "mcp.remove_server")]
+    McpRemoveServer(McpServerNameParams),
+    #[serde(rename = "mcp.connect")]
+    McpConnect(McpServerNameParams),
+    #[serde(rename = "mcp.disconnect")]
+    McpDisconnect(McpServerNameParams),
+    #[serde(rename = "mcp.health")]
+    McpHealth(McpServerNameParams),
+    #[serde(rename = "mcp.list_tools")]
+    McpListTools(EmptyParams),
+    #[serde(rename = "mcp.reconnect_all")]
+    McpReconnectAll(EmptyParams),
     #[serde(rename = "conversations.list")]
     ConversationsList(ConversationListParams),
     #[serde(rename = "conversations.create")]
@@ -1657,6 +1675,15 @@ pub enum ResponsePayload {
     ExtensionsPluginEnabled(PluginRecord),
     ExtensionsHookReviewed(HookRecord),
     SettingsSystemPrompt(SystemPromptRecord),
+    McpServersListed(McpServerListResult),
+    McpServerAdded(McpServerAdminRecord),
+    McpServerUpdated(McpServerAdminRecord),
+    McpServerRemoved(LegacyOkResult),
+    McpConnected(McpConnectResult),
+    McpDisconnected(McpConnectResult),
+    McpHealth(McpHealthResult),
+    McpToolsListed(McpToolListResult),
+    McpReconnected(McpServerListResult),
     ConversationsList(Vec<ConversationRecord>),
     ConversationsCreated(ConversationRecord),
     ConversationsGot(ConversationRecord),

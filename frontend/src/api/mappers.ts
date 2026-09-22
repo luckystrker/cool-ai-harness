@@ -24,6 +24,8 @@ import type {
   LatencyPoint,
   MacroStep,
   MacroTool,
+  MCPServer,
+  MCPToolInfo,
   MemoryActivityPoint,
   MemoryExplain,
   MemoryItem,
@@ -108,6 +110,34 @@ function parsedJson(value: string | null): protocol.JsonValue | null {
 }
 
 /** `ConversationRecord` -> `Conversation` (breakpoints live in metadata). */
+export function toMcpTool(record: protocol.McpToolRecord): MCPToolInfo {
+  return {
+    name: record.name,
+    qualified_name: record.qualifiedName,
+    description: record.description,
+    server_name: record.serverName,
+    input_schema: (record.inputSchema ?? {}) as Record<string, unknown>,
+  }
+}
+
+export function toMcpServer(record: protocol.McpServerAdminRecord): MCPServer {
+  return {
+    name: record.name,
+    transport: record.transport as MCPServer["transport"],
+    status: record.status as MCPServer["status"],
+    enabled: record.enabled,
+    description: record.description,
+    command: record.command,
+    args: record.args,
+    url: record.url,
+    capabilities: record.capabilities,
+    timeout_s: record.timeoutS,
+    error: record.error ?? null,
+    tools: (record.tools ?? []).map(toMcpTool),
+    server_info: (record.serverInfo ?? {}) as Record<string, unknown>,
+  }
+}
+
 export function toConversation(record: protocol.ConversationRecord): Conversation {
   const metadata = asObject(record.metadata)
   return {

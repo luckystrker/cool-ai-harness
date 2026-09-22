@@ -30,15 +30,17 @@ use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
     CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, ExtensionStatusResult,
     HistoryItem, HookRecord, IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2,
-    PlanCreated, PlanExecuteResult, PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep,
-    PluginRecord, PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId,
-    RpcNotification, RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted,
-    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
-    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, StatusGetResult,
-    StreamFrame, SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult,
-    TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested,
-    TransportLimits, UsageUpdated, V1Version,
+    LegacyOkResult, McpAddServerParams, McpConnectResult, McpHealthResult, McpServerAdminRecord,
+    McpServerListResult, McpToolListResult, McpUpdateServerParams, PlanCreated, PlanExecuteResult,
+    PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
+    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
+    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
+    RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult, SessionCreatedResult,
+    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
+    SessionRunSummary, SessionRunsResult, SessionSummary, StatusGetResult, StreamFrame,
+    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
+    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
+    V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -144,6 +146,9 @@ struct Inner {
     /// Persistent application settings, present when the host configures a
     /// settings file (the CLI stores one on the data root).
     app_settings: Option<Arc<dyn AppSettings>>,
+    /// Operator-owned global MCP admin, present when the host configures it (the
+    /// CLI installs one over its MCP config store + live session registry).
+    mcp_admin: Option<Arc<dyn McpAdmin>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -215,6 +220,50 @@ pub trait AppSettings: Send + Sync {
 
     /// Persist the default system prompt; an empty value clears it.
     async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String>;
+}
+
+/// Operator-owned global MCP server admin (distinct from the plugin-bundled MCP
+/// servers projected by [`ExtensionAdmin`]). The app server owns no MCP state:
+/// the host (the CLI) stores the operator config and manages the live session
+/// registry. Records are secret-free; `env`/`headers` are accepted on writes but
+/// never projected back.
+#[async_trait]
+pub trait McpAdmin: Send + Sync {
+    /// All configured servers with their live status and discovered tools.
+    async fn list_servers(&self) -> Result<McpServerListResult, String>;
+
+    /// Add a server configuration. Implementations must reject a duplicate name
+    /// and validate the transport/name.
+    async fn add_server(
+        &self,
+        actor: &str,
+        params: &McpAddServerParams,
+    ) -> Result<McpServerAdminRecord, String>;
+
+    /// Patch a server configuration. A missing server is an error.
+    async fn update_server(
+        &self,
+        actor: &str,
+        params: &McpUpdateServerParams,
+    ) -> Result<McpServerAdminRecord, String>;
+
+    /// Remove a server configuration and disconnect its live session.
+    async fn remove_server(&self, actor: &str, name: &str) -> Result<(), String>;
+
+    /// Connect to a server and discover its tools.
+    async fn connect(&self, actor: &str, name: &str) -> Result<McpConnectResult, String>;
+
+    /// Disconnect a server and drop its discovered tools.
+    async fn disconnect(&self, actor: &str, name: &str) -> Result<McpConnectResult, String>;
+
+    /// Health-check a server.
+    async fn health(&self, name: &str) -> Result<McpHealthResult, String>;
+
+    /// All tools discovered across connected servers.
+    async fn list_tools(&self) -> Result<McpToolListResult, String>;
+
+    /// Reconnect every enabled server, refreshing its tools.
+    async fn reconnect_all(&self, actor: &str) -> Result<McpServerListResult, String>;
 }
 
 #[derive(Default)]
@@ -400,6 +449,7 @@ impl AppServer {
                 lifecycle: None,
                 extension_admin: None,
                 app_settings: None,
+                mcp_admin: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -431,6 +481,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("app settings must be configured before the server is cloned")
             .app_settings = Some(settings);
+        self
+    }
+
+    pub fn with_mcp_admin(mut self, admin: Arc<dyn McpAdmin>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("mcp admin must be configured before the server is cloned")
+            .mcp_admin = Some(admin);
         self
     }
 
@@ -563,7 +620,12 @@ impl AppServer {
                     }
                     if !connection.lock().await.initialized {
                         if matches!(&request.params.command, Command::Initialize(_)) {
-                            self.dispatch(request, outbound.clone(), connection.clone())
+                            // The dispatch future is very large (one arm per
+                            // command); box it so the inline initialize path
+                            // cannot overflow the caller's stack. Initialization
+                            // stays awaited here so it completes before the next
+                            // request is read.
+                            Box::pin(self.dispatch(request, outbound.clone(), connection.clone()))
                                 .await;
                         } else if !outbound
                             .send(failure(request.id, error(-32002, "not_initialized", false)))
@@ -1418,6 +1480,150 @@ impl AppServer {
                         }
                     },
                     None => failure(id, error(-32019, "settings_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpListServers(_) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => match admin.list_servers().await {
+                        Ok(result) => success(id, ResponsePayload::McpServersListed(result)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32021, "mcp_admin_failed", &message),
+                        ),
+                    },
+                    None => success(
+                        id,
+                        ResponsePayload::McpServersListed(McpServerListResult::default()),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpAddServer(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.add_server(&actor, &params).await {
+                            Ok(record) => success(id, ResponsePayload::McpServerAdded(record)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpUpdateServer(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.update_server(&actor, &params).await {
+                            Ok(record) => success(id, ResponsePayload::McpServerUpdated(record)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpRemoveServer(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.remove_server(&actor, &params.name).await {
+                            Ok(()) => success(
+                                id,
+                                ResponsePayload::McpServerRemoved(LegacyOkResult { ok: true }),
+                            ),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpConnect(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.connect(&actor, &params.name).await {
+                            Ok(result) => success(id, ResponsePayload::McpConnected(result)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpDisconnect(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.disconnect(&actor, &params.name).await {
+                            Ok(result) => success(id, ResponsePayload::McpDisconnected(result)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpHealth(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => match admin.health(&params.name).await {
+                        Ok(result) => success(id, ResponsePayload::McpHealth(result)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32021, "mcp_admin_failed", &message),
+                        ),
+                    },
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpListTools(_) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => match admin.list_tools().await {
+                        Ok(result) => success(id, ResponsePayload::McpToolsListed(result)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32021, "mcp_admin_failed", &message),
+                        ),
+                    },
+                    None => success(
+                        id,
+                        ResponsePayload::McpToolsListed(McpToolListResult::default()),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpReconnectAll(_) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.reconnect_all(&actor).await {
+                            Ok(result) => success(id, ResponsePayload::McpReconnected(result)),
+                            Err(message) => failure(
+                                id,
+                                masked_detail_error(-32021, "mcp_admin_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -4815,6 +5021,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "extension_admin",
         "extension_admin_write",
         "local_socket",
+        "mcp_admin",
         "plan_execution",
         "recovery",
         "run_cancellation",

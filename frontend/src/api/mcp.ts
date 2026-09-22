@@ -1,12 +1,14 @@
 import { api } from "./client"
+import { idempotencyKey, sdk } from "./sdk"
+import { toMcpServer, toMcpTool } from "./mappers"
 import type {
   MCPConnectResponse,
   MCPHealthResponse,
+  MCPServer,
   MCPServerCreate,
   MCPServerListResponse,
   MCPServerUpdate,
   MCPToolListResponse,
-  MCPServer,
   MCPStoreSearchResponse,
   MCPStoreInstallRequest,
   MCPStoreInstallResponse,
@@ -14,38 +16,98 @@ import type {
 
 export const mcpApi = {
   /** List all configured MCP servers with status and tools. */
-  listServers: () => api.get<MCPServerListResponse>("/api/mcp/servers"),
+  listServers: async (): Promise<MCPServerListResponse> => {
+    const result = await sdk.mcpListServers({})
+    return { servers: result.servers.map(toMcpServer) }
+  },
 
   /** Add a new MCP server configuration. */
-  addServer: (body: MCPServerCreate) => api.post<MCPServer>("/api/mcp/servers", body),
+  addServer: async (body: MCPServerCreate): Promise<MCPServer> =>
+    toMcpServer(
+      await sdk.mcpAddServer({
+        idempotencyKey: idempotencyKey(),
+        name: body.name,
+        transport: body.transport ?? "stdio",
+        command: body.command ?? "",
+        args: body.args ?? [],
+        env: body.env ?? {},
+        url: body.url ?? "",
+        headers: body.headers ?? {},
+        enabled: body.enabled ?? true,
+        description: body.description ?? "",
+        capabilities: body.capabilities ?? [],
+        timeoutS: body.timeout_s ?? 30,
+        version: "",
+        author: "",
+        compatibility: "",
+      })
+    ),
 
   /** Update an existing MCP server configuration. */
-  updateServer: (name: string, body: MCPServerUpdate) =>
-    api.patch<MCPServer>(`/api/mcp/servers/${encodeURIComponent(name)}`, body),
+  updateServer: async (name: string, body: MCPServerUpdate): Promise<MCPServer> =>
+    toMcpServer(
+      await sdk.mcpUpdateServer({
+        idempotencyKey: idempotencyKey(),
+        name,
+        transport: body.transport ?? null,
+        command: body.command ?? null,
+        args: body.args ?? null,
+        env: body.env ?? null,
+        url: body.url ?? null,
+        headers: body.headers ?? null,
+        enabled: body.enabled ?? null,
+        description: body.description ?? null,
+        capabilities: body.capabilities ?? null,
+        timeoutS: body.timeout_s ?? null,
+      })
+    ),
 
   /** Remove an MCP server. */
-  removeServer: (name: string) =>
-    api.delete<void>(`/api/mcp/servers/${encodeURIComponent(name)}`),
+  removeServer: async (name: string): Promise<void> => {
+    await sdk.mcpRemoveServer({ name })
+  },
 
   /** Connect to an MCP server and discover tools. */
-  connect: (name: string) =>
-    api.post<MCPConnectResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/connect`),
+  connect: async (name: string): Promise<MCPConnectResponse> => {
+    const result = await sdk.mcpConnect({ name })
+    return {
+      name: result.name,
+      status: result.status,
+      tools_count: result.toolsCount,
+      error: result.error ?? null,
+    }
+  },
 
   /** Disconnect an MCP server. */
-  disconnect: (name: string) =>
-    api.post<MCPConnectResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/disconnect`),
+  disconnect: async (name: string): Promise<MCPConnectResponse> => {
+    const result = await sdk.mcpDisconnect({ name })
+    return {
+      name: result.name,
+      status: result.status,
+      tools_count: result.toolsCount,
+      error: result.error ?? null,
+    }
+  },
 
   /** Health-check a connected server. */
-  health: (name: string) =>
-    api.get<MCPHealthResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/health`),
+  health: async (name: string): Promise<MCPHealthResponse> => {
+    const result = await sdk.mcpHealth({ name })
+    return { name: result.name, healthy: result.healthy }
+  },
 
   /** List all tools across connected MCP servers. */
-  listTools: () => api.get<MCPToolListResponse>("/api/mcp/tools"),
+  listTools: async (): Promise<MCPToolListResponse> => {
+    const result = await sdk.mcpListTools({})
+    return { tools: result.tools.map(toMcpTool) }
+  },
 
   /** Reconnect all enabled servers. */
-  reconnectAll: () => api.post<MCPServerListResponse>("/api/mcp/reconnect-all"),
+  reconnectAll: async (): Promise<MCPServerListResponse> => {
+    const result = await sdk.mcpReconnectAll({})
+    return { servers: result.servers.map(toMcpServer) }
+  },
 
-  // --- Store / Marketplace ---
+  // --- Store / Marketplace (network access to the MCP Registry) ---
 
   /** Search the official MCP Registry. */
   storeSearch: (q: string, limit = 10) =>

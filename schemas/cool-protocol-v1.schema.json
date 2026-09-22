@@ -2102,6 +2102,159 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "mcp.list_servers"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.add_server"
+            },
+            "params": {
+              "$ref": "#/$defs/McpAddServerParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.update_server"
+            },
+            "params": {
+              "$ref": "#/$defs/McpUpdateServerParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.remove_server"
+            },
+            "params": {
+              "$ref": "#/$defs/McpServerNameParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.connect"
+            },
+            "params": {
+              "$ref": "#/$defs/McpServerNameParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.disconnect"
+            },
+            "params": {
+              "$ref": "#/$defs/McpServerNameParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.health"
+            },
+            "params": {
+              "$ref": "#/$defs/McpServerNameParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.list_tools"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.reconnect_all"
+            },
+            "params": {
+              "$ref": "#/$defs/EmptyParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "conversations.list"
             },
             "params": {
@@ -6052,6 +6205,246 @@
         "id"
       ]
     },
+    "McpAddServerParams": {
+      "description": "Add a global MCP server configuration.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "author": {
+          "type": "string",
+          "default": ""
+        },
+        "capabilities": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string",
+          "default": ""
+        },
+        "compatibility": {
+          "type": "string",
+          "default": ""
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "name": {
+          "type": "string"
+        },
+        "timeoutS": {
+          "type": "number",
+          "format": "double",
+          "default": 30.0
+        },
+        "transport": {
+          "type": "string",
+          "default": "stdio"
+        },
+        "url": {
+          "type": "string",
+          "default": ""
+        },
+        "version": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "name"
+      ]
+    },
+    "McpConnectResult": {
+      "description": "Result of a connect/disconnect/install action.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "toolsCount": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "toolsCount"
+      ]
+    },
+    "McpHealthResult": {
+      "description": "Result of a health probe.",
+      "type": "object",
+      "properties": {
+        "healthy": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "healthy"
+      ]
+    },
+    "McpServerAdminRecord": {
+      "description": "One configured MCP server with its live status and discovered tools.\n`env`/`headers`/`cwd` are deliberately absent (they can carry credentials).",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "author": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string"
+        },
+        "compatibility": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "serverInfo": {
+          "default": null
+        },
+        "status": {
+          "description": "`disconnected`, `connecting`, `connected` or `error`.",
+          "type": "string"
+        },
+        "timeoutS": {
+          "type": "number",
+          "format": "double"
+        },
+        "tools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpToolRecord"
+          }
+        },
+        "transport": {
+          "description": "`stdio` or `http`.",
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "transport",
+        "status",
+        "enabled",
+        "description",
+        "command",
+        "args",
+        "url",
+        "capabilities",
+        "timeoutS",
+        "version",
+        "author",
+        "compatibility"
+      ]
+    },
+    "McpServerListResult": {
+      "description": "All configured MCP servers.",
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpServerAdminRecord"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpServerNameParams": {
+      "description": "Address one configured MCP server by name.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
     "McpServerRecord": {
       "description": "One MCP server bundled by an enabled plugin.",
       "type": "object",
@@ -6078,6 +6471,20 @@
         "endpoint"
       ]
     },
+    "McpToolListResult": {
+      "description": "All tools discovered across connected servers.",
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpToolRecord"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "McpToolPolicyRecord": {
       "description": "The configured MCP tool policy. `enabled` is `None` when the policy keeps\nevery non-disabled tool; `disabled` always applies.",
       "type": "object",
@@ -6101,6 +6508,124 @@
       "additionalProperties": false,
       "required": [
         "disabled"
+      ]
+    },
+    "McpToolRecord": {
+      "description": "One tool exposed by a configured MCP server.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": {
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        },
+        "qualifiedName": {
+          "type": "string"
+        },
+        "serverName": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "qualifiedName",
+        "description",
+        "serverName"
+      ]
+    },
+    "McpUpdateServerParams": {
+      "description": "Partial update for a global MCP server configuration.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "env": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "name": {
+          "type": "string"
+        },
+        "timeoutS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "transport": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "name"
       ]
     },
     "MemoryActivityBucketRecord": {
@@ -8575,6 +9100,159 @@
             },
             "value": {
               "$ref": "#/$defs/SystemPromptRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_servers_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/McpServerListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_server_added"
+            },
+            "value": {
+              "$ref": "#/$defs/McpServerAdminRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_server_updated"
+            },
+            "value": {
+              "$ref": "#/$defs/McpServerAdminRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_server_removed"
+            },
+            "value": {
+              "$ref": "#/$defs/LegacyOkResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_connected"
+            },
+            "value": {
+              "$ref": "#/$defs/McpConnectResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_disconnected"
+            },
+            "value": {
+              "$ref": "#/$defs/McpConnectResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_health"
+            },
+            "value": {
+              "$ref": "#/$defs/McpHealthResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_tools_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/McpToolListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_reconnected"
+            },
+            "value": {
+              "$ref": "#/$defs/McpServerListResult"
             }
           },
           "additionalProperties": false,

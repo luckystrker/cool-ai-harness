@@ -8,13 +8,15 @@ use cool_agent::{
 };
 use cool_app_server::client::new_idempotency_key;
 use cool_app_server::{
-    AppClient, AppServer, AppSettings, ExtensionAdmin, RunLifecycle, ServerConfig,
+    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
 };
 use cool_protocol::{
     CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
-    HookRecord, HookReviewParams, McpServerRecord, McpToolPolicyRecord, PluginEnabledParams,
-    PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult, SystemPromptRecord,
-    SystemPromptSetParams, WorkerRecord,
+    HookRecord, HookReviewParams, McpAddServerParams, McpConnectResult, McpHealthResult,
+    McpServerAdminRecord, McpServerListResult, McpServerNameParams, McpServerRecord,
+    McpToolListResult, McpToolPolicyRecord, McpToolRecord, McpUpdateServerParams,
+    PluginEnabledParams, PluginRecord, ResponsePayload, SkillRecord, StatusEntry, StatusGetResult,
+    SystemPromptRecord, SystemPromptSetParams, WorkerRecord,
 };
 use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
@@ -663,6 +665,236 @@ async fn extension_mutations_are_actor_scoped_and_require_an_admin() {
     assert_eq!(error.cool_code, "extension_mutation_failed");
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
+}
+
+#[derive(Default)]
+struct RecordingMcpAdmin {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+fn admin_record(name: &str) -> McpServerAdminRecord {
+    McpServerAdminRecord {
+        name: name.to_owned(),
+        transport: "stdio".to_owned(),
+        status: "connected".to_owned(),
+        enabled: true,
+        description: String::new(),
+        command: "echo".to_owned(),
+        args: Vec::new(),
+        url: String::new(),
+        capabilities: Vec::new(),
+        timeout_s: 30.0,
+        version: String::new(),
+        author: String::new(),
+        compatibility: String::new(),
+        error: None,
+        tools: vec![McpToolRecord {
+            name: "echo".to_owned(),
+            qualified_name: format!("mcp_{name}_echo"),
+            description: String::new(),
+            server_name: name.to_owned(),
+            input_schema: json!({"type": "object"}),
+        }],
+        server_info: None,
+    }
+}
+
+#[async_trait]
+impl McpAdmin for RecordingMcpAdmin {
+    async fn list_servers(&self) -> Result<McpServerListResult, String> {
+        Ok(McpServerListResult {
+            servers: vec![admin_record("demo")],
+        })
+    }
+
+    async fn add_server(
+        &self,
+        actor: &str,
+        params: &McpAddServerParams,
+    ) -> Result<McpServerAdminRecord, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("add:{actor}:{}:{}", params.name, params.transport));
+        Ok(admin_record(&params.name))
+    }
+
+    async fn update_server(
+        &self,
+        actor: &str,
+        params: &McpUpdateServerParams,
+    ) -> Result<McpServerAdminRecord, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("update:{actor}:{}", params.name));
+        Ok(admin_record(&params.name))
+    }
+
+    async fn remove_server(&self, actor: &str, name: &str) -> Result<(), String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("remove:{actor}:{name}"));
+        Ok(())
+    }
+
+    async fn connect(&self, actor: &str, name: &str) -> Result<McpConnectResult, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("connect:{actor}:{name}"));
+        Ok(McpConnectResult {
+            name: name.to_owned(),
+            status: "connected".to_owned(),
+            tools_count: 1,
+            error: None,
+        })
+    }
+
+    async fn disconnect(&self, actor: &str, name: &str) -> Result<McpConnectResult, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("disconnect:{actor}:{name}"));
+        Ok(McpConnectResult {
+            name: name.to_owned(),
+            status: "disconnected".to_owned(),
+            tools_count: 0,
+            error: None,
+        })
+    }
+
+    async fn health(&self, name: &str) -> Result<McpHealthResult, String> {
+        Ok(McpHealthResult {
+            name: name.to_owned(),
+            healthy: true,
+        })
+    }
+
+    async fn list_tools(&self) -> Result<McpToolListResult, String> {
+        Ok(McpToolListResult {
+            tools: vec![admin_record("demo").tools[0].clone()],
+        })
+    }
+
+    async fn reconnect_all(&self, actor: &str) -> Result<McpServerListResult, String> {
+        self.seen.lock().unwrap().push(format!("reconnect:{actor}"));
+        self.list_servers().await
+    }
+}
+
+fn add_params(name: &str) -> McpAddServerParams {
+    McpAddServerParams {
+        idempotency_key: key("mcp-add"),
+        name: name.to_owned(),
+        transport: "stdio".to_owned(),
+        command: "echo".to_owned(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        url: String::new(),
+        headers: std::collections::BTreeMap::new(),
+        enabled: true,
+        description: String::new(),
+        capabilities: Vec::new(),
+        timeout_s: 30.0,
+        version: String::new(),
+        author: String::new(),
+        compatibility: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn mcp_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No admin configured: a mutation fails closed and a read answers empty.
+    let (client, task) = connected_client(server.clone()).await;
+    let error = client
+        .request(Command::McpAddServer(add_params("demo")))
+        .await
+        .expect_err("a mutation without an admin must fail");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "mcp_admin_unavailable");
+    let payload = client
+        .request(Command::McpListServers(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::McpServersListed(list) = payload else {
+        panic!("mcp.list_servers must return McpServersListed, got {payload:?}");
+    };
+    assert!(list.servers.is_empty());
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let admin = Arc::new(RecordingMcpAdmin::default());
+    let server = server.with_mcp_admin(admin.clone());
+    let (client, task) = connected_client(server).await;
+
+    let payload = client
+        .request(Command::McpAddServer(add_params("demo")))
+        .await
+        .unwrap();
+    let ResponsePayload::McpServerAdded(record) = payload else {
+        panic!("mcp.add_server must return McpServerAdded, got {payload:?}");
+    };
+    assert_eq!(record.name, "demo");
+    assert_eq!(record.tools[0].qualified_name, "mcp_demo_echo");
+
+    let payload = client
+        .request(Command::McpConnect(McpServerNameParams {
+            name: "demo".to_owned(),
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::McpConnected(result) = payload else {
+        panic!("mcp.connect must return McpConnected, got {payload:?}");
+    };
+    assert_eq!(result.status, "connected");
+    assert_eq!(result.tools_count, 1);
+
+    let payload = client
+        .request(Command::McpHealth(McpServerNameParams {
+            name: "demo".to_owned(),
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::McpHealth(result) = payload else {
+        panic!("mcp.health must return McpHealth, got {payload:?}");
+    };
+    assert!(result.healthy);
+
+    let payload = client
+        .request(Command::McpListTools(EmptyParams {}))
+        .await
+        .unwrap();
+    let ResponsePayload::McpToolsListed(tools) = payload else {
+        panic!("mcp.list_tools must return McpToolsListed, got {payload:?}");
+    };
+    assert_eq!(tools.tools.len(), 1);
+
+    let payload = client
+        .request(Command::McpRemoveServer(McpServerNameParams {
+            name: "demo".to_owned(),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(payload, ResponsePayload::McpServerRemoved(_)));
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+    assert_eq!(
+        admin.seen.lock().unwrap().as_slice(),
+        [
+            "add:local-user:demo:stdio",
+            "connect:local-user:demo",
+            "remove:local-user:demo",
+        ],
+        "the server-derived actor must reach the host for every mutation"
+    );
 }
 
 #[tokio::test]

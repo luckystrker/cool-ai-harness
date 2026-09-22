@@ -1,3 +1,4 @@
+mod mcp_admin;
 mod store_tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -288,6 +289,9 @@ async fn build_server(
     server = server.with_app_settings(Arc::new(FileAppSettings::new(
         data_dir.join("settings.json"),
     )));
+    // The operator-owned global MCP admin (config store + live session registry)
+    // is always available; plugin-bundled MCP servers stay on `extensions.status`.
+    server = server.with_mcp_admin(Arc::new(mcp_admin::CliMcpAdmin::new(data_dir)));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }
@@ -1925,6 +1929,11 @@ mod tests {
             "rss_list",
             "rss_subscribe",
             "rss_unsubscribe",
+            "create_task",
+            "list_tasks",
+            "update_task",
+            "delete_task",
+            "parse_cron",
         ] {
             assert!(registry.get(name).is_some(), "{name} must be registered");
         }
@@ -2227,6 +2236,229 @@ mod tests {
         let listed = rss_list.execute(&context, json!({})).await.unwrap();
         assert!(listed.output.as_array().unwrap().is_empty());
 
+        // Task tools: natural-language schedule parsing, template expansion and
+        // CRUD over the legacy store (the executor-backed `run_task_now` is out
+        // of parity scope).
+        let parse = registry.get("parse_cron").unwrap();
+        let parsed = parse
+            .execute(&context, json!({"text": "every weekday at 7:30"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            parsed
+                .output
+                .get("cron_expression")
+                .and_then(serde_json::Value::as_str),
+            Some("30 7 * * 1-5")
+        );
+        assert_eq!(
+            parsed
+                .output
+                .get("next_runs_utc")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            parse
+                .execute(&context, json!({"text": "whenever the moon is full"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        let create_task = registry.get("create_task").unwrap();
+        let created = create_task
+            .execute(
+                &context,
+                json!({
+                    "name": "Standup digest",
+                    "prompt": "Summarize the standup",
+                    "schedule": "every day at 8pm",
+                    "delivery_channels": ["ui"],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !created.is_error,
+            "create_task failed: {:?}",
+            created.output
+        );
+        let created_task = created.output.get("created").unwrap();
+        assert_eq!(
+            created_task
+                .get("cron_expression")
+                .and_then(serde_json::Value::as_str),
+            Some("0 20 * * *")
+        );
+        let task_id = created_task
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap();
+        // A template fills prompt/schedule when the caller leaves them unset.
+        let templated = create_task
+            .execute(&context, json!({"name": "News", "template": "news-digest"}))
+            .await
+            .unwrap();
+        assert!(!templated.is_error, "{:?}", templated.output);
+        assert_eq!(
+            templated
+                .output
+                .get("created")
+                .unwrap()
+                .get("cron_expression")
+                .and_then(serde_json::Value::as_str),
+            Some("0 8 * * *")
+        );
+        // The template also supplies the prompt, workflow type, tools and the
+        // tool's `max_iterations` (Python tool parity, unlike the REST path).
+        let news_id = templated
+            .output
+            .get("created")
+            .unwrap()
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap();
+        let news = store.get_task("local-user", news_id).unwrap();
+        assert_eq!(news.workflow_type.as_deref(), Some("news-digest"));
+        assert_eq!(news.max_iterations, 12);
+        assert!(!news.prompt.is_empty());
+        assert!(
+            !news
+                .tools_whitelist
+                .as_ref()
+                .and_then(serde_json::Value::as_array)
+                .unwrap()
+                .is_empty()
+        );
+        // Python `or` semantics: an empty string/list counts as unset and falls
+        // back to the template (not an error and not an empty allowlist).
+        let empty_fallback = create_task
+            .execute(
+                &context,
+                json!({
+                    "name": "News empty",
+                    "template": "news-digest",
+                    "prompt": "",
+                    "tools": [],
+                    "delivery_channels": [],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!empty_fallback.is_error, "{:?}", empty_fallback.output);
+        let empty_id = empty_fallback
+            .output
+            .get("created")
+            .unwrap()
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap();
+        let empty = store.get_task("local-user", empty_id).unwrap();
+        assert!(!empty.prompt.is_empty());
+        assert!(
+            !empty
+                .tools_whitelist
+                .as_ref()
+                .and_then(serde_json::Value::as_array)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            empty_fallback
+                .output
+                .get("created")
+                .unwrap()
+                .get("delivery_channels")
+                .unwrap(),
+            &json!(["ui"])
+        );
+        // An unknown template and a missing prompt/schedule fail closed.
+        assert!(
+            create_task
+                .execute(&context, json!({"name": "x", "template": "nope"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(
+            create_task
+                .execute(&context, json!({"name": "x"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        let list_tasks = registry.get("list_tasks").unwrap();
+        let listed = list_tasks.execute(&context, json!({})).await.unwrap();
+        assert_eq!(listed.output.as_array().unwrap().len(), 3);
+
+        let update_task = registry.get("update_task").unwrap();
+        let updated = update_task
+            .execute(&context, json!({"task_id": task_id, "enabled": false}))
+            .await
+            .unwrap();
+        assert_eq!(
+            updated
+                .output
+                .get("updated")
+                .unwrap()
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        // A natural-language reschedule updates the cron expression.
+        let rescheduled = update_task
+            .execute(
+                &context,
+                json!({"task_id": task_id, "schedule": "every hour"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rescheduled
+                .output
+                .get("updated")
+                .unwrap()
+                .get("cron_expression")
+                .and_then(serde_json::Value::as_str),
+            Some("0 * * * *")
+        );
+        // Nothing to update, and a missing task, both fail closed.
+        assert!(
+            update_task
+                .execute(&context, json!({"task_id": task_id}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(
+            update_task
+                .execute(&context, json!({"task_id": 999_999, "name": "x"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        let delete_task = registry.get("delete_task").unwrap();
+        assert!(
+            !delete_task
+                .execute(&context, json!({"task_id": task_id}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(
+            delete_task
+                .execute(&context, json!({"task_id": task_id}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
         // WS2(d): the canonical catalog is a valid picker source — it contains the
         // builtins and the ported store families, with unique names.
         let catalog: Vec<String> = registry
@@ -2240,6 +2472,8 @@ mod tests {
             "memory_recall",
             "read_wiki",
             "rss_list",
+            "create_task",
+            "parse_cron",
         ] {
             assert!(
                 catalog.iter().any(|name| name == expected),
@@ -2277,5 +2511,92 @@ mod tests {
         assert_eq!(config.root, PathBuf::from("/plugins/demo"));
         assert_eq!(config.data, PathBuf::from("/data/plugins/demo"));
         assert_eq!(config.workspace, Some(PathBuf::from("/workspace/project")));
+    }
+
+    #[tokio::test]
+    async fn mcp_admin_config_round_trips_and_fails_closed() {
+        use cool_app_server::McpAdmin;
+        let directory = tempfile::tempdir().unwrap();
+        let admin = mcp_admin::CliMcpAdmin::new(directory.path());
+        assert!(admin.list_servers().await.unwrap().servers.is_empty());
+
+        let key = || {
+            cool_protocol::IdempotencyKey::new(cool_app_server::client::new_idempotency_key(
+                "mcp-add",
+            ))
+            .unwrap()
+        };
+        let add = |name: &str| cool_protocol::McpAddServerParams {
+            idempotency_key: key(),
+            name: name.to_owned(),
+            transport: "stdio".to_owned(),
+            command: "definitely-not-a-real-mcp-binary".to_owned(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            url: String::new(),
+            headers: std::collections::BTreeMap::new(),
+            enabled: true,
+            description: String::new(),
+            capabilities: Vec::new(),
+            timeout_s: 5.0,
+            version: String::new(),
+            author: String::new(),
+            compatibility: String::new(),
+        };
+
+        assert!(
+            admin
+                .add_server("local-user", &add("Bad Name"))
+                .await
+                .is_err()
+        );
+        // Python bounds the name at 64 characters.
+        assert!(
+            admin
+                .add_server("local-user", &add(&"a".repeat(65)))
+                .await
+                .is_err()
+        );
+        let record = admin.add_server("local-user", &add("demo")).await.unwrap();
+        assert_eq!(record.name, "demo");
+        assert_eq!(record.status, "disconnected");
+        // A duplicate name is rejected.
+        assert!(admin.add_server("local-user", &add("demo")).await.is_err());
+        assert_eq!(admin.list_servers().await.unwrap().servers.len(), 1);
+
+        // A connect to a missing executable records an error instead of panicking.
+        let result = admin.connect("local-user", "demo").await.unwrap();
+        assert_eq!(result.status, "error");
+        assert!(result.error.is_some());
+        assert!(!admin.health("demo").await.unwrap().healthy);
+
+        let update = cool_protocol::McpUpdateServerParams {
+            idempotency_key: key(),
+            name: "demo".to_owned(),
+            transport: None,
+            command: None,
+            args: None,
+            env: None,
+            url: None,
+            headers: None,
+            enabled: Some(false),
+            description: Some("demo server".to_owned()),
+            capabilities: None,
+            timeout_s: None,
+        };
+        let updated = admin.update_server("local-user", &update).await.unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.description, "demo server");
+        // A missing server fails closed.
+        let missing = cool_protocol::McpUpdateServerParams {
+            name: "nope".to_owned(),
+            ..update
+        };
+        assert!(admin.update_server("local-user", &missing).await.is_err());
+
+        admin.remove_server("local-user", "demo").await.unwrap();
+        assert!(admin.remove_server("local-user", "demo").await.is_err());
+        assert!(admin.list_servers().await.unwrap().servers.is_empty());
+        assert!(directory.path().join("mcp-admin-audit.jsonl").exists());
     }
 }

@@ -137,65 +137,65 @@
     {
       "file": "mcp.ts",
       "member": "listServers",
-      "http": "GET /api/mcp/servers",
-      "status": "deferred",
-      "rationale": "MCP servers are owned by the M8 Rust extension runtime (PluginStore/mcp.json), not by the legacy SQLite schema; M11 wires the SDK admin facade"
+      "http": "POST /api/rpc (mcp.list_servers)",
+      "status": "sdk",
+      "command": "mcp.list_servers"
     },
     {
       "file": "mcp.ts",
       "member": "addServer",
-      "http": "POST /api/mcp/servers",
-      "status": "deferred",
-      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+      "http": "POST /api/rpc (mcp.add_server)",
+      "status": "sdk",
+      "command": "mcp.add_server"
     },
     {
       "file": "mcp.ts",
       "member": "updateServer",
-      "http": "PATCH /api/mcp/servers/{name}",
-      "status": "deferred",
-      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+      "http": "POST /api/rpc (mcp.update_server)",
+      "status": "sdk",
+      "command": "mcp.update_server"
     },
     {
       "file": "mcp.ts",
       "member": "removeServer",
-      "http": "DELETE /api/mcp/servers/{name}",
-      "status": "deferred",
-      "rationale": "M8 extension runtime owns MCP config; no legacy SQL table exists"
+      "http": "POST /api/rpc (mcp.remove_server)",
+      "status": "sdk",
+      "command": "mcp.remove_server"
     },
     {
       "file": "mcp.ts",
       "member": "connect",
-      "http": "POST /api/mcp/servers/{name}/connect",
-      "status": "deferred",
-      "rationale": "M8 runtime transport action (stdio/HTTP session), not a store operation"
+      "http": "POST /api/rpc (mcp.connect)",
+      "status": "sdk",
+      "command": "mcp.connect"
     },
     {
       "file": "mcp.ts",
       "member": "disconnect",
-      "http": "POST /api/mcp/servers/{name}/disconnect",
-      "status": "deferred",
-      "rationale": "M8 runtime transport action, not a store operation"
+      "http": "POST /api/rpc (mcp.disconnect)",
+      "status": "sdk",
+      "command": "mcp.disconnect"
     },
     {
       "file": "mcp.ts",
       "member": "health",
-      "http": "GET /api/mcp/servers/{name}/health",
-      "status": "deferred",
-      "rationale": "M8 runtime transport action, not a store operation"
+      "http": "POST /api/rpc (mcp.health)",
+      "status": "sdk",
+      "command": "mcp.health"
     },
     {
       "file": "mcp.ts",
       "member": "listTools",
-      "http": "GET /api/mcp/tools",
-      "status": "deferred",
-      "rationale": "M8 runtime tool discovery, not a store operation"
+      "http": "POST /api/rpc (mcp.list_tools)",
+      "status": "sdk",
+      "command": "mcp.list_tools"
     },
     {
       "file": "mcp.ts",
       "member": "reconnectAll",
-      "http": "POST /api/mcp/reconnect-all",
-      "status": "deferred",
-      "rationale": "M8 runtime transport action, not a store operation"
+      "http": "POST /api/rpc (mcp.reconnect_all)",
+      "status": "sdk",
+      "command": "mcp.reconnect_all"
     },
     {
       "file": "mcp.ts",
