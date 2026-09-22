@@ -200,7 +200,7 @@ export interface ModelInfo {
   completion_price: number | null
 }
 
-/** Request body for POST /providers/models/preview (unsaved-provider probe). */
+/** Request body for the previewModels probe (unsaved-provider model list). */
 export interface ModelsPreviewRequest {
   name: string
   base_url?: string

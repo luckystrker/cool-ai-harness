@@ -89,6 +89,17 @@ pub struct ProviderUpdateParams {
     pub chat_models: Option<Value>,
 }
 
+/// Live model-list probe for an unsaved provider (create form). The plaintext
+/// key is used in memory only and never persisted.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ProvidersPreviewModelsParams {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub api_key: String,
+}
+
 /// One budget configuration row.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

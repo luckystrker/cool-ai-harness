@@ -109,16 +109,16 @@
     {
       "file": "providers.ts",
       "member": "listModels",
-      "http": "GET /api/providers/{id}/models",
-      "status": "deferred",
-      "rationale": "Python lists models with a live provider call; Rust providers.models only projects the cached chat_models catalog, so the live list stays deferred"
+      "http": "POST /api/rpc (providers.list_models)",
+      "status": "sdk",
+      "command": "providers.list_models"
     },
     {
       "file": "providers.ts",
       "member": "previewModels",
-      "http": "POST /api/providers/models/preview",
-      "status": "deferred",
-      "rationale": "live model-list probe against an unsaved provider needs the M11 provider runtime and network allowlist; cool-store only holds cached chat_models"
+      "http": "POST /api/rpc (providers.preview_models)",
+      "status": "sdk",
+      "command": "providers.preview_models"
     },
     {
       "file": "settings.ts",

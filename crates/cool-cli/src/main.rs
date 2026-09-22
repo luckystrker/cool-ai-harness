@@ -1,4 +1,5 @@
 mod mcp_admin;
+mod provider_probe;
 mod skills_admin;
 mod store_tools;
 
@@ -265,7 +266,7 @@ async fn build_server(
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
     let workspace = current_workspace()?;
-    let (registry, extensions, plugin_store) = extension_registry(data_dir, legacy).await;
+    let (registry, extensions, plugin_store) = extension_registry(data_dir, legacy.clone()).await;
     let agent = AgentRuntime::new(provider, registry);
     let mut server = AppServer::with_agent_runtime(
         config,
@@ -295,6 +296,11 @@ async fn build_server(
     server = server.with_mcp_admin(Arc::new(mcp_admin::CliMcpAdmin::new(data_dir)));
     // The operator-owned global skills store (a SKILL.md tree on the data root).
     server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
+    // The live provider model-list probe (uses the stored provider rows + keyring).
+    server = server.with_provider_probe(Arc::new(provider_probe::CliProviderProbe::new(
+        legacy,
+        configured_secrets(),
+    )));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }

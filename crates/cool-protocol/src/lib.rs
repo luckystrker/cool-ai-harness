@@ -271,6 +271,10 @@ pub enum Command {
     ProvidersDelete(IdempotentIdParams),
     #[serde(rename = "providers.models")]
     ProvidersModels(LegacyIdParams),
+    #[serde(rename = "providers.list_models")]
+    ProvidersListModels(LegacyIdParams),
+    #[serde(rename = "providers.preview_models")]
+    ProvidersPreviewModels(ProvidersPreviewModelsParams),
     #[serde(rename = "memory.list")]
     MemoryList(MemoryListParams),
     #[serde(rename = "memory.get")]
@@ -1713,6 +1717,8 @@ pub enum ResponsePayload {
     ProvidersUpdated(ProviderRecord),
     ProvidersDeleted(DeletedResult),
     ProvidersModels(Vec<ModelInfoRecord>),
+    ProvidersModelsLive(Vec<ModelInfoRecord>),
+    ProvidersModelsPreview(Vec<ModelInfoRecord>),
     MemoryListed(Vec<MemoryRecord>),
     MemoryGot(MemoryRecord),
     MemoryCreated(MemoryRecord),

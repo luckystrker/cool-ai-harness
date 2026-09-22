@@ -1,6 +1,5 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
-import { toProvider } from "./mappers"
+import { toModelInfo, toProvider } from "./mappers"
 import type { ModelInfo, ModelsPreviewRequest, ProviderCreate, ProviderUpdate } from "./types"
 import type { JsonValue } from "./generated/cool_protocol"
 
@@ -46,10 +45,16 @@ export const providersApi = {
     sdk.providersDelete({ idempotencyKey: idempotencyKey(), id }),
 
   /** Models served by an already-saved provider (live provider probe). */
-  listModels: (id: number) =>
-    api.get<ModelInfo[]>(`/api/providers/${id}/models`),
+  listModels: async (id: number): Promise<ModelInfo[]> =>
+    (await sdk.providersListModels({ id })).map(toModelInfo),
 
   /** Live model-list probe for an unsaved provider (create form). */
-  previewModels: (body: ModelsPreviewRequest) =>
-    api.post<ModelInfo[]>("/api/providers/models/preview", body),
+  previewModels: async (body: ModelsPreviewRequest): Promise<ModelInfo[]> =>
+    (
+      await sdk.providersPreviewModels({
+        name: body.name,
+        baseUrl: body.base_url ?? null,
+        apiKey: body.api_key,
+      })
+    ).map(toModelInfo),
 }

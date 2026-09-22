@@ -8,14 +8,14 @@ use cool_agent::{
 };
 use cool_app_server::client::new_idempotency_key;
 use cool_app_server::{
-    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
-    SkillAdmin,
+    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, ProviderProbe, RunLifecycle,
+    ServerConfig, SkillAdmin,
 };
 use cool_protocol::{
     CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
     HookRecord, HookReviewParams, McpAddServerParams, McpConnectResult, McpHealthResult,
     McpServerAdminRecord, McpServerListResult, McpServerNameParams, McpServerRecord,
-    McpToolListResult, McpToolPolicyRecord, McpToolRecord, McpUpdateServerParams,
+    McpToolListResult, McpToolPolicyRecord, McpToolRecord, McpUpdateServerParams, ModelInfoRecord,
     PluginEnabledParams, PluginRecord, ResponsePayload, SkillAdminRecord, SkillCreateParams,
     SkillCreateResult, SkillListResult, SkillRecord, StatusEntry, StatusGetResult,
     SystemPromptRecord, SystemPromptSetParams, WorkerRecord,
@@ -1037,6 +1037,93 @@ async fn skill_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
         ["create:local-user:demo", "delete:local-user:demo"],
         "the server-derived actor must reach the host for every mutation"
     );
+}
+
+#[derive(Default)]
+struct RecordingProviderProbe;
+
+#[async_trait]
+impl ProviderProbe for RecordingProviderProbe {
+    async fn list_models(
+        &self,
+        _actor: &str,
+        provider_id: i64,
+    ) -> Result<Vec<ModelInfoRecord>, String> {
+        Ok(vec![ModelInfoRecord {
+            id: format!("model-{provider_id}"),
+            context_window: Some(128_000),
+            prompt_price: Some(0.1),
+            completion_price: Some(0.2),
+        }])
+    }
+
+    async fn preview_models(
+        &self,
+        name: &str,
+        _base_url: Option<&str>,
+        _api_key: &str,
+    ) -> Result<Vec<ModelInfoRecord>, String> {
+        Ok(vec![ModelInfoRecord {
+            id: format!("{name}-model"),
+            context_window: None,
+            prompt_price: None,
+            completion_price: None,
+        }])
+    }
+}
+
+#[tokio::test]
+async fn provider_probe_dispatch_requires_a_host_and_returns_live_models() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No probe configured -> the read fails closed.
+    let (client, task) = connected_client(server.clone()).await;
+    let error = client
+        .request(Command::ProvidersListModels(
+            cool_protocol::LegacyIdParams { id: 1 },
+        ))
+        .await
+        .expect_err("a probe without a host must fail");
+    let cool_app_server::ClientError::Protocol(error) = error else {
+        panic!("expected a canonical protocol failure, got {error:?}");
+    };
+    assert_eq!(error.cool_code, "provider_probe_unavailable");
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let server = server.with_provider_probe(Arc::new(RecordingProviderProbe));
+    let (client, task) = connected_client(server).await;
+
+    let payload = client
+        .request(Command::ProvidersListModels(
+            cool_protocol::LegacyIdParams { id: 7 },
+        ))
+        .await
+        .unwrap();
+    let ResponsePayload::ProvidersModelsLive(models) = payload else {
+        panic!("providers.list_models must return ProvidersModelsLive, got {payload:?}");
+    };
+    assert_eq!(models[0].id, "model-7");
+    assert_eq!(models[0].context_window, Some(128_000));
+
+    let payload = client
+        .request(Command::ProvidersPreviewModels(
+            cool_protocol::ProvidersPreviewModelsParams {
+                name: "openai".to_owned(),
+                base_url: None,
+                api_key: "key".to_owned(),
+            },
+        ))
+        .await
+        .unwrap();
+    let ResponsePayload::ProvidersModelsPreview(models) = payload else {
+        panic!("providers.preview_models must return ProvidersModelsPreview, got {payload:?}");
+    };
+    assert_eq!(models[0].id, "openai-model");
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
 }
 
 #[tokio::test]

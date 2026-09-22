@@ -333,6 +333,7 @@ dependencies = [
  "cool-state",
  "cool-store",
  "cool-tui",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

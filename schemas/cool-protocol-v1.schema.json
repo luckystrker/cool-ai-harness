@@ -2646,6 +2646,40 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "providers.list_models"
+            },
+            "params": {
+              "$ref": "#/$defs/LegacyIdParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "providers.preview_models"
+            },
+            "params": {
+              "$ref": "#/$defs/ProvidersPreviewModelsParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "memory.list"
             },
             "params": {
@@ -8385,6 +8419,29 @@
         "id"
       ]
     },
+    "ProvidersPreviewModelsParams": {
+      "description": "Live model-list probe for an unsaved provider (create form). The plaintext\nkey is used in memory only and never persisted.",
+      "type": "object",
+      "properties": {
+        "apiKey": {
+          "type": "string"
+        },
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "apiKey"
+      ]
+    },
     "RecentDirectoriesRecord": {
       "description": "Recently used working directories and the global default.",
       "type": "object",
@@ -9713,6 +9770,46 @@
             "kind": {
               "type": "string",
               "const": "providers_models"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ModelInfoRecord"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_models_live"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ModelInfoRecord"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_models_preview"
             },
             "value": {
               "type": "array",

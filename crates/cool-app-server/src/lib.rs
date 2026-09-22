@@ -31,16 +31,16 @@ use cool_protocol::{
     CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, ExtensionStatusResult,
     HistoryItem, HookRecord, IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2,
     LegacyOkResult, McpAddServerParams, McpConnectResult, McpHealthResult, McpServerAdminRecord,
-    McpServerListResult, McpToolListResult, McpUpdateServerParams, PlanCreated, PlanExecuteResult,
-    PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
-    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
-    RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult, SessionCreatedResult,
-    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
-    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
-    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
-    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    McpServerListResult, McpToolListResult, McpUpdateServerParams, ModelInfoRecord, PlanCreated,
+    PlanExecuteResult, PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep,
+    PluginRecord, PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId,
+    RpcNotification, RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted,
+    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
+    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
+    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
+    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
+    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
+    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -151,6 +151,8 @@ struct Inner {
     mcp_admin: Option<Arc<dyn McpAdmin>>,
     /// Operator-owned global skills store, present when the host configures it.
     skill_admin: Option<Arc<dyn SkillAdmin>>,
+    /// Live provider model-list probe, present when the host configures it.
+    provider_probe: Option<Arc<dyn ProviderProbe>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -287,6 +289,28 @@ pub trait SkillAdmin: Send + Sync {
 
     /// Delete a skill by name. A missing skill is an error.
     async fn delete(&self, actor: &str, name: &str) -> Result<(), String>;
+}
+
+/// Live provider model-list probe. The host (the CLI) owns the provider
+/// credentials and egress policy; the app server forwards. A probe error is
+/// reported to the caller rather than degrading to the cached catalog.
+#[async_trait]
+pub trait ProviderProbe: Send + Sync {
+    /// Live model list for an already-saved provider row (decrypts the stored key).
+    async fn list_models(
+        &self,
+        actor: &str,
+        provider_id: i64,
+    ) -> Result<Vec<ModelInfoRecord>, String>;
+
+    /// Live model-list probe for an unsaved provider. The plaintext `api_key` is
+    /// used in memory only and never persisted.
+    async fn preview_models(
+        &self,
+        name: &str,
+        base_url: Option<&str>,
+        api_key: &str,
+    ) -> Result<Vec<ModelInfoRecord>, String>;
 }
 
 #[derive(Default)]
@@ -474,6 +498,7 @@ impl AppServer {
                 app_settings: None,
                 mcp_admin: None,
                 skill_admin: None,
+                provider_probe: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -519,6 +544,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("skill admin must be configured before the server is cloned")
             .skill_admin = Some(admin);
+        self
+    }
+
+    pub fn with_provider_probe(mut self, probe: Arc<dyn ProviderProbe>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("provider probe must be configured before the server is cloned")
+            .provider_probe = Some(probe);
         self
     }
 
@@ -1706,6 +1738,35 @@ impl AppServer {
                         }
                     }
                     None => failure(id, error(-32022, "skills_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersListModels(params) => {
+                let frame = match &self.inner.provider_probe {
+                    Some(probe) => match probe.list_models(&local_actor().id, params.id).await {
+                        Ok(models) => success(id, ResponsePayload::ProvidersModelsLive(models)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32026, "provider_probe_failed", &message),
+                        ),
+                    },
+                    None => failure(id, error(-32025, "provider_probe_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersPreviewModels(params) => {
+                let frame = match &self.inner.provider_probe {
+                    Some(probe) => match probe
+                        .preview_models(&params.name, params.base_url.as_deref(), &params.api_key)
+                        .await
+                    {
+                        Ok(models) => success(id, ResponsePayload::ProvidersModelsPreview(models)),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32026, "provider_probe_failed", &message),
+                        ),
+                    },
+                    None => failure(id, error(-32025, "provider_probe_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -5105,6 +5166,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "local_socket",
         "mcp_admin",
         "plan_execution",
+        "provider_probe",
         "recovery",
         "run_cancellation",
         "run_subscribe",

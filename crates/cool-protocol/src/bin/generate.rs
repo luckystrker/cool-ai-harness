@@ -718,6 +718,7 @@ fn generated_typescript() -> String {
         ProviderListParams,
         ProviderCreateParams,
         ProviderUpdateParams,
+        ProvidersPreviewModelsParams,
         BudgetRecord,
         BudgetWindowSpendRecord,
         BudgetStatusRecord,

@@ -90,6 +90,8 @@ export class CoolSdk {
   providersUpdate(params: protocol.ProviderUpdateParams) { return this.send<protocol.ProviderRecord>({ method: "providers.update", params }); }
   providersDelete(params: protocol.IdempotentIdParams) { return this.send<protocol.DeletedResult>({ method: "providers.delete", params }); }
   providersModels(params: protocol.LegacyIdParams) { return this.send<protocol.ModelInfoRecord[]>({ method: "providers.models", params }); }
+  providersListModels(params: protocol.LegacyIdParams) { return this.send<protocol.ModelInfoRecord[]>({ method: "providers.list_models", params }); }
+  providersPreviewModels(params: protocol.ProvidersPreviewModelsParams) { return this.send<protocol.ModelInfoRecord[]>({ method: "providers.preview_models", params }); }
   memoryList(params: protocol.MemoryListParams) { return this.send<protocol.MemoryRecord[]>({ method: "memory.list", params }); }
   memoryGet(params: protocol.LegacyIdParams) { return this.send<protocol.MemoryRecord>({ method: "memory.get", params }); }
   memoryCreate(params: protocol.MemoryCreateParams) { return this.send<protocol.MemoryRecord>({ method: "memory.create", params }); }
