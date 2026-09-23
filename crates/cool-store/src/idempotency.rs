@@ -11,7 +11,9 @@
 //! Execution is reserve → run → complete. A crash after the reservation leaves
 //! a `pending` row: the next replay fails closed (`Conflict`) rather than
 //! repeating a mutation whose outcome is unknown. This is at-most-once, which
-//! is the M10 contract; overwriting pending reservations is not allowed.
+//! is the M10 contract; overwriting pending reservations is not allowed. A
+//! clean `Err` from the action releases the reservation (the outcome is known:
+//! it failed), so a retry with the same key can run.
 
 use std::future::Future;
 
@@ -53,7 +55,15 @@ impl LegacyStore {
         {
             return Ok(existing);
         }
-        let value = action()?;
+        let value = match action() {
+            Ok(value) => value,
+            Err(error) => {
+                // The action reported failure (no unknown outcome), so release
+                // the reservation instead of stranding the key as `pending`.
+                let _ = self.release_idempotent(actor_id, method, idempotency_key);
+                return Err(error);
+            }
+        };
         self.complete_idempotent(actor_id, method, idempotency_key, &value)?;
         Ok(Idempotent {
             value,
@@ -81,12 +91,36 @@ impl LegacyStore {
         {
             return Ok(existing);
         }
-        let value = action().await?;
+        let value = match action().await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.release_idempotent(actor_id, method, idempotency_key);
+                return Err(error);
+            }
+        };
         self.complete_idempotent(actor_id, method, idempotency_key, &value)?;
         Ok(Idempotent {
             value,
             created: true,
         })
+    }
+
+    /// Drop a `pending` reservation whose action reported a clean failure, so a
+    /// retry with the same key can run instead of failing "still pending".
+    /// A crash mid-action still leaves the row (unknown outcome = at-most-once).
+    fn release_idempotent(
+        &self,
+        actor_id: &str,
+        method: &str,
+        idempotency_key: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "DELETE FROM rust_idempotency
+             WHERE actor_id = ?1 AND method = ?2 AND idempotency_key = ?3 AND status = 'pending'",
+            params![actor_id, method, idempotency_key],
+        )?;
+        Ok(())
     }
 
     /// Reserve the key, returning the stored outcome for a replay.

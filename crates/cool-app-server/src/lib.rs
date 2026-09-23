@@ -34,13 +34,14 @@ use cool_protocol::{
     McpServerListResult, McpToolListResult, McpUpdateServerParams, ModelInfoRecord, PlanCreated,
     PlanExecuteResult, PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep,
     PluginRecord, PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId,
-    RpcNotification, RpcRequest, RpcSuccess, RunCancelledResult, RunEventMethod, RunStarted,
-    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
-    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
-    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
-    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    RpcNotification, RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod,
+    RunStarted, RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted,
+    SessionConversationResult, SessionCreatedResult, SessionForkedResult, SessionHistoryResult,
+    SessionListResult, SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary,
+    SkillCreateParams, SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame,
+    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
+    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
+    V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -153,6 +154,9 @@ struct Inner {
     skill_admin: Option<Arc<dyn SkillAdmin>>,
     /// Live provider model-list probe, present when the host configures it.
     provider_probe: Option<Arc<dyn ProviderProbe>>,
+    /// Forced RSS feed fetch/parse (network facade), present when the host
+    /// configures it.
+    rss_feed_fetch: Option<Arc<dyn RssFeedFetch>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -311,6 +315,37 @@ pub trait ProviderProbe: Send + Sync {
         base_url: Option<&str>,
         api_key: &str,
     ) -> Result<Vec<ModelInfoRecord>, String>;
+}
+
+/// Why an `rss.fetch_now` failed. Fetch/parse problems are **not** errors: they
+/// record `last_error` on the subscription and answer `new_entries: 0`.
+#[derive(Debug)]
+pub enum RssFetchError {
+    /// The subscription id is unknown to the actor (`-32004`).
+    NotFound,
+    /// Idempotency key conflict (`-32006`).
+    Conflict(String),
+    /// The host or legacy store is not configured (`-32027`).
+    Unavailable(String),
+    /// Any other host failure (`-32028`, masked detail).
+    Failed(String),
+}
+
+/// Forced RSS feed fetch/parse (the network facade). The host owns the egress
+/// policy and the legacy store writes; a fetch/parse failure is recorded on the
+/// subscription and reported as zero new entries (Python `fetch_feed` parity),
+/// while a missing subscription or a store/host failure is an error.
+#[async_trait]
+pub trait RssFeedFetch: Send + Sync {
+    /// Fetch the subscription's feed now (ignores the fetch interval).
+    ///
+    /// The mutation is idempotent on `(actor, idempotency_key)`.
+    async fn fetch_now(
+        &self,
+        actor: &str,
+        subscription_id: i64,
+        idempotency_key: &str,
+    ) -> Result<RssFetchResult, RssFetchError>;
 }
 
 #[derive(Default)]
@@ -499,6 +534,7 @@ impl AppServer {
                 mcp_admin: None,
                 skill_admin: None,
                 provider_probe: None,
+                rss_feed_fetch: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -551,6 +587,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("provider probe must be configured before the server is cloned")
             .provider_probe = Some(probe);
+        self
+    }
+
+    pub fn with_rss_feed_fetch(mut self, fetch: Arc<dyn RssFeedFetch>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("rss feed fetch must be configured before the server is cloned")
+            .rss_feed_fetch = Some(fetch);
         self
     }
 
@@ -684,12 +727,21 @@ impl AppServer {
                     if !connection.lock().await.initialized {
                         if matches!(&request.params.command, Command::Initialize(_)) {
                             // The dispatch future is very large (one arm per
-                            // command); box it so the inline initialize path
-                            // cannot overflow the caller's stack. Initialization
-                            // stays awaited here so it completes before the next
+                            // command) and is constructed when the wrapper
+                            // future is first polled. Spawn that wrapper so the
+                            // large state machine is built on a worker stack,
+                            // not the serve loop's stack, then wait so
+                            // initialization still completes before the next
                             // request is read.
-                            Box::pin(self.dispatch(request, outbound.clone(), connection.clone()))
-                                .await;
+                            let server = self.clone();
+                            let outbound = outbound.clone();
+                            let connection = connection.clone();
+                            let (done, finished) = tokio::sync::oneshot::channel();
+                            handlers.spawn(async move {
+                                server.dispatch(request, outbound, connection).await;
+                                let _ = done.send(());
+                            });
+                            let _ = finished.await;
                         } else if !outbound
                             .send(failure(request.id, error(-32002, "not_initialized", false)))
                             .await
@@ -718,6 +770,8 @@ impl AppServer {
                     let connection = connection.clone();
                     handlers.spawn(async move {
                         let _permit = permit;
+                        // Same wrapper shape as the initialize path: keep the
+                        // huge dispatch state machine off the spawn site.
                         server.dispatch(request, outbound, connection).await;
                     });
                 }
@@ -1767,6 +1821,35 @@ impl AppServer {
                         ),
                     },
                     None => failure(id, error(-32025, "provider_probe_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::RssFetchNow(params) => {
+                let frame = match &self.inner.rss_feed_fetch {
+                    Some(fetch) => {
+                        let actor = local_actor();
+                        match fetch
+                            .fetch_now(&actor.id, params.id, params.idempotency_key.as_str())
+                            .await
+                        {
+                            Ok(result) => success(id, ResponsePayload::RssFetched(result)),
+                            Err(RssFetchError::NotFound) => {
+                                failure(id, error(-32004, "rss_subscription_not_found", false))
+                            }
+                            Err(RssFetchError::Conflict(message)) => {
+                                failure(id, masked_detail_error(-32006, "conflict", &message))
+                            }
+                            Err(RssFetchError::Unavailable(message)) => failure(
+                                id,
+                                masked_detail_error(-32027, "rss_fetch_unavailable", &message),
+                            ),
+                            Err(RssFetchError::Failed(message)) => failure(
+                                id,
+                                masked_detail_error(-32028, "rss_fetch_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32027, "rss_fetch_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -5167,6 +5250,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "mcp_admin",
         "plan_execution",
         "provider_probe",
+        "rss_fetch",
         "recovery",
         "run_cancellation",
         "run_subscribe",

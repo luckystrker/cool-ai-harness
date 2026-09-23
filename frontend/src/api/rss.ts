@@ -1,4 +1,3 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
 import { toRssEntry, toRssSubscription } from "./mappers"
 
@@ -30,10 +29,10 @@ export const rssApi = {
   unsubscribe: async (id: number) => {
     await sdk.rssUnsubscribe({ idempotencyKey: idempotencyKey(), id })
   },
-  fetchNow: (id: number) =>
-    api.post<{ subscription_id: number; new_entries: number }>(
-      `/api/rss/subscriptions/${id}/fetch`
-    ),
+  fetchNow: async (id: number) => {
+    const result = await sdk.rssFetchNow({ idempotencyKey: idempotencyKey(), id })
+    return { subscription_id: result.subscriptionId, new_entries: result.newEntries }
+  },
 
   // --- Entries ---
   listEntries: async (

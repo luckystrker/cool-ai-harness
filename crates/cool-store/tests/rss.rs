@@ -39,7 +39,7 @@ fn entry(guid: &str) -> NewRssEntry {
 
 #[test]
 fn subscriptions_apply_defaults_clamp_and_ordering() {
-    let (_directory, store) = adopted_store();
+    let (directory, store) = adopted_store();
 
     let first = store
         .create_subscription(
@@ -95,21 +95,51 @@ fn subscriptions_apply_defaults_clamp_and_ordering() {
     assert!(matches!(duplicate, Err(StoreError::Conflict(_))));
 
     store
+        .insert_entry_if_new("local-user", first.id, &entry("g1"))
+        .expect("insert");
+    store
         .record_fetch_result(
             "local-user",
             first.id,
             "2026-05-01 00:00:00.000000",
             Some("timeout"),
-            7,
         )
         .expect("record fetch");
     let refreshed = store.get_subscription("local-user", first.id).expect("get");
-    assert_eq!(refreshed.entry_count, 7);
+    // A failure never touches entry_count (Python parity).
+    assert_eq!(
+        refreshed.entry_count, 1,
+        "failure must not zero entry_count"
+    );
     assert_eq!(refreshed.last_error.as_deref(), Some("timeout"));
     assert_eq!(
         refreshed.last_fetched_at.as_deref(),
         Some("2026-05-01 00:00:00.000000")
     );
+
+    store
+        .insert_entry_if_new("local-user", first.id, &entry("g2"))
+        .expect("insert");
+    // Drift the denormalized counter so the success path must self-heal it.
+    {
+        use rusqlite::Connection;
+        let connection = Connection::open(directory.path().join("harness.db")).expect("open");
+        connection
+            .execute(
+                "UPDATE rss_subscriptions SET entry_count = 99 WHERE id = ?1",
+                [first.id],
+            )
+            .expect("drift");
+    }
+    store
+        .record_fetch_result("local-user", first.id, "2026-05-01 00:00:00.000000", None)
+        .expect("record success");
+    let refreshed = store.get_subscription("local-user", first.id).expect("get");
+    assert_eq!(
+        refreshed.entry_count, 2,
+        "success recounts entry_count to COUNT(*)"
+    );
+    assert_eq!(refreshed.last_error, None);
 
     store
         .delete_subscription("local-user", second.id)
@@ -241,4 +271,116 @@ fn rss_operations_are_actor_scoped() {
             .expect("all")
             .is_empty()
     );
+}
+
+#[test]
+fn fill_subscription_meta_only_backfills_missing_fields() {
+    let (_directory, store) = adopted_store();
+    let sub = store
+        .create_subscription(
+            "local-user",
+            &NewRssSubscription {
+                title: Some("kept".to_string()),
+                ..subscription("https://example.com/feed.xml")
+            },
+        )
+        .expect("create");
+
+    store
+        .fill_subscription_meta(
+            "local-user",
+            sub.id,
+            Some("ignored"),
+            Some("https://example.com/"),
+        )
+        .expect("fill");
+    let refreshed = store.get_subscription("local-user", sub.id).expect("get");
+    assert_eq!(refreshed.title.as_deref(), Some("kept"));
+    assert_eq!(refreshed.site_url.as_deref(), Some("https://example.com/"));
+
+    store
+        .fill_subscription_meta("local-user", sub.id, Some("later"), Some("https://other/"))
+        .expect("fill again");
+    let refreshed = store.get_subscription("local-user", sub.id).expect("get");
+    assert_eq!(refreshed.title.as_deref(), Some("kept"));
+    assert_eq!(refreshed.site_url.as_deref(), Some("https://example.com/"));
+}
+
+#[test]
+fn prune_keeps_newest_entries_and_resets_the_count() {
+    let (_directory, store) = adopted_store();
+    let sub = store
+        .create_subscription("local-user", &subscription("https://example.com/feed.xml"))
+        .expect("create");
+
+    for index in 0..5 {
+        let guid = format!("g{index}");
+        store
+            .insert_entry_if_new(
+                "local-user",
+                sub.id,
+                &NewRssEntry {
+                    published_at: Some(format!("2026-01-0{index} 00:00:00.000000")),
+                    ..entry(&guid)
+                },
+            )
+            .expect("insert");
+    }
+    assert_eq!(store.count_entries("local-user", sub.id).expect("count"), 5);
+
+    let removed = store
+        .prune_subscription_entries("local-user", sub.id, 3)
+        .expect("prune");
+    assert_eq!(removed, 2);
+    let remaining = store
+        .list_entries("local-user", sub.id, None, false)
+        .expect("list");
+    assert_eq!(remaining.len(), 3);
+    // Newest three survive (2026-01-02..04); the two oldest are gone.
+    let guids: Vec<_> = remaining.iter().map(|row| row.guid.as_str()).collect();
+    assert_eq!(guids, vec!["g4", "g3", "g2"]);
+    let refreshed = store.get_subscription("local-user", sub.id).expect("get");
+    assert_eq!(refreshed.entry_count, 3);
+
+    let none = store
+        .prune_subscription_entries("local-user", sub.id, 3)
+        .expect("prune again");
+    assert_eq!(none, 0);
+}
+
+#[test]
+fn prune_treats_a_null_published_at_as_the_fetch_time() {
+    let (_directory, store) = adopted_store();
+    let sub = store
+        .create_subscription("local-user", &subscription("https://example.com/feed.xml"))
+        .expect("create");
+    // g1 has no published_at, so it sorts by fetched_at (now) and is the newest.
+    store
+        .insert_entry_if_new("local-user", sub.id, &entry("g1"))
+        .expect("insert");
+    for index in 0..3 {
+        store
+            .insert_entry_if_new(
+                "local-user",
+                sub.id,
+                &NewRssEntry {
+                    published_at: Some("2020-01-01 00:00:00.000000".to_string()),
+                    ..entry(&format!("old{index}"))
+                },
+            )
+            .expect("insert");
+    }
+    let removed = store
+        .prune_subscription_entries("local-user", sub.id, 2)
+        .expect("prune");
+    assert_eq!(removed, 2);
+    let remaining = store
+        .list_entries("local-user", sub.id, None, false)
+        .expect("list");
+    // g1 (null published_at → sorts as fetched_at = now) survives the prune as
+    // the newest; the two oldest published rows are deleted. `list_entries`
+    // itself is NULLS LAST, so g1 appears last even though it is newest.
+    let mut guids: Vec<_> = remaining.iter().map(|row| row.guid.as_str()).collect();
+    guids.sort_unstable();
+    assert_eq!(guids, vec!["g1", "old2"]);
 }

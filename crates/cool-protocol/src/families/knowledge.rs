@@ -449,6 +449,17 @@ pub struct RssEntryReadParams {
     pub is_read: bool,
 }
 
+/// Outcome of a forced feed fetch: how many novel entries were stored.
+/// A fetch/parse failure is recorded on the subscription and reported as
+/// `new_entries: 0` (Python `fetch_feed` never raises to the caller).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RssFetchResult {
+    pub subscription_id: i64,
+    pub new_entries: i64,
+}
+
 /// One webhook endpoint row. The HMAC `secret` is intentionally absent.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

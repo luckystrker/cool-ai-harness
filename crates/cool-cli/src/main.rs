@@ -1,5 +1,6 @@
 mod mcp_admin;
 mod provider_probe;
+mod rss_feed;
 mod skills_admin;
 mod store_tools;
 
@@ -35,19 +36,33 @@ use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use serde_json::json;
 
-#[tokio::main]
-async fn main() {
-    if let Err((code, message)) = run().await {
-        eprintln!(
-            "{}",
-            serde_json::to_string(&message).expect("error JSON serializes")
-        );
-        std::process::exit(code);
-    }
+fn main() {
+    // The App Protocol dispatch future is very large (one arm per command).
+    // Give worker threads 8 MiB stacks (the 2 MiB default is tight on Windows),
+    // and drive `run` on a worker rather than the 1 MiB main stack.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        tokio::spawn(async {
+            if let Err((code, message)) = run().await {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&message).expect("error JSON serializes")
+                );
+                std::process::exit(code);
+            }
+        })
+        .await
+        .expect("run task");
+    });
 }
 
 async fn run() -> Result<(), (i32, serde_json::Value)> {
-    let mut args = env::args().skip(1);
+    // Collect first so no `std::env::Args` is held across an await (it is not `Send`).
+    let mut args = env::args().skip(1).collect::<Vec<_>>().into_iter();
     let Some(command) = args.next() else {
         return run_tui(args.collect()).await;
     };
@@ -298,9 +313,11 @@ async fn build_server(
     server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
     // The live provider model-list probe (uses the stored provider rows + keyring).
     server = server.with_provider_probe(Arc::new(provider_probe::CliProviderProbe::new(
-        legacy,
+        legacy.clone(),
         configured_secrets(),
     )));
+    // The forced RSS feed fetch/parse (pinned egress + legacy RSS store writes).
+    server = server.with_rss_feed_fetch(Arc::new(rss_feed::CliRssFeedFetch::new(legacy)));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }

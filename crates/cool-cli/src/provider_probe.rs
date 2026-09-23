@@ -130,10 +130,13 @@ pub async fn probe_models(
         format!("{base}/models")
     };
     let parsed = url::Url::parse(&url).map_err(|error| format!("invalid provider URL: {error}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "provider URL has no host".to_owned())?
-        .to_owned();
+    // Unbracketed host so IPv6 literals seed `NetworkPolicy` correctly.
+    let host = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.to_ascii_lowercase(),
+        Some(url::Host::Ipv4(address)) => address.to_string(),
+        Some(url::Host::Ipv6(address)) => address.to_string(),
+        None => return Err("provider URL has no host".to_owned()),
+    };
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "provider URL has no port".to_owned())?;

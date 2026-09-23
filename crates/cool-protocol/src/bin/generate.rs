@@ -707,6 +707,7 @@ fn generated_typescript() -> String {
         RssEntriesParams,
         RssAllEntriesParams,
         RssEntryReadParams,
+        RssFetchResult,
         WebhookEndpointRecord,
         WebhookEventRecord,
         WebhookCreateParams,

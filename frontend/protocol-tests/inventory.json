@@ -920,8 +920,8 @@
       "file": "rss.ts",
       "member": "fetchNow",
       "http": "POST /api/rss/subscriptions/{id}/fetch",
-      "status": "deferred",
-      "rationale": "network fetch/parse of the feed is an M11 worker; cool-store owns the entry insert and fetch-result recording paths"
+      "status": "sdk",
+      "command": "rss.fetch_now"
     },
     {
       "file": "rss.ts",

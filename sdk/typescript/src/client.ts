@@ -182,6 +182,7 @@ export class CoolSdk {
   rssEntriesList(params: protocol.RssEntriesParams) { return this.send<protocol.RssEntryRecord[]>({ method: "rss.entries_list", params }); }
   rssEntriesAll(params: protocol.RssAllEntriesParams) { return this.send<protocol.RssEntryRecord[]>({ method: "rss.entries_all", params }); }
   rssEntryRead(params: protocol.RssEntryReadParams) { return this.send<protocol.RssEntryRecord>({ method: "rss.entry_read", params }); }
+  rssFetchNow(params: protocol.IdempotentIdParams) { return this.send<protocol.RssFetchResult>({ method: "rss.fetch_now", params }); }
   webhooksList(params: protocol.EmptyParams) { return this.send<protocol.WebhookEndpointRecord[]>({ method: "webhooks.list", params }); }
   webhooksGet(params: protocol.LegacyIdParams) { return this.send<protocol.WebhookEndpointRecord>({ method: "webhooks.get", params }); }
   webhooksCreate(params: protocol.WebhookCreateParams) { return this.send<protocol.WebhookEndpointRecord>({ method: "webhooks.create", params }); }

@@ -4210,6 +4210,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "rss.fetch_now"
+            },
+            "params": {
+              "$ref": "#/$defs/IdempotentIdParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "webhooks.list"
             },
             "params": {
@@ -11428,6 +11445,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "rss_fetched"
+            },
+            "value": {
+              "$ref": "#/$defs/RssFetchResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "webhooks_listed"
             },
             "value": {
@@ -12106,6 +12140,25 @@
         "fetchedAt",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "RssFetchResult": {
+      "description": "Outcome of a forced feed fetch: how many novel entries were stored.\nA fetch/parse failure is recorded on the subscription and reported as\n`new_entries: 0` (Python `fetch_feed` never raises to the caller).",
+      "type": "object",
+      "properties": {
+        "newEntries": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "subscriptionId": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subscriptionId",
+        "newEntries"
       ]
     },
     "RssSubscribeParams": {

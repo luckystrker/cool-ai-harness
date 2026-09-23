@@ -455,6 +455,8 @@ pub enum Command {
     RssEntriesAll(RssAllEntriesParams),
     #[serde(rename = "rss.entry_read")]
     RssEntryRead(RssEntryReadParams),
+    #[serde(rename = "rss.fetch_now")]
+    RssFetchNow(IdempotentIdParams),
     #[serde(rename = "webhooks.list")]
     WebhooksList(EmptyParams),
     #[serde(rename = "webhooks.get")]
@@ -1809,6 +1811,7 @@ pub enum ResponsePayload {
     RssEntriesListed(Vec<RssEntryRecord>),
     RssEntriesAll(Vec<RssEntryRecord>),
     RssEntryRead(RssEntryRecord),
+    RssFetched(RssFetchResult),
     WebhooksListed(Vec<WebhookEndpointRecord>),
     WebhooksGot(WebhookEndpointRecord),
     WebhooksCreated(WebhookEndpointRecord),

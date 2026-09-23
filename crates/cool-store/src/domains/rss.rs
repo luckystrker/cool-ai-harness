@@ -240,30 +240,40 @@ impl crate::LegacyStore {
         Ok(())
     }
 
-    /// Record the outcome of a fetch: timestamps, error and stored entry count.
+    /// Record the outcome of a fetch: timestamp and optional error.
     ///
-    /// `entry_count` is the absolute number of entries now stored for the
-    /// subscription (Python keeps the same counter on `RssSubscription`).
+    /// On success (`error = None`) the subscription's `entry_count` is reset to
+    /// `COUNT(*)` so the counter self-heals after inserts/prunes. A failure
+    /// leaves `entry_count` alone (Python `fetch_feed` never touches it on the
+    /// error path).
     pub fn record_fetch_result(
         &self,
         actor_id: &str,
         subscription_id: i64,
         fetched_at: &str,
         error: Option<&str>,
-        entry_count: i64,
     ) -> Result<(), StoreError> {
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
         fetch_subscription(&connection, actor_id, subscription_id)?;
+        if error.is_none() {
+            let transaction = connection.transaction()?;
+            let stored: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM rss_entries WHERE subscription_id = ?1",
+                params![subscription_id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "UPDATE rss_subscriptions SET last_fetched_at = ?1, last_error = NULL,
+                   entry_count = ?2, updated_at = ?3 WHERE id = ?4",
+                params![fetched_at, stored, now_python(), subscription_id],
+            )?;
+            transaction.commit()?;
+            return Ok(());
+        }
         connection.execute(
-            "UPDATE rss_subscriptions SET last_fetched_at = ?1, last_error = ?2, entry_count = ?3,
-               updated_at = ?4 WHERE id = ?5",
-            params![
-                fetched_at,
-                error,
-                entry_count,
-                now_python(),
-                subscription_id
-            ],
+            "UPDATE rss_subscriptions SET last_fetched_at = ?1, last_error = ?2,
+               updated_at = ?3 WHERE id = ?4",
+            params![fetched_at, error, now_python(), subscription_id],
         )?;
         Ok(())
     }
@@ -333,6 +343,77 @@ impl crate::LegacyStore {
         }))
     }
 
+    /// Backfill feed metadata that is still missing (Python `fetch_feed` only
+    /// fills `title`/`site_url` when they are unset or empty).
+    pub fn fill_subscription_meta(
+        &self,
+        actor_id: &str,
+        subscription_id: i64,
+        title: Option<&str>,
+        site_url: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        fetch_subscription(&connection, actor_id, subscription_id)?;
+        connection.execute(
+            "UPDATE rss_subscriptions SET title = COALESCE(NULLIF(title, ''), ?1),
+               site_url = COALESCE(NULLIF(site_url, ''), ?2), updated_at = ?3 WHERE id = ?4",
+            params![title, site_url, now_python(), subscription_id],
+        )?;
+        Ok(())
+    }
+
+    /// Number of stored entries for one subscription (`COUNT(*)`, so it also
+    /// self-heals a drifted `entry_count`).
+    pub fn count_entries(&self, actor_id: &str, subscription_id: i64) -> Result<i64, StoreError> {
+        let connection = self.connection()?;
+        fetch_subscription(&connection, actor_id, subscription_id)?;
+        let stored: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM rss_entries WHERE subscription_id = ?1",
+            params![subscription_id],
+            |row| row.get(0),
+        )?;
+        Ok(stored)
+    }
+
+    /// Keep at most `keep` entries, deleting the oldest first.
+    ///
+    /// Oldest is `COALESCE(published_at, fetched_at)` ascending (Python sorts on
+    /// `published_at or fetched_at`), with a stable `id` tiebreak. On a prune the
+    /// subscription's `entry_count` is reset to `keep`, matching Python.
+    /// Returns how many rows were deleted.
+    pub fn prune_subscription_entries(
+        &self,
+        actor_id: &str,
+        subscription_id: i64,
+        keep: usize,
+    ) -> Result<u64, StoreError> {
+        let mut connection = self.connection()?;
+        fetch_subscription(&connection, actor_id, subscription_id)?;
+        let total: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM rss_entries WHERE subscription_id = ?1",
+            params![subscription_id],
+            |row| row.get(0),
+        )?;
+        let keep = keep as i64;
+        if total <= keep {
+            return Ok(0);
+        }
+        let to_remove = total - keep;
+        let transaction = connection.transaction()?;
+        let removed = transaction.execute(
+            "DELETE FROM rss_entries WHERE id IN (
+                SELECT id FROM rss_entries WHERE subscription_id = ?1
+                ORDER BY COALESCE(published_at, fetched_at) ASC, id ASC LIMIT ?2)",
+            params![subscription_id, to_remove],
+        )?;
+        transaction.execute(
+            "UPDATE rss_subscriptions SET entry_count = ?1, updated_at = ?2 WHERE id = ?3",
+            params![keep, now_python(), subscription_id],
+        )?;
+        transaction.commit()?;
+        Ok(removed as u64)
+    }
+
     /// Entries for one subscription, newest first.
     ///
     /// Matches Python `published_at DESC NULLS LAST` with a stable `id DESC`
@@ -398,7 +479,7 @@ impl crate::LegacyStore {
     }
 }
 
-/// Read a subscription's stored entry count (diagnostics/tests).
+/// Read a subscription's denormalized `entry_count` column (diagnostics/tests).
 #[allow(dead_code)]
 pub fn subscription_entry_count(
     connection: &Connection,
