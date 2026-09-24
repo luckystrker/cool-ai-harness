@@ -2901,6 +2901,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "memory.extract"
+            },
+            "params": {
+              "$ref": "#/$defs/MemoryExtractParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "memory.episodes"
             },
             "params": {
@@ -7147,6 +7164,48 @@
         "score"
       ]
     },
+    "MemoryExtractParams": {
+      "description": "Run LLM memory extraction over one conversation.",
+      "type": "object",
+      "properties": {
+        "conversationId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "conversationId"
+      ]
+    },
+    "MemoryExtractResult": {
+      "description": "Outcome of `memory.extract`. Mirrors Python `ExtractResponse`: `status` is\n`error` / `skipped` / `completed`; `detail` carries the skip reason or the\nerror message; `stored_count` is the number of persisted candidates.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "storedCount": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "storedCount"
+      ]
+    },
     "MemoryListParams": {
       "type": "object",
       "properties": {
@@ -10209,6 +10268,23 @@
             },
             "value": {
               "$ref": "#/$defs/MemoryExplainRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "memory_extracted"
+            },
+            "value": {
+              "$ref": "#/$defs/MemoryExtractResult"
             }
           },
           "additionalProperties": false,

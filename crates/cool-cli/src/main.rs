@@ -1,5 +1,6 @@
 mod mcp_admin;
 mod mcp_store;
+mod memory_extract;
 mod provider_probe;
 mod rss_feed;
 mod skills_admin;
@@ -281,6 +282,8 @@ async fn build_server(
         ..ServerConfig::default()
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
+    let extraction_provider = provider.clone();
+    let extraction_model = model.clone();
     let workspace = current_workspace()?;
     let (registry, extensions, plugin_store) = extension_registry(data_dir, legacy.clone()).await;
     let agent = AgentRuntime::new(provider, registry);
@@ -318,7 +321,13 @@ async fn build_server(
         configured_secrets(),
     )));
     // The forced RSS feed fetch/parse (pinned egress + legacy RSS store writes).
-    server = server.with_rss_feed_fetch(Arc::new(rss_feed::CliRssFeedFetch::new(legacy)));
+    server = server.with_rss_feed_fetch(Arc::new(rss_feed::CliRssFeedFetch::new(legacy.clone())));
+    // LLM memory extraction (the configured provider + legacy memory store).
+    server = server.with_memory_extractor(Arc::new(memory_extract::CliMemoryExtractor::new(
+        legacy,
+        extraction_provider,
+        extraction_model,
+    )));
     if let Some(executor) = server.task_executor() {
         executor.spawn_loop(std::time::Duration::from_secs(15));
     }

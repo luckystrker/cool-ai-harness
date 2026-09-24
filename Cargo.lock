@@ -333,6 +333,7 @@ dependencies = [
  "cool-state",
  "cool-store",
  "cool-tui",
+ "futures-util",
  "quick-xml",
  "reqwest",
  "rusqlite",

@@ -460,6 +460,28 @@ pub struct RssFetchResult {
     pub new_entries: i64,
 }
 
+/// Run LLM memory extraction over one conversation.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct MemoryExtractParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub conversation_id: i64,
+}
+
+/// Outcome of `memory.extract`. Mirrors Python `ExtractResponse`: `status` is
+/// `error` / `skipped` / `completed`; `detail` carries the skip reason or the
+/// error message; `stored_count` is the number of persisted candidates.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct MemoryExtractResult {
+    pub status: String,
+    pub stored_count: i64,
+    pub detail: Option<String>,
+}
+
 /// One webhook endpoint row. The HMAC `secret` is intentionally absent.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

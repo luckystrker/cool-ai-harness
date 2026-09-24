@@ -105,6 +105,7 @@ export class CoolSdk {
   memoryReject(params: protocol.IdempotentIdParams) { return this.send<protocol.LegacyOkResult>({ method: "memory.reject", params }); }
   memoryPin(params: protocol.MemoryPinParams) { return this.send<protocol.MemoryRecord>({ method: "memory.pin", params }); }
   memoryExplain(params: protocol.LegacyIdParams) { return this.send<protocol.MemoryExplainRecord>({ method: "memory.explain", params }); }
+  memoryExtract(params: protocol.MemoryExtractParams) { return this.send<protocol.MemoryExtractResult>({ method: "memory.extract", params }); }
   memoryEpisodes(params: protocol.MemoryEpisodesParams) { return this.send<protocol.EpisodeRecord[]>({ method: "memory.episodes", params }); }
   memoryStats(params: protocol.EmptyParams) { return this.send<protocol.MemoryStatsRecord>({ method: "memory.stats", params }); }
   entitiesList(params: protocol.EntityListParams) { return this.send<protocol.EntityRecord[]>({ method: "entities.list", params }); }

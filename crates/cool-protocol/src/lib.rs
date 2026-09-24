@@ -301,6 +301,8 @@ pub enum Command {
     MemoryPin(MemoryPinParams),
     #[serde(rename = "memory.explain")]
     MemoryExplain(LegacyIdParams),
+    #[serde(rename = "memory.extract")]
+    MemoryExtract(MemoryExtractParams),
     #[serde(rename = "memory.episodes")]
     MemoryEpisodes(MemoryEpisodesParams),
     #[serde(rename = "memory.stats")]
@@ -1739,6 +1741,7 @@ pub enum ResponsePayload {
     MemoryRejected(LegacyOkResult),
     MemoryPinned(MemoryRecord),
     MemoryExplained(MemoryExplainRecord),
+    MemoryExtracted(MemoryExtractResult),
     MemoryEpisodes(Vec<EpisodeRecord>),
     MemoryStats(MemoryStatsRecord),
     EntitiesListed(Vec<EntityRecord>),

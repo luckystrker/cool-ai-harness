@@ -32,16 +32,16 @@ use cool_protocol::{
     HistoryItem, HookRecord, IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2,
     LegacyOkResult, McpAddServerParams, McpConnectResult, McpHealthResult, McpServerAdminRecord,
     McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
-    McpUpdateServerParams, ModelInfoRecord, PlanCreated, PlanExecuteResult, PlanProgress,
-    PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord, PromptAcceptedResult,
-    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
-    RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
-    RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult, SessionCreatedResult,
-    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
-    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
-    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
-    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    McpUpdateServerParams, MemoryExtractResult, ModelInfoRecord, PlanCreated, PlanExecuteResult,
+    PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
+    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
+    RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
+    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
+    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
+    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
+    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
+    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
+    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -157,6 +157,9 @@ struct Inner {
     /// Forced RSS feed fetch/parse (network facade), present when the host
     /// configures it.
     rss_feed_fetch: Option<Arc<dyn RssFeedFetch>>,
+    /// LLM memory extraction host (model driver + legacy store), present when
+    /// the host configures it.
+    memory_extractor: Option<Arc<dyn MemoryExtractor>>,
     /// Background task scheduler/executor, present when a legacy store is
     /// configured (`--legacy-store`).
     task_executor: Option<Arc<TaskExecutor>>,
@@ -294,6 +297,33 @@ pub trait McpAdmin: Send + Sync {
         actor: &str,
         params: &McpStoreInstallParams,
     ) -> Result<McpConnectResult, McpStoreError>;
+}
+
+/// Why a `memory.extract` host call failed. Extraction itself reports skips
+/// and parse/model problems in `MemoryExtractResult` (Python's 200-with-status
+/// contract); these variants are host/store failures.
+#[derive(Debug)]
+pub enum MemoryExtractError {
+    /// The host is not configured (`-32029`).
+    Unavailable(String),
+    /// An idempotency key conflict (`-32006`).
+    Conflict(String),
+    /// Any other host/store failure (`-32030`, masked detail).
+    Failed(String),
+}
+
+/// LLM-backed memory extraction over one conversation (Workstream B4c). The
+/// host owns the model driver and the legacy memory store; the app server
+/// only forwards. Extraction is a one-shot completion plus a best-effort
+/// conflict-detection completion — never a durable agent run.
+#[async_trait]
+pub trait MemoryExtractor: Send + Sync {
+    async fn extract(
+        &self,
+        actor: &str,
+        conversation_id: i64,
+        idempotency_key: &str,
+    ) -> Result<MemoryExtractResult, MemoryExtractError>;
 }
 
 /// Persistent application settings (the default system prompt today). The host
@@ -567,6 +597,7 @@ impl AppServer {
                 skill_admin: None,
                 provider_probe: None,
                 rss_feed_fetch: None,
+                memory_extractor: None,
                 task_executor,
                 subagent_executor,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
@@ -626,6 +657,13 @@ impl AppServer {
         Arc::get_mut(&mut self.inner)
             .expect("rss feed fetch must be configured before the server is cloned")
             .rss_feed_fetch = Some(fetch);
+        self
+    }
+
+    pub fn with_memory_extractor(mut self, extractor: Arc<dyn MemoryExtractor>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("memory extractor must be configured before the server is cloned")
+            .memory_extractor = Some(extractor);
         self
     }
 
@@ -1927,6 +1965,36 @@ impl AppServer {
                         }
                     }
                     None => failure(id, error(-32027, "rss_fetch_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::MemoryExtract(params) => {
+                let frame = match &self.inner.memory_extractor {
+                    Some(extractor) => {
+                        let actor = local_actor();
+                        match extractor
+                            .extract(
+                                &actor.id,
+                                params.conversation_id,
+                                params.idempotency_key.as_str(),
+                            )
+                            .await
+                        {
+                            Ok(result) => success(id, ResponsePayload::MemoryExtracted(result)),
+                            Err(MemoryExtractError::Unavailable(message)) => failure(
+                                id,
+                                masked_detail_error(-32029, "memory_extract_unavailable", &message),
+                            ),
+                            Err(MemoryExtractError::Conflict(message)) => {
+                                failure(id, masked_detail_error(-32006, "conflict", &message))
+                            }
+                            Err(MemoryExtractError::Failed(message)) => failure(
+                                id,
+                                masked_detail_error(-32030, "memory_extract_failed", &message),
+                            ),
+                        }
+                    }
+                    None => failure(id, error(-32029, "memory_extract_unavailable", false)),
                 };
                 let _ = self.send(&outbound, frame).await;
             }
@@ -5344,6 +5412,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "local_socket",
         "mcp_admin",
         "mcp_store",
+        "memory_extract",
         "plan_execution",
         "provider_probe",
         "rss_fetch",

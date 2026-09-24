@@ -687,6 +687,8 @@ fn generated_typescript() -> String {
         MemoryEpisodesParams,
         MemoryScoreBreakdown,
         MemoryExplainRecord,
+        MemoryExtractParams,
+        MemoryExtractResult,
         MemoryStatsRecord,
         EpisodeRecord,
         EntityRecord,

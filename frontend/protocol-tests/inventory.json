@@ -326,8 +326,8 @@
       "file": "memory.ts",
       "member": "extract",
       "http": "POST /api/memory/extract",
-      "status": "deferred",
-      "rationale": "runs LLM extraction over a conversation; the store-side persistence lives in memory.create, so M11 wires the extraction worker",
+      "status": "sdk",
+      "command": "memory.extract",
       "source": "memoryApi"
     },
     {

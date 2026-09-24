@@ -871,3 +871,151 @@ pub fn expire_items(store: &LegacyStore, actor_id: &str, now: &str) -> Result<u6
 
     Ok(archived)
 }
+
+// --- Extraction similarity (B4c: Python `memory/service.py` dedup/conflict) ---
+
+/// Python `_word_overlap` tokenizes with `content.lower().split()` (whitespace
+/// only — punctuation stays attached), not the FTS tokenizer.
+fn word_set(content: &str) -> HashSet<String> {
+    content
+        .split_whitespace()
+        .map(|word| word.to_lowercase())
+        .collect()
+}
+
+/// Python `_word_overlap`: `len(a & b) / max(len(a), len(b))`.
+fn word_overlap(left: &str, right: &str) -> f64 {
+    let left = word_set(left);
+    let right = word_set(right);
+    let denominator = left.len().max(right.len());
+    if denominator == 0 {
+        return 0.0;
+    }
+    let common = left.intersection(&right).count();
+    common as f64 / denominator as f64
+}
+
+impl LegacyStore {
+    /// Similar memories by FTS candidate lookup + word-set overlap, matching
+    /// Python `find_similar_active_memories` (top-4 longest terms OR-joined,
+    /// `LIMIT 12`, overlap filter, best `limit` by overlap).
+    pub fn find_similar_memories(
+        &self,
+        actor_id: &str,
+        content: &str,
+        min_overlap: f64,
+        limit: usize,
+        status: Option<&str>,
+        memory_type: Option<&str>,
+    ) -> Result<Vec<(MemoryItem, f64)>, StoreError> {
+        let connection = self.connection()?;
+        let user_id = user_id_for(&connection, actor_id)?;
+        if !crate::migrations::table_exists(&connection, "memory_fts")? {
+            return Ok(Vec::new());
+        }
+        let mut terms = fts_terms(content);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Python `find_similar_active_memories` bails below 3 FTS terms.
+        if terms.len() < 3 {
+            return Ok(Vec::new());
+        }
+        // Python takes the 4 longest terms.
+        terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+        let fts_query = terms
+            .iter()
+            .take(4)
+            .map(|term| fts_quote(term))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let ranked: Vec<i64> = {
+            let mut statement = connection.prepare(
+                "SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 12",
+            )?;
+            let rows = statement.query(params![fts_query])?;
+            let mut collected = Vec::new();
+            let mut rows = rows;
+            while let Some(row) = rows.next()? {
+                collected.push(row.get::<_, i64>(0)?);
+            }
+            collected
+        };
+        let status = status.unwrap_or(MEMORY_STATUS_ACTIVE);
+        let mut scored: Vec<(MemoryItem, f64)> = Vec::new();
+        for rowid in ranked {
+            let Some(item) = fetch_item(&connection, user_id, rowid)? else {
+                continue;
+            };
+            if item.status != status {
+                continue;
+            }
+            if let Some(memory_type) = memory_type
+                && item.memory_type != memory_type
+            {
+                continue;
+            }
+            let overlap = word_overlap(content, &item.content);
+            if overlap >= min_overlap {
+                scored.push((item, overlap));
+            }
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Python re-queries candidates by id (`IN (...)`, ascending id) and
+        // stably sorts by overlap descending, so equal overlaps keep ascending
+        // id order — pre-sort by id to reproduce that tie-break.
+        scored.sort_by_key(|(item, _)| item.id);
+        scored.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Duplicate detection for extraction, matching Python `_find_duplicate`:
+    /// exact `content` first, then an FTS near-duplicate with strict
+    /// `overlap > 0.7` within the same `memory_type` and status tier. Python
+    /// re-queries the FTS candidates by id (`IN (...)` with no `ORDER BY`, i.e.
+    /// ascending id) and returns the first hit, so this sorts the candidates by
+    /// id before the `> 0.7` scan.
+    pub fn find_duplicate_memory(
+        &self,
+        actor_id: &str,
+        memory_type: &str,
+        status: &str,
+        content: &str,
+    ) -> Result<Option<MemoryItem>, StoreError> {
+        {
+            let connection = self.connection()?;
+            let user_id = user_id_for(&connection, actor_id)?;
+            if let Some(existing) = query_one(
+                &connection,
+                "SELECT * FROM memory_items WHERE user_id = ?1 AND memory_type = ?2 AND status = ?3 \
+                 AND content = ?4 LIMIT 1",
+                params![user_id, memory_type, status, content],
+                MemoryItem::from_row,
+            )? {
+                return Ok(Some(existing));
+            }
+        }
+        // Python requires at least 3 terms before the FTS near-dup probe.
+        // The connection guard is released first: `find_similar_memories`
+        // re-locks the same store mutex.
+        if fts_terms(content).len() < 3 {
+            return Ok(None);
+        }
+        let mut candidates = self.find_similar_memories(
+            actor_id,
+            content,
+            0.7,
+            12,
+            Some(status),
+            Some(memory_type),
+        )?;
+        candidates.sort_by_key(|(item, _)| item.id);
+        Ok(candidates
+            .into_iter()
+            .find(|(_, overlap)| *overlap > 0.7)
+            .map(|(item, _)| item))
+    }
+}

@@ -22,6 +22,7 @@ cool-state = { path = "../cool-state" }
 cool-store = { path = "../cool-store" }
 cool-tui = { path = "../cool-tui" }
 async-trait.workspace = true
+futures-util.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 serde.workspace = true

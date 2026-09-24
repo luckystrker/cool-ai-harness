@@ -1,4 +1,3 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
 import {
   toEntity,
@@ -131,8 +130,19 @@ export const memoryApi = {
   stats: async () => toMemoryStats(await sdk.memoryStats({})),
 
   // --- Extraction ---
-  extract: (body: MemoryExtractRequest) =>
-    api.post<MemoryExtractResponse>("/api/memory/extract", body),
+  extract: async (
+    body: MemoryExtractRequest
+  ): Promise<MemoryExtractResponse> => {
+    const result = await sdk.memoryExtract({
+      idempotencyKey: idempotencyKey(),
+      conversationId: body.conversation_id,
+    })
+    return {
+      status: result.status,
+      stored_count: result.storedCount,
+      detail: result.detail ?? null,
+    }
+  },
 }
 
 export const entitiesApi = {
