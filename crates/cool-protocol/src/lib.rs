@@ -225,6 +225,12 @@ pub enum Command {
     McpListTools(EmptyParams),
     #[serde(rename = "mcp.reconnect_all")]
     McpReconnectAll(EmptyParams),
+    #[serde(rename = "mcp.store_search")]
+    McpStoreSearch(McpStoreSearchParams),
+    #[serde(rename = "mcp.store_popular")]
+    McpStorePopular(McpStorePopularParams),
+    #[serde(rename = "mcp.store_install")]
+    McpStoreInstall(McpStoreInstallParams),
     #[serde(rename = "skills.list")]
     SkillsList(SkillListParams),
     #[serde(rename = "skills.create")]
@@ -1696,6 +1702,8 @@ pub enum ResponsePayload {
     McpHealth(McpHealthResult),
     McpToolsListed(McpToolListResult),
     McpReconnected(McpServerListResult),
+    McpStoreSearched(McpStoreSearchResult),
+    McpStoreInstalled(McpConnectResult),
     SkillsListed(SkillListResult),
     SkillCreated(SkillCreateResult),
     SkillDeleted(LegacyOkResult),

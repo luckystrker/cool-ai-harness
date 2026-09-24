@@ -25,6 +25,9 @@ import type {
   MacroStep,
   MacroTool,
   MCPServer,
+  MCPStoreItem,
+  MCPStoreInstallResponse,
+  MCPStoreSearchResponse,
   MCPToolInfo,
   MemoryActivityPoint,
   MemoryExplain,
@@ -148,6 +151,38 @@ export function toMcpServer(record: protocol.McpServerAdminRecord): MCPServer {
     error: record.error ?? null,
     tools: (record.tools ?? []).map(toMcpTool),
     server_info: (record.serverInfo ?? {}) as Record<string, unknown>,
+  }
+}
+
+export function toMcpStoreItem(record: protocol.McpStoreItemRecord): MCPStoreItem {
+  return {
+    name: record.name,
+    description: record.description,
+    version: record.version,
+    repository_url: record.repositoryUrl,
+    install_command: record.installCommand,
+    transport: record.transport,
+    packages_count: record.packagesCount,
+  }
+}
+
+export function toMcpStoreSearch(
+  result: protocol.McpStoreSearchResult
+): MCPStoreSearchResponse {
+  return {
+    results: (result.results ?? []).map(toMcpStoreItem),
+    query: result.query,
+  }
+}
+
+export function toMcpStoreInstall(
+  result: protocol.McpConnectResult
+): MCPStoreInstallResponse {
+  return {
+    name: result.name,
+    status: result.status,
+    tools_count: result.toolsCount,
+    error: result.error ?? null,
   }
 }
 

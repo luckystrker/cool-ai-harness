@@ -18,11 +18,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cool_app_server::McpAdmin;
+use cool_app_server::{McpAdmin, McpStoreError};
 use cool_extensions::{McpClient, McpError, McpServer, McpTool};
 use cool_protocol::{
     McpAddServerParams, McpConnectResult, McpHealthResult, McpServerAdminRecord,
-    McpServerListResult, McpToolListResult, McpToolRecord, McpUpdateServerParams,
+    McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
+    McpToolRecord, McpUpdateServerParams,
 };
 use cool_security::mask_secrets;
 use serde::{Deserialize, Serialize};
@@ -538,6 +539,79 @@ impl McpAdmin for CliMcpAdmin {
         Ok(McpServerListResult {
             servers: configs.iter().map(|config| self.record(config)).collect(),
         })
+    }
+
+    async fn store_search(
+        &self,
+        query: &str,
+        limit: u16,
+    ) -> Result<McpStoreSearchResult, McpStoreError> {
+        crate::mcp_store::search_registry(query, limit)
+            .await
+            .map_err(|error| McpStoreError::Failed(crate::mcp_store::masked_registry_error(&error)))
+    }
+
+    async fn store_popular(&self, limit: u16) -> Result<McpStoreSearchResult, McpStoreError> {
+        crate::mcp_store::list_popular(limit)
+            .await
+            .map_err(|error| McpStoreError::Failed(crate::mcp_store::masked_registry_error(&error)))
+    }
+
+    async fn store_install(
+        &self,
+        actor: &str,
+        params: &McpStoreInstallParams,
+    ) -> Result<McpConnectResult, McpStoreError> {
+        use crate::mcp_store::RegistryLookupError;
+        let entry = crate::mcp_store::get_server_details(&params.registry_name)
+            .await
+            .map_err(|error| match error {
+                RegistryLookupError::NotFound => McpStoreError::NotFound(format!(
+                    "Server '{}' not found in registry.",
+                    params.registry_name
+                )),
+                RegistryLookupError::Failed(message) => {
+                    McpStoreError::Failed(crate::mcp_store::masked_registry_error(&format!(
+                        "Registry fetch failed: {message}"
+                    )))
+                }
+            })?;
+        let config = crate::mcp_store::registry_entry_to_config(&entry, &params.local_name)
+            .map_err(|message| {
+                McpStoreError::NoPackages(format!("Server '{}' {message}.", params.registry_name))
+            })?;
+        let existing = self
+            .store
+            .read()
+            .map_err(|error| McpStoreError::Failed(error.to_string()))?;
+        if existing
+            .iter()
+            .any(|config_entry| config_entry.name == config.name())
+        {
+            return Err(McpStoreError::AlreadyExists(format!(
+                "Server '{}' already exists locally.",
+                config.name()
+            )));
+        }
+        drop(existing);
+        let add = crate::mcp_store::registry_config_to_add_params(
+            &config,
+            params.idempotency_key.as_str(),
+        );
+        // Reuse the canonical admin paths (validation + audit + persist). A
+        // duplicate that landed after the pre-check still maps to -32006.
+        self.add_server(actor, &add).await.map_err(|message| {
+            if message.contains("already exists") {
+                McpStoreError::AlreadyExists(message)
+            } else {
+                McpStoreError::Failed(message)
+            }
+        })?;
+        // A connect failure still returns Ok with `status: "error"` (Python
+        // install returns 200 with the error field populated).
+        self.connect(actor, config.name())
+            .await
+            .map_err(McpStoreError::Failed)
     }
 }
 

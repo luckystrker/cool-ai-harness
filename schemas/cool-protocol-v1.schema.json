@@ -2255,6 +2255,57 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "mcp.store_search"
+            },
+            "params": {
+              "$ref": "#/$defs/McpStoreSearchParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.store_popular"
+            },
+            "params": {
+              "$ref": "#/$defs/McpStorePopularParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "mcp.store_install"
+            },
+            "params": {
+              "$ref": "#/$defs/McpStoreInstallParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "skills.list"
             },
             "params": {
@@ -6573,6 +6624,121 @@
         "endpoint"
       ]
     },
+    "McpStoreInstallParams": {
+      "description": "Install an MCP server from the official registry by registry name.",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "localName": {
+          "type": "string",
+          "default": ""
+        },
+        "registryName": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "registryName"
+      ]
+    },
+    "McpStoreItemRecord": {
+      "description": "One server returned by an MCP registry search.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "installCommand": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "packagesCount": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "repositoryUrl": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "version",
+        "repositoryUrl",
+        "installCommand",
+        "transport",
+        "packagesCount"
+      ]
+    },
+    "McpStorePopularParams": {
+      "description": "Registry \"popular\" parameters.",
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "limit"
+      ]
+    },
+    "McpStoreSearchParams": {
+      "description": "Registry search parameters.",
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "query": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "limit"
+      ]
+    },
+    "McpStoreSearchResult": {
+      "description": "Registry search result plus the query that produced it.",
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpStoreItemRecord"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "query"
+      ]
+    },
     "McpToolListResult": {
       "description": "All tools discovered across connected servers.",
       "type": "object",
@@ -9378,6 +9544,40 @@
             },
             "value": {
               "$ref": "#/$defs/McpServerListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_store_searched"
+            },
+            "value": {
+              "$ref": "#/$defs/McpStoreSearchResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mcp_store_installed"
+            },
+            "value": {
+              "$ref": "#/$defs/McpConnectResult"
             }
           },
           "additionalProperties": false,

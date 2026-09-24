@@ -1,4 +1,5 @@
 mod mcp_admin;
+mod mcp_store;
 mod provider_probe;
 mod rss_feed;
 mod skills_admin;

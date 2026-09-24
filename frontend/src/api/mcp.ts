@@ -1,6 +1,5 @@
-import { api } from "./client"
 import { idempotencyKey, sdk } from "./sdk"
-import { toMcpServer, toMcpTool } from "./mappers"
+import { toMcpServer, toMcpTool, toMcpStoreSearch, toMcpStoreInstall } from "./mappers"
 import type {
   MCPConnectResponse,
   MCPHealthResponse,
@@ -110,16 +109,22 @@ export const mcpApi = {
   // --- Store / Marketplace (network access to the MCP Registry) ---
 
   /** Search the official MCP Registry. */
-  storeSearch: (q: string, limit = 10) =>
-    api.get<MCPStoreSearchResponse>(
-      `/api/mcp/store/search?q=${encodeURIComponent(q)}&limit=${limit}`
-    ),
+  storeSearch: async (q: string, limit = 10): Promise<MCPStoreSearchResponse> =>
+    toMcpStoreSearch(await sdk.mcpStoreSearch({ query: q, limit })),
 
   /** List popular servers from the MCP Registry. */
-  storePopular: (limit = 20) =>
-    api.get<MCPStoreSearchResponse>(`/api/mcp/store/popular?limit=${limit}`),
+  storePopular: async (limit = 20): Promise<MCPStoreSearchResponse> =>
+    toMcpStoreSearch(await sdk.mcpStorePopular({ limit })),
 
   /** Install a server from the MCP Registry. */
-  storeInstall: (body: MCPStoreInstallRequest) =>
-    api.post<MCPStoreInstallResponse>("/api/mcp/store/install", body),
+  storeInstall: async (
+    body: MCPStoreInstallRequest
+  ): Promise<MCPStoreInstallResponse> =>
+    toMcpStoreInstall(
+      await sdk.mcpStoreInstall({
+        idempotencyKey: idempotencyKey(),
+        registryName: body.registry_name,
+        localName: body.local_name ?? "",
+      })
+    ),
 }

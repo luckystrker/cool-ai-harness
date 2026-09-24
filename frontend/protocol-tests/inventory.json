@@ -201,22 +201,22 @@
       "file": "mcp.ts",
       "member": "storeSearch",
       "http": "GET /api/mcp/store/search",
-      "status": "deferred",
-      "rationale": "network access to the MCP Registry; M11 network facade"
+      "status": "sdk",
+      "command": "mcp.store_search"
     },
     {
       "file": "mcp.ts",
       "member": "storePopular",
       "http": "GET /api/mcp/store/popular",
-      "status": "deferred",
-      "rationale": "network access to the MCP Registry; M11 network facade"
+      "status": "sdk",
+      "command": "mcp.store_popular"
     },
     {
       "file": "mcp.ts",
       "member": "storeInstall",
       "http": "POST /api/mcp/store/install",
-      "status": "deferred",
-      "rationale": "network install pipeline owned by the M8 extension runtime; M11 facade"
+      "status": "sdk",
+      "command": "mcp.store_install"
     },
     {
       "file": "memory.ts",

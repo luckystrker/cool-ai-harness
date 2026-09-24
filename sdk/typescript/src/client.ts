@@ -66,6 +66,9 @@ export class CoolSdk {
   mcpHealth(params: protocol.McpServerNameParams) { return this.send<protocol.McpHealthResult>({ method: "mcp.health", params }); }
   mcpListTools(params: protocol.EmptyParams) { return this.send<protocol.McpToolListResult>({ method: "mcp.list_tools", params }); }
   mcpReconnectAll(params: protocol.EmptyParams) { return this.send<protocol.McpServerListResult>({ method: "mcp.reconnect_all", params }); }
+  mcpStoreSearch(params: protocol.McpStoreSearchParams) { return this.send<protocol.McpStoreSearchResult>({ method: "mcp.store_search", params }); }
+  mcpStorePopular(params: protocol.McpStorePopularParams) { return this.send<protocol.McpStoreSearchResult>({ method: "mcp.store_popular", params }); }
+  mcpStoreInstall(params: protocol.McpStoreInstallParams) { return this.send<protocol.McpConnectResult>({ method: "mcp.store_install", params }); }
   skillsList(params: protocol.SkillListParams) { return this.send<protocol.SkillListResult>({ method: "skills.list", params }); }
   skillsCreate(params: protocol.SkillCreateParams) { return this.send<protocol.SkillCreateResult>({ method: "skills.create", params }); }
   skillsDelete(params: protocol.SkillDeleteParams) { return this.send<protocol.LegacyOkResult>({ method: "skills.delete", params }); }

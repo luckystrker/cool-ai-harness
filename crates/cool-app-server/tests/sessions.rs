@@ -8,13 +8,14 @@ use cool_agent::{
 };
 use cool_app_server::client::new_idempotency_key;
 use cool_app_server::{
-    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, ProviderProbe, RunLifecycle,
-    ServerConfig, SkillAdmin,
+    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, McpStoreError, ProviderProbe,
+    RunLifecycle, ServerConfig, SkillAdmin,
 };
 use cool_protocol::{
     CanonicalEvent, Command, EmptyParams, ExtensionDiagnosticRecord, ExtensionStatusResult,
     HookRecord, HookReviewParams, McpAddServerParams, McpConnectResult, McpHealthResult,
     McpServerAdminRecord, McpServerListResult, McpServerNameParams, McpServerRecord,
+    McpStoreInstallParams, McpStorePopularParams, McpStoreSearchParams, McpStoreSearchResult,
     McpToolListResult, McpToolPolicyRecord, McpToolRecord, McpUpdateServerParams, ModelInfoRecord,
     PluginEnabledParams, PluginRecord, ResponsePayload, SkillAdminRecord, SkillCreateParams,
     SkillCreateResult, SkillListResult, SkillRecord, StatusEntry, StatusGetResult,
@@ -784,6 +785,46 @@ impl McpAdmin for RecordingMcpAdmin {
         self.seen.lock().unwrap().push(format!("reconnect:{actor}"));
         self.list_servers().await
     }
+
+    async fn store_search(
+        &self,
+        query: &str,
+        _limit: u16,
+    ) -> Result<McpStoreSearchResult, McpStoreError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("store_search:{query}"));
+        Ok(McpStoreSearchResult {
+            results: Vec::new(),
+            query: query.to_owned(),
+        })
+    }
+
+    async fn store_popular(&self, _limit: u16) -> Result<McpStoreSearchResult, McpStoreError> {
+        self.seen.lock().unwrap().push("store_popular".to_owned());
+        Ok(McpStoreSearchResult {
+            results: Vec::new(),
+            query: String::new(),
+        })
+    }
+
+    async fn store_install(
+        &self,
+        actor: &str,
+        params: &McpStoreInstallParams,
+    ) -> Result<McpConnectResult, McpStoreError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("store_install:{}:{}", actor, params.registry_name));
+        Ok(McpConnectResult {
+            name: params.registry_name.clone(),
+            status: "connected".to_owned(),
+            tools_count: 0,
+            error: None,
+        })
+    }
 }
 
 fn add_params(name: &str) -> McpAddServerParams {
@@ -856,6 +897,10 @@ async fn mcp_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
         panic!("mcp.connect must return McpConnected, got {payload:?}");
     };
     assert_eq!(result.status, "connected");
+    assert_eq!(
+        admin.seen.lock().unwrap().last().map(String::as_str),
+        Some("connect:local-user:demo")
+    );
     assert_eq!(result.tools_count, 1);
 
     let payload = client
@@ -897,6 +942,88 @@ async fn mcp_admin_dispatch_is_actor_scoped_and_requires_an_admin() {
         ],
         "the server-derived actor must reach the host for every mutation"
     );
+}
+
+#[tokio::test]
+async fn mcp_store_dispatch_round_trips_and_maps_registry_errors() {
+    let directory = tempdir().unwrap();
+    let server = scripted_server(Arc::new(ScriptedDriver::echo()), directory.path());
+
+    // No admin configured: the three store commands fail closed with -32020.
+    let (client, task) = connected_client(server.clone()).await;
+    for command in [
+        Command::McpStoreSearch(McpStoreSearchParams {
+            query: "fs".to_owned(),
+            limit: 5,
+        }),
+        Command::McpStorePopular(McpStorePopularParams { limit: 5 }),
+        Command::McpStoreInstall(McpStoreInstallParams {
+            idempotency_key: key("mcp-store-install"),
+            registry_name: "io.example/x".to_owned(),
+            local_name: String::new(),
+        }),
+    ] {
+        let error = client
+            .request(command)
+            .await
+            .expect_err("a store command without an admin must fail");
+        let cool_app_server::ClientError::Protocol(error) = error else {
+            panic!("expected a canonical protocol failure, got {error:?}");
+        };
+        assert_eq!(error.cool_code, "mcp_admin_unavailable");
+    }
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    let admin = Arc::new(RecordingMcpAdmin::default());
+    let server = server.with_mcp_admin(admin.clone());
+    let (client, task) = connected_client(server).await;
+
+    let payload = client
+        .request(Command::McpStoreSearch(McpStoreSearchParams {
+            query: "  files  ".to_owned(),
+            limit: 10,
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::McpStoreSearched(result) = payload else {
+        panic!("mcp.store_search must return McpStoreSearched, got {payload:?}");
+    };
+    assert_eq!(result.query, "  files  ", "the raw query is echoed");
+    assert_eq!(
+        admin.seen.lock().unwrap().last().map(String::as_str),
+        Some("store_search:  files  ")
+    );
+
+    let payload = client
+        .request(Command::McpStorePopular(McpStorePopularParams {
+            limit: 20,
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::McpStoreSearched(result) = payload else {
+        panic!("mcp.store_popular must return McpStoreSearched, got {payload:?}");
+    };
+    assert_eq!(result.query, "", "popular echoes an empty query");
+
+    let payload = client
+        .request(Command::McpStoreInstall(McpStoreInstallParams {
+            idempotency_key: key("mcp-store-install"),
+            registry_name: "io.github.example/servers-filesystem".to_owned(),
+            local_name: String::new(),
+        }))
+        .await
+        .unwrap();
+    let ResponsePayload::McpStoreInstalled(result) = payload else {
+        panic!("mcp.store_install must return McpStoreInstalled, got {payload:?}");
+    };
+    assert_eq!(result.status, "connected");
+    assert_eq!(
+        admin.seen.lock().unwrap().last().map(String::as_str),
+        Some("store_install:local-user:io.github.example/servers-filesystem")
+    );
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
 }
 
 #[derive(Default)]

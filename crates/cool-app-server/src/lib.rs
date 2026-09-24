@@ -31,17 +31,17 @@ use cool_protocol::{
     CompactResult, ContentPart, EventCursor, EventEnvelope, EventPage, ExtensionStatusResult,
     HistoryItem, HookRecord, IdempotentPlanIdParams, InitializeResult, ItemEvent, JsonRpcV2,
     LegacyOkResult, McpAddServerParams, McpConnectResult, McpHealthResult, McpServerAdminRecord,
-    McpServerListResult, McpToolListResult, McpUpdateServerParams, ModelInfoRecord, PlanCreated,
-    PlanExecuteResult, PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep,
-    PluginRecord, PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId,
-    RpcNotification, RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod,
-    RunStarted, RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted,
-    SessionConversationResult, SessionCreatedResult, SessionForkedResult, SessionHistoryResult,
-    SessionListResult, SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary,
-    SkillCreateParams, SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame,
-    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
-    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
-    V1Version,
+    McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
+    McpUpdateServerParams, ModelInfoRecord, PlanCreated, PlanExecuteResult, PlanProgress,
+    PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord, PromptAcceptedResult,
+    ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult,
+    RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult, SessionCreatedResult,
+    SessionForkedResult, SessionHistoryResult, SessionListResult, SessionLoadedResult,
+    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
+    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
 use cool_state::{
@@ -217,17 +217,21 @@ pub trait ExtensionAdmin: Send + Sync {
     }
 }
 
-/// Mutable application settings owned by the web UI. The app server never
-/// persists settings itself; the host (the CLI) stores them on the data root so
-/// they survive a restart instead of living in process memory.
-#[async_trait]
-pub trait AppSettings: Send + Sync {
-    /// The effective default system prompt (an unset default is an empty
-    /// `builtin` record).
-    async fn system_prompt(&self) -> Result<SystemPromptRecord, String>;
-
-    /// Persist the default system prompt; an empty value clears it.
-    async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String>;
+/// Why an `mcp.store_*` registry operation failed. `store_install` reports a
+/// connect failure in `McpConnectResult.error` (200-equivalent, Python parity);
+/// only fetch/miss/no-packages/collision are errors here.
+#[derive(Debug)]
+pub enum McpStoreError {
+    /// The host is not configured (`-32020`).
+    Unavailable(String),
+    /// Exact registry name miss (`-32004`).
+    NotFound(String),
+    /// The registry entry has no installable packages (`-32602`).
+    NoPackages(String),
+    /// A local server with the derived name already exists (`-32006`).
+    AlreadyExists(String),
+    /// Any other registry/host failure (`-32021`, masked detail).
+    Failed(String),
 }
 
 /// Operator-owned global MCP server admin (distinct from the plugin-bundled MCP
@@ -272,6 +276,34 @@ pub trait McpAdmin: Send + Sync {
 
     /// Reconnect every enabled server, refreshing its tools.
     async fn reconnect_all(&self, actor: &str) -> Result<McpServerListResult, String>;
+
+    /// Search the public MCP Registry (network; pinned to the registry host).
+    async fn store_search(
+        &self,
+        query: &str,
+        limit: u16,
+    ) -> Result<McpStoreSearchResult, McpStoreError>;
+
+    /// Popular entries from the public MCP Registry.
+    async fn store_popular(&self, limit: u16) -> Result<McpStoreSearchResult, McpStoreError>;
+
+    /// Fetch a registry entry, derive a config, then `add_server` + `connect`
+    /// through this same admin (no duplicated store path).
+    async fn store_install(
+        &self,
+        actor: &str,
+        params: &McpStoreInstallParams,
+    ) -> Result<McpConnectResult, McpStoreError>;
+}
+
+/// Persistent application settings (the default system prompt today). The host
+/// (the CLI) owns the storage; the app server only forwards and renders.
+#[async_trait]
+pub trait AppSettings: Send + Sync {
+    /// The persisted default system prompt record (may be empty).
+    async fn system_prompt(&self) -> Result<SystemPromptRecord, String>;
+    /// Replace the persisted default system prompt.
+    async fn set_system_prompt(&self, prompt: &str) -> Result<SystemPromptRecord, String>;
 }
 
 /// Operator-owned global skills store (distinct from the plugin-bundled skills
@@ -1738,6 +1770,51 @@ impl AppServer {
                                 id,
                                 masked_detail_error(-32021, "mcp_admin_failed", &message),
                             ),
+                        }
+                    }
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpStoreSearch(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => match admin.store_search(&params.query, params.limit).await {
+                        Ok(result) => success(id, ResponsePayload::McpStoreSearched(result)),
+                        Err(McpStoreError::Unavailable(message)) => failure(
+                            id,
+                            masked_detail_error(-32020, "mcp_admin_unavailable", &message),
+                        ),
+                        Err(error) => failure(id, mcp_store_error_frame(error)),
+                    },
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpStorePopular(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => match admin.store_popular(params.limit).await {
+                        Ok(result) => success(id, ResponsePayload::McpStoreSearched(result)),
+                        Err(McpStoreError::Unavailable(message)) => failure(
+                            id,
+                            masked_detail_error(-32020, "mcp_admin_unavailable", &message),
+                        ),
+                        Err(error) => failure(id, mcp_store_error_frame(error)),
+                    },
+                    None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::McpStoreInstall(params) => {
+                let frame = match &self.inner.mcp_admin {
+                    Some(admin) => {
+                        let actor = local_actor().id;
+                        match admin.store_install(&actor, &params).await {
+                            Ok(result) => success(id, ResponsePayload::McpStoreInstalled(result)),
+                            Err(McpStoreError::Unavailable(message)) => failure(
+                                id,
+                                masked_detail_error(-32020, "mcp_admin_unavailable", &message),
+                            ),
+                            Err(error) => failure(id, mcp_store_error_frame(error)),
                         }
                     }
                     None => failure(id, error(-32020, "mcp_admin_unavailable", false)),
@@ -4971,6 +5048,24 @@ fn masked_detail_error(rpc_code: i32, cool_code: &str, message: &str) -> Protoco
     protocol_error
 }
 
+/// Map a structured registry error onto the family error codes (Python REST
+/// parity: 404/422/409/502 → `-32004`/`-32602`/`-32006`/`-32021`).
+fn mcp_store_error_frame(error: McpStoreError) -> ProtocolError {
+    match error {
+        McpStoreError::Unavailable(message) => {
+            masked_detail_error(-32020, "mcp_admin_unavailable", &message)
+        }
+        McpStoreError::NotFound(message) => {
+            masked_detail_error(-32004, "mcp_registry_server_not_found", &message)
+        }
+        McpStoreError::NoPackages(message) => {
+            masked_detail_error(-32602, "invalid_params", &message)
+        }
+        McpStoreError::AlreadyExists(message) => masked_detail_error(-32006, "conflict", &message),
+        McpStoreError::Failed(message) => masked_detail_error(-32021, "mcp_admin_failed", &message),
+    }
+}
+
 /// The persisted default system prompt, applied when a normal (non-plan) turn
 /// does not supply one. An unset/empty default means no system message, and a
 /// settings read failure degrades to no system prompt rather than failing the
@@ -5248,6 +5343,7 @@ pub fn capabilities() -> BTreeSet<String> {
         "extension_admin_write",
         "local_socket",
         "mcp_admin",
+        "mcp_store",
         "plan_execution",
         "provider_probe",
         "rss_fetch",
