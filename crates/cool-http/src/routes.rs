@@ -308,7 +308,7 @@ async fn health() -> Json<Value> {
         "status": "ok",
         "runtime": "rust-trusted-core",
         "protocolVersion": 1,
-        "phase": "M11",
+        "phase": "M12",
         "server": "cool-http",
         "serverVersion": env!("CARGO_PKG_VERSION"),
         "capabilities": cool_app_server::capabilities(),
