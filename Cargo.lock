@@ -342,6 +342,7 @@ dependencies = [
  "cool-state",
  "futures-util",
  "process-wrap",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

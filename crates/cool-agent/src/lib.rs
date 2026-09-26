@@ -9,6 +9,7 @@ mod loop_runtime;
 mod pricing;
 mod provider;
 mod tools;
+mod web_tools;
 
 pub use anthropic::AnthropicDriver;
 pub use context::{
@@ -29,3 +30,4 @@ pub use tools::{
     PythonFallbackTool, Tool, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError,
     ToolHandler, ToolRegistry, ToolResult, builtin_registry, capability_name,
 };
+pub use web_tools::{WebToolsConfig, web_tool_registry};
