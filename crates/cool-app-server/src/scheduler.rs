@@ -27,12 +27,13 @@ use cool_protocol::{
 };
 use cool_security::{Capability, CapabilityPolicy, Decision, Workspace, mask_secrets};
 use cool_store::LegacyStore;
+use cool_store::domains::conversations::NewConversation;
 use cool_store::domains::tasks::{
     APPROVAL_ALLOW_ALL, NewScheduledTask, NewTaskRun, ScheduledTask, TASK_RUN_CANCELLED,
     TASK_RUN_COMPLETED, TASK_RUN_FAILED, TASK_RUN_RUNNING, TaskRun,
 };
 use cool_store::scheduler::{self, Decision as ScheduleDecision, Scheduler, SchedulerConfig};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 
 /// Default number of concurrent task runs advertised to the UI (matches the
@@ -513,9 +514,39 @@ impl TaskExecutor {
         cancel_rx: watch::Receiver<Option<String>>,
         duration: impl Fn() -> i64,
     ) {
+        // Python's task run owns a hidden `[Task] name` conversation that
+        // hosts the research; an `is_task` conversation stays out of the
+        // sidebar list, and `parent_task_run_id` keeps the audit link.
+        let title = format!("[Task] {}", task.name.chars().take(60).collect::<String>());
+        let conversation = match self.store.create_conversation(
+            &actor.id,
+            &NewConversation {
+                title: Some(title),
+                model: task
+                    .model
+                    .clone()
+                    .or_else(|| Some(self.default_model.clone())),
+                working_directory: task.working_directory.clone(),
+                metadata: Some(json!({"is_task": true, "task_id": task.id})),
+                ..NewConversation::default()
+            },
+        ) {
+            Ok(conversation) => conversation,
+            Err(error) => {
+                self.fail_run(actor, task, run_id, &error.to_string(), duration());
+                return;
+            }
+        };
         // Python `run_research_for_task` defaults depth to 4.
         let outcome = executor
-            .run_inline(&task.prompt, 4, task.model.clone(), None, Some(cancel_rx))
+            .run_inline(
+                &task.prompt,
+                4,
+                task.model.clone(),
+                Some(conversation.id),
+                Some(run_id),
+                Some(cancel_rx),
+            )
             .await;
         let (status, output, error, usage, conversation_id) = match outcome {
             Ok(outcome) => {
@@ -529,19 +560,25 @@ impl TaskExecutor {
                         report
                     }
                 });
-                let (usage, conversation_id) = self
+                let usage = self
                     .store
                     .get_research_run(&actor.id, outcome.run_id)
-                    .map(|run| (run.usage, run.conversation_id))
-                    .unwrap_or((None, None));
+                    .ok()
+                    .and_then(|run| run.usage);
                 let status = match outcome.status {
                     "completed" => TASK_RUN_COMPLETED,
                     "cancelled" => TASK_RUN_CANCELLED,
                     _ => TASK_RUN_FAILED,
                 };
-                (status, report, outcome.error, usage, conversation_id)
+                (status, report, outcome.error, usage, Some(conversation.id))
             }
-            Err(error) => (TASK_RUN_FAILED, None, Some(error.to_string()), None, None),
+            Err(error) => (
+                TASK_RUN_FAILED,
+                None,
+                Some(error.to_string()),
+                None,
+                Some(conversation.id),
+            ),
         };
         let _ = self.store.finish_task_run(
             &actor.id,

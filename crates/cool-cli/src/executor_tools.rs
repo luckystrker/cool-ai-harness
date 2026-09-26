@@ -111,7 +111,7 @@ impl ToolHandler for DeepResearch {
         let model = optional_string(&arguments, "model")?;
         let cancel = context.cancel.as_ref().map(|signal| signal.receiver());
         let outcome = executor
-            .run_inline(topic, depth, model, context.conversation_id, cancel)
+            .run_inline(topic, depth, model, context.conversation_id, None, cancel)
             .await
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
         Ok(match outcome.status {
@@ -210,7 +210,8 @@ impl ToolHandler for SpawnSubagent {
             prompt: prompt.clone(),
             model,
         };
-        // One launch per tool call; the idempotency key dedupes a retried call.
+        // Python parity: a fresh key per call — a subagent launch must never
+        // dedupe against an earlier spawn.
         let key = format!("spawn-subagent:{}", Uuid::new_v4());
         let run = executor
             .launch(&context.actor_id, spec, &key, &key)

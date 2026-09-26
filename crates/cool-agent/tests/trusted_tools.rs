@@ -222,10 +222,33 @@ async fn containment_unit_kills_descendants_with_the_child() {
     // The parent spawns a descendant that writes a marker ~4s in, then blocks.
     // The timeout fires at 500ms and must kill both, so the marker never lands.
     #[cfg(windows)]
-    let arguments = json!({
-        "program": "cmd.exe",
-        "args": ["/D", "/C", "start /b cmd /c \"ping -n 5 127.0.0.1 >nul && echo GHOST> ghost.txt\" & ping -n 60 127.0.0.1 >nul"],
-    });
+    let arguments = {
+        // Nested quotes inside `cmd /c "...\"...\" & ..."` are mangled by
+        // cmd's strip-first/last-quote rule, so the delayed writer lives in a
+        // script a descendant `cmd` runs via `start /b` — a separate process
+        // inside the same Job Object while the parent blocks.
+        std::fs::write(
+            directory.path().join("ghost.cmd"),
+            "ping -n 5 127.0.0.1 >nul\r\necho GHOST> ghost.txt\r\n",
+        )
+        .unwrap();
+        // The launcher env-clears the child, so supply the minimum cmd.exe
+        // needs to resolve `ping` and `ghost.cmd`.
+        context.environment.insert(
+            "PATH".to_owned(),
+            r"C:\Windows\System32;C:\Windows".to_owned(),
+        );
+        context
+            .environment
+            .insert("PATHEXT".to_owned(), ".COM;.EXE;.BAT;.CMD".to_owned());
+        context
+            .environment
+            .insert("SystemRoot".to_owned(), r"C:\Windows".to_owned());
+        json!({
+            "program": "cmd.exe",
+            "args": ["/D", "/C", "start /b cmd /c ghost.cmd & ping -n 60 127.0.0.1 >nul"],
+        })
+    };
     #[cfg(unix)]
     let arguments = json!({
         "program": "/bin/sh",
