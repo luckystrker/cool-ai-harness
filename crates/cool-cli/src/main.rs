@@ -19,7 +19,8 @@ use cool_agent::{
     builtin_registry,
 };
 use cool_app_server::{
-    AppClient, AppServer, AppSettings, ExtensionAdmin, RunLifecycle, ServerConfig, capabilities,
+    AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
+    capabilities,
 };
 use cool_extensions::{
     CompatibilityAdapter, ExtensionRuntime, HookDeclaration, InstalledPlugin, McpToolPolicy,
@@ -286,7 +287,7 @@ async fn build_server(
     let extraction_model = model.clone();
     let workspace = current_workspace()?;
     let (registry, extensions, plugin_store) = extension_registry(data_dir, legacy.clone()).await;
-    let agent = AgentRuntime::new(provider, registry);
+    let agent = AgentRuntime::new(provider, registry.clone());
     let mut server = AppServer::with_agent_runtime(
         config,
         store,
@@ -312,7 +313,14 @@ async fn build_server(
     )));
     // The operator-owned global MCP admin (config store + live session registry)
     // is always available; plugin-bundled MCP servers stay on `extensions.status`.
-    server = server.with_mcp_admin(Arc::new(mcp_admin::CliMcpAdmin::new(data_dir)));
+    // Wired into the shared tool registry so connected servers' tools are live
+    // in every agent run (Python `tool_bridge` parity).
+    let mcp_admin = mcp_admin::CliMcpAdmin::new(data_dir).with_tool_registry(registry);
+    let mcp_admin = Arc::new(mcp_admin);
+    server = server.with_mcp_admin(mcp_admin.clone());
+    // Python `main.startup` parity: connect every enabled configured server and
+    // register its tools before the first run is accepted.
+    let _ = mcp_admin.reconnect_all("local-user").await;
     // The operator-owned global skills store (a SKILL.md tree on the data root).
     server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
     // The live provider model-list probe (uses the stored provider rows + keyring).

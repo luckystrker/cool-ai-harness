@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -204,9 +204,24 @@ impl Tool {
     }
 }
 
+/// Shared, dynamically updatable tool registry. Clones share the same backing
+/// map, so a host that registers tools at runtime (e.g. operator MCP servers
+/// connecting after startup) is visible to every live `AgentRuntime`.
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
-    tools: Arc<BTreeMap<String, Tool>>,
+    tools: Arc<RwLock<BTreeMap<String, Tool>>>,
+}
+
+fn read_tools(
+    tools: &RwLock<BTreeMap<String, Tool>>,
+) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Tool>> {
+    tools.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn write_tools(
+    tools: &RwLock<BTreeMap<String, Tool>>,
+) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Tool>> {
+    tools.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
 impl ToolRegistry {
@@ -221,16 +236,16 @@ impl ToolRegistry {
             registry.insert(tool.definition.name.clone(), tool);
         }
         Ok(Self {
-            tools: Arc::new(registry),
+            tools: Arc::new(RwLock::new(registry)),
         })
     }
 
     pub fn get(&self, name: &str) -> Option<Tool> {
-        self.tools.get(name).cloned()
+        read_tools(&self.tools).get(name).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        read_tools(&self.tools)
             .values()
             .map(|tool| tool.definition.clone())
             .collect()
@@ -238,8 +253,7 @@ impl ToolRegistry {
 
     /// Rich, deterministic (name-sorted) catalog for the UI tool pickers.
     pub fn catalog(&self) -> Vec<ToolCatalogEntry> {
-        let mut entries = self
-            .tools
+        let mut entries = read_tools(&self.tools)
             .values()
             .map(|tool| {
                 let mut capabilities = tool
@@ -262,10 +276,41 @@ impl ToolRegistry {
         entries
     }
 
+    /// Returns a new independent registry containing this registry's tools plus
+    /// `tools`. The original is untouched (dynamic registrations made later on
+    /// either registry are not shared between them).
     pub fn extend(&self, tools: impl IntoIterator<Item = Tool>) -> Result<Self, ToolError> {
-        let mut combined = self.tools.values().cloned().collect::<Vec<_>>();
+        let mut combined = read_tools(&self.tools)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         combined.extend(tools);
         Self::new(combined)
+    }
+
+    /// Insert a tool into the shared map at runtime. Fails on an empty name or
+    /// a name already present, matching `new`'s uniqueness contract — callers
+    /// (e.g. the MCP admin) treat a collision as a skip, never an override.
+    pub fn register(&self, tool: Tool) -> Result<(), ToolError> {
+        let name = tool.definition.name.clone();
+        if name.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "tool names must be non-empty and unique".to_owned(),
+            ));
+        }
+        let mut tools = write_tools(&self.tools);
+        if tools.contains_key(&name) {
+            return Err(ToolError::InvalidArguments(
+                "tool names must be non-empty and unique".to_owned(),
+            ));
+        }
+        tools.insert(name, tool);
+        Ok(())
+    }
+
+    /// Remove a dynamically registered tool; returns whether it was present.
+    pub fn unregister(&self, name: &str) -> bool {
+        write_tools(&self.tools).remove(name).is_some()
     }
 }
 
