@@ -17,32 +17,6 @@ use cool_security::{NetworkPolicy, SecretKeyring};
 use cool_store::LegacyStore;
 use serde_json::Value;
 
-/// Per-1k-token USD prices (prompt, completion); mirrors `providers/pricing.py`.
-const PRICING: &[(&str, f64, f64)] = &[
-    // OpenAI
-    ("gpt-4o", 0.0025, 0.01),
-    ("gpt-4o-mini", 0.00015, 0.0006),
-    ("gpt-4-turbo", 0.01, 0.03),
-    ("gpt-4", 0.03, 0.06),
-    ("gpt-3.5-turbo", 0.0005, 0.0015),
-    ("o1", 0.015, 0.06),
-    ("o1-mini", 0.003, 0.012),
-    ("o3-mini", 0.0011, 0.0044),
-    // Anthropic
-    ("claude-3-5-sonnet", 0.003, 0.015),
-    ("claude-3-5-haiku", 0.0008, 0.004),
-    ("claude-3-opus", 0.015, 0.075),
-    ("claude-3-sonnet", 0.003, 0.015),
-    ("claude-3-haiku", 0.00025, 0.00125),
-    // DeepSeek
-    ("deepseek-chat", 0.00027, 0.0011),
-    ("deepseek-reasoner", 0.00055, 0.00219),
-    // Groq (rough OpenAI-compatible tiers)
-    ("llama-3.3-70b", 0.00059, 0.00079),
-    ("llama-3.1-70b", 0.00059, 0.00079),
-    ("llama-3.1-8b", 0.00005, 0.00008),
-];
-
 /// CLI provider probe over the legacy provider store + secret keyring.
 pub struct CliProviderProbe {
     store: Option<Arc<LegacyStore>>,
@@ -264,64 +238,11 @@ fn extract_context_window(object: &serde_json::Map<String, Value>) -> Option<i64
     None
 }
 
-/// Python `pricing._lookup`: exact, then longest prefix match.
+/// Per-1k USD prices for `model`, from the canonical `cool_agent` pricing
+/// table (µ$/1k → $/1k) that also feeds run-budget accounting.
 fn pricing(model: &str) -> Option<(f64, f64)> {
-    let normalized = normalize(model);
-    if let Some(entry) = PRICING.iter().find(|(key, _, _)| *key == normalized) {
-        return Some((entry.1, entry.2));
-    }
-    let mut best: Option<&(&str, f64, f64)> = None;
-    for entry in PRICING {
-        let key = entry.0;
-        let matches = normalized == key
-            || normalized.starts_with(&format!("{key}-"))
-            || key.starts_with(&format!("{normalized}-"));
-        if matches
-            && best
-                .map(|current| key.len() > current.0.len())
-                .unwrap_or(true)
-        {
-            best = Some(entry);
-        }
-    }
-    best.map(|entry| (entry.1, entry.2))
-}
-
-/// Python `pricing._normalize`: lowercase and strip a trailing date stamp.
-fn normalize(model: &str) -> String {
-    let lower = model.trim().to_ascii_lowercase();
-    if !lower.is_ascii() {
-        return lower;
-    }
-    match strip_date_suffix(&lower) {
-        Some(stripped) => stripped.to_owned(),
-        None => lower,
-    }
-}
-
-fn strip_date_suffix(model: &str) -> Option<&str> {
-    let bytes = model.as_bytes();
-    if model.len() >= 11 {
-        let start = model.len() - 11;
-        let tail = &bytes[start..];
-        if tail[0] == b'-'
-            && tail[1..5].iter().all(u8::is_ascii_digit)
-            && tail[5] == b'-'
-            && tail[6..8].iter().all(u8::is_ascii_digit)
-            && tail[8] == b'-'
-            && tail[9..11].iter().all(u8::is_ascii_digit)
-        {
-            return Some(&model[..start]);
-        }
-    }
-    if model.len() >= 9 {
-        let start = model.len() - 9;
-        let tail = &bytes[start..];
-        if tail[0] == b'-' && tail[1..].iter().all(u8::is_ascii_digit) {
-            return Some(&model[..start]);
-        }
-    }
-    None
+    cool_agent::model_pricing(model)
+        .map(|(prompt, completion)| (prompt as f64 / 1e6, completion as f64 / 1e6))
 }
 
 #[cfg(test)]

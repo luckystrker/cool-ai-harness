@@ -3,8 +3,10 @@
 //! Providers propose content and tool intents. The core owns policy, approval,
 //! execution, canonical events, cancellation, budgets and history.
 
+mod anthropic;
 mod context;
 mod loop_runtime;
+mod pricing;
 mod provider;
 mod tools;
 
@@ -17,6 +19,8 @@ pub use loop_runtime::{
     CancelSignal, EventSink, RunOutcome, RuntimeError, StoreEventSink, SubagentRequest,
     history_from_events, mask_canonical_event,
 };
+pub use anthropic::AnthropicDriver;
+pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{
     ModelDriver, ModelEvent, ModelRequest, ModelStream, OpenAiCompatibleDriver, ProviderError,
     ScriptedDriver, Usage,

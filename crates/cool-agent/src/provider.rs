@@ -245,6 +245,7 @@ impl ModelDriver for OpenAiCompatibleDriver {
             ));
         }
         let max_bytes = self.network_policy.max_response_bytes;
+        let model = request.model.clone();
         let (sender, receiver) = tokio::sync::mpsc::channel(32);
         tokio::spawn(async move {
             let mut body = response.bytes_stream();
@@ -285,7 +286,9 @@ impl ModelDriver for OpenAiCompatibleDriver {
                     }
                 };
                 for line in lines {
-                    match process_sse_line(&line, &sender, &mut calls, &mut finish_reason).await {
+                    match process_sse_line(&line, &sender, &mut calls, &mut finish_reason, &model)
+                        .await
+                    {
                         Ok(true) => return,
                         Ok(false) => {}
                         Err(error) => {
@@ -320,7 +323,10 @@ impl ModelDriver for OpenAiCompatibleDriver {
     }
 }
 
-fn decode_sse_lines(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<String>, ProviderError> {
+pub(crate) fn decode_sse_lines(
+    buffer: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<Vec<String>, ProviderError> {
     buffer.extend_from_slice(chunk);
     let mut lines = Vec::new();
     while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
@@ -417,6 +423,7 @@ async fn process_sse_line(
     sender: &tokio::sync::mpsc::Sender<Result<ModelEvent, ProviderError>>,
     calls: &mut BTreeMap<u64, OpenAiToolAccumulator>,
     finish_reason: &mut Option<String>,
+    model: &str,
 ) -> Result<bool, ProviderError> {
     let Some(data) = line.strip_prefix("data:").map(str::trim) else {
         return Ok(false);
@@ -436,12 +443,18 @@ async fn process_sse_line(
     let value: Value = serde_json::from_str(data)
         .map_err(|error| ProviderError::new("provider_json", error.to_string(), false))?;
     if let Some(usage) = value.get("usage").filter(|value| !value.is_null()) {
+        let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+        let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         sender
             .send(Ok(ModelEvent::Usage(Usage {
-                prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+                prompt_tokens,
+                completion_tokens,
                 total_tokens: usage["total_tokens"].as_u64().unwrap_or(0),
-                cost_micro_usd: None,
+                cost_micro_usd: crate::pricing::estimate_cost_micro_usd(
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                ),
             })))
             .await
             .ok();
@@ -509,6 +522,7 @@ mod tests {
             &sender,
             &mut calls,
             &mut finish_reason,
+            "gpt-4o",
         )
         .await
         .unwrap();
@@ -517,6 +531,7 @@ mod tests {
             &sender,
             &mut calls,
             &mut finish_reason,
+            "gpt-4o",
         )
         .await
         .unwrap();
@@ -525,11 +540,12 @@ mod tests {
             &sender,
             &mut calls,
             &mut finish_reason,
+            "gpt-4o",
         )
         .await
         .unwrap();
         assert!(
-            process_sse_line("data: [DONE]", &sender, &mut calls, &mut finish_reason)
+            process_sse_line("data: [DONE]", &sender, &mut calls, &mut finish_reason, "gpt-4o")
                 .await
                 .unwrap()
         );

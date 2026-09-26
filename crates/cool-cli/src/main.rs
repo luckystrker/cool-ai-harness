@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cool_agent::{
-    AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, MessageRole,
-    ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink, ToolContext,
-    builtin_registry,
+    AgentLimits, AgentRequest, AgentRuntime, AnthropicDriver, AutoApprovalGate, CancelSignal,
+    MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink,
+    ToolContext, builtin_registry,
 };
 use cool_app_server::{
     AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
@@ -1614,6 +1614,13 @@ fn configured_provider(
     echo_delay: std::time::Duration,
     allow_scripted_fallback: bool,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
+    let provider_kind = env::var("COOL_PROVIDER").unwrap_or_default().to_lowercase();
+    if provider_kind == "anthropic"
+        || (provider_kind.is_empty()
+            && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty()))
+    {
+        return configured_anthropic_provider(allow_scripted_fallback);
+    }
     let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let configured_base_url = env::var("OPENAI_BASE_URL")
         .ok()
@@ -1627,7 +1634,7 @@ fn configured_provider(
         }
         return Err(runtime(
             "provider_credentials_missing",
-            "OPENAI_API_KEY or an explicit OPENAI_BASE_URL is required; use --scripted only for deterministic local checks",
+            "COOL_PROVIDER=anthropic with ANTHROPIC_API_KEY, or OPENAI_API_KEY or an explicit OPENAI_BASE_URL is required; use --scripted only for deterministic local checks",
         ));
     }
     let base_url = configured_base_url.unwrap_or_else(|| "https://api.openai.com/v1/".to_owned());
@@ -1649,7 +1656,53 @@ fn configured_provider(
         .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
     let model = env::var("OPENAI_MODEL")
         .or_else(|_| env::var("OPENAI_DEFAULT_MODEL"))
+        .or_else(|_| env::var("COOL_MODEL"))
         .unwrap_or_else(|_| "gpt-5-mini".to_owned());
+    Ok((Arc::new(provider), model))
+}
+
+/// Anthropic-native provider wiring (parity with `providers/anthropic.py`):
+/// `ANTHROPIC_API_KEY` + optional `ANTHROPIC_BASE_URL`, model from
+/// `ANTHROPIC_MODEL`/`COOL_MODEL` or the current Claude default.
+fn configured_anthropic_provider(
+    allow_scripted_fallback: bool,
+) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
+    let api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        if allow_scripted_fallback {
+            return Ok((
+                Arc::new(ScriptedDriver::echo_with_delay(std::time::Duration::ZERO)),
+                "scripted-echo".to_owned(),
+            ));
+        }
+        return Err(runtime(
+            "provider_credentials_missing",
+            "COOL_PROVIDER=anthropic requires ANTHROPIC_API_KEY",
+        ));
+    }
+    let base_url = env::var("ANTHROPIC_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://api.anthropic.com".to_owned());
+    let parsed = url::Url::parse(&base_url)
+        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| runtime("provider_config_invalid", "provider URL has no host"))?;
+    let allow_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let policy = if allow_loopback {
+        NetworkPolicy::new([host.to_owned()]).loopback_only()
+    } else {
+        NetworkPolicy::new([host.to_owned()])
+    };
+    let provider = AnthropicDriver::new(&base_url, api_key, policy)
+        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let model = env::var("ANTHROPIC_MODEL")
+        .or_else(|_| env::var("COOL_MODEL"))
+        .unwrap_or_else(|_| "claude-sonnet-4-5".to_owned());
     Ok((Arc::new(provider), model))
 }
 
