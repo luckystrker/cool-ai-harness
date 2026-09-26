@@ -839,6 +839,12 @@ fn add_usage(total: &mut Usage, addition: &Usage) {
     total.completion_tokens = total
         .completion_tokens
         .saturating_add(addition.completion_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(addition.cache_read_tokens);
+    total.cache_write_tokens = total
+        .cache_write_tokens
+        .saturating_add(addition.cache_write_tokens);
     total.total_tokens = total.total_tokens.saturating_add(addition.total_tokens);
     total.cost_micro_usd = match (total.cost_micro_usd, addition.cost_micro_usd) {
         (Some(left), Some(right)) => Some(left.saturating_add(right)),

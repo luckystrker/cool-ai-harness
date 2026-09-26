@@ -281,9 +281,12 @@ struct AnthropicToolBlock {
 struct AnthropicStreamState {
     model: String,
     tool_blocks: BTreeMap<u64, AnthropicToolBlock>,
-    /// `message_start` carries `input_tokens`; `message_delta` carries the
-    /// cumulative `output_tokens` and may omit input entirely.
+    /// `message_start` carries `input_tokens` plus the cache fields;
+    /// `message_delta` carries the cumulative `output_tokens` and may repeat
+    /// or omit the rest.
     start_input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     finish_reason: Option<String>,
 }
 
@@ -293,8 +296,23 @@ impl AnthropicStreamState {
             model,
             tool_blocks: BTreeMap::new(),
             start_input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             finish_reason: None,
         }
+    }
+
+    /// Anthropic counts cached tokens separately from `input_tokens`:
+    /// `cache_creation_input_tokens` are written at a premium and
+    /// `cache_read_input_tokens` are billed at a discount — track both so the
+    /// run budget sees the real cost, not just the raw input bill.
+    fn track_cache(&mut self, usage: &Value) {
+        self.cache_read_tokens = usage["cache_read_input_tokens"]
+            .as_u64()
+            .unwrap_or(self.cache_read_tokens);
+        self.cache_write_tokens = usage["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(self.cache_write_tokens);
     }
 
     async fn process_line(
@@ -314,6 +332,7 @@ impl AnthropicStreamState {
             Some("message_start") => {
                 let usage = &event["message"]["usage"];
                 self.start_input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                self.track_cache(usage);
             }
             Some("content_block_start") => {
                 let index = event["index"].as_u64().unwrap_or(0);
@@ -374,6 +393,7 @@ impl AnthropicStreamState {
                 }
                 let usage = &event["usage"];
                 if !usage.is_null() {
+                    self.track_cache(usage);
                     let prompt_tokens = usage["input_tokens"]
                         .as_u64()
                         .unwrap_or(self.start_input_tokens);
@@ -382,11 +402,18 @@ impl AnthropicStreamState {
                         .send(Ok(ModelEvent::Usage(Usage {
                             prompt_tokens,
                             completion_tokens,
-                            total_tokens: prompt_tokens + completion_tokens,
+                            cache_read_tokens: self.cache_read_tokens,
+                            cache_write_tokens: self.cache_write_tokens,
+                            total_tokens: prompt_tokens
+                                + completion_tokens
+                                + self.cache_read_tokens
+                                + self.cache_write_tokens,
                             cost_micro_usd: estimate_cost_micro_usd(
                                 &self.model,
                                 prompt_tokens,
                                 completion_tokens,
+                                self.cache_read_tokens,
+                                self.cache_write_tokens,
                             ),
                         })))
                         .await
@@ -394,6 +421,11 @@ impl AnthropicStreamState {
                 }
             }
             Some("message_stop") => {
+                // Flush any tool blocks still buffered — content_block_stop
+                // is not guaranteed before the stream terminates.
+                for (_, block) in std::mem::take(&mut self.tool_blocks) {
+                    sender.send(block.finish()).await.ok();
+                }
                 sender
                     .send(Ok(ModelEvent::Finish {
                         reason: self.finish_reason.take(),

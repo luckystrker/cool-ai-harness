@@ -493,21 +493,29 @@ impl ToolHandler for ListFiles {
         }
         let requested = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
         let path = workspace_path(context, requested)?;
-        let reader = context
+        let dir = context
             .workspace
             .dir()
-            .read_dir(&path)
+            .try_clone()
             .map_err(confinement_io)?;
-        let mut entries = Vec::new();
-        for entry in reader {
-            let entry = entry.map_err(confinement_io)?;
-            let kind = entry.file_type().map_err(confinement_io)?;
-            entries.push(format!(
-                "{}{}",
-                entry.file_name().to_string_lossy(),
-                if kind.is_dir() { "/" } else { "" }
-            ));
-        }
+        // cap-std read_dir is a synchronous iterator — keep it off the
+        // async worker.
+        let mut entries = tokio::task::spawn_blocking(move || -> Result<Vec<String>, ToolError> {
+            let reader = dir.read_dir(&path).map_err(confinement_io)?;
+            let mut entries = Vec::new();
+            for entry in reader {
+                let entry = entry.map_err(confinement_io)?;
+                let kind = entry.file_type().map_err(confinement_io)?;
+                entries.push(format!(
+                    "{}{}",
+                    entry.file_name().to_string_lossy(),
+                    if kind.is_dir() { "/" } else { "" }
+                ));
+            }
+            Ok(entries)
+        })
+        .await
+        .map_err(|error| ToolError::Io(std::io::Error::other(error)))??;
         entries.sort();
         Ok(ToolResult::ok(json!({"entries": entries})))
     }

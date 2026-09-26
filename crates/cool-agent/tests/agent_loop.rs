@@ -121,6 +121,7 @@ async fn scripted_chat_streams_usage_and_completes() {
             completion_tokens: 1,
             total_tokens: 3,
             cost_micro_usd: Some(7),
+            ..Default::default()
         }),
         ModelEvent::Finish {
             reason: Some("stop".to_owned()),
@@ -586,6 +587,7 @@ async fn atomic_budget_rejection_closes_the_run_before_another_provider_call() {
         completion_tokens: 0,
         total_tokens: 2,
         cost_micro_usd: None,
+        ..Default::default()
     })])]);
     let runtime = AgentRuntime::new(Arc::new(provider), builtin_registry());
     let (_, cancel) = CancelSignal::channel();
@@ -620,6 +622,7 @@ async fn configured_usage_limit_fails_closed_when_a_later_turn_omits_usage() {
                 completion_tokens: 0,
                 total_tokens: 1,
                 cost_micro_usd: None,
+                ..Default::default()
             }),
             ModelEvent::ToolCall(cool_agent::ToolCall {
                 call_id: "missing-read".to_owned(),
@@ -666,6 +669,7 @@ async fn configured_cost_limit_fails_closed_when_a_later_turn_has_unknown_cost()
                 completion_tokens: 0,
                 total_tokens: 1,
                 cost_micro_usd: Some(1),
+                ..Default::default()
             }),
             ModelEvent::ToolCall(cool_agent::ToolCall {
                 call_id: "cost-read".to_owned(),
@@ -682,6 +686,7 @@ async fn configured_cost_limit_fails_closed_when_a_later_turn_has_unknown_cost()
                 completion_tokens: 0,
                 total_tokens: 2,
                 cost_micro_usd: None,
+                ..Default::default()
             }),
             ModelEvent::Finish {
                 reason: Some("stop".to_owned()),

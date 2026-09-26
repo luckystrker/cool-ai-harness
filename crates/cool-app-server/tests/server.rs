@@ -417,6 +417,7 @@ async fn rust_agent_tool_approval_resumes_the_live_app_server_run() {
                 completion_tokens: 2,
                 total_tokens: 5,
                 cost_micro_usd: None,
+                ..Default::default()
             }),
             ModelEvent::Finish {
                 reason: Some("stop".to_owned()),

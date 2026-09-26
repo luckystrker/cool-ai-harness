@@ -282,19 +282,24 @@ impl PluginLoader {
             .parent()
             .and_then(Path::parent)
             .unwrap_or(data_root);
-        let signature_status = manifest
-            .as_ref()
-            .map(|manifest| {
-                crate::signing::inspect_signature(
-                    &root,
-                    store_root,
-                    &manifest.name,
-                    &manifest.version,
-                    &content_hash,
+        let signature_status = match &manifest {
+            Some(manifest) => crate::signing::inspect_signature(
+                &root,
+                store_root,
+                &manifest.name,
+                &manifest.version,
+                &content_hash,
+            )
+            .unwrap_or_else(|error| crate::signing::SignatureStatus::Invalid(error.to_string())),
+            // A signature file without a manifest is tamper evidence — it can
+            // never be verified and must not downgrade to plain "unsigned".
+            None if root.join(crate::signing::SIGNATURE_FILE).is_file() => {
+                crate::signing::SignatureStatus::Invalid(
+                    "signature.json is present but the manifest is not loadable".to_owned(),
                 )
-                .unwrap_or_else(|error| crate::signing::SignatureStatus::Invalid(error.to_string()))
-            })
-            .unwrap_or(crate::signing::SignatureStatus::Unsigned);
+            }
+            None => crate::signing::SignatureStatus::Unsigned,
+        };
         match &signature_status {
             crate::signing::SignatureStatus::Unsigned => diagnostics.push(diagnostic(
                 "signature.unsigned",
@@ -592,6 +597,9 @@ impl PluginLoader {
         };
         let mut transformed = 0_usize;
         let mut seen_ids = BTreeSet::new();
+        // Vendor hooks run in the user's project directory under Claude Code;
+        // for a local single-core agent that is the process working directory.
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| bundle.root.clone());
         for (event, groups) in &events {
             let prefix = format!("{relative}/hooks/{event}");
             if !CANONICAL_HOOK_EVENTS.contains(&event.as_str()) {
@@ -660,6 +668,29 @@ impl PluginLoader {
                         ));
                         continue;
                     }
+                    // Vendor fields without a canonical concept (e.g. Claude's
+                    // per-hook `timeout`) are dropped — visibly, never silently.
+                    let dropped: Vec<String> = item
+                        .keys()
+                        .filter(|key| {
+                            !matches!(
+                                key.as_str(),
+                                "type" | "command" | "matcher" | "hooks" | "event"
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    if !dropped.is_empty() {
+                        bundle.diagnostics.push(diagnostic(
+                            "compatibility.hook_field_unsupported",
+                            &format!(
+                                "vendor hook fields have no canonical concept and are dropped: {}",
+                                dropped.join(", ")
+                            ),
+                            DiagnosticLevel::Warning,
+                            &item_path,
+                        ));
+                    }
                     let Some(command) = item.get("command").and_then(Value::as_str) else {
                         bundle.diagnostics.push(diagnostic(
                             "compatibility.hooks_invalid",
@@ -669,7 +700,8 @@ impl PluginLoader {
                         ));
                         continue;
                     };
-                    let command = translate_vendor_command(command, bundle.compatibility);
+                    let command =
+                        translate_vendor_command(command, bundle.compatibility, &project_dir);
                     // Vendor hooks execute through the host shell — the
                     // canonical handler preserves that with a bare shell name
                     // plus the command string as its argument. PLUGIN_ROOT /
@@ -681,9 +713,17 @@ impl PluginLoader {
                     };
                     let mut env = serde_json::Map::new();
                     if bundle.compatibility == CompatibilityKind::Claude {
+                        // Claude Code exposes CLAUDE_PLUGIN_ROOT (the plugin's
+                        // directory) and CLAUDE_PROJECT_DIR (the user's
+                        // project); they map onto the canonical install root
+                        // and the process workspace respectively.
+                        env.insert(
+                            "CLAUDE_PLUGIN_ROOT".to_owned(),
+                            Value::String("${PLUGIN_ROOT}".to_owned()),
+                        );
                         env.insert(
                             "CLAUDE_PROJECT_DIR".to_owned(),
-                            Value::String("${PLUGIN_ROOT}".to_owned()),
+                            Value::String(project_dir.to_string_lossy().into_owned()),
                         );
                     }
                     let args = flags
@@ -707,7 +747,12 @@ impl PluginLoader {
                         });
                         match parse_hook(&canonical, &bundle.root, &data_root, &bundle.content_hash)
                         {
-                            Ok(hook) if seen_ids.insert(hook.id.clone()) => {
+                            Ok(mut hook) if seen_ids.insert(hook.id.clone()) => {
+                                // Vendor commands run from the user's project
+                                // directory, not the plugin root.
+                                if let HookHandler::Command { ref mut cwd, .. } = hook.handler {
+                                    *cwd = project_dir.clone();
+                                }
                                 transformed += 1;
                                 bundle.hooks.push(hook);
                             }
@@ -747,21 +792,39 @@ impl PluginLoader {
         if !directory.is_dir() {
             return Ok(());
         }
+        let mut files = Vec::new();
+        collect_markdown(&directory, &mut files)?;
+        files.sort();
         let mut transformed = 0_usize;
-        for entry in fs::read_dir(directory)? {
-            let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+        for path in files {
+            if ensure_file_in(&bundle.root, &path).is_err() {
                 continue;
             }
-            if !path.is_file() || ensure_file_in(&bundle.root, &path).is_err() {
-                continue;
-            }
+            // Nested entries keep their relative path as the skill name;
+            // the canonical charset has no `/` or `:`, so the sanitizer
+            // maps commands/team/deploy.md onto "team-deploy" — the same
+            // namespace Claude Code renders as `team:deploy`.
             let stem = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("prompt");
+                .strip_prefix(&directory)
+                .ok()
+                .and_then(|tail| tail.parent().map(|dir| (dir, &path)))
+                .map(|(dir, path)| {
+                    let name = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("prompt");
+                    let prefix = dir
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    if prefix.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{prefix}/{name}")
+                    }
+                })
+                .unwrap_or_else(|| "prompt".to_owned());
             let text = fs::read_to_string(&path)?;
-            let normalized = normalize_vendor_prompt(&text, stem, relative);
+            let normalized = normalize_vendor_prompt(&text, &stem, relative);
             match parse_skill(&normalized, &path, false) {
                 Ok(skill) => {
                     transformed += 1;
@@ -1464,6 +1527,19 @@ fn expand_path(value: &str, root: &Path, data: &Path) -> Result<PathBuf, String>
     Ok(normalized)
 }
 
+fn collect_markdown(directory: &Path, out: &mut Vec<PathBuf>) -> Result<(), LoadError> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_markdown(&path, out)?;
+        } else if path.extension().and_then(|value| value.to_str()) == Some("md") && path.is_file()
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn expand_value(value: &str, root: &Path, data: &Path) -> String {
     value
         .replace("${PLUGIN_ROOT}", &root.to_string_lossy())
@@ -1689,13 +1765,21 @@ fn vendor_matcher(value: &str) -> Option<Vec<BTreeMap<String, Value>>> {
     None
 }
 
-/// Rewrites vendor-specific path variables onto the canonical plugin-root
-/// placeholder, which `expand_value` then resolves under the install root.
-fn translate_vendor_command(command: &str, kind: CompatibilityKind) -> String {
+/// Rewrites vendor-specific path variables: Claude Code's
+/// `CLAUDE_PLUGIN_ROOT` onto the canonical plugin-root placeholder (resolved
+/// by `expand_value` under the install root) and `CLAUDE_PROJECT_DIR` onto
+/// the user's project directory — for a local single-core agent, the process
+/// working directory.
+fn translate_vendor_command(command: &str, kind: CompatibilityKind, project_dir: &Path) -> String {
     match kind {
-        CompatibilityKind::Claude => command
-            .replace("${CLAUDE_PROJECT_DIR}", "${PLUGIN_ROOT}")
-            .replace("$CLAUDE_PROJECT_DIR", "${PLUGIN_ROOT}"),
+        CompatibilityKind::Claude => {
+            let project_dir = project_dir.to_string_lossy();
+            command
+                .replace("${CLAUDE_PLUGIN_ROOT}", "${PLUGIN_ROOT}")
+                .replace("$CLAUDE_PLUGIN_ROOT", "${PLUGIN_ROOT}")
+                .replace("${CLAUDE_PROJECT_DIR}", &project_dir)
+                .replace("$CLAUDE_PROJECT_DIR", &project_dir)
+        }
         _ => command.to_owned(),
     }
 }

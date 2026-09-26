@@ -147,6 +147,28 @@ impl PluginStore {
                 entry.name
             )));
         }
+        // Signature status is re-verified at every load, so publisher
+        // revocation or post-install signature tampering still blocks enable
+        // and runtime registration — the install-time gate is not a one-shot.
+        if !bundle.loadable() {
+            let blockers = bundle
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(diagnostic.level, crate::loader::DiagnosticLevel::Blocker)
+                })
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect::<Vec<_>>();
+            return Err(StoreError::Invalid(if blockers.is_empty() {
+                format!("plugin is not loadable: {}", entry.name)
+            } else {
+                format!(
+                    "plugin {} is not loadable: {}",
+                    entry.name,
+                    blockers.join("; ")
+                )
+            }));
+        }
         Ok(bundle)
     }
 
@@ -156,6 +178,80 @@ impl PluginStore {
 
     pub fn install_local(&self, source: &Path) -> Result<InstalledPlugin, StoreError> {
         self.install_directory(source, "local", &source.to_string_lossy(), "", None, false)
+    }
+
+    /// Replaces an installed plugin with the directory at `source` when the
+    /// manifest name matches `name`; installs under a new content hash and
+    /// records an `update` transparency entry. Fails if the plugin is not
+    /// installed — updating must never silently install.
+    pub fn update_local(&self, name: &str, source: &Path) -> Result<InstalledPlugin, StoreError> {
+        self.install_directory(
+            source,
+            "local",
+            &source.to_string_lossy(),
+            "",
+            Some(name),
+            true,
+        )
+    }
+
+    /// Removes an installed plugin: drops the lockfile entry, deletes the
+    /// content-addressed install and data directories, and records a `remove`
+    /// transparency entry.
+    pub fn uninstall(&self, name: &str) -> Result<InstalledPlugin, StoreError> {
+        let _guard = self.write_lock.lock().map_err(|_| StoreError::Poisoned)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join("rust-extensions.lock"))?;
+        lock.lock()?;
+        let result = (|| -> Result<InstalledPlugin, StoreError> {
+            let mut document = self.read()?;
+            let Some(entry) = document.plugins.remove(name) else {
+                return Err(StoreError::Invalid(format!(
+                    "plugin is not installed: {name}"
+                )));
+            };
+            self.write(&document)?;
+            // Delete the owned directories only after the lockfile no longer
+            // references them; a failed delete leaves garbage on disk but not
+            // a phantom installed plugin.
+            if let Err(error) = fs::remove_dir_all(&entry.install_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(StoreError::Io(error));
+            }
+            if let Err(error) = fs::remove_dir_all(&entry.data_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(StoreError::Io(error));
+            }
+            let status = if entry.signature_status == "signed" {
+                crate::signing::SignatureStatus::Signed(crate::signing::VerifiedSignature {
+                    publisher: entry.publisher.clone().unwrap_or_default(),
+                    key_fingerprint: String::new(),
+                })
+            } else if entry.signature_status == "invalid" {
+                crate::signing::SignatureStatus::Invalid(entry.signature_status.clone())
+            } else {
+                crate::signing::SignatureStatus::Unsigned
+            };
+            crate::signing::append_transparency(
+                &self.root,
+                "remove",
+                &entry.name,
+                &entry.version,
+                &entry.content_hash,
+                &status,
+                timestamp(),
+            )
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            Ok(entry)
+        })();
+        let _ = lock.unlock();
+        result
     }
 
     pub fn install_git(&self, source: &str, revision: &str) -> Result<InstalledPlugin, StoreError> {
@@ -233,35 +329,45 @@ impl PluginStore {
                 "plugin is not installed: {name}"
             )));
         };
-        if enabled {
-            self.load_entry(entry.clone())?;
-        }
-        entry.enabled = enabled;
-        let result = self.write(&document);
-        if result.is_ok() {
-            let entry = &document.plugins[name];
-            let status = if entry.signature_status.is_empty() {
-                crate::signing::SignatureStatus::Unsigned
-            } else if entry.signature_status == "signed" {
+        // Re-verify the bundle before enabling so a revoked or tampered
+        // signature still blocks; the fresh status also replaces the stored
+        // copy so transparency entries describe what was verified now, not
+        // what was verified at install.
+        let fresh_bundle = match self.load_entry(entry.clone()) {
+            Ok(bundle) => Some(bundle),
+            Err(error) if enabled => return Err(error),
+            Err(_) => None,
+        };
+        let status = match fresh_bundle {
+            Some(bundle) => {
+                let status = bundle.signature_status;
+                entry.signature_status = status.label().to_owned();
+                entry.publisher = status.publisher().map(str::to_owned);
+                status
+            }
+            None if entry.signature_status.is_empty() => crate::signing::SignatureStatus::Unsigned,
+            None if entry.signature_status == "signed" => {
                 crate::signing::SignatureStatus::Signed(crate::signing::VerifiedSignature {
                     publisher: entry.publisher.clone().unwrap_or_default(),
                     key_fingerprint: String::new(),
                 })
-            } else {
-                crate::signing::SignatureStatus::Invalid(entry.signature_status.clone())
-            };
-            let _ = crate::signing::append_transparency(
-                &self.root,
-                if enabled { "enable" } else { "disable" },
-                &entry.name,
-                &entry.version,
-                &entry.content_hash,
-                &status,
-                timestamp(),
-            );
-        }
+            }
+            None => crate::signing::SignatureStatus::Invalid(entry.signature_status.clone()),
+        };
+        entry.enabled = enabled;
+        self.write(&document)?;
+        let entry = &document.plugins[name];
+        crate::signing::append_transparency(
+            &self.root,
+            if enabled { "enable" } else { "disable" },
+            &entry.name,
+            &entry.version,
+            &entry.content_hash,
+            &status,
+            timestamp(),
+        )
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
         lock.unlock()?;
-        result?;
         Ok(document
             .plugins
             .remove(name)
@@ -371,6 +477,12 @@ impl PluginStore {
             if document.plugins.contains_key(&manifest.name) && !replacing {
                 return Err(StoreError::Invalid(format!(
                     "plugin is already installed: {}; use update",
+                    manifest.name
+                )));
+            }
+            if replacing && !document.plugins.contains_key(&manifest.name) {
+                return Err(StoreError::Invalid(format!(
+                    "plugin is not installed and cannot be updated: {}",
                     manifest.name
                 )));
             }

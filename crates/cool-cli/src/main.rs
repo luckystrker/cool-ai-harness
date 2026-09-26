@@ -1204,7 +1204,7 @@ async fn spawn_app_server(
 fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
     let Some(action) = arguments.first().map(String::as_str) else {
         return Err(usage(
-            "plugin command is: plugin install|list|validate|doctor [argument]",
+            "plugin command is: plugin install|update|remove|enable|disable|list|validate|doctor [argument]",
         ));
     };
     let data_dir = default_data_dir();
@@ -1224,6 +1224,36 @@ fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)
                 None => store.install_local(std::path::Path::new(source)),
             }
             .map_err(|error| runtime("plugin_install_failed", &error.to_string()))?;
+            print_json(&plugin_entry_json(&entry))
+        }
+        "update" => {
+            let (Some(name), Some(source)) = (arguments.get(1), arguments.get(2)) else {
+                return Err(usage("plugin update needs a name and a source path"));
+            };
+            let store = open_plugin_store(&data_dir)?;
+            let entry = store
+                .update_local(name, std::path::Path::new(source))
+                .map_err(|error| runtime("plugin_update_failed", &error.to_string()))?;
+            print_json(&plugin_entry_json(&entry))
+        }
+        "remove" | "uninstall" => {
+            let Some(name) = arguments.get(1) else {
+                return Err(usage("plugin remove needs a name"));
+            };
+            let store = open_plugin_store(&data_dir)?;
+            let entry = store
+                .uninstall(name)
+                .map_err(|error| runtime("plugin_remove_failed", &error.to_string()))?;
+            print_json(&json!({"removed": plugin_entry_json(&entry)}))
+        }
+        "enable" | "disable" => {
+            let Some(name) = arguments.get(1) else {
+                return Err(usage("plugin enable|disable needs a name"));
+            };
+            let store = open_plugin_store(&data_dir)?;
+            let entry = store
+                .set_enabled(name, action == "enable")
+                .map_err(|error| runtime("plugin_enable_failed", &error.to_string()))?;
             print_json(&plugin_entry_json(&entry))
         }
         "list" => {
@@ -1267,6 +1297,10 @@ fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)
                 return plugin_command(vec!["validate".to_owned(), path.clone()]);
             }
             let store = open_plugin_store(&data_dir)?;
+            let transparency = match store.verify_transparency_log() {
+                Ok(entries) => json!({"valid": true, "entries": entries}),
+                Err(error) => json!({"valid": false, "error": error.to_string()}),
+            };
             let entries = store
                 .list()
                 .map_err(|error| runtime("plugin_store_failed", &error.to_string()))?;
@@ -1289,6 +1323,8 @@ fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)
                     "sourceType": entry.source_type,
                     "source": entry.source,
                     "revision": entry.revision,
+                    "publisher": entry.publisher,
+                    "signatureStatus": entry.signature_status,
                     "contentHash": entry.content_hash,
                     "installPath": entry.install_path,
                     "dataPath": entry.data_path,
@@ -1299,7 +1335,7 @@ fn plugin_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)
                     "diagnostics": bundle.as_ref().map(|bundle| bundle.diagnostics.clone()),
                 }));
             }
-            print_json(&json!({"plugins": reports}))
+            print_json(&json!({"plugins": reports, "transparency": transparency}))
         }
         _ => Err(usage("unknown plugin action")),
     }
@@ -1418,6 +1454,8 @@ fn plugin_entry_json(entry: &InstalledPlugin) -> serde_json::Value {
         "installPath": entry.install_path,
         "dataPath": entry.data_path,
         "installedAt": entry.installed_at,
+        "publisher": entry.publisher,
+        "signatureStatus": entry.signature_status,
         "requiredCapabilities": entry.required_capabilities,
         "resolvedDependencies": entry.resolved_dependencies,
     })
@@ -1615,9 +1653,22 @@ fn configured_provider(
     allow_scripted_fallback: bool,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let provider_kind = env::var("COOL_PROVIDER").unwrap_or_default().to_lowercase();
-    if provider_kind == "anthropic"
-        || (provider_kind.is_empty()
-            && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty()))
+    match provider_kind.as_str() {
+        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback),
+        "" | "openai" | "openai-compatible" | "openai_compatible" => {}
+        // An explicit but unknown provider must fail closed — never silently
+        // fall back to a different backend than the operator asked for.
+        other => {
+            return Err(runtime(
+                "provider_config_invalid",
+                &format!("unknown COOL_PROVIDER: {other}"),
+            ));
+        }
+    }
+    // With no explicit provider, a stray ANTHROPIC_API_KEY selects the
+    // Anthropic-native driver; the OpenAI-compatible path stays the default.
+    if provider_kind.is_empty()
+        && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty())
     {
         return configured_anthropic_provider(allow_scripted_fallback);
     }

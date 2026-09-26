@@ -24,6 +24,13 @@ type Script = Result<Vec<ModelEvent>, ProviderError>;
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Provider-side prompt-cache counters (Anthropic
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`); billed at
+    /// their own rates, zero for providers without prompt caching.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub cost_micro_usd: Option<u64>,
 }
@@ -449,11 +456,17 @@ async fn process_sse_line(
             .send(Ok(ModelEvent::Usage(Usage {
                 prompt_tokens,
                 completion_tokens,
+                // OpenAI-compatible usage does not decompose prompt caching;
+                // the cache counters stay zero.
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
                 total_tokens: usage["total_tokens"].as_u64().unwrap_or(0),
                 cost_micro_usd: crate::pricing::estimate_cost_micro_usd(
                     model,
                     prompt_tokens,
                     completion_tokens,
+                    0,
+                    0,
                 ),
             })))
             .await

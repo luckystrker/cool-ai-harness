@@ -420,6 +420,70 @@ fn plugin_lifecycle_commands_cover_install_list_validate_and_doctor() {
     let doctored: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(doctored["plugins"][0]["name"], "cli-demo");
     assert_eq!(doctored["plugins"][0]["loadable"], true);
+    assert_eq!(doctored["plugins"][0]["signatureStatus"], "unsigned");
+    assert_eq!(doctored["transparency"]["valid"], true);
+
+    // enable/disable/update/remove round-trip through the same store.
+    let enable = cool()
+        .env("COOL_DATA_DIR", &data_dir)
+        .args(["plugin", "enable", "cli-demo"])
+        .output()
+        .expect("enable plugin");
+    assert!(
+        enable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enable.stderr)
+    );
+    let enabled: Value = serde_json::from_slice(&enable.stdout).unwrap();
+    assert_eq!(enabled["enabled"], true);
+
+    let disable = cool()
+        .env("COOL_DATA_DIR", &data_dir)
+        .args(["plugin", "disable", "cli-demo"])
+        .output()
+        .expect("disable plugin");
+    assert!(disable.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&disable.stdout).unwrap()["enabled"],
+        false
+    );
+
+    let update_source = temporary.path().join("plugin-source-v2");
+    write_plugin_fixture(&update_source);
+    let update = cool()
+        .env("COOL_DATA_DIR", &data_dir)
+        .args(["plugin", "update", "cli-demo"])
+        .arg(&update_source)
+        .output()
+        .expect("update plugin");
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let remove = cool()
+        .env("COOL_DATA_DIR", &data_dir)
+        .args(["plugin", "remove", "cli-demo"])
+        .output()
+        .expect("remove plugin");
+    assert!(
+        remove.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let after = cool()
+        .env("COOL_DATA_DIR", &data_dir)
+        .args(["plugin", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&after.stdout).unwrap()["plugins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 
     let missing = cool()
         .env("COOL_DATA_DIR", &data_dir)

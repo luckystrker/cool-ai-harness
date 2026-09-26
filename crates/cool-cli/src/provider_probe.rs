@@ -241,8 +241,10 @@ fn extract_context_window(object: &serde_json::Map<String, Value>) -> Option<i64
 /// Per-1k USD prices for `model`, from the canonical `cool_agent` pricing
 /// table (µ$/1k → $/1k) that also feeds run-budget accounting.
 fn pricing(model: &str) -> Option<(f64, f64)> {
-    cool_agent::model_pricing(model)
-        .map(|(prompt, completion)| (prompt as f64 / 1e6, completion as f64 / 1e6))
+    cool_agent::model_pricing(model).map(|entry| {
+        let (prompt, completion, ..) = entry;
+        (prompt as f64 / 1e6, completion as f64 / 1e6)
+    })
 }
 
 #[cfg(test)]

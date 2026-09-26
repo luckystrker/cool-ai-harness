@@ -988,9 +988,16 @@ fn vendor_hooks_map_to_canonical_or_stay_inactive() {
         panic!("expected command handler");
     };
     assert!(args.last().unwrap().ends_with("scripts/check.sh --strict"));
+    // CLAUDE_PLUGIN_ROOT stays the plugin directory while
+    // CLAUDE_PROJECT_DIR is the host process's project dir (process cwd),
+    // matching real Claude Code semantics.
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_ROOT").map(String::as_str),
+        Some(root.canonicalize().unwrap().to_string_lossy().as_ref())
+    );
     assert_eq!(
         env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
-        Some(root.canonicalize().unwrap().to_string_lossy().as_ref())
+        Some(std::env::current_dir().unwrap().to_string_lossy().as_ref())
     );
     assert!(command.file_name().is_some());
 
@@ -1018,6 +1025,38 @@ fn vendor_hooks_map_to_canonical_or_stay_inactive() {
             .hooks
             .iter()
             .all(|hook| hook.event != "VendorOnlyEvent")
+    );
+}
+
+#[test]
+fn claude_nested_commands_become_namespaced_skills() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("vendor");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    fs::write(
+        root.join(".claude-plugin/plugin.json"),
+        r#"{"name":"claude-demo","version":"1"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("commands/team")).unwrap();
+    fs::write(
+        root.join("commands/deploy.md"),
+        "---\ndescription: deploy\n---\ndeploy it\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("commands/team/review.md"),
+        "---\ndescription: review\n---\nreview it\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&data).unwrap();
+    let bundle = PluginLoader.load(&root, &data).unwrap();
+    let names: Vec<&str> = bundle.skills.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"deploy"), "{names:?}");
+    assert!(
+        names.contains(&"team-review"),
+        "nested commands/ entries must keep their namespace: {names:?}"
     );
 }
 
@@ -1296,6 +1335,31 @@ fn store_records_signed_installs_in_the_transparency_log() {
     assert_eq!(log[3].action, "disable");
     assert_eq!(store.verify_transparency_log().unwrap(), 4);
 
+    // Uninstall records a "remove" entry and keeps the log verifiable.
+    let removed = store.uninstall("signed-demo").unwrap();
+    assert_eq!(removed.name, "signed-demo");
+    assert!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .all(|e| e.name != "signed-demo")
+    );
+    let log = store.transparency_log().unwrap();
+    assert_eq!(log.len(), 5);
+    assert_eq!(log[4].action, "remove");
+    assert_eq!(store.verify_transparency_log().unwrap(), 5);
+
+    // update_local reinstalls a plugin by name under a "local" source.
+    let update_source = temporary.path().join("update-source");
+    write_plugin(&update_source, false);
+    let updated = store.update_local("demo", &update_source).unwrap();
+    assert_eq!(updated.source_type, "local");
+    assert!(matches!(
+        store.update_local("never-installed", &update_source),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+
     // History edits break the chain.
     let log_path = store_root.join(cool_extensions::TRANSPARENCY_FILE);
     let content = fs::read_to_string(&log_path).unwrap();
@@ -1305,7 +1369,15 @@ fn store_records_signed_installs_in_the_transparency_log() {
     lines[0] = serde_json::to_string(&first).unwrap();
     fs::write(&log_path, lines.join("\n") + "\n").unwrap();
     assert!(store.verify_transparency_log().is_err());
+
+    // Tail truncation is caught by the head anchor: a log that ends earlier
+    // than the recorded head is as invalid as a mutated entry.
+    let original = fs::read_to_string(&log_path).unwrap();
+    let truncated = original.lines().take(3).collect::<Vec<_>>().join("\n") + "\n";
+    fs::write(&log_path, &truncated).unwrap();
+    assert!(store.verify_transparency_log().is_err());
     fs::remove_file(&log_path).unwrap();
+    assert!(store.verify_transparency_log().is_err());
 
     // A signature whose publisher is not trusted blocks the install outright.
     fs::remove_file(store_root.join(KEYRING_FILE)).unwrap();

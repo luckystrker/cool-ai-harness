@@ -2019,6 +2019,7 @@ async fn session_history_paginates_on_a_durable_cursor_without_splitting_reasoni
                 completion_tokens: 5,
                 total_tokens: 15,
                 cost_micro_usd: Some(1_000),
+                ..Default::default()
             }),
             ModelEvent::Finish { reason: None },
         ])

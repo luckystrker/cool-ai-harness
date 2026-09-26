@@ -11,10 +11,14 @@
 //! a signature that fails to parse, verify, or match the trusted keyring is a
 //! load blocker — tamper evidence must never pass as unsigned content.
 //!
-//! Every managed lifecycle change (install, update, enable, disable) is also
-//! appended to the store's `transparency-log.jsonl`: an append-only,
+//! Every managed lifecycle change (install, update, enable, disable, remove)
+//! is also appended to the store's `transparency-log.jsonl`: an append-only,
 //! hash-chained JSONL record where `entryHash` covers the whole entry
-//! including `prevHash`, so history edits or removals are detectable.
+//! including `prevHash`, so history edits or removals are detectable. The
+//! latest `entryHash` is mirrored into `transparency-head.txt` after each
+//! append, so truncating the tail of the log is detectable too; `append` is
+//! always preceded by a full chain verification, so a corrupted log refuses
+//! to extend instead of silently continuing.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -33,6 +37,8 @@ pub const SIGNATURE_FILE: &str = "signature.json";
 pub const KEYRING_FILE: &str = "trusted-publishers.json";
 /// Name of the append-only transparency log at the plugin store root.
 pub const TRANSPARENCY_FILE: &str = "transparency-log.jsonl";
+/// Sidecar carrying the last entry's hash, so tail truncation is detectable.
+pub const TRANSPARENCY_HEAD_FILE: &str = "transparency-head.txt";
 
 /// Canonical bytes a publisher signs for a plugin release.
 pub fn signature_payload(name: &str, version: &str, content_hash: &str) -> Vec<u8> {
@@ -296,9 +302,22 @@ pub fn read_transparency_log(store_root: &Path) -> Result<Vec<TransparencyEntry>
 }
 
 /// Verifies the transparency log chain: sequence numbers, per-entry hashes,
-/// and the prev-hash linkage. Returns the number of verified entries.
+/// the prev-hash linkage, and the head sidecar (which pins the final hash so
+/// tail truncation does not pass silently). Returns the number of verified
+/// entries.
 pub fn verify_transparency_log(store_root: &Path) -> Result<usize, SignatureError> {
     let entries = read_transparency_log(store_root)?;
+    let head_path = store_root.join(TRANSPARENCY_HEAD_FILE);
+    let head = match fs::read_to_string(&head_path) {
+        Ok(head) => Some(head.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(SignatureError::Io(error)),
+    };
+    if entries.is_empty() != head.is_none() {
+        return Err(SignatureError::Malformed(
+            "transparency log and head anchor disagree about emptiness".to_owned(),
+        ));
+    }
     let mut prev_hash = String::new();
     for (index, entry) in entries.iter().enumerate() {
         if entry.seq != index as u64 + 1 {
@@ -321,6 +340,13 @@ pub fn verify_transparency_log(store_root: &Path) -> Result<usize, SignatureErro
         }
         prev_hash = entry.entry_hash.clone();
     }
+    if let (Some(head), Some(last)) = (head, entries.last())
+        && head != last.entry_hash
+    {
+        return Err(SignatureError::Malformed(
+            "transparency head anchor does not match the last entry — tail was removed".to_owned(),
+        ));
+    }
     Ok(entries.len())
 }
 
@@ -335,6 +361,8 @@ pub fn append_transparency(
     signature_status: &SignatureStatus,
     timestamp: String,
 ) -> Result<TransparencyEntry, SignatureError> {
+    // Refuse to extend a corrupted or truncated chain: verify first.
+    verify_transparency_log(store_root)?;
     let entries = read_transparency_log(store_root)?;
     let prev_hash = entries
         .last()
@@ -358,6 +386,12 @@ pub fn append_transparency(
     use std::io::Write as _;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
     file.sync_data()?;
+    // Anchor the newest hash in a sidecar so a tail-truncated log verifies
+    // against a head the log itself no longer carries.
+    fs::write(
+        store_root.join(TRANSPARENCY_HEAD_FILE),
+        format!("{}\n", entry.entry_hash),
+    )?;
     Ok(entry)
 }
 
