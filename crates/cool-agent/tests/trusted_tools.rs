@@ -111,14 +111,16 @@ async fn file_tools_reject_links_pointing_outside_the_workspace() {
     // Links that stay inside the workspace keep working. Windows junctions
     // carry an NT-namespace target that fails closed through the capability
     // dir, so the positive case is asserted on Unix only — failing closed is
-    // still the safe outcome on Windows.
+    // still the safe outcome on Windows. The inner link uses a *relative*
+    // target: capability resolution (openat2 RESOLVE_BENEATH) rejects
+    // absolute symlinks even when they point back inside the workspace.
     #[cfg(unix)]
     {
         let inner = directory.path().join("real");
         std::fs::create_dir(&inner).unwrap();
         std::fs::write(inner.join("ok.txt"), "inner").unwrap();
         let inner_link = directory.path().join("inner-link");
-        std::os::unix::fs::symlink(&inner, &inner_link).unwrap();
+        std::os::unix::fs::symlink("real", &inner_link).unwrap();
         let ok = read
             .execute(&context, json!({"path":"inner-link/ok.txt"}))
             .await;
