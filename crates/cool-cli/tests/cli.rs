@@ -681,7 +681,7 @@ fn serve_starts_the_http_facade_and_answers_health() {
         "response:\n{response}"
     );
     assert!(
-        response.contains("\"phase\":\"M11\""),
+        response.contains("\"phase\":\"M12\""),
         "response:\n{response}"
     );
 }
