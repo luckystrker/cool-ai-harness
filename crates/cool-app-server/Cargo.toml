@@ -8,11 +8,11 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-cool-agent = { path = "../cool-agent" }
-cool-protocol = { path = "../cool-protocol" }
-cool-security = { path = "../cool-security" }
-cool-state = { path = "../cool-state" }
-cool-store = { path = "../cool-store" }
+cool-agent = { path = "../cool-agent", version = "0.1.0" }
+cool-protocol = { path = "../cool-protocol", version = "0.1.0" }
+cool-security = { path = "../cool-security", version = "0.1.0" }
+cool-state = { path = "../cool-state", version = "0.1.0" }
+cool-store = { path = "../cool-store", version = "0.1.0" }
 futures-util.workspace = true
 regex.workspace = true
 serde.workspace = true

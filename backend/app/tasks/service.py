@@ -395,6 +395,7 @@ def create_task_run(
     trigger_source: str = TRIGGER_SOURCE_SCHEDULE,
 ) -> TaskRun:
     """Create an isolated conversation + durable AgentRun + TaskRun row."""
+    assert task.id is not None
     from app.agent.service import append_message, create_conversation, create_run
 
     model = task.model or _default_model(session)
@@ -445,6 +446,7 @@ def record_skipped_run(
     trigger_source: str = TRIGGER_SOURCE_SCHEDULE,
 ) -> TaskRun:
     """Record a fire time that deliberately did not execute."""
+    assert task.id is not None
     now = datetime.now(UTC)
     run = TaskRun(
         task_id=task.id,

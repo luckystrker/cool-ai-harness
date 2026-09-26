@@ -182,6 +182,7 @@ def process_event(
     If the signature is invalid or the event type is filtered, the event is
     stored as ``rejected`` and no processing occurs.
     """
+    assert endpoint.id is not None
     if event_type is None:
         event_type = _extract_event_type(
             endpoint.source_type, headers or {}, payload
@@ -345,6 +346,7 @@ def replay_event(session: Session, event_id: int) -> WebhookEvent | None:
     endpoint = session.get(WebhookEndpoint, event.endpoint_id)
     if endpoint is None:
         return None
+    assert endpoint.id is not None
 
     # Create a new event row for the replay.
     new_event = WebhookEvent(

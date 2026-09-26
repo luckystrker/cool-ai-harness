@@ -171,6 +171,7 @@ def fetch_feed(session: Session, sub: RssSubscription) -> int:
 
     Updates ``last_fetched_at`` and ``last_error`` on the subscription.
     """
+    assert sub.id is not None
     try:
         feed = _download_and_parse(sub.url)
     except Exception as exc:

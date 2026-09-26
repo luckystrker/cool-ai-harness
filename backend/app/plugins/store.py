@@ -529,5 +529,6 @@ class PluginStore:
             return
         for child in resolved.rglob("*"):
             with suppress(OSError):
-                child.chmod(stat.S_IWRITE | stat.S_IREAD)
+                # Directories need the execute bit for rmtree to descend.
+                child.chmod(0o700 if child.is_dir() else stat.S_IWRITE | stat.S_IREAD)
         shutil.rmtree(resolved)

@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -87,14 +88,14 @@ async def kill_and_reap(proc: asyncio.subprocess.Process) -> None:
 
 def process_group_kwargs() -> dict[str, Any]:
     """Creation flags that isolate descendants into a killable process group."""
-    if os.name == "nt":
+    if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
 
 
 def terminate_process_tree_by_pid(pid: int) -> None:
     """Force-terminate a process tree without requiring an elevated shell command."""
-    if os.name == "nt":
+    if sys.platform == "win32":
         descendants = _windows_descendant_pids(pid)
         _windows_terminate_pid(pid)
         for child_pid in reversed(descendants):
@@ -104,7 +105,7 @@ def terminate_process_tree_by_pid(pid: int) -> None:
             _windows_terminate_pid(child_pid)
         return
     try:
-        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+        os.killpg(pid, signal.SIGKILL)
     except OSError:
         return
 
@@ -128,7 +129,7 @@ def _windows_descendant_pids(root_pid: int) -> list[int]:
             ("szExeFile", wintypes.WCHAR * 260),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     kernel32.Process32FirstW.argtypes = [
@@ -174,7 +175,7 @@ def _windows_terminate_pid(pid: int) -> None:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]

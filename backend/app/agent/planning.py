@@ -187,11 +187,12 @@ def create_plan(
     session.add(plan)
     session.commit()
     session.refresh(plan)
+    assert plan.id is not None
 
     # Create individual step rows.
     for step_data in steps:
         row = PlanStep(
-            plan_id=plan.id,  # id is set after refresh
+            plan_id=plan.id,
             position=step_data.get("position", 0),
             title=step_data.get("title", "Untitled"),
             description=step_data.get("description"),

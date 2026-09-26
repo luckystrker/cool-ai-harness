@@ -7,9 +7,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-cool-agent = { path = "../cool-agent" }
-cool-protocol = { path = "../cool-protocol" }
-cool-security = { path = "../cool-security" }
+cool-agent = { path = "../cool-agent", version = "0.1.0" }
+cool-protocol = { path = "../cool-protocol", version = "0.1.0" }
+cool-security = { path = "../cool-security", version = "0.1.0" }
 async-trait.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true
