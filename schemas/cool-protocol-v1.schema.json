@@ -9007,11 +9007,11 @@
       "type": "object",
       "properties": {
         "confidence": {
+          "description": "Python stores confidence as a label (`high`/`medium`/`low`), not a\nnumeric score.",
           "type": [
-            "number",
+            "string",
             "null"
-          ],
-          "format": "double"
+          ]
         },
         "snippet": {
           "type": [
