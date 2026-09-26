@@ -361,21 +361,32 @@ impl CliMcpAdmin {
         }
     }
 
-    /// (Re)register the server's discovered tools in the shared agent registry.
-    /// Mirrors Python `register_mcp_tools`: `mcp_{server}_{tool}` names, a
-    /// `[MCP:{server}]` description prefix, capabilities from the server config
-    /// (absent/invalid declarations fall back to deny-by-default `Ask` on the
-    /// full side-effect set), and name collisions are skipped, never replaced.
-    fn register_server_tools(&self, config: &McpServerConfig, tools: &[McpTool]) {
+    /// (Re)register the server's discovered tools in the shared agent
+    /// registry. Mirrors Python `register_mcp_tools`: `mcp_{server}_{tool}`
+    /// names, a `[MCP:{server}]` description prefix, capabilities from the
+    /// server config (absent/invalid declarations fall back to deny-by-default
+    /// `Ask` on the full side-effect set), and name collisions are skipped,
+    /// never replaced. The `registered` mutex is held across the whole
+    /// drop-old→register-new→record sequence so two concurrent connects of
+    /// the same server cannot interleave (a racing register would otherwise
+    /// collision-skip every name while recording `registered[S]=[]`, leaking
+    /// the entries forever).
+    fn register_server_tools(&self, actor: &str, config: &McpServerConfig, tools: &[McpTool]) {
         let Some(registry) = &self.tool_registry else {
             return;
         };
-        self.unregister_server_tools(&config.name);
+        let mut registered = match self.registered.lock() {
+            Ok(registered) => registered,
+            Err(poison) => poison.into_inner(),
+        };
+        for name in registered.remove(&config.name).unwrap_or_default() {
+            registry.unregister(&name);
+        }
+        let (capabilities, decision) = tool_policy(config);
         let mut names = Vec::new();
         for tool in tools {
             let name = qualified_name(&config.name, &tool.name);
-            let (capabilities, decision) = tool_policy(config);
-            let registered = Tool::new(
+            let registered_tool = Tool::new(
                 ToolDefinition {
                     name: name.clone(),
                     description: format!(
@@ -385,7 +396,7 @@ impl CliMcpAdmin {
                     ),
                     parameters: tool.input_schema.clone(),
                 },
-                capabilities,
+                capabilities.clone(),
                 decision,
                 OperatorMcpTool {
                     shared: self.shared.clone(),
@@ -393,16 +404,14 @@ impl CliMcpAdmin {
                     remote: tool.name.clone(),
                 },
             );
-            match registry.register(registered) {
+            match registry.register(registered_tool) {
                 Ok(()) => names.push(name),
                 Err(_) => {
-                    self.audit("cool-cli", "tool_collision", &name, "skipped");
+                    self.audit(actor, "tool_collision", &name, "skipped");
                 }
             }
         }
-        if let Ok(mut registered) = self.registered.lock() {
-            registered.insert(config.name.clone(), names);
-        }
+        registered.insert(config.name.clone(), names);
     }
 
     /// Drop every tool this admin registered for `server` (Python
@@ -411,12 +420,10 @@ impl CliMcpAdmin {
         let Some(registry) = &self.tool_registry else {
             return;
         };
-        let names = self
-            .registered
-            .lock()
-            .ok()
-            .map(|mut registered| registered.remove(server).unwrap_or_default())
-            .unwrap_or_default();
+        let names = match self.registered.lock() {
+            Ok(mut registered) => registered.remove(server).unwrap_or_default(),
+            Err(poison) => poison.into_inner().remove(server).unwrap_or_default(),
+        };
         for name in names {
             registry.unregister(&name);
         }
@@ -454,7 +461,7 @@ impl CliMcpAdmin {
         }
     }
 
-    async fn connect_config(&self, config: &McpServerConfig) -> McpConnectResult {
+    async fn connect_config(&self, actor: &str, config: &McpServerConfig) -> McpConnectResult {
         let client = match self.shared.client(config) {
             Ok(client) => client,
             Err(message) => {
@@ -487,7 +494,7 @@ impl CliMcpAdmin {
                         error: None,
                     },
                 );
-                self.register_server_tools(config, &tools);
+                self.register_server_tools(actor, config, &tools);
                 McpConnectResult {
                     name: config.name.clone(),
                     status: "connected".to_owned(),
@@ -596,7 +603,7 @@ impl McpAdmin for CliMcpAdmin {
             self.audit(actor, "connect", name, "not_found");
             return Err(format!("server {name:?} not found"));
         };
-        let result = self.connect_config(config).await;
+        let result = self.connect_config(actor, config).await;
         self.audit(actor, "connect", name, &result.status);
         Ok(result)
     }
@@ -634,12 +641,10 @@ impl McpAdmin for CliMcpAdmin {
     }
 
     async fn list_tools(&self) -> Result<McpToolListResult, String> {
-        let sessions = self
-            .shared
-            .sessions
-            .lock()
-            .map_err(|_| "mcp session registry poisoned".to_owned())?
-            .clone();
+        let sessions = match self.shared.sessions.lock() {
+            Ok(sessions) => sessions.clone(),
+            Err(poison) => poison.into_inner().clone(),
+        };
         let mut tools = Vec::new();
         for (name, session) in &sessions {
             if session.status != "connected" {
@@ -655,14 +660,19 @@ impl McpAdmin for CliMcpAdmin {
 
     async fn reconnect_all(&self, actor: &str) -> Result<McpServerListResult, String> {
         let configs = self.shared.store.read()?;
-        for config in &configs {
-            if config.enabled {
-                let _ = self.connect_config(config).await;
-            } else {
-                self.shared
-                    .set_session(&config.name, SessionState::disconnected());
-                self.unregister_server_tools(&config.name);
-            }
+        // Python `connect_all` gathers the connects concurrently (startup cost
+        // is max(timeout_s), not the sum).
+        futures_util::future::join_all(
+            configs
+                .iter()
+                .filter(|config| config.enabled)
+                .map(|config| self.connect_config(actor, config)),
+        )
+        .await;
+        for config in configs.iter().filter(|config| !config.enabled) {
+            self.shared
+                .set_session(&config.name, SessionState::disconnected());
+            self.unregister_server_tools(&config.name);
         }
         self.audit(actor, "reconnect_all", "*", "ok");
         Ok(McpServerListResult {
@@ -1032,7 +1042,7 @@ mod tests {
                 error: None,
             },
         );
-        admin.register_server_tools(&config, &[listed_tool("lookup")]);
+        admin.register_server_tools("test", &config, &[listed_tool("lookup")]);
 
         let tool = registry.get("mcp_demo_lookup").expect("tool registered");
         assert_eq!(tool.definition.name, "mcp_demo_lookup");
@@ -1047,6 +1057,86 @@ mod tests {
 
         admin.unregister_server_tools("demo");
         assert!(registry.get("mcp_demo_lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn hashed_names_register_and_unregister() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::default();
+        let admin = CliMcpAdmin::new(dir.path()).with_tool_registry(registry.clone());
+        let server = "a".repeat(80);
+        let config = stdio_config(&server, vec!["read".to_owned()]);
+        admin.register_server_tools("test", &config, &[listed_tool("b")]);
+        let name = qualified_name(&server, "b");
+        assert!(name.starts_with("mcpx_"));
+        assert!(registry.get(&name).is_some());
+        admin.unregister_server_tools(&server);
+        assert!(registry.get(&name).is_none());
+    }
+
+    #[tokio::test]
+    async fn collisions_are_skipped_and_never_unregistered_by_the_loser() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::default();
+        let admin = CliMcpAdmin::new(dir.path()).with_tool_registry(registry.clone());
+        let config = stdio_config("demo", vec!["read".to_owned()]);
+        // A foreign tool already owns the qualified name.
+        registry
+            .register(Tool::new(
+                ToolDefinition {
+                    name: "mcp_demo_lookup".to_owned(),
+                    description: "foreign".to_owned(),
+                    parameters: serde_json::json!({}),
+                },
+                vec![],
+                Decision::Deny,
+                OperatorMcpTool {
+                    shared: admin.shared.clone(),
+                    server: "demo".to_owned(),
+                    remote: "lookup".to_owned(),
+                },
+            ))
+            .unwrap();
+        admin.register_server_tools("test", &config, &[listed_tool("lookup")]);
+        // The collision-skip must not claim the foreign name as ours.
+        assert!(
+            admin
+                .registered
+                .lock()
+                .unwrap()
+                .get("demo")
+                .is_none_or(Vec::is_empty)
+        );
+        admin.unregister_server_tools("demo");
+        assert!(registry.get("mcp_demo_lookup").is_some());
+    }
+
+    #[tokio::test]
+    async fn same_remote_names_on_different_servers_are_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = McpShared {
+            store: McpConfigStore::open(dir.path().join(CONFIG_FILE)),
+            sessions: Mutex::new(HashMap::new()),
+            data_dir: dir.path().to_path_buf(),
+        };
+        shared.set_session(
+            "a",
+            SessionState {
+                status: "disconnected".to_owned(),
+                tools: vec![listed_tool("search")],
+                error: None,
+            },
+        );
+        // A disconnected server's remote name does not satisfy the gate even
+        // though it was discovered earlier.
+        let error = shared
+            .call_tool("a", "search", serde_json::json!({}))
+            .await
+            .expect_err("disconnected server must fail");
+        assert!(
+            error.contains("not found in any connected server"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

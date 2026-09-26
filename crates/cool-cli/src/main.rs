@@ -319,8 +319,11 @@ async fn build_server(
     let mcp_admin = Arc::new(mcp_admin);
     server = server.with_mcp_admin(mcp_admin.clone());
     // Python `main.startup` parity: connect every enabled configured server and
-    // register its tools before the first run is accepted.
-    let _ = mcp_admin.reconnect_all("local-user").await;
+    // register its tools before the first run is accepted. A store-read failure
+    // degrades to no-registered-tools rather than aborting startup.
+    if let Err(error) = mcp_admin.reconnect_all("local-user").await {
+        eprintln!("mcp startup reconnect skipped: {error}");
+    }
     // The operator-owned global skills store (a SKILL.md tree on the data root).
     server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
     // The live provider model-list probe (uses the stored provider rows + keyring).
