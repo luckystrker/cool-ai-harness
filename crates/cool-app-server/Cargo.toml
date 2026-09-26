@@ -13,8 +13,11 @@ cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }
 cool-store = { path = "../cool-store" }
+futures-util.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 

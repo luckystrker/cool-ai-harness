@@ -446,7 +446,12 @@ export type SubagentRunDetailRecord = { run: SubagentRunRecord, messages: Array<
 
 export type ResearchCancelResult = { cancelled: number, };
 
-export type ResearchRunRecord = { id: number, userId: number, conversationId: number | null, parentTaskRunId: number | null, topic: string, depth: number, model: string | null, status: string, subQuestions: JsonValue | null, sources: JsonValue | null, citations: JsonValue | null, reportMarkdown: string | null, reportArtifactId: number | null, usage: JsonValue | null, error: string | null, inputHash: string | null, finishedAt: string | null, createdAt: string, updatedAt: string, };
+export type ResearchRunRecord = { id: number, userId: number, conversationId: number | null, parentTaskRunId: number | null, topic: string, depth: number, model: string | null, status: string, subQuestions: JsonValue | null, sources: JsonValue | null, citations: JsonValue | null, reportMarkdown: string | null, reportArtifactId: number | null, usage: JsonValue | null, error: string | null, inputHash: string | null, finishedAt: string | null, createdAt: string, updatedAt: string, 
+/**
+ * Canonical run id that streams this run's `research.*` events (set on
+ * `research.create`/`research.rerun` responses; not part of the row).
+ */
+runtimeRunId?: string | null, };
 
 export type ResearchRunDetailRecord = { run: ResearchRunRecord, conversationId: number | null, parentTaskRunId: number | null, subQuestions: Array<string>, sources: Array<JsonValue>, citations: Array<JsonValue>, reportMarkdown: string | null, };
 

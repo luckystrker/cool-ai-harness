@@ -23,7 +23,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 async-trait = "=0.1.92"
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "query", "tokio", "tower-log"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "multipart", "original-uri", "query", "tokio", "tower-log"] }
 base64 = "=0.22.1"
 cap-std = "=3.4.4"
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "digest", "rand_core"] }

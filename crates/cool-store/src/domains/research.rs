@@ -265,4 +265,32 @@ impl crate::LegacyStore {
         drop(connection);
         self.get_research_run(actor_id, run_id)
     }
+
+    /// Persist mid-run progress (`sub_questions`, `sources`) without touching
+    /// status or terminal fields; `NULL` arguments keep the stored value
+    /// (Python writes the fields directly on the row between stages).
+    pub fn update_research_progress(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        sub_questions: Option<&Value>,
+        sources: Option<&Value>,
+    ) -> Result<ResearchRun, StoreError> {
+        let connection = self.connection()?;
+        let user_id = user_id_for(&connection, actor_id)?;
+        fetch_research_run(&connection, user_id, run_id)?
+            .ok_or(StoreError::NotFound("research run"))?;
+        connection.execute(
+            "UPDATE research_runs SET sub_questions = COALESCE(?1, sub_questions),
+               sources = COALESCE(?2, sources), updated_at = ?3 WHERE id = ?4",
+            params![
+                json_text(&sub_questions.cloned())?,
+                json_text(&sources.cloned())?,
+                now_python(),
+                run_id,
+            ],
+        )?;
+        drop(connection);
+        self.get_research_run(actor_id, run_id)
+    }
 }

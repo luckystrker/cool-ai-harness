@@ -8,7 +8,7 @@
 
 use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::domains::common::{
     bounded_limit, collect_rows, json_text, parse_json, query_one, require_conversation,
@@ -521,6 +521,130 @@ impl crate::LegacyStore {
             ));
         }
         connection.execute("DELETE FROM subagent_runs WHERE id = ?1", [run_id])?;
+        Ok(())
+    }
+
+    /// Seed the built-in roles if missing (Python `ensure_builtin_roles`,
+    /// called on app startup). Includes the one-time forward migration that
+    /// rewrites the legacy researcher tool list when it still matches the old
+    /// exact list — custom user edits are preserved.
+    pub fn seed_builtin_roles(&self) -> Result<(), StoreError> {
+        // name, description, system prompt, tool names, (key, value) settings, sort order
+        type BuiltinRole<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a [&'a str],
+            &'a [(&'a str, &'a str)],
+            i64,
+        );
+        let builtins: &[BuiltinRole<'_>] = &[
+            (
+                "researcher",
+                "Deep research agent that gathers and synthesizes information from multiple sources.",
+                "You are a research specialist. Your job is to thoroughly investigate \
+                 a topic, gather information from available sources, and produce a \
+                 comprehensive, well-structured summary. Cite sources where possible.",
+                &[
+                    "web_fetch",
+                    "web_search",
+                    "browser_navigate",
+                    "browser_click",
+                    "browser_extract",
+                    "browser_scroll",
+                    "browser_screenshot",
+                    "browser_close",
+                    "image_analyze",
+                    "read_file",
+                    "list_files",
+                ],
+                &[
+                    ("read", "allow"),
+                    ("network", "allow"),
+                    // Browser screenshots are durable Artifact writes; file-write
+                    // tools are not in this role's whitelist.
+                    ("write", "allow"),
+                    ("execute", "deny"),
+                ],
+                15,
+            ),
+            (
+                "code-reviewer",
+                "Code review agent that analyzes code for bugs, style issues, and improvements.",
+                "You are a senior code reviewer. Analyze the provided code carefully, \
+                 identifying bugs, security issues, performance problems, and style \
+                 violations. Provide specific, actionable feedback with code examples.",
+                &["read_file", "list_files"],
+                &[
+                    ("read", "allow"),
+                    ("write", "deny"),
+                    ("execute", "deny"),
+                    ("network", "deny"),
+                ],
+                10,
+            ),
+            (
+                "summarizer",
+                "Document summarization agent that produces concise, accurate summaries.",
+                "You are a summarization expert. Read the provided content and produce \
+                 a clear, concise summary that captures all key points. Structure your \
+                 summary with headings and bullet points for readability.",
+                &["read_file", "list_files"],
+                &[
+                    ("read", "allow"),
+                    ("write", "deny"),
+                    ("execute", "deny"),
+                    ("network", "deny"),
+                ],
+                5,
+            ),
+        ];
+        let existing = self.list_subagent_roles()?;
+        for (name, description, system_prompt, tool_names, capability_policy, max_iterations) in
+            builtins
+        {
+            let tool_names_json = json!(*tool_names);
+            let policy_json = Value::Object(
+                capability_policy
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
+                    .collect(),
+            );
+            match existing.iter().find(|role| &role.name == name) {
+                None => {
+                    self.create_subagent_role(&NewSubagentRole {
+                        name: (*name).to_owned(),
+                        description: Some((*description).to_owned()),
+                        system_prompt: Some((*system_prompt).to_owned()),
+                        tool_names: Some(tool_names_json),
+                        capability_policy: Some(policy_json),
+                        max_iterations: *max_iterations,
+                        is_builtin: true,
+                        ..NewSubagentRole::default()
+                    })?;
+                }
+                Some(role) => {
+                    // Forward migration: the legacy built-in researcher shipped
+                    // with the four-tool list; rewrite it only when the stored
+                    // list still matches it exactly.
+                    let legacy_tool_list =
+                        json!(["web_fetch", "web_search", "read_file", "list_files"]);
+                    if role.is_builtin
+                        && role.name == "researcher"
+                        && role.tool_names.as_ref() == Some(&legacy_tool_list)
+                    {
+                        self.update_subagent_role(
+                            role.id,
+                            &SubagentRolePatch {
+                                tool_names: Some(tool_names_json),
+                                capability_policy: Some(policy_json),
+                                ..SubagentRolePatch::default()
+                            },
+                        )?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

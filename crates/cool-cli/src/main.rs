@@ -1,3 +1,4 @@
+mod executor_tools;
 mod mcp_admin;
 mod mcp_store;
 mod memory_extract;
@@ -250,8 +251,15 @@ fn open_legacy_store(
             ..cool_store::StoreOptions::default()
         }
     };
-    cool_store::LegacyStore::open(database, &options)
-        .map_err(|error| runtime("legacy_store_failed", &error.to_string()))
+    let writable = !options.read_only;
+    let store = cool_store::LegacyStore::open(database, &options)
+        .map_err(|error| runtime("legacy_store_failed", &error.to_string()))?;
+    // Seed the builtin subagent roles that `spawn_subagent` resolves by name.
+    // A Python-owned (read-only) store is left untouched.
+    if writable && let Err(error) = store.seed_builtin_roles() {
+        eprintln!("subagent role seeding skipped: {error}");
+    }
+    Ok(store)
 }
 
 fn configured_secrets() -> Option<Arc<SecretKeyring>> {
@@ -280,6 +288,9 @@ async fn build_server(
     let config = ServerConfig {
         secrets: configured_secrets(),
         legacy_store: legacy.clone(),
+        // Content-addressed artifact blobs live beside the database (Python
+        // `artifacts/` layout); enables the blob endpoints + upload paths.
+        artifacts_dir: Some(data_dir.join("artifacts")),
         ..ServerConfig::default()
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
@@ -315,7 +326,7 @@ async fn build_server(
     // is always available; plugin-bundled MCP servers stay on `extensions.status`.
     // Wired into the shared tool registry so connected servers' tools are live
     // in every agent run (Python `tool_bridge` parity).
-    let mcp_admin = mcp_admin::CliMcpAdmin::new(data_dir).with_tool_registry(registry);
+    let mcp_admin = mcp_admin::CliMcpAdmin::new(data_dir).with_tool_registry(registry.clone());
     let mcp_admin = Arc::new(mcp_admin);
     server = server.with_mcp_admin(mcp_admin.clone());
     // Python `main.startup` parity: connect every enabled configured server and
@@ -326,6 +337,23 @@ async fn build_server(
     }
     // The operator-owned global skills store (a SKILL.md tree on the data root).
     server = server.with_skill_admin(Arc::new(skills_admin::CliSkillAdmin::new(data_dir)));
+    // Executor-bound tools (deep_research / spawn_subagent / skills) need the
+    // server-owned executors, so they are registered after the server exists.
+    // ToolRegistry clones share the backing map — the live runtime sees them.
+    if let Some(store) = legacy.clone() {
+        for tool in executor_tools::executor_tool_registry(
+            store,
+            server.subagent_executor(),
+            server.research_executor(),
+            server.skill_admin(),
+        ) {
+            // `extend` builds a new registry; `register` inserts into the
+            // shared map the live runtime already reads.
+            if let Err(error) = registry.register(tool) {
+                eprintln!("executor tool skipped: {error}");
+            }
+        }
+    }
     // The live provider model-list probe (uses the stored provider rows + keyring).
     server = server.with_provider_probe(Arc::new(provider_probe::CliProviderProbe::new(
         legacy.clone(),

@@ -1982,7 +1982,8 @@ async fn a_settings_read_failure_does_not_fail_a_turn() {
         .await
         .unwrap()
         .run_id;
-    // The turn still completes; a settings read failure only drops the default.
+    // The turn still completes; a settings read failure only drops the custom
+    // override — the built-in default prompt still ships (Python parity).
     let emitted = drain_run(events, &run_id).await;
     assert!(
         emitted
@@ -1991,12 +1992,16 @@ async fn a_settings_read_failure_does_not_fail_a_turn() {
         "the run must complete despite the settings read failure"
     );
     let requests = provider.requests().await;
-    assert!(
-        requests[0]
-            .messages
-            .iter()
-            .all(|message| message.role != cool_agent::MessageRole::System),
-        "a failed settings read must not inject a system message"
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        system,
+        cool_agent::default_agent_system_prompt(),
+        "a failed settings read must fall back to the built-in default prompt"
     );
     drop(client);
     task.await.expect("server task").expect("clean disconnect");

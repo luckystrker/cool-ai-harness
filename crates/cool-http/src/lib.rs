@@ -111,6 +111,10 @@ pub(crate) struct FacadeState {
     pub(crate) pool: ConnectionPool,
     pub(crate) auth: auth::AuthConfig,
     pub(crate) assets: Option<PathBuf>,
+    /// Content-addressed artifact/blob store serving the legacy binary
+    /// endpoints (upload, download, exports). `None` keeps those routes
+    /// answering `blob_store_unavailable`.
+    pub(crate) blobs: Option<cool_app_server::BlobStore>,
 }
 
 /// Validated HTTP facade. Cheap to build; call [`HttpFacade::serve`] to run.
@@ -121,10 +125,12 @@ pub struct HttpFacade {
 impl HttpFacade {
     pub fn new(server: AppServer, options: ServeOptions) -> Result<Self, ServeError> {
         let auth = auth::AuthConfig::from_options(&options)?;
+        let blobs = server.blob_store();
         let state = Arc::new(FacadeState {
             pool: ConnectionPool::new(server),
             auth,
             assets: options.assets.clone(),
+            blobs,
         });
         Ok(Self { state })
     }

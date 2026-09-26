@@ -267,7 +267,7 @@ pub fn store_tool_registry(store: Arc<LegacyStore>) -> Result<Vec<Tool>, ToolErr
     ])
 }
 
-fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
+pub(crate) fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
     ToolDefinition {
         name: name.to_owned(),
         description: description.to_owned(),
@@ -1180,7 +1180,7 @@ fn format_run_time(timestamp: i64) -> String {
     )
 }
 
-fn reject_unknown(arguments: &Value, allowed: &[&str]) -> Result<(), ToolError> {
+pub(crate) fn reject_unknown(arguments: &Value, allowed: &[&str]) -> Result<(), ToolError> {
     let object = arguments
         .as_object()
         .ok_or_else(|| ToolError::InvalidArguments("arguments must be an object".to_owned()))?;
@@ -1192,7 +1192,7 @@ fn reject_unknown(arguments: &Value, allowed: &[&str]) -> Result<(), ToolError> 
     Ok(())
 }
 
-fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, ToolError> {
+pub(crate) fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, ToolError> {
     arguments
         .get(name)
         .and_then(Value::as_str)
@@ -1200,7 +1200,7 @@ fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, Tool
         .ok_or_else(|| ToolError::InvalidArguments(format!("{name} must be a non-empty string")))
 }
 
-fn optional_string(arguments: &Value, name: &str) -> Result<Option<String>, ToolError> {
+pub(crate) fn optional_string(arguments: &Value, name: &str) -> Result<Option<String>, ToolError> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
@@ -1222,7 +1222,7 @@ fn optional_string_lenient(arguments: &Value, name: &str) -> Result<Option<Strin
     }
 }
 
-fn optional_f64(arguments: &Value, name: &str) -> Result<Option<f64>, ToolError> {
+pub(crate) fn optional_f64(arguments: &Value, name: &str) -> Result<Option<f64>, ToolError> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
@@ -1232,7 +1232,7 @@ fn optional_f64(arguments: &Value, name: &str) -> Result<Option<f64>, ToolError>
     }
 }
 
-fn optional_i64(arguments: &Value, name: &str) -> Result<Option<i64>, ToolError> {
+pub(crate) fn optional_i64(arguments: &Value, name: &str) -> Result<Option<i64>, ToolError> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
@@ -1249,7 +1249,7 @@ fn required_i64(arguments: &Value, name: &str) -> Result<i64, ToolError> {
         .ok_or_else(|| ToolError::InvalidArguments(format!("{name} must be an integer")))
 }
 
-fn optional_bool(arguments: &Value, name: &str) -> Result<Option<bool>, ToolError> {
+pub(crate) fn optional_bool(arguments: &Value, name: &str) -> Result<Option<bool>, ToolError> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
@@ -1259,7 +1259,10 @@ fn optional_bool(arguments: &Value, name: &str) -> Result<Option<bool>, ToolErro
     }
 }
 
-fn optional_string_array(arguments: &Value, name: &str) -> Result<Option<Vec<String>>, ToolError> {
+pub(crate) fn optional_string_array(
+    arguments: &Value,
+    name: &str,
+) -> Result<Option<Vec<String>>, ToolError> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Array(items)) => items

@@ -31,6 +31,14 @@ not start executing the steps.";
 pub fn planning_system_prompt() -> &'static str {
     PLANNING_SYSTEM_PROMPT
 }
+
+/// The built-in default agent system prompt — the Rust-tool-name port of
+/// `backend/app/agent/default_system_prompt.txt` (memory_remember /
+/// spawn_subagent / update_plan, not the Python names). The app settings file
+/// still overrides it.
+pub fn default_agent_system_prompt() -> &'static str {
+    include_str!("default_system_prompt.txt")
+}
 const INSTRUCTION_CANDIDATES: &[&str] = &[
     "AGENTS.md",
     "agents.md",

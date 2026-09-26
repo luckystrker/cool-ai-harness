@@ -28,9 +28,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::tools::{
-    Tool, ToolContext, ToolDefinition, ToolError, ToolHandler, ToolResult,
-};
+use crate::tools::{Tool, ToolContext, ToolDefinition, ToolError, ToolHandler, ToolResult};
 
 const MAX_REDIRECTS: u8 = 10; // Python `_MAX_REDIRECTS`
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -137,18 +135,18 @@ pub fn web_tool_registry(config: WebToolsConfig) -> Vec<Tool> {
 
 /// Resolve `host:port` once (with the fetch timeout) and return the IPs.
 async fn resolve_ips(url: &Url, timeout: Duration) -> Result<Vec<IpAddr>, String> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| "URL has no host".to_owned())?;
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_owned())?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "URL has no port".to_owned())?;
-    Ok(tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
-        .await
-        .map_err(|_| "host lookup timed out".to_owned())?
-        .map_err(|error| format!("host lookup failed: {error}"))?
-        .map(|socket| socket.ip())
-        .collect())
+    Ok(
+        tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
+            .await
+            .map_err(|_| "host lookup timed out".to_owned())?
+            .map_err(|error| format!("host lookup failed: {error}"))?
+            .map(|socket| socket.ip())
+            .collect(),
+    )
 }
 
 struct PinnedResponse {
@@ -192,7 +190,14 @@ async fn pinned_post_json(
     body: Vec<u8>,
     extra_headers: &[(String, String)],
 ) -> Result<PinnedResponse, String> {
-    match pinned_request(url, policy, Some((body, extra_headers)), HARD_MAX_RESPONSE_BYTES).await? {
+    match pinned_request(
+        url,
+        policy,
+        Some((body, extra_headers)),
+        HARD_MAX_RESPONSE_BYTES,
+    )
+    .await?
+    {
         PinnedOutcome::Response(response) => Ok(response),
         PinnedOutcome::Redirect(_) => Err("redirect on a search POST is not followed".to_owned()),
     }
@@ -203,12 +208,15 @@ enum PinnedOutcome {
     Redirect(String),
 }
 
+/// POST payload: raw body plus extra headers.
+type PostBody<'a> = (Vec<u8>, &'a [(String, String)]);
+
 /// One pinned request: resolve, validate against `policy`, pin the socket
 /// address into a one-shot client, cap the body mid-stream.
 async fn pinned_request(
     url: &Url,
     policy: &NetworkPolicy,
-    post: Option<(Vec<u8>, &[(String, String)])>,
+    post: Option<PostBody<'_>>,
     max_bytes: u64,
 ) -> Result<PinnedOutcome, String> {
     let resolved = resolve_ips(url, policy.timeout).await?;
@@ -315,7 +323,9 @@ impl ToolHandler for WebSearch {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|query| !query.is_empty())
-            .ok_or_else(|| ToolError::InvalidArguments("query must be a non-empty string".to_owned()))?;
+            .ok_or_else(|| {
+                ToolError::InvalidArguments("query must be a non-empty string".to_owned())
+            })?;
         if query.chars().count() > MAX_QUERY_CHARS {
             return Err(ToolError::InvalidArguments(format!(
                 "query exceeds {MAX_QUERY_CHARS} chars"
@@ -349,7 +359,9 @@ impl WebSearch {
         }
         let url = Url::parse("https://google.serper.dev/search").unwrap();
         let policy = NetworkPolicy::new(["google.serper.dev".to_owned()]);
-        let body = json!({"q": query, "num": num_results}).to_string().into_bytes();
+        let body = json!({"q": query, "num": num_results})
+            .to_string()
+            .into_bytes();
         let headers = [("X-API-KEY".to_owned(), self.config.serper_api_key.clone())];
         let response = match pinned_post_json(&url, &policy, body, &headers).await {
             Ok(response) => response,
@@ -434,11 +446,12 @@ impl WebSearch {
                 "SEARCH_PROVIDER=searxng but SEARXNG_URL is empty.",
             ));
         }
-        let base = Url::parse(self.config.searxng_url.trim_end_matches('/'))
-            .map_err(|error| ToolError::InvalidArguments(format!("SEARXNG_URL invalid: {error}")))?;
-        let mut url = base
-            .join("search")
-            .map_err(|error| ToolError::InvalidArguments(format!("SEARXNG_URL invalid: {error}")))?;
+        let base = Url::parse(self.config.searxng_url.trim_end_matches('/')).map_err(|error| {
+            ToolError::InvalidArguments(format!("SEARXNG_URL invalid: {error}"))
+        })?;
+        let mut url = base.join("search").map_err(|error| {
+            ToolError::InvalidArguments(format!("SEARXNG_URL invalid: {error}"))
+        })?;
         url.query_pairs_mut()
             .append_pair("q", query)
             .append_pair("format", "json");
@@ -492,12 +505,22 @@ fn format_results<'a>(
     if items.is_empty() {
         return ToolResult::ok(json!({"text": format!("No results for: {query}"), "count": 0}));
     }
-    let mut lines = vec![format!("# Web search: {query}"), format!("{} result(s)\n", items.len())];
+    let mut lines = vec![
+        format!("# Web search: {query}"),
+        format!("{} result(s)\n", items.len()),
+    ];
     for (index, (title, link, snippet)) in items.iter().enumerate() {
         let title: String = title.chars().take(TITLE_CHARS).collect();
         let snippet: String = snippet.chars().take(SNIPPET_CHARS).collect();
-        let title = if title.is_empty() { "(untitled)" } else { title.as_str() };
-        lines.push(format!("## {}. {title}\nURL: {link}\n{snippet}\n", index + 1));
+        let title = if title.is_empty() {
+            "(untitled)"
+        } else {
+            title.as_str()
+        };
+        lines.push(format!(
+            "## {}. {title}\nURL: {link}\n{snippet}\n",
+            index + 1
+        ));
     }
     ToolResult::ok(json!({"text": lines.join("\n"), "count": items.len()}))
 }
@@ -540,7 +563,9 @@ impl ToolHandler for WebFetch {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|url| !url.is_empty())
-            .ok_or_else(|| ToolError::InvalidArguments("url must be a non-empty string".to_owned()))?;
+            .ok_or_else(|| {
+                ToolError::InvalidArguments("url must be a non-empty string".to_owned())
+            })?;
         let max_chars = arguments
             .get("max_chars")
             .and_then(Value::as_u64)
@@ -548,8 +573,12 @@ impl ToolHandler for WebFetch {
             .clamp(1, 200_000) as usize;
         let url = Url::parse(url)
             .map_err(|error| ToolError::InvalidArguments(format!("invalid url: {error}")))?;
-        let response = match pinned_get(&url, &self.config.fetch_policy(), self.config.max_response_bytes)
-            .await
+        let response = match pinned_get(
+            &url,
+            &self.config.fetch_policy(),
+            self.config.max_response_bytes,
+        )
+        .await
         {
             Ok(response) => response,
             Err(error) => {
@@ -577,7 +606,11 @@ impl ToolHandler for WebFetch {
                 self.config.max_response_bytes
             ));
         }
-        let text = mask_secrets(if text.is_empty() { "(empty body)" } else { &text });
+        let text = mask_secrets(if text.is_empty() {
+            "(empty body)"
+        } else {
+            &text
+        });
         Ok(ToolResult::ok(json!({
             "text": text,
             "final_url": response.final_url.as_str(),
@@ -618,10 +651,12 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.output["error"]
-            .as_str()
-            .unwrap()
-            .contains("SEARCH_PROVIDER"));
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap()
+                .contains("SEARCH_PROVIDER")
+        );
     }
 
     #[tokio::test]
@@ -638,7 +673,12 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.output["error"].as_str().unwrap().contains("SERPER_API_KEY"));
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap()
+                .contains("SERPER_API_KEY")
+        );
     }
 
     #[tokio::test]
@@ -661,10 +701,11 @@ mod tests {
     async fn web_fetch_rejects_invalid_arguments() {
         let tool = tool("web_fetch", WebToolsConfig::default());
         assert!(tool.execute(&context(), json!({})).await.is_err());
-        assert!(tool
-            .execute(&context(), json!({"url": "  "}))
-            .await
-            .is_err());
+        assert!(
+            tool.execute(&context(), json!({"url": "  "}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -724,7 +765,10 @@ mod tests {
             parse_allowed_domains(r#"["a.dev", " b.dev "]"#),
             vec!["a.dev", "b.dev"]
         );
-        assert_eq!(parse_allowed_domains("a.dev, b.dev"), vec!["a.dev", "b.dev"]);
+        assert_eq!(
+            parse_allowed_domains("a.dev, b.dev"),
+            vec!["a.dev", "b.dev"]
+        );
         assert!(parse_allowed_domains("").is_empty());
     }
 }

@@ -819,7 +819,18 @@ async fn subagents_roles_launch_and_runs_are_store_backed() {
 
 #[tokio::test]
 async fn research_artifacts_and_constructor_flow_through_the_store() {
-    let (server, store) = legacy_server();
+    // A large event delay keeps the launched research pipeline mid-decompose,
+    // so the cancel below deterministically targets a still-running run.
+    let store = LegacyStore::in_memory().expect("in-memory legacy store");
+    store.ensure_actor("local-user").expect("actor");
+    let store = Arc::new(store);
+    let config = ServerConfig {
+        legacy_store: Some(store.clone()),
+        event_delay: std::time::Duration::from_secs(60),
+        ..ServerConfig::default()
+    };
+    let server =
+        AppServer::with_store(config, DurableStore::in_memory().expect("durable")).expect("server");
     let (client, _task) = connected_client(server).await;
 
     let research = request(
