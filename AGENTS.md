@@ -1,17 +1,28 @@
 # AGENTS.md
 
 Guidance for AI coding agents working in this repository. Read this before
-editing. Cool AI Harness is a personal AI agent harness: a Python/FastAPI
-backend plus a React/TypeScript SPA, following a phased roadmap in
-[`docs/PLAN.md`](docs/PLAN.md) and [`docs/phases/`](docs/phases/). Phases 0–3b
-and **Фаза 4** (Deep Research, Code/Git, multimodal, browser automation,
-Agent Constructor) are done. Telegram (Фаза 5) is still an empty placeholder.
+editing. Cool AI Harness is a personal AI agent harness: as of M12 the
+**Rust trusted core is the default runtime** — the `cool` binary serves the
+React/TypeScript SPA, the canonical App Protocol, the agent loop, tools,
+subagents and deep research with no Python/Node/Bun on the default path. The
+Python/FastAPI backend under `backend/` is the legacy lane (kept until
+[`docs/migration/adr/0003-remove-legacy-python-server.md`](docs/migration/adr/0003-remove-legacy-python-server.md)
+executes); optional Python workers are specified in
+[`docs/backlog/python-workers.md`](docs/backlog/python-workers.md), and the
+documented rollback release is
+[`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md). The product
+roadmap lives in [`docs/PLAN.md`](docs/PLAN.md) and
+[`docs/phases/`](docs/phases/). Phases 0–3b and **Фаза 4** (Deep Research,
+Code/Git, multimodal, browser automation, Agent Constructor) are done.
+Telegram (Фаза 5) is still an empty placeholder.
 
 The active architecture-migration roadmap is
 [`docs/RUST_CORE_MIGRATION_PLAN.md`](docs/RUST_CORE_MIGRATION_PLAN.md). It replaces the earlier
 TypeScript-core proposal with a Rust trusted core, versioned App Protocol, Rust TUI, native
-Skills/MCP/hooks, and isolated TypeScript/Python compatibility workers. Until a migration phase
-passes its checkpoint, the current Python constraints in this file remain authoritative.
+Skills/MCP/hooks, and isolated TypeScript/Python compatibility workers. M12 is complete: the
+Rust core is the default and the Python server is off the startup path; the `backend/` constraints
+below still apply to the legacy lane (and to the optional-worker work when scheduled), and the
+server's deletion stays gated on ADR-0003 — do not remove it in regular tasks.
 
 ## Repository layout
 

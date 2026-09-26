@@ -12,7 +12,14 @@ inspector/replay console, and durable agent runs. Control via the web UI.
 
 ## Stack
 
-- **Backend:** Python 3.12+, FastAPI, Uvicorn, SQLModel + SQLite, Alembic
+- **Runtime (default):** Rust trusted core — the single `cool` binary serves
+  the SPA, the canonical App Protocol (`POST /api/rpc` + `GET /api/events`),
+  blob transports, the agent loop, tools, subagents and deep research.
+- **Legacy lane (optional, not on the default startup path):** Python 3.12+,
+  FastAPI, Uvicorn, SQLModel + SQLite, Alembic under `backend/` — kept until
+  [ADR-0003](docs/migration/adr/0003-remove-legacy-python-server.md) executes;
+  optional Python workers follow
+  [`docs/backlog/python-workers.md`](docs/backlog/python-workers.md)
 - **Frontend:** React 19 + TypeScript + Vite 8 + Tailwind 4 (zustand,
   @tanstack/react-query, Radix-based UI primitives)
 - **LLM providers:** OpenAI + Anthropic via a single `LLMProvider` interface
@@ -34,8 +41,9 @@ inspector/replay console, and durable agent runs. Control via the web UI.
 cp .env.example .env
 # edit .env — set at least OPENAI_API_KEY (or OPENAI_BASE_URL for an
 # OpenAI-compatible backend like OpenRouter/DeepSeek/Groq/Ollama)
-# also generate a SECRET_KEY:
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# also generate a SECRET_KEY (Fernet = 32 url-safe base64 bytes):
+openssl rand -base64 32
+# or with the Python lane: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 ### 2. Run the packaged app (recommended)
@@ -102,7 +110,11 @@ an existing Python-owned data root read-only until you adopt it (see above). For
 frontend hot reload, run `cool serve` in one terminal and `npm run dev`
 from `frontend/` in another; Vite remains the development-only split mode. The
 legacy Python/FastAPI backend in `backend/` still exists during the migration
-and is not the production packaging.
+but is not on the default startup path and is not the production packaging.
+Rolling an installation back to the Python runtime is documented in
+[`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md); removing
+the legacy server entirely is gated on
+[ADR-0003](docs/migration/adr/0003-remove-legacy-python-server.md).
 
 ### 4. Smoke test
 
@@ -133,20 +145,21 @@ usage, iterations, and outcome; an append-only `run_events` log records every
 event for replay/inspection. Interactive runs (SSE/WebSocket) are cancellable
 via the registry and the cancel endpoint.
 
-```bash
-# List/detail a conversation's runs and their event logs
-curl http://localhost:8000/api/conversations/1/runs
-curl http://localhost:8000/api/conversations/1/runs/1
-curl http://localhost:8000/api/conversations/1/runs/1/events
+On the default runtime these are canonical App Protocol commands
+(`session.runs`, `run.events`, `run.cancel`) over `POST /api/rpc` — for
+example:
 
-# Signal a running run to stop
-curl -X POST http://localhost:8000/api/conversations/1/runs/1/cancel
+```bash
+curl -X POST http://localhost:8000/api/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"cool.command","params":{"protocolVersion":1,"commandId":"c1","command":{"method":"run.events","params":{"runId":"run-…","limit":50}}}}'
 ```
 
-Schema changes are managed with **Alembic** (`backend/alembic`). In production
-the app applies `alembic upgrade head` on startup; in development/tests it uses
-`SQLModel.create_all` (models are the source of truth there). Current head:
-`0022_phase4_completion`.
+Schema changes are owned by the Rust store (`crates/cool-store`) at the frozen
+Alembic baseline `0022_phase4_completion`; the legacy **Alembic** toolchain
+(`backend/alembic`) only remains for the optional legacy lane and refuses a
+Rust-owned database. In development/tests the Python lane still uses
+`SQLModel.create_all` (models are the source of truth there).
 
 ```bash
 cd backend

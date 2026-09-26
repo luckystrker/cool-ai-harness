@@ -61,7 +61,7 @@
 | 9 | M9 — Rust CLI/TUI и ACP cutover | M4, M7, M8 | [x] complete | [`M9.md`](migration/checkpoints/M9.md) |
 | 10 | M10 — Store и background subsystems parity | M6, M7 | [x] complete | [`M10.md`](migration/checkpoints/M10.md) |
 | 11 | M11 — Web cutover и compatibility workers | M8, M9, M10 | [x] done per reduced recorded scope: React store-backed cutover + runtime catalogs + task parity + task scheduler/executor + subagent executor + canonical webhook replay + canonical plan execution + canonical conversation compaction + admin surfaces (extensions, MCP, skills, providers) + store-backed tool families + memory extraction + operator-MCP-tool registration (B5); deep-research executor re-confirmed M12 scope, server-profile ops/Telegram/optional Python workers parked in backlog | [`M11.md`](migration/checkpoints/M11.md) |
-| 12 | M12 — Default cutover и сокращение Python | M11 | [ ] pending | — |
+| 12 | M12 — Default cutover и сокращение Python | M11 | [x] done: Rust runtime default; rollback release documented ([M12_ROLLBACK.md](migration/M12_ROLLBACK.md)); Python server off default startup; optional Python workers specified ([backlog/python-workers.md](backlog/python-workers.md)); frontend fully canonical (no deferred ops); legacy test disposition recorded; removal ADR proposed ([0003](migration/adr/0003-remove-legacy-python-server.md)) — execution stays gated | [`M12.md`](migration/checkpoints/M12.md) |
 
 Фазы с выполненными зависимостями могут реализовываться независимо, но один агент не должен вести
 несколько незавершённых фаз одновременно. Колонка `Evidence` должна ссылаться на checkpoint,

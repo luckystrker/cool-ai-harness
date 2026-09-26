@@ -2,7 +2,10 @@
 
 Полный roadmap от пустого репозитория до полноценного AI-агентского harness'а.
 
-**Стек:** Python (FastAPI) + React SPA + SQLite + Telegram (Bot + Web App).
+**Стек:** Rust trusted core (default runtime с M12) + React SPA + SQLite +
+Telegram (Bot + Web App); legacy Python (FastAPI) — опциональная lane до
+[ADR-0003](migration/adr/0003-remove-legacy-python-server.md), см.
+[RUST_CORE_MIGRATION_PLAN.md](RUST_CORE_MIGRATION_PLAN.md).
 
 ## Статус
 
