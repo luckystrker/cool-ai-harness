@@ -1,6 +1,13 @@
 # Cool — план миграции на Rust core
 
-> Статус: active; M0-M11 complete (M4 real-client acceptance collected in the post-M11 residuals sweep: real Zed + two upstream-lib external clients, evidence in the M4 checkpoint), M11 complete per reduced recorded scope (research executor re-confirmed M12; server-profile ops/Telegram/optional Python workers parked in backlog)
+> Статус: active; M0-M11 complete — every recorded M1-M10 residual is closed in the post-M11
+> sweep (M4 real-client acceptance collected: real Zed + two upstream-lib external clients,
+> evidence in the M4 checkpoint; pricing, Anthropic-native driver, cap-std fs caps + isolated
+> launcher, publisher signatures + transparency log, real vendor-adapter semantics). The sweep
+> passed independent review: CHANGES REQUESTED → one fix round (`d1a6192` + nit follow-up) →
+> APPROVE (session devin-b6efe7bba00b4ffba27da3cc21a44d97). M11 complete per reduced recorded
+> scope (research executor re-confirmed M12; server-profile ops/Telegram/optional Python
+> workers parked in backlog)
 > Назначение: исполняемый coding-agent roadmap, дополняющий `docs/PLAN.md`  
 > Базовая стратегия: incremental replacement без big-bang rewrite  
 > Целевая платформа: Rust trusted core + App Protocol + React Web UI + Rust TUI + ACP + protocol-isolated extensions

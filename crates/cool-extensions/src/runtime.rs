@@ -26,7 +26,7 @@ impl ExtensionRuntime {
         let mut hooks = Vec::new();
         let mut mcp = HashMap::new();
         let mut status = Vec::new();
-        for loaded in store.load_enabled_isolated()? {
+        for (plugin_name, loaded) in store.load_enabled_isolated()? {
             match loaded {
                 Ok(bundle) => {
                     let Some(manifest) = bundle.manifest else {
@@ -52,7 +52,7 @@ impl ExtensionRuntime {
                     status.push(plugin_status_event(manifest.name, "enabled", None));
                 }
                 Err(error) => status.push(plugin_status_event(
-                    "unknown",
+                    &plugin_name,
                     "failed",
                     Some(error.to_string()),
                 )),

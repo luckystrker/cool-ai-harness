@@ -82,6 +82,9 @@ struct LockDocument {
     plugins: BTreeMap<String, InstalledPlugin>,
 }
 
+/// Per-plugin isolated load result: the plugin name plus its load outcome.
+pub type IsolatedLoad = (String, Result<PluginBundle, StoreError>);
+
 #[derive(Clone)]
 pub struct PluginStore {
     root: PathBuf,
@@ -110,17 +113,23 @@ impl PluginStore {
     }
 
     pub fn load_enabled(&self) -> Result<Vec<PluginBundle>, StoreError> {
-        self.load_enabled_isolated()?.into_iter().collect()
+        self.load_enabled_isolated()?
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect()
     }
 
-    pub fn load_enabled_isolated(
-        &self,
-    ) -> Result<Vec<Result<PluginBundle, StoreError>>, StoreError> {
+    /// Loads every enabled plugin independently, pairing each result with the
+    /// plugin name so a per-item failure still identifies the offender.
+    pub fn load_enabled_isolated(&self) -> Result<Vec<IsolatedLoad>, StoreError> {
         Ok(self
             .list()?
             .into_iter()
             .filter(|entry| entry.enabled)
-            .map(|entry| self.load_entry(entry))
+            .map(|entry| {
+                let name = entry.name.clone();
+                (name, self.load_entry(entry))
+            })
             .collect())
     }
 
@@ -486,6 +495,10 @@ impl PluginStore {
                     manifest.name
                 )));
             }
+            let superseded_path = document
+                .plugins
+                .get(&manifest.name)
+                .map(|previous| previous.install_path.clone());
             let content_hash = self
                 .loader
                 .content_hash(&staging)
@@ -551,6 +564,17 @@ impl PluginStore {
             };
             document.plugins.insert(entry.name.clone(), entry.clone());
             self.write(&document)?;
+            // An update moves the install to a new content hash; sweep the
+            // superseded copy so the store does not accumulate dead trees.
+            if let Some(previous) = superseded_path {
+                let previous_path = PathBuf::from(&previous);
+                if previous_path != destination
+                    && previous_path.starts_with(&installations)
+                    && previous_path.is_dir()
+                {
+                    fs::remove_dir_all(&previous_path)?;
+                }
+            }
             crate::signing::append_transparency(
                 &self.root,
                 if replacing { "update" } else { "install" },

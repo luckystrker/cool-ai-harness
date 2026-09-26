@@ -395,7 +395,7 @@ async fn extension_registry(
     let Ok(entries) = store.load_enabled_isolated() else {
         return (registry, runtime, Some(store));
     };
-    for bundle in entries.into_iter().flatten() {
+    for bundle in entries.into_iter().filter_map(|(_, result)| result.ok()) {
         let Some(manifest) = bundle.manifest else {
             continue;
         };
@@ -677,13 +677,16 @@ fn load_bundle(entry: &InstalledPlugin) -> Option<PluginBundle> {
         .ok()
 }
 
-/// Same integrity rule as `PluginStore::load_entry`: a plugin is only "verified"
-/// when its tree still hashes to the recorded content hash and its manifest
-/// still has the recorded identity. The runtime refuses to load enabled plugins
-/// that fail this, so the admin must not project their hooks/skills/MCP servers.
+/// Same integrity rule as `PluginStore::load_entry`: a plugin is only
+/// "verified" when its tree still hashes to the recorded content hash, its
+/// manifest still has the recorded identity, and the bundle carries no
+/// blockers — `loadable()` is what `load_entry` gates on. The runtime refuses
+/// to load enabled plugins that fail this, so the admin must not project
+/// their hooks/skills/MCP servers.
 fn content_verified(entry: &InstalledPlugin, bundle: Option<&PluginBundle>) -> bool {
     bundle.is_some_and(|bundle| {
-        bundle.content_hash == entry.content_hash
+        bundle.loadable()
+            && bundle.content_hash == entry.content_hash
             && bundle
                 .manifest
                 .as_ref()
@@ -1357,7 +1360,7 @@ fn mcp_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
         let Ok(bundles) = store.load_enabled_isolated() else {
             continue;
         };
-        for bundle in bundles.into_iter().flatten() {
+        for bundle in bundles.into_iter().filter_map(|(_, result)| result.ok()) {
             let Some(manifest) = &bundle.manifest else {
                 continue;
             };
@@ -1402,7 +1405,7 @@ fn hooks_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)>
             continue;
         };
         let reviewed = store.reviewed_hook_hashes(&entry.name).unwrap_or_default();
-        for bundle in bundles.into_iter().flatten() {
+        for bundle in bundles.into_iter().filter_map(|(_, result)| result.ok()) {
             let Some(manifest) = &bundle.manifest else {
                 continue;
             };
