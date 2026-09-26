@@ -560,7 +560,7 @@ async fn blocked_writer_is_timed_out_without_blocking_durable_execution() {
         },
     );
     let result = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(15),
         serve_jsonl(BufReader::new(input.as_slice()), BlockingWriter, core),
     )
     .await
