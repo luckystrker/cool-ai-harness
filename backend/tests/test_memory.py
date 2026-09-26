@@ -381,8 +381,8 @@ class TestLifecycle:
             ttl_days=1,
             source="user_explicit",
         )
-        # Manually set valid_from to 2 days ago (naive datetime for SQLite).
-        memory.valid_from = datetime.now() - timedelta(days=2)
+        # Manually set valid_from to 2 days ago.
+        memory.valid_from = datetime.now(UTC) - timedelta(days=2)
         memory_session.add(memory)
         memory_session.commit()
         memory_session.refresh(memory)
