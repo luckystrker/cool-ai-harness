@@ -179,7 +179,7 @@ async fn health_is_public_and_reports_the_web_facade() {
     let body: serde_json::Value = response.json().await.expect("health json");
     assert_eq!(body["status"], "ok");
     assert_eq!(body["runtime"], "rust-trusted-core");
-    assert_eq!(body["phase"], "M11");
+    assert_eq!(body["phase"], "M12");
 }
 
 #[tokio::test]
