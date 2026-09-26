@@ -182,13 +182,16 @@ impl ResearchExecutor {
     /// Inline driver for the `deep_research` tool: creates the run row (with a
     /// hidden research conversation when `conversation_id` is absent) and runs
     /// the pipeline to completion with no canonical sink. `cancel` is the
-    /// calling run's cancel signal when present.
+    /// calling run's cancel signal when present. `parent_task_run_id` links a
+    /// scheduled deep-research run back to its task run (Python
+    /// `run_research_for_task` audit field).
     pub async fn run_inline(
         self: &Arc<Self>,
         topic: &str,
         depth: i64,
         model: Option<String>,
         conversation_id: Option<i64>,
+        parent_task_run_id: Option<i64>,
         cancel: Option<watch::Receiver<Option<String>>>,
     ) -> Result<ResearchOutcome, StoreError> {
         let actor = crate::local_actor();
@@ -203,7 +206,7 @@ impl ResearchExecutor {
                 depth,
                 model,
                 conversation_id: Some(conversation_id),
-                parent_task_run_id: None,
+                parent_task_run_id,
             },
         )?;
         let (cancel_tx, default_rx) = watch::channel(None);
@@ -474,7 +477,9 @@ impl ResearchExecutor {
             .ok()
             .and_then(|roles| roles.into_iter().find(|role| role.name == "researcher"));
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SUBAGENTS));
-        let mut set: JoinSet<(usize, Result<String, String>)> = JoinSet::new();
+        // `None` outcome = the question was cancelled while queued and never
+        // launched — the drain skips its completed event (Python emits none).
+        let mut set: JoinSet<(usize, Option<Result<String, String>>)> = JoinSet::new();
         let total = sub_questions.len();
         for (index, question) in sub_questions.iter().cloned().enumerate() {
             let permit = Arc::clone(&semaphore);
@@ -495,7 +500,7 @@ impl ResearchExecutor {
                 // A queued sub-question must not spawn a subagent row once the
                 // run has been cancelled while it waited on the semaphore.
                 if child_cancel.borrow().is_some() {
-                    return (index, Ok(String::new()));
+                    return (index, None);
                 }
                 if let Some(sink) = &progress {
                     let _ = sink
@@ -522,24 +527,31 @@ impl ResearchExecutor {
                 };
                 let child = match executor.launch(&actor, spec, &key, &key).await {
                     Ok(child) => child,
-                    Err(error) => return (index, Err(mask_secrets(&error.to_string()))),
+                    Err(error) => {
+                        return (index, Some(Err(mask_secrets(&error.to_string()))));
+                    }
                 };
                 let row = match executor
                     .await_terminal(&actor, child.id, &mut child_cancel)
                     .await
                 {
                     Ok(row) => row,
-                    Err(error) => return (index, Err(mask_secrets(&error.to_string()))),
+                    Err(error) => {
+                        return (index, Some(Err(mask_secrets(&error.to_string()))));
+                    }
                 };
                 // The research run's own cancel fires the shared receiver and
                 // signals the child inside `await_terminal`.
                 if child_cancel.borrow().is_some() {
-                    return (index, Ok(String::new()));
+                    return (index, Some(Ok(String::new())));
                 }
                 if row.status == "completed" {
-                    (index, Ok(row.result_summary.unwrap_or_default()))
+                    (index, Some(Ok(row.result_summary.unwrap_or_default())))
                 } else {
-                    (index, Err(row.error.unwrap_or_else(|| row.status.clone())))
+                    (
+                        index,
+                        Some(Err(row.error.unwrap_or_else(|| row.status.clone()))),
+                    )
                 }
             });
         }
@@ -551,6 +563,9 @@ impl ResearchExecutor {
             }
             match result {
                 Ok((index, outcome)) => {
+                    let Some(outcome) = outcome else {
+                        continue;
+                    };
                     let status = match &outcome {
                         Ok(text) if !text.is_empty() => "completed",
                         Ok(_) => "empty",
@@ -957,6 +972,7 @@ fn lookup_title(findings: &str, url: &str) -> String {
 fn snippet_around(text: &str, position: usize) -> String {
     // Python slices by chars; mirror it by converting the char window to byte
     // offsets so multibyte text can never panic `&str` indexing.
+    let position = text.floor_char_boundary(position.min(text.len()));
     let start = position
         - text[..position]
             .chars()
@@ -1157,6 +1173,19 @@ mod tests {
             })
             .collect();
         assert_eq!(questions, ["First question", "Second question", "Third"]);
+    }
+
+    #[test]
+    fn snippet_around_is_char_windowed_and_multibyte_safe() {
+        // Byte-offset slicing must never panic on UTF-8 text (the pre-fix bug).
+        let text = "й".repeat(500); // 1000 bytes, 500 chars
+        let snippet = snippet_around(&text, 501); // mid-string, inside a char
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.chars().count() <= MAX_SNIPPET_CHARS);
+        assert!(snippet.chars().all(|c| c == 'й' || c == '…'));
+        // Ends of the text carry no ellipsis on the free side.
+        assert!(!snippet_around("abc", 0).starts_with('…'));
+        assert!(!snippet_around("abc", 0).ends_with('…'));
     }
 
     #[test]

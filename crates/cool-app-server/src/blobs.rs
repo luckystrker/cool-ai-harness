@@ -695,6 +695,35 @@ mod tests {
     }
 
     #[test]
+    fn markdown_to_html_matches_python_headings_and_tables() {
+        // Python `^(#{1,6})\s+` supports h5/h6 and skips table rows entirely.
+        let html = markdown_to_html(
+            "##### deep\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nplain",
+            "t",
+        );
+        assert!(html.contains("<h5>deep</h5>"));
+        assert!(!html.contains("| a | b |"));
+        assert!(html.contains("<p>plain</p>"));
+    }
+
+    #[test]
+    fn inline_md_keeps_tail_and_citations_and_rejects_non_http_links() {
+        // Text after the last link is preserved (the pre-fix bug dropped it).
+        let html = inline_md("see [site](https://a.b) then tail");
+        assert!(html.contains("<a href=\"https://a.b\""));
+        assert!(html.ends_with("then tail"));
+        // `[n]` citations next to links stay literal.
+        let html = inline_md("[1] and [x](https://a.b)");
+        assert!(html.contains("[1]"));
+        assert!(html.contains("<a href=\"https://a.b\""));
+        // Only http(s) links become anchors (Python regex parity).
+        let html = inline_md("[e](javascript:alert(1)) and [d](data:text/html,x)");
+        assert!(!html.contains("href=\"javascript:"));
+        assert!(!html.contains("href=\"data:"));
+        assert!(html.contains("[e](javascript:alert(1))"));
+    }
+
+    #[test]
     fn export_format_errors() {
         // Worker-gated formats report cleanly. The run row must exist (Python
         // 404s without a report), so seed one through the store.
