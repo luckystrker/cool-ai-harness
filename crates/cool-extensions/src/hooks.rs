@@ -11,7 +11,6 @@ use cool_security::{CapabilityPolicy, Decision, mask_json, sanitize_environment}
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::{HookDeclaration, HookHandler, McpClient, narrowed_plugin_policy};
@@ -287,26 +286,35 @@ impl HookEngine {
                 .map(|(name, value)| (name.as_str(), value.as_str())),
             &Default::default(),
         ));
-        let mut child = Command::new(command)
-            .args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(safe_environment)
-            .kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
+        // Same containment as the agent's bounded process launcher: a Job
+        // Object / process group plus kill-on-drop so a hook's descendants
+        // cannot outlive the invocation.
+        let mut command_wrap = process_wrap::tokio::CommandWrap::with_new(command, |command| {
+            command
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .envs(safe_environment)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        });
+        command_wrap.wrap(process_wrap::tokio::KillOnDrop);
+        #[cfg(unix)]
+        command_wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        command_wrap.wrap(process_wrap::tokio::JobObject);
+        let mut child = command_wrap.spawn()?;
+        if let Some(mut stdin) = child.stdin().take() {
             stdin.write_all(&serde_json::to_vec(payload)?).await?;
         }
         let mut stdout = child
-            .stdout
+            .stdout()
             .take()
             .ok_or_else(|| HookError::Failed("missing stdout".to_owned()))?
             .take(self.max_output_bytes as u64 + 1);
         let mut stderr = child
-            .stderr
+            .stderr()
             .take()
             .ok_or_else(|| HookError::Failed("missing stderr".to_owned()))?
             .take(self.max_output_bytes as u64 + 1);
@@ -321,7 +329,7 @@ impl HookEngine {
         let status = match timeout(self.timeout, child.wait()).await {
             Ok(status) => status?,
             Err(_) => {
-                let _ = child.kill().await;
+                let _ = std::pin::Pin::from(child.kill()).await;
                 let _ = child.wait().await;
                 return Err(HookError::Timeout);
             }

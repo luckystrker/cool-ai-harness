@@ -8,6 +8,7 @@ mod loader;
 mod mcp;
 mod opencode;
 mod runtime;
+mod signing;
 mod store;
 mod worker;
 
@@ -26,6 +27,11 @@ pub use opencode::{
     opencode_worker_policy,
 };
 pub use runtime::ExtensionRuntime;
+pub use signing::{
+    KEYRING_FILE, SIGNATURE_FILE, SignatureStatus, TRANSPARENCY_FILE, TransparencyEntry,
+    VerifiedSignature, append_transparency, inspect_signature, load_keyring, public_key_base64,
+    read_transparency_log, sign_payload, signature_payload, verify_transparency_log,
+};
 pub use store::{InstalledPlugin, PluginStore, StoreError};
 pub use worker::{
     CompatibilityAdapter, CompatibilityWorkerSupervisor, WorkerError, WorkerLaunchSpec,

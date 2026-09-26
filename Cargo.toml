@@ -25,8 +25,11 @@ version = "0.1.0"
 async-trait = "=0.1.92"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "query", "tokio", "tower-log"] }
 base64 = "=0.22.1"
+cap-std = "=3.4.4"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "digest", "rand_core"] }
 fernet = { version = "=0.2.2", default-features = false, features = ["rustcrypto"] }
 futures-util = "=0.3.34"
+process-wrap = { version = "=9.1.0", default-features = false, features = ["tokio1", "job-object", "process-group", "kill-on-drop", "creation-flags"] }
 quick-xml = "=0.42.0"
 regex = "=1.12.2"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }

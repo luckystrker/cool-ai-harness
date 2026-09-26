@@ -12,7 +12,6 @@ use cool_security::{
 };
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::loop_runtime::CancelSignal;
@@ -412,6 +411,24 @@ fn string_array(arguments: &Value, name: &str) -> Result<Vec<String>, ToolError>
 
 struct ReadFile;
 
+/// Every file-tool open goes through the workspace's cap-std `Dir`, so the
+/// handle is resolved component-by-component beneath the root at I/O time and
+/// a symlink/reparse swap cannot escape (handle-relative confinement).
+fn workspace_path(context: &ToolContext, requested: &str) -> Result<std::path::PathBuf, ToolError> {
+    context
+        .workspace
+        .confine_relative(requested)
+        .map_err(|error| ToolError::Security(error.to_string()))
+}
+
+fn confinement_io(error: std::io::Error) -> ToolError {
+    match error.kind() {
+        // cap-std reports sandboxed (escaping) paths as permission failures.
+        std::io::ErrorKind::PermissionDenied => ToolError::Security(error.to_string()),
+        _ => ToolError::Io(error),
+    }
+}
+
 #[async_trait]
 impl ToolHandler for ReadFile {
     async fn execute(
@@ -420,11 +437,15 @@ impl ToolHandler for ReadFile {
         arguments: Value,
     ) -> Result<ToolResult, ToolError> {
         reject_unknown(&arguments, &["path", "maxBytes"])?;
-        let path = context
-            .workspace
-            .confine_existing(required_string(&arguments, "path")?)
-            .map_err(|error| ToolError::Security(error.to_string()))?;
-        if !path.is_file() {
+        let path = workspace_path(context, required_string(&arguments, "path")?)?;
+        let metadata = match context.workspace.dir().metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ToolResult::error("file_not_found", "path is not a file"));
+            }
+            Err(error) => return Err(confinement_io(error)),
+        };
+        if !metadata.is_file() {
             return Ok(ToolResult::error("file_not_found", "path is not a file"));
         }
         let limit = arguments
@@ -437,7 +458,11 @@ impl ToolHandler for ReadFile {
                 "maxBytes must be positive".to_owned(),
             ));
         }
-        let bytes = tokio::fs::read(&path).await?;
+        let bytes = context
+            .workspace
+            .dir()
+            .read(&path)
+            .map_err(confinement_io)?;
         let truncated = bytes.len() > limit;
         let text = String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]);
         Ok(ToolResult::ok(json!({
@@ -467,14 +492,16 @@ impl ToolHandler for ListFiles {
             ));
         }
         let requested = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
-        let path = context
+        let path = workspace_path(context, requested)?;
+        let reader = context
             .workspace
-            .confine_existing(requested)
-            .map_err(|error| ToolError::Security(error.to_string()))?;
-        let mut reader = tokio::fs::read_dir(path).await?;
+            .dir()
+            .read_dir(&path)
+            .map_err(confinement_io)?;
         let mut entries = Vec::new();
-        while let Some(entry) = reader.next_entry().await? {
-            let kind = entry.file_type().await?;
+        for entry in reader {
+            let entry = entry.map_err(confinement_io)?;
+            let kind = entry.file_type().map_err(confinement_io)?;
             entries.push(format!(
                 "{}{}",
                 entry.file_name().to_string_lossy(),
@@ -510,36 +537,31 @@ impl ToolHandler for WriteFile {
             .get("append")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let path = if context.workspace.root().join(requested).exists() {
-            context.workspace.confine_existing(requested)
-        } else {
-            context.workspace.confine_for_create(requested)
-        }
-        .map_err(|error| ToolError::Security(error.to_string()))?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        let path = workspace_path(context, requested)?;
+        if let Some(parent) = path.parent()
+            && parent.components().next().is_some()
+        {
             context
                 .workspace
-                .confine_existing(parent)
-                .map_err(|error| ToolError::Security(error.to_string()))?;
+                .dir()
+                .create_dir_all(parent)
+                .map_err(confinement_io)?;
         }
-        if path.exists() {
-            context
-                .workspace
-                .confine_existing(&path)
-                .map_err(|error| ToolError::Security(error.to_string()))?;
-        }
-        let mut options = tokio::fs::OpenOptions::new();
+        let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create(true);
         if append {
             options.append(true);
         } else {
             options.truncate(true);
         }
-        use tokio::io::AsyncWriteExt as _;
-        let mut file = options.open(&path).await?;
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
+        use std::io::Write as _;
+        let mut file = context
+            .workspace
+            .dir()
+            .open_with(&path, &options)
+            .map_err(confinement_io)?;
+        file.write_all(content.as_bytes()).map_err(ToolError::Io)?;
+        file.flush().map_err(ToolError::Io)?;
         Ok(ToolResult::ok(json!({
             "path": requested,
             "bytes": content.len(),
@@ -683,33 +705,41 @@ async fn run_bounded_process(
             .map(|(name, value)| (name.as_str(), value.as_str())),
         &context.allowed_secret_environment,
     );
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(context.workspace.root())
-        .env_clear()
-        .envs(environment)
-        .kill_on_drop(true)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut command = process_wrap::tokio::CommandWrap::with_new(program, |command| {
+        command
+            .args(args)
+            .current_dir(context.workspace.root())
+            .env_clear()
+            .envs(environment)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    });
+    // OS-isolated launcher: the child and any descendants live in a killable
+    // containment unit — a Windows Job Object (closed on drop/kill) or a Unix
+    // process group (kill hits the whole group, not just the direct child).
+    command.wrap(process_wrap::tokio::KillOnDrop);
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(process_wrap::tokio::JobObject);
+    let mut child = command.spawn().map_err(ToolError::Io)?;
     if let Some(stdin) = stdin
-        && let Some(mut pipe) = child.stdin.take()
+        && let Some(mut pipe) = child.stdin().take()
     {
         use tokio::io::AsyncWriteExt as _;
         pipe.write_all(&stdin).await?;
     }
     let stdout = child
-        .stdout
+        .stdout()
         .take()
         .ok_or_else(|| ToolError::Io(std::io::Error::other("missing stdout")))?;
     let stderr = child
-        .stderr
+        .stderr()
         .take()
         .ok_or_else(|| ToolError::Io(std::io::Error::other("missing stderr")))?;
     let limit = context.max_output_bytes as u64 + 1;
@@ -734,13 +764,13 @@ async fn run_bounded_process(
             waited = timeout(context.timeout, child.wait()) => match waited {
                 Ok(status) => status?,
                 Err(_) => {
-                    let _ = child.kill().await;
+                    let _ = std::pin::Pin::from(child.kill()).await;
                     let _ = child.wait().await;
                     return Err(ToolError::Timeout);
                 }
             },
             _ = cancel.wait() => {
-                let _ = child.kill().await;
+                let _ = std::pin::Pin::from(child.kill()).await;
                 let _ = child.wait().await;
                 return Err(ToolError::Cancelled);
             }
@@ -749,7 +779,7 @@ async fn run_bounded_process(
         match timeout(context.timeout, child.wait()).await {
             Ok(status) => status?,
             Err(_) => {
-                let _ = child.kill().await;
+                let _ = std::pin::Pin::from(child.kill()).await;
                 let _ = child.wait().await;
                 return Err(ToolError::Timeout);
             }

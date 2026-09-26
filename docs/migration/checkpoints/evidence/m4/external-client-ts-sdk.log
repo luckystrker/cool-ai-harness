@@ -1,0 +1,9 @@
+[client] ok - initialize -> protocolVersion=1
+[client] ok - agent advertises promptCapabilities
+[client] ok - agent advertises loadSession
+[client] ok - newSession -> session-66a1a4b8-d648-47e5-bc15-d3ea5d1befb7
+[client] ok - prompt -> stopReason=end_turn
+[client] ok - streamed agent_message_chunk updates (saw: agent_message_chunk)
+[client] ok - overlapping prompt rejected (session run active)
+[client] ok - loadSession replayed the conversation
+[client] ALL CHECKS PASSED

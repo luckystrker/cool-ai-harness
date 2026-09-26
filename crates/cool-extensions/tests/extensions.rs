@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use cool_extensions::{
     BUN_INSTALL_ENV, CompatibilityAdapter, CompatibilityWorkerSupervisor, ExtensionRuntime,
-    GRANTED_WORKSPACES_ENV, HookEngine, HookError, HookInvocation, HookReviewStore, McpClient,
-    McpServer, McpToolPolicy, OpenCodeSpecError, OpenCodeWorkerConfig, PLUGIN_DATA_ENV,
+    GRANTED_WORKSPACES_ENV, HookEngine, HookError, HookHandler, HookInvocation, HookReviewStore,
+    McpClient, McpServer, McpToolPolicy, OpenCodeSpecError, OpenCodeWorkerConfig, PLUGIN_DATA_ENV,
     PLUGIN_ENTRY_ENV, PLUGIN_ROOT_ENV, PluginLoader, PluginStore, WorkerError, WorkerLaunchSpec,
     WorkerOperationClass, WorkerProtocol, WorkerRequestOutcome, discover_plugin_tools,
     discover_plugin_tools_with_policy, narrowed_plugin_policy, opencode_launch_spec,
@@ -890,7 +890,8 @@ fn m3_codex_and_claude_fixtures_have_explicit_tier_two_mappings() {
             &temporary.path().join("claude-data"),
         )
         .unwrap();
-    assert_eq!(claude.skills.len(), 1);
+    assert_eq!(claude.skills.len(), 2);
+    assert!(claude.skills.iter().any(|skill| skill.name == "reviewer"));
     assert!(claude.mcp_servers.is_empty());
     assert!(
         claude
@@ -945,6 +946,103 @@ fn codex_vendor_mcp_is_translated_to_canonical_server() {
     fs::create_dir_all(&data).unwrap();
     let bundle = PluginLoader.load(&root, &data).unwrap();
     assert_eq!(bundle.mcp_servers.len(), 1);
+}
+
+#[test]
+fn vendor_hooks_map_to_canonical_or_stay_inactive() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("vendor");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    fs::write(
+        root.join(".claude-plugin/plugin.json"),
+        r#"{"name":"claude-demo","version":"1"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("hooks")).unwrap();
+    fs::write(
+        root.join("hooks/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|Read","hooks":[{"type":"command","command":"$CLAUDE_PROJECT_DIR/scripts/check.sh --strict"}]}],"Stop":[{"matcher":".*","hooks":[{"type":"command","command":"echo done"}]}],"UserPromptSubmit":[{"matcher":"Write(.*)","hooks":[{"type":"command","command":"echo regex"}]}],"VendorOnlyEvent":[{"matcher":"*","hooks":[{"type":"command","command":"echo nope"}]}]}}"#,
+    )
+    .unwrap();
+    let bundle = PluginLoader.load(&root, &data).unwrap();
+    assert!(bundle.loadable());
+
+    // `Bash|Read` expands to two exact matchers; `.*` is a single match-all.
+    assert_eq!(bundle.hooks.len(), 3);
+    let hook = bundle
+        .hooks
+        .iter()
+        .find(|hook| hook.event == "PreToolUse" && hook.matcher.contains_key("tool"))
+        .unwrap();
+    assert!(
+        hook.capabilities
+            .iter()
+            .any(|name| name.as_str() == "execute")
+    );
+    assert!(!hook.trust_hash.is_empty());
+    let HookHandler::Command {
+        command, args, env, ..
+    } = &hook.handler
+    else {
+        panic!("expected command handler");
+    };
+    assert!(args.last().unwrap().ends_with("scripts/check.sh --strict"));
+    assert_eq!(
+        env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+        Some(root.canonicalize().unwrap().to_string_lossy().as_ref())
+    );
+    assert!(command.file_name().is_some());
+
+    // Regex matcher and unknown event stay inactive with diagnostics.
+    assert!(
+        bundle
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "compatibility.hook_matcher_unsupported")
+    );
+    assert!(
+        bundle
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "compatibility.hook_event_unsupported")
+    );
+    assert!(
+        bundle
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "compatibility.hooks_transformed")
+    );
+    assert!(
+        bundle
+            .hooks
+            .iter()
+            .all(|hook| hook.event != "VendorOnlyEvent")
+    );
+}
+
+#[test]
+fn codex_flat_hook_entries_map_to_canonical() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("vendor");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(root.join(".codex-plugin")).unwrap();
+    fs::write(
+        root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"codex-demo","version":"1"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("hooks")).unwrap();
+    fs::write(
+        root.join("hooks/hooks.json"),
+        r#"{"hooks":[{"event":"SessionStart","command":"python setup.py"}]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(&data).unwrap();
+    let bundle = PluginLoader.load(&root, &data).unwrap();
+    assert_eq!(bundle.hooks.len(), 1);
+    assert_eq!(bundle.hooks[0].event, "SessionStart");
+    assert!(bundle.hooks[0].matcher.is_empty());
 }
 
 #[test]
@@ -1124,6 +1222,116 @@ fn store_install_git_requires_a_pinned_commit() {
     assert_eq!(store.list().unwrap().len(), 1);
 }
 
+/// A signed plugin must carry a verifiable publisher signature and land in the
+/// hash-chained transparency log; a signature from an untrusted publisher must
+/// block installation instead of degrading silently to "unsigned".
+#[test]
+fn store_records_signed_installs_in_the_transparency_log() {
+    use cool_extensions::{KEYRING_FILE, SIGNATURE_FILE};
+    use ed25519_dalek::SigningKey;
+
+    let temporary = TempDir::new().unwrap();
+    let store_root = temporary.path().join("plugins");
+    let store = PluginStore::open(&store_root).unwrap();
+
+    // Unsigned install is allowed but recorded as unsigned.
+    let source = temporary.path().join("unsigned-source");
+    write_plugin(&source, false);
+    let entry = store.install_local(&source).unwrap();
+    assert_eq!(entry.signature_status, "unsigned");
+    assert_eq!(entry.publisher, None);
+
+    let key = SigningKey::from_bytes(&[9u8; 32]);
+    fs::write(
+        store_root.join(KEYRING_FILE),
+        serde_json::to_vec_pretty(&json!({
+            "publishers": {"acme": cool_extensions::public_key_base64(&key)}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A second, signed plugin — the signature covers name, version, and the
+    // content hash that excludes signature.json itself.
+    let signed_source = temporary.path().join("signed-source");
+    write_plugin(&signed_source, false);
+    let manifest_path = signed_source.join("plugin.json");
+    fs::write(
+        &manifest_path,
+        r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"signed-demo","version":"2"}"#,
+    )
+    .unwrap();
+    let scratch = temporary.path().join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let content_hash = PluginLoader
+        .load(&signed_source, &scratch)
+        .unwrap()
+        .content_hash;
+    fs::write(
+        signed_source.join(SIGNATURE_FILE),
+        serde_json::to_vec_pretty(&json!({
+            "publisher": "acme",
+            "signature": cool_extensions::sign_payload(&key, "signed-demo", "2", &content_hash),
+            "publicKey": cool_extensions::public_key_base64(&key),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let entry = store.install_local(&signed_source).unwrap();
+    assert_eq!(entry.signature_status, "signed");
+    assert_eq!(entry.publisher.as_deref(), Some("acme"));
+
+    // Enable/disable events are recorded too.
+    store.set_enabled("signed-demo", true).unwrap();
+    store.set_enabled("signed-demo", false).unwrap();
+
+    let log = store.transparency_log().unwrap();
+    assert_eq!(log.len(), 4);
+    assert_eq!(log[0].action, "install");
+    assert_eq!(log[0].signature_status, "unsigned");
+    assert_eq!(log[1].action, "install");
+    assert_eq!(log[1].signature_status, "signed");
+    assert_eq!(log[1].publisher.as_deref(), Some("acme"));
+    assert_eq!(log[2].action, "enable");
+    assert_eq!(log[3].action, "disable");
+    assert_eq!(store.verify_transparency_log().unwrap(), 4);
+
+    // History edits break the chain.
+    let log_path = store_root.join(cool_extensions::TRANSPARENCY_FILE);
+    let content = fs::read_to_string(&log_path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+    let mut first: Value = serde_json::from_str(&lines[0]).unwrap();
+    first["action"] = json!("update");
+    lines[0] = serde_json::to_string(&first).unwrap();
+    fs::write(&log_path, lines.join("\n") + "\n").unwrap();
+    assert!(store.verify_transparency_log().is_err());
+    fs::remove_file(&log_path).unwrap();
+
+    // A signature whose publisher is not trusted blocks the install outright.
+    fs::remove_file(store_root.join(KEYRING_FILE)).unwrap();
+    let source3 = temporary.path().join("signed-source-2");
+    write_plugin(&source3, false);
+    fs::write(
+        source3.join("plugin.json"),
+        r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"untrusted-demo","version":"1"}"#,
+    )
+    .unwrap();
+    let hash3 = PluginLoader.load(&source3, &scratch).unwrap().content_hash;
+    fs::write(
+        source3.join(SIGNATURE_FILE),
+        serde_json::to_vec_pretty(&json!({
+            "publisher": "acme",
+            "signature": cool_extensions::sign_payload(&key, "untrusted-demo", "1", &hash3),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.install_local(&source3),
+        Err(cool_extensions::StoreError::Invalid(_))
+    ));
+}
+
 #[tokio::test]
 async fn runtime_status_snapshot_lists_plugins_workers_and_mcp_servers() {
     let temporary = TempDir::new().unwrap();
@@ -1141,6 +1349,8 @@ async fn runtime_status_snapshot_lists_plugins_workers_and_mcp_servers() {
         install_path: install.to_string_lossy().into_owned(),
         data_path: data.to_string_lossy().into_owned(),
         installed_at: "2026-09-17T00:00:00.000Z".to_owned(),
+        publisher: None,
+        signature_status: String::new(),
         diagnostics: Vec::new(),
         resolved_dependencies: Vec::new(),
         required_capabilities: Vec::new(),

@@ -1,0 +1,9 @@
+🚀 Spawning agent: C:/Users/Administrator/repos/cool-ai-harness/target/debug/cool.exe ["acp"]
+🤝 Initializing agent...
+✓ Agent initialized: Some(Implementation { name: "cool-ai-harness", title: Some("Cool AI Harness"), version: "0.1.0", meta: None })
+📝 Creating new session...
+✓ Session created
+💬 Sending prompt: "hello from rust upstream client"
+AgentMessageChunk(ContentChunk { content: Text(TextContent { annotations: None, text: "hello from rust upstream client", meta: None }), meta: None })
+✅ Agent completed!
+Stop reason: EndTurn

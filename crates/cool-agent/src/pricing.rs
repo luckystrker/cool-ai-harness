@@ -119,8 +119,7 @@ pub fn estimate_cost_micro_usd(
 ) -> Option<u64> {
     let prices = lookup(model)?;
     let prompt = u128::from(prompt_tokens) * u128::from(prices.prompt_per_1k_micro_usd);
-    let completion =
-        u128::from(completion_tokens) * u128::from(prices.completion_per_1k_micro_usd);
+    let completion = u128::from(completion_tokens) * u128::from(prices.completion_per_1k_micro_usd);
     Some(((prompt + completion + 500) / 1_000) as u64)
 }
 
@@ -146,7 +145,10 @@ mod tests {
 
     #[test]
     fn exact_and_prefix_lookup_match_python() {
-        assert_eq!(estimate_cost_micro_usd("gpt-4o", 1_000, 1_000), Some(12_500));
+        assert_eq!(
+            estimate_cost_micro_usd("gpt-4o", 1_000, 1_000),
+            Some(12_500)
+        );
         assert_eq!(
             estimate_cost_micro_usd("gpt-4o-2024-08-06", 1_000, 0),
             Some(2_500)

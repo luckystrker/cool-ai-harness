@@ -11,7 +11,10 @@ cool-agent = { path = "../cool-agent" }
 cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 async-trait.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
 futures-util.workspace = true
+process-wrap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +24,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 tempfile.workspace = true
 
 [lints]

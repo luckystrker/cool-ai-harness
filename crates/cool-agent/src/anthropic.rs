@@ -334,7 +334,10 @@ impl AnthropicStreamState {
                 match delta["type"].as_str() {
                     Some("text_delta") => {
                         if let Some(text) = delta["text"].as_str().filter(|text| !text.is_empty()) {
-                            sender.send(Ok(ModelEvent::Content(text.to_owned()))).await.ok();
+                            sender
+                                .send(Ok(ModelEvent::Content(text.to_owned())))
+                                .await
+                                .ok();
                         }
                     }
                     Some("thinking_delta") => {
@@ -349,10 +352,10 @@ impl AnthropicStreamState {
                     }
                     Some("input_json_delta") => {
                         let index = event["index"].as_u64().unwrap_or(0);
-                        if let Some(block) = self.tool_blocks.get_mut(&index) {
-                            if let Some(partial) = delta["partial_json"].as_str() {
-                                block.input_json.push_str(partial);
-                            }
+                        if let Some(block) = self.tool_blocks.get_mut(&index)
+                            && let Some(partial) = delta["partial_json"].as_str()
+                        {
+                            block.input_json.push_str(partial);
                         }
                     }
                     // signature_delta and any newer delta kinds carry no content.
@@ -420,7 +423,10 @@ impl AnthropicStreamState {
 
     /// Stream ended without `message_stop`: flush any tool blocks and finish
     /// so the caller never hangs waiting for a terminal event.
-    async fn finish(&mut self, sender: &tokio::sync::mpsc::Sender<Result<ModelEvent, ProviderError>>) {
+    async fn finish(
+        &mut self,
+        sender: &tokio::sync::mpsc::Sender<Result<ModelEvent, ProviderError>>,
+    ) {
         for (_, block) in std::mem::take(&mut self.tool_blocks) {
             sender.send(block.finish()).await.ok();
         }
@@ -485,10 +491,7 @@ mod tests {
         assistant.tool_calls.push(ToolCall {
             call_id: "call_1".to_owned(),
             name: "read_file".to_owned(),
-            arguments: serde_json::Map::from_iter([(
-                "path".to_owned(),
-                json!("a.txt"),
-            )]),
+            arguments: serde_json::Map::from_iter([("path".to_owned(), json!("a.txt"))]),
         });
         let mut tool = message(MessageRole::Tool, Some("contents"));
         tool.tool_call_id = Some("call_1".to_owned());

@@ -22,6 +22,12 @@ pub struct InstalledPlugin {
     pub install_path: String,
     pub data_path: String,
     pub installed_at: String,
+    /// Publisher name when the release carried a verifiable signature.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    /// `signed` | `unsigned` — invalid signatures never reach this file.
+    #[serde(default)]
+    pub signature_status: String,
     #[serde(default)]
     pub diagnostics: Vec<BTreeMap<String, String>>,
     #[serde(default)]
@@ -60,6 +66,12 @@ impl From<std::io::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<crate::signing::SignatureError> for StoreError {
+    fn from(value: crate::signing::SignatureError) -> Self {
+        Self::Invalid(value.to_string())
     }
 }
 
@@ -226,6 +238,28 @@ impl PluginStore {
         }
         entry.enabled = enabled;
         let result = self.write(&document);
+        if result.is_ok() {
+            let entry = &document.plugins[name];
+            let status = if entry.signature_status.is_empty() {
+                crate::signing::SignatureStatus::Unsigned
+            } else if entry.signature_status == "signed" {
+                crate::signing::SignatureStatus::Signed(crate::signing::VerifiedSignature {
+                    publisher: entry.publisher.clone().unwrap_or_default(),
+                    key_fingerprint: String::new(),
+                })
+            } else {
+                crate::signing::SignatureStatus::Invalid(entry.signature_status.clone())
+            };
+            let _ = crate::signing::append_transparency(
+                &self.root,
+                if enabled { "enable" } else { "disable" },
+                &entry.name,
+                &entry.version,
+                &entry.content_hash,
+                &status,
+                timestamp(),
+            );
+        }
         lock.unlock()?;
         result?;
         Ok(document
@@ -365,6 +399,7 @@ impl PluginStore {
             }
             let plugin_data = data_root.join(&manifest.name);
             fs::create_dir_all(&plugin_data)?;
+            let signature_status = bundle.signature_status.clone();
             let entry = InstalledPlugin {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
@@ -376,6 +411,8 @@ impl PluginStore {
                 install_path: destination.to_string_lossy().into_owned(),
                 data_path: plugin_data.to_string_lossy().into_owned(),
                 installed_at: timestamp(),
+                publisher: signature_status.publisher().map(str::to_owned),
+                signature_status: signature_status.label().to_owned(),
                 diagnostics: bundle
                     .diagnostics
                     .iter()
@@ -402,6 +439,15 @@ impl PluginStore {
             };
             document.plugins.insert(entry.name.clone(), entry.clone());
             self.write(&document)?;
+            crate::signing::append_transparency(
+                &self.root,
+                if replacing { "update" } else { "install" },
+                &entry.name,
+                &entry.version,
+                &entry.content_hash,
+                &signature_status,
+                timestamp(),
+            )?;
             Ok(entry)
         })();
         if staging.exists() {
@@ -519,6 +565,17 @@ impl PluginStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The append-only, hash-chained transparency log of lifecycle changes.
+    pub fn transparency_log(&self) -> Result<Vec<crate::signing::TransparencyEntry>, StoreError> {
+        Ok(crate::signing::read_transparency_log(&self.root)?)
+    }
+
+    /// Re-verifies every transparency entry hash plus the prev-hash chain.
+    /// Returns the number of verified records.
+    pub fn verify_transparency_log(&self) -> Result<usize, StoreError> {
+        Ok(crate::signing::verify_transparency_log(&self.root)?)
     }
 
     fn read_reviews(&self) -> Result<BTreeMap<String, BTreeMap<String, String>>, StoreError> {

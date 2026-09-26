@@ -545,9 +545,15 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            process_sse_line("data: [DONE]", &sender, &mut calls, &mut finish_reason, "gpt-4o")
-                .await
-                .unwrap()
+            process_sse_line(
+                "data: [DONE]",
+                &sender,
+                &mut calls,
+                &mut finish_reason,
+                "gpt-4o"
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(
             receiver.recv().await.unwrap().unwrap(),

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use cool_security::Capability;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -142,6 +142,7 @@ pub struct PluginBundle {
     pub manifest: Option<PluginManifest>,
     pub compatibility: CompatibilityKind,
     pub content_hash: String,
+    pub signature_status: crate::signing::SignatureStatus,
     pub skills: Vec<Skill>,
     pub mcp_servers: Vec<McpServer>,
     pub hooks: Vec<HookDeclaration>,
@@ -251,6 +252,7 @@ impl PluginLoader {
                 manifest: None,
                 compatibility: CompatibilityKind::Portable,
                 content_hash,
+                signature_status: crate::signing::SignatureStatus::Unsigned,
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
                 hooks: Vec::new(),
@@ -274,6 +276,49 @@ impl PluginLoader {
         };
         let mut diagnostics = Vec::new();
         let manifest = parse_manifest(&raw, compatibility, &mut diagnostics);
+        // Publisher signature: data_root lives at <store>/data/<name>, so the
+        // store root (which carries the trusted keyring) is two levels up.
+        let store_root = data_root
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(data_root);
+        let signature_status = manifest
+            .as_ref()
+            .map(|manifest| {
+                crate::signing::inspect_signature(
+                    &root,
+                    store_root,
+                    &manifest.name,
+                    &manifest.version,
+                    &content_hash,
+                )
+                .unwrap_or_else(|error| crate::signing::SignatureStatus::Invalid(error.to_string()))
+            })
+            .unwrap_or(crate::signing::SignatureStatus::Unsigned);
+        match &signature_status {
+            crate::signing::SignatureStatus::Unsigned => diagnostics.push(diagnostic(
+                "signature.unsigned",
+                "plugin carries no publisher signature; content hash only detects drift",
+                DiagnosticLevel::Info,
+                crate::signing::SIGNATURE_FILE,
+            )),
+            crate::signing::SignatureStatus::Signed(verified) => diagnostics.push(diagnostic(
+                "signature.signed",
+                &format!(
+                    "plugin is signed by trusted publisher \"{}\" (key {})",
+                    verified.publisher,
+                    &verified.key_fingerprint[..12]
+                ),
+                DiagnosticLevel::Info,
+                crate::signing::SIGNATURE_FILE,
+            )),
+            crate::signing::SignatureStatus::Invalid(reason) => diagnostics.push(diagnostic(
+                "signature.invalid",
+                &format!("publisher signature cannot be trusted: {reason}"),
+                DiagnosticLevel::Blocker,
+                crate::signing::SIGNATURE_FILE,
+            )),
+        }
         if compatibility != CompatibilityKind::Portable {
             diagnostics.push(diagnostic(
                 "compatibility.transformed",
@@ -290,6 +335,7 @@ impl PluginLoader {
             manifest,
             compatibility,
             content_hash,
+            signature_status,
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
@@ -301,7 +347,7 @@ impl PluginLoader {
             self.load_hooks(&mut bundle, data_root)?;
         } else {
             self.load_vendor_mcp(&mut bundle, data_root)?;
-            self.inspect_vendor_features(&mut bundle)?;
+            self.inspect_vendor_features(&mut bundle, data_root)?;
         }
         Ok(bundle)
     }
@@ -411,30 +457,333 @@ impl PluginLoader {
         Ok(())
     }
 
-    fn inspect_vendor_features(&self, bundle: &mut PluginBundle) -> Result<(), LoadError> {
-        let candidates: &[&str] = match bundle.compatibility {
-            CompatibilityKind::Codex => &[".app.json", "hooks/hooks.json"],
-            CompatibilityKind::Claude => &[
-                "commands",
-                "agents",
-                "hooks/hooks.json",
-                "settings.json",
-                "monitors",
-                "themes",
-                "bin",
-            ],
+    /// Vendor feature import. Reviewed semantic mappings bring vendor hooks
+    /// and prompt resources into the canonical model — vendor hooks flow
+    /// through the same `parse_hook` trust-hash/review/capability path as
+    /// native declarations, and Claude `commands/`/`agents/` prompt resources
+    /// become skills. Features with no canonical concept stay inactive and
+    /// keep an explicit diagnostic instead of silently executing.
+    fn inspect_vendor_features(
+        &self,
+        bundle: &mut PluginBundle,
+        data_root: &Path,
+    ) -> Result<(), LoadError> {
+        self.load_vendor_hooks(bundle, data_root, "hooks/hooks.json")?;
+        if bundle.compatibility == CompatibilityKind::Claude {
+            self.load_vendor_hooks(bundle, data_root, "settings.json")?;
+            self.load_vendor_prompts(bundle, "commands")?;
+            self.load_vendor_prompts(bundle, "agents")?;
+            bundle
+                .skills
+                .sort_by(|left, right| left.name.cmp(&right.name));
+            bundle.hooks.sort_by(|left, right| {
+                left.order
+                    .cmp(&right.order)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        }
+        let unmapped: &[&str] = match bundle.compatibility {
+            CompatibilityKind::Codex => &[".app.json"],
+            CompatibilityKind::Claude => &["monitors", "themes", "bin"],
             CompatibilityKind::Portable => &[],
         };
-        for relative in candidates {
+        for relative in unmapped {
             let path = bundle.root.join(relative);
             if path.exists() {
                 bundle.diagnostics.push(diagnostic(
                     "compatibility.feature_unsupported",
-                    "vendor feature is detected but remains inactive until a reviewed semantic mapping exists",
+                    "vendor feature has no canonical mapping and stays inactive",
                     DiagnosticLevel::Warning,
                     *relative,
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Maps a vendor `hooks/hooks.json` (or the `hooks` key of Claude
+    /// `settings.json`) onto canonical declarations via `parse_hook`. The
+    /// vendor entry format is `{event: [{matcher?, hooks: [{type:"command",
+    /// command}]}]}`; every command runs under the host shell inside the same
+    /// bounded containment as native hooks, after the same trust review.
+    fn load_vendor_hooks(
+        &self,
+        bundle: &mut PluginBundle,
+        data_root: &Path,
+        relative: &str,
+    ) -> Result<(), LoadError> {
+        let path = bundle.root.join(relative);
+        if !path.is_file() {
+            return Ok(());
+        }
+        fs::create_dir_all(data_root)?;
+        let data_root = data_root.canonicalize()?;
+        ensure_file_in(&bundle.root, &path)?;
+        let raw: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        if relative == "settings.json"
+            && let Some(object) = raw.as_object()
+        {
+            let ignored = object
+                .keys()
+                .filter(|key| key.as_str() != "hooks")
+                .cloned()
+                .collect::<Vec<_>>();
+            if !ignored.is_empty() {
+                bundle.diagnostics.push(diagnostic(
+                    "compatibility.settings_keys_inactive",
+                    &format!(
+                        "settings.json keys have no canonical mapping and stay inactive: {}",
+                        ignored.join(", ")
+                    ),
+                    DiagnosticLevel::Warning,
+                    relative,
+                ));
+            }
+        }
+        let hooks_value = raw.get("hooks").cloned().unwrap_or(Value::Null);
+        // Two vendor shapes share the code path: Claude's `{event: [{matcher,
+        // hooks: [...]}]}` groups and Codex's flat `[{event, command, ...}]`
+        // entries (normalized here into pseudo-groups).
+        let events: BTreeMap<String, Vec<Value>> = if let Some(object) = hooks_value.as_object() {
+            object
+                .iter()
+                .map(|(event, groups)| {
+                    let groups = groups.as_array().cloned().unwrap_or_default();
+                    (event.clone(), groups)
+                })
+                .collect()
+        } else if let Some(items) = hooks_value.as_array() {
+            // Flat `{event, command?, hooks?, matcher?}` entries — each entry
+            // becomes a single-item pseudo-group under its event.
+            let mut events = BTreeMap::<String, Vec<Value>>::new();
+            for item in items {
+                let Some(item) = item.as_object() else {
+                    bundle.diagnostics.push(diagnostic(
+                        "compatibility.hooks_invalid",
+                        "vendor hook entry must be an object",
+                        DiagnosticLevel::Error,
+                        relative,
+                    ));
+                    continue;
+                };
+                let event = item
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let group = json!({
+                    "matcher": item.get("matcher").cloned().unwrap_or(Value::Null),
+                    "hooks": [item.clone()],
+                });
+                events.entry(event).or_default().push(group);
+            }
+            events
+        } else {
+            if relative == "settings.json" {
+                return Ok(());
+            }
+            bundle.diagnostics.push(diagnostic(
+                "compatibility.hooks_invalid",
+                "vendor hooks.json must contain a hooks object or array",
+                DiagnosticLevel::Error,
+                relative,
+            ));
+            return Ok(());
+        };
+        let mut transformed = 0_usize;
+        let mut seen_ids = BTreeSet::new();
+        for (event, groups) in &events {
+            let prefix = format!("{relative}/hooks/{event}");
+            if !CANONICAL_HOOK_EVENTS.contains(&event.as_str()) {
+                bundle.diagnostics.push(diagnostic(
+                    "compatibility.hook_event_unsupported",
+                    "vendor hook event has no canonical mapping and stays inactive",
+                    DiagnosticLevel::Warning,
+                    &prefix,
+                ));
+                continue;
+            }
+            for (group_index, group) in groups.iter().enumerate() {
+                let group_path = format!("{prefix}/{group_index}");
+                let Some(group) = group.as_object() else {
+                    bundle.diagnostics.push(diagnostic(
+                        "compatibility.hooks_invalid",
+                        "vendor hook group must be an object",
+                        DiagnosticLevel::Error,
+                        group_path,
+                    ));
+                    continue;
+                };
+                let matcher_value = group
+                    .get("matcher")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let Some(matchers) = vendor_matcher(matcher_value) else {
+                    bundle.diagnostics.push(diagnostic(
+                        "compatibility.hook_matcher_unsupported",
+                        "vendor hook matcher has no exact-match mapping; the hook stays inactive",
+                        DiagnosticLevel::Warning,
+                        group_path,
+                    ));
+                    continue;
+                };
+                let Some(items) = group.get("hooks").and_then(Value::as_array) else {
+                    bundle.diagnostics.push(diagnostic(
+                        "compatibility.hooks_invalid",
+                        "vendor hook group must contain a hooks array",
+                        DiagnosticLevel::Error,
+                        group_path,
+                    ));
+                    continue;
+                };
+                for (item_index, item) in items.iter().enumerate() {
+                    let item_path = format!("{group_path}/hooks/{item_index}");
+                    let Some(item) = item.as_object() else {
+                        bundle.diagnostics.push(diagnostic(
+                            "compatibility.hooks_invalid",
+                            "vendor hook entry must be an object",
+                            DiagnosticLevel::Error,
+                            item_path,
+                        ));
+                        continue;
+                    };
+                    let kind = item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("command");
+                    if kind != "command" {
+                        bundle.diagnostics.push(diagnostic(
+                            "compatibility.hook_handler_unsupported",
+                            "only vendor command hooks map onto the canonical model; other handler types stay inactive",
+                            DiagnosticLevel::Warning,
+                            item_path,
+                        ));
+                        continue;
+                    }
+                    let Some(command) = item.get("command").and_then(Value::as_str) else {
+                        bundle.diagnostics.push(diagnostic(
+                            "compatibility.hooks_invalid",
+                            "vendor command hook requires a command string",
+                            DiagnosticLevel::Error,
+                            item_path,
+                        ));
+                        continue;
+                    };
+                    let command = translate_vendor_command(command, bundle.compatibility);
+                    // Vendor hooks execute through the host shell — the
+                    // canonical handler preserves that with a bare shell name
+                    // plus the command string as its argument. PLUGIN_ROOT /
+                    // PLUGIN_DATA environment and trust review still apply.
+                    let (shell, flags): (&str, &[&str]) = if cfg!(windows) {
+                        ("cmd.exe", &["/D", "/C"])
+                    } else {
+                        ("sh", &["-c"])
+                    };
+                    let mut env = serde_json::Map::new();
+                    if bundle.compatibility == CompatibilityKind::Claude {
+                        env.insert(
+                            "CLAUDE_PROJECT_DIR".to_owned(),
+                            Value::String("${PLUGIN_ROOT}".to_owned()),
+                        );
+                    }
+                    let args = flags
+                        .iter()
+                        .map(|flag| Value::String((*flag).to_owned()))
+                        .chain([Value::String(command.clone())])
+                        .collect::<Vec<_>>();
+                    for (matcher_index, matcher) in matchers.iter().enumerate() {
+                        let canonical = json!({
+                            "id": vendor_hook_id(event, group_index, item_index, matcher_index),
+                            "event": event,
+                            "handler": {
+                                "type": "command",
+                                "command": shell,
+                                "args": args,
+                                "env": env,
+                            },
+                            "matcher": matcher,
+                            "order": 0,
+                            "concurrency": "serial",
+                        });
+                        match parse_hook(&canonical, &bundle.root, &data_root, &bundle.content_hash)
+                        {
+                            Ok(hook) if seen_ids.insert(hook.id.clone()) => {
+                                transformed += 1;
+                                bundle.hooks.push(hook);
+                            }
+                            Ok(_) => {}
+                            Err(message) => bundle.diagnostics.push(diagnostic(
+                                "compatibility.hooks_invalid",
+                                &message,
+                                DiagnosticLevel::Error,
+                                &item_path,
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        if transformed > 0 {
+            bundle.diagnostics.push(diagnostic(
+                "compatibility.hooks_transformed",
+                "vendor hooks were translated to canonical declarations and require the same trust review",
+                DiagnosticLevel::Warning,
+                relative,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Maps a Claude `commands/` or `agents/` directory onto skills: every
+    /// markdown file is a prompt resource, with `name`/`description` taken
+    /// from its frontmatter (or synthesized from the file) and the vendor
+    /// `tools` allowlist mapped onto `allowed-tools`.
+    fn load_vendor_prompts(
+        &self,
+        bundle: &mut PluginBundle,
+        relative: &str,
+    ) -> Result<(), LoadError> {
+        let directory = bundle.root.join(relative);
+        if !directory.is_dir() {
+            return Ok(());
+        }
+        let mut transformed = 0_usize;
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                continue;
+            }
+            if !path.is_file() || ensure_file_in(&bundle.root, &path).is_err() {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("prompt");
+            let text = fs::read_to_string(&path)?;
+            let normalized = normalize_vendor_prompt(&text, stem, relative);
+            match parse_skill(&normalized, &path, false) {
+                Ok(skill) => {
+                    transformed += 1;
+                    bundle.skills.push(skill);
+                }
+                Err(message) => bundle.diagnostics.push(diagnostic(
+                    "compatibility.prompt_invalid",
+                    &message,
+                    DiagnosticLevel::Error,
+                    path.strip_prefix(&bundle.root)
+                        .unwrap_or(&path)
+                        .to_string_lossy(),
+                )),
+            }
+        }
+        if transformed > 0 {
+            bundle.diagnostics.push(diagnostic(
+                "compatibility.prompts_transformed",
+                &format!("vendor {relative} entries were imported as skills"),
+                DiagnosticLevel::Warning,
+                relative,
+            ));
         }
         Ok(())
     }
@@ -1036,6 +1385,11 @@ fn hash_tree(root: &Path) -> Result<String, LoadError> {
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hash = Sha256::new();
     for (relative, path) in files {
+        if relative == crate::signing::SIGNATURE_FILE {
+            // The signature attests to the hash; hashing it in would be a
+            // fixpoint. A tampered signature.json still fails verification.
+            continue;
+        }
         let bytes = fs::read(path)?;
         hash.update(format!("F\0{relative}\0{}\0", bytes.len()).as_bytes());
         hash.update(bytes);
@@ -1283,5 +1637,188 @@ fn diagnostic(
         message: message.to_owned(),
         level,
         path: path.to_string(),
+    }
+}
+
+/// Events the canonical hook engine can dispatch. Vendor hooks for any other
+/// event stay inactive with a diagnostic instead of running under a mapped
+/// name.
+const CANONICAL_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "Interrupt",
+];
+
+/// Maps a vendor matcher string onto canonical exact-match entries.
+/// Empty/`.*`/`*` match everything; a literal or an `a|b` alternation of
+/// safe literals maps to one `{"tool": literal}` entry per alternative —
+/// matching the payload field the runtime emits for tool events. Anything
+/// else (regexes, globs) has no faithful mapping and returns `None` so the
+/// group stays inactive with a diagnostic rather than silently broadening.
+fn vendor_matcher(value: &str) -> Option<Vec<BTreeMap<String, Value>>> {
+    let value = value.trim();
+    if value.is_empty() || value == "*" || value == ".*" {
+        return Some(vec![BTreeMap::new()]);
+    }
+    let parts: Vec<&str> = value.split('|').collect();
+    let literal = |part: &str| -> bool {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'.' | b':' | b'-')
+            })
+    };
+    if parts.iter().all(|part| literal(part.trim())) {
+        return Some(
+            parts
+                .iter()
+                .map(|part| {
+                    BTreeMap::from([("tool".to_owned(), Value::String(part.trim().to_owned()))])
+                })
+                .collect(),
+        );
+    }
+    None
+}
+
+/// Rewrites vendor-specific path variables onto the canonical plugin-root
+/// placeholder, which `expand_value` then resolves under the install root.
+fn translate_vendor_command(command: &str, kind: CompatibilityKind) -> String {
+    match kind {
+        CompatibilityKind::Claude => command
+            .replace("${CLAUDE_PROJECT_DIR}", "${PLUGIN_ROOT}")
+            .replace("$CLAUDE_PROJECT_DIR", "${PLUGIN_ROOT}"),
+        _ => command.to_owned(),
+    }
+}
+
+/// Deterministic canonical id for a vendor hook occurrence, constrained to
+/// `valid_name` (lowercase, digits, `.` and `-`, alphanumeric edges).
+fn vendor_hook_id(event: &str, group: usize, item: usize, matcher: usize) -> String {
+    let base = format!("vendor-{event}-{group}-{item}-{matcher}").to_lowercase();
+    let sanitized = base
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'.' {
+                byte as char
+            } else {
+                '-'
+            }
+        })
+        .collect::<Vec<_>>()
+        .iter()
+        .collect::<String>();
+    let collapsed = sanitized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let truncated: String = collapsed.chars().take(64).collect();
+    let id = truncated.trim_matches(|ch| ch == '-' || ch == '.');
+    if id.is_empty() {
+        "vendor-hook".to_owned()
+    } else {
+        id.to_owned()
+    }
+}
+
+/// Normalizes a Claude `commands/` or `agents/` markdown file into canonical
+/// skill frontmatter. Missing `name`/`description` are synthesized from the
+/// file, the vendor `tools` allowlist becomes `allowed-tools`, and
+/// vendor-only fields (`model`, `color`, ...) are dropped — they have no
+/// canonical concept and must not silently pass through.
+fn normalize_vendor_prompt(text: &str, stem: &str, relative: &str) -> String {
+    let sanitized_stem = sanitized_resource_name(stem);
+    let name = if relative == "agents" {
+        format!("agent-{sanitized_stem}")
+    } else {
+        sanitized_stem
+    };
+    let normalized = text.replace("\r\n", "\n");
+    let (mut fields, body) = match normalized
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+    {
+        Some((frontmatter, body)) => {
+            let mut fields = BTreeMap::new();
+            for line in frontmatter.lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    fields.insert(key.trim().to_owned(), yaml_scalar(value).to_owned());
+                }
+            }
+            (fields, body)
+        }
+        None => (BTreeMap::new(), normalized.as_str()),
+    };
+    let name = fields
+        .remove("name")
+        .filter(|value| !value.is_empty())
+        .map(|value| sanitized_resource_name(&value))
+        .unwrap_or(name);
+    let description = fields
+        .remove("description")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("Vendor prompt resource")
+                .chars()
+                .take(1024)
+                .collect()
+        });
+    let allowed_tools = fields
+        .remove("allowed-tools")
+        .or_else(|| fields.remove("tools"))
+        .map(|value| {
+            value
+                .split([',', ' '])
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let mut document = format!("---\nname: {name}\ndescription: {description}\n");
+    if !allowed_tools.is_empty() {
+        document.push_str(&format!("allowed-tools: {allowed_tools}\n"));
+    }
+    document.push_str("---\n");
+    document.push_str(body);
+    document
+}
+
+fn sanitized_resource_name(value: &str) -> String {
+    let sanitized = value
+        .to_lowercase()
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'.' {
+                byte as char
+            } else {
+                '-'
+            }
+        })
+        .collect::<Vec<_>>()
+        .iter()
+        .collect::<String>();
+    let collapsed = sanitized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let truncated: String = collapsed.chars().take(64).collect();
+    let name = truncated.trim_matches(|ch| ch == '-' || ch == '.');
+    if name.is_empty() {
+        "prompt".to_owned()
+    } else {
+        name.to_owned()
     }
 }

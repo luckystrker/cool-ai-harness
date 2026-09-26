@@ -153,9 +153,24 @@ impl fmt::Display for SecurityError {
 
 impl std::error::Error for SecurityError {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
+    /// Capability handle over the workspace root. Every open/read/write
+    /// through it is resolved relative to this handle, so a path component
+    /// swapped for a symlink or reparse point after validation cannot carry
+    /// the operation outside the workspace (M7 residual: handle-relative
+    /// filesystem capabilities).
+    dir: std::sync::Arc<cap_std::fs::Dir>,
+}
+
+impl fmt::Debug for Workspace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Workspace")
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 impl Workspace {
@@ -164,11 +179,50 @@ impl Workspace {
         if !root.is_dir() {
             return Err(SecurityError::InvalidWorkspace);
         }
-        Ok(Self { root })
+        let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
+            .map_err(|_| SecurityError::InvalidWorkspace)?;
+        Ok(Self {
+            root,
+            dir: std::sync::Arc::new(dir),
+        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The capability handle rooted at the workspace directory.
+    pub fn dir(&self) -> &cap_std::fs::Dir {
+        &self.dir
+    }
+
+    /// Lexically confine `requested` and return the workspace-relative path
+    /// for use with `dir()`. Absolute requests must still resolve beneath the
+    /// root; `..` may never climb above it. Unlike `confine_*`, this performs
+    /// no filesystem access — escape prevention is enforced by the capability
+    /// handle itself at open time, which also closes the check-to-use race.
+    pub fn confine_relative(&self, requested: impl AsRef<Path>) -> Result<PathBuf, SecurityError> {
+        let requested = requested.as_ref();
+        let relative = if requested.is_absolute() {
+            requested
+                .strip_prefix(&self.root)
+                .map_err(|_| SecurityError::PathEscapesWorkspace)?
+                .to_path_buf()
+        } else {
+            requested.to_path_buf()
+        };
+        let mut depth = 0usize;
+        for component in relative.components() {
+            match component {
+                Component::Normal(_) => depth += 1,
+                Component::CurDir => {}
+                Component::ParentDir if depth > 0 => depth -= 1,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                    return Err(SecurityError::PathEscapesWorkspace);
+                }
+            }
+        }
+        Ok(relative)
     }
 
     pub fn confine_existing(&self, requested: impl AsRef<Path>) -> Result<PathBuf, SecurityError> {

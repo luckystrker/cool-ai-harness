@@ -10,6 +10,7 @@ mod pricing;
 mod provider;
 mod tools;
 
+pub use anthropic::AnthropicDriver;
 pub use context::{
     Compaction, Message, MessageRole, PLANNING_SYSTEM_PROMPT, ToolCall, compact_history,
     estimate_history_tokens, load_project_instructions, planning_system_prompt,
@@ -19,7 +20,6 @@ pub use loop_runtime::{
     CancelSignal, EventSink, RunOutcome, RuntimeError, StoreEventSink, SubagentRequest,
     history_from_events, mask_canonical_event,
 };
-pub use anthropic::AnthropicDriver;
 pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{
     ModelDriver, ModelEvent, ModelRequest, ModelStream, OpenAiCompatibleDriver, ProviderError,

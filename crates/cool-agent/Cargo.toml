@@ -7,10 +7,12 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cap-std.workspace = true
 cool-protocol = { path = "../cool-protocol" }
 cool-security = { path = "../cool-security" }
 cool-state = { path = "../cool-state" }
 futures-util.workspace = true
+process-wrap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
