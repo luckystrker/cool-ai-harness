@@ -218,6 +218,12 @@ impl CancelSignal {
         self.receiver.borrow().clone()
     }
 
+    /// A clone of the inner receiver, for components that poll cancellation
+    /// without owning the signal (executor-bound tools awaiting a child run).
+    pub fn receiver(&self) -> watch::Receiver<Option<String>> {
+        self.receiver.clone()
+    }
+
     async fn changed(&mut self) -> Option<String> {
         if let Some(reason) = self.reason() {
             return Some(reason);
@@ -248,6 +254,12 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn new(provider: Arc<dyn ModelDriver>, tools: ToolRegistry) -> Self {
         Self { provider, tools }
+    }
+
+    /// The shared model driver — one-shot completions (research decompose /
+    /// synthesize) run through the same provider abstraction as the loop.
+    pub fn driver(&self) -> Arc<dyn ModelDriver> {
+        Arc::clone(&self.provider)
     }
 
     /// The runtime's registered tool catalog (name-sorted).

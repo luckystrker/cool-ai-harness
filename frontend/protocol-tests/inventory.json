@@ -1073,23 +1073,23 @@
     {
       "file": "research.ts",
       "member": "start",
-      "http": "POST /api/research",
-      "status": "deferred",
-      "rationale": "Rust research.create only inserts the durable research-run row; the research pipeline executes in the Python runtime, so start stays deferred"
+      "http": "POST /api/rpc",
+      "status": "sdk",
+      "command": "research.create"
     },
     {
       "file": "research.ts",
       "member": "cancel",
-      "http": "POST /api/research/{id}/cancel",
-      "status": "deferred",
-      "rationale": "Rust research.cancel flips the durable row to cancelled but cannot stop the Python pipeline, so the cancel action stays deferred"
+      "http": "POST /api/rpc",
+      "status": "sdk",
+      "command": "research.cancel"
     },
     {
       "file": "research.ts",
       "member": "rerun",
-      "http": "POST /api/research/{id}/rerun",
-      "status": "deferred",
-      "rationale": "Rust research.rerun only inserts a new durable row; execution stays in the Python runtime, so rerun stays deferred"
+      "http": "POST /api/rpc",
+      "status": "sdk",
+      "command": "research.rerun"
     },
     {
       "file": "research.ts",
@@ -1101,9 +1101,9 @@
     {
       "file": "research.ts",
       "member": "streamResearch",
-      "http": "POST /api/research/stream",
+      "http": "GET /api/events?runId=",
       "status": "sse/stream",
-      "rationale": "live research progress streams progress frames; M11 moves it to the canonical event stream"
+      "rationale": "creates the run via research.create, then follows its canonical runtimeRunId on the cursor/reconnect stream, re-projecting research.*/run.* envelopes into the progress shape"
     },
     {
       "file": "constructor.ts",
@@ -1143,9 +1143,9 @@
     {
       "file": "streaming.ts",
       "member": "streamConversationMessage",
-      "http": "POST /api/conversations/{id}/messages",
+      "http": "POST /api/rpc + GET /api/events?runId=",
       "status": "sse/stream",
-      "rationale": "canonical turn streaming: session.for_conversation + session.prompt + streamRunEvents (run events over GET /api/events); the legacy POST SSE remains only as the artifact-attachment fallback until non-text ContentParts are supported"
+      "rationale": "canonical turn streaming: session.for_conversation + session.prompt (artifact ContentParts accepted) + streamRunEvents"
     },
     {
       "file": "conversations.ts",

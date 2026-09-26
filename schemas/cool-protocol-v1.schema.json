@@ -8855,7 +8855,6 @@
       ]
     },
     "ResearchRunDetailRecord": {
-      "description": "Research run with the report payload the UI renders.",
       "type": "object",
       "properties": {
         "citations": {
@@ -8965,6 +8964,13 @@
           "format": "int64"
         },
         "reportMarkdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeRunId": {
+          "description": "Canonical run id that streams this run's `research.*` events (set on\n`research.create`/`research.rerun` responses; not part of the row).",
           "type": [
             "string",
             "null"

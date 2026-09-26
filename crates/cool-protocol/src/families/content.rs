@@ -551,9 +551,11 @@ pub struct ResearchRunRecord {
     pub finished_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Canonical run id that streams this run's `research.*` events (set on
+    /// `research.create`/`research.rerun` responses; not part of the row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_run_id: Option<String>,
 }
-
-/// Research run with the report payload the UI renders.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

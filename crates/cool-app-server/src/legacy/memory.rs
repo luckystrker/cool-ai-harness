@@ -630,11 +630,26 @@ pub(super) async fn dispatch(
                 return Err(invalid_input("Topic is required").into());
             }
             let depth = params.depth.clamp(3, 5);
+            // Python `start_research` (backend/app/research/orchestrator.py):
+            // without an explicit conversation the run gets a hidden
+            // "[Research] {topic}" one for its subagents/report artifact.
+            let conversation_id = match params.conversation_id {
+                Some(id) => Some(id),
+                None => Some(
+                    crate::research::create_research_conversation(
+                        store,
+                        &actor.id,
+                        &topic,
+                        params.model.as_deref(),
+                    )
+                    .map_err(store_error)?,
+                ),
+            };
             let new = cool_store::domains::research::NewResearchRun {
                 topic,
                 depth,
                 model: params.model.clone(),
-                conversation_id: params.conversation_id,
+                conversation_id,
                 parent_task_run_id: None,
             };
             let created = idempotent(
@@ -673,13 +688,22 @@ pub(super) async fn dispatch(
                 &fingerprint(&params),
                 || {
                     let original = store.get_research_run(&actor.id, run_id)?;
+                    let conversation_id = match original.conversation_id {
+                        Some(id) => Some(id),
+                        None => Some(crate::research::create_research_conversation(
+                            store,
+                            &actor.id,
+                            &original.topic,
+                            model.as_deref().or(original.model.as_deref()),
+                        )?),
+                    };
                     store.create_research_run(
                         &actor.id,
                         &cool_store::domains::research::NewResearchRun {
                             topic: original.topic.clone(),
                             depth: depth.unwrap_or(original.depth).clamp(3, 5),
                             model: model.clone().or_else(|| original.model.clone()),
-                            conversation_id: original.conversation_id,
+                            conversation_id,
                             parent_task_run_id: None,
                         },
                     )

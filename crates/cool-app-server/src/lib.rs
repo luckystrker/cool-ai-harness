@@ -3,18 +3,22 @@
 //! This crate owns transport/session plumbing only. Provider, tool and policy
 //! decisions remain delegated to `cool-agent`, `cool-security` and `cool-state`.
 
+pub mod blobs;
 pub mod client;
 mod legacy;
+mod research;
 mod scheduler;
 mod subagents;
 
+pub use blobs::{BlobError, BlobStore};
 pub use client::{AppClient, ClientError};
+pub use research::{ResearchExecutor, ResearchOutcome};
 pub use scheduler::TaskExecutor;
 pub use subagents::{SubagentExecutor, SubagentLaunchSpec};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,8 +27,8 @@ use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
-    ToolContext, Usage, builtin_registry, history_from_events, mask_canonical_event,
-    planning_system_prompt,
+    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_events,
+    mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -81,6 +85,10 @@ pub struct ServerConfig {
     /// Optional Fernet keyring for provider credentials. Provider writes fail
     /// closed without it instead of persisting plaintext.
     pub secrets: Option<Arc<SecretKeyring>>,
+    /// Root of the content-addressed artifact blob store (`data_dir/artifacts`
+    /// on the CLI path). When unset (tests without a filesystem layout),
+    /// research reports persist on the row without an artifact.
+    pub artifacts_dir: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -96,6 +104,7 @@ impl Default for ServerConfig {
             request_delay: Duration::ZERO,
             legacy_store: None,
             secrets: None,
+            artifacts_dir: None,
         }
     }
 }
@@ -117,6 +126,7 @@ impl std::fmt::Debug for ServerConfig {
                 &self.legacy_store.as_ref().map(|store| store.path()),
             )
             .field("secrets", &self.secrets.is_some())
+            .field("artifacts_dir", &self.artifacts_dir)
             .finish()
     }
 }
@@ -165,6 +175,12 @@ struct Inner {
     task_executor: Option<Arc<TaskExecutor>>,
     /// Foreground subagent executor, present when a legacy store is configured.
     subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// Deep-research pipeline executor, present when a legacy store is
+    /// configured (requires the subagent executor for the gather stage).
+    research_executor: Option<Arc<ResearchExecutor>>,
+    /// Content-addressed artifact blob store, present when the host configured
+    /// both a legacy store and an `artifacts_dir`.
+    blob_store: Option<BlobStore>,
     /// Durable plan id persisted for each run's first `plan.created`, so one
     /// run's repeated `update_plan` calls do not create duplicate drafts.
     planned_runs: std::sync::Mutex<HashMap<String, i64>>,
@@ -578,6 +594,24 @@ impl AppServer {
                 default_model.clone(),
             ))
         });
+        let research_executor = config
+            .legacy_store
+            .as_ref()
+            .zip(subagent_executor.as_ref())
+            .map(|(legacy, subagents)| {
+                Arc::new(ResearchExecutor::new(
+                    Arc::clone(legacy),
+                    Arc::clone(subagents),
+                    &runtime,
+                    default_model.clone(),
+                    config.artifacts_dir.clone(),
+                ))
+            });
+        let blob_store = config
+            .legacy_store
+            .as_ref()
+            .zip(config.artifacts_dir.as_ref())
+            .map(|(legacy, root)| BlobStore::new(Arc::clone(legacy), root.clone()));
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -600,6 +634,8 @@ impl AppServer {
                 memory_extractor: None,
                 task_executor,
                 subagent_executor,
+                research_executor,
+                blob_store,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
@@ -609,6 +645,28 @@ impl AppServer {
     /// (the CLI) start its loop with [`TaskExecutor::spawn_loop`].
     pub fn task_executor(&self) -> Option<Arc<TaskExecutor>> {
         self.inner.task_executor.clone()
+    }
+
+    /// The foreground subagent executor (for agent tools that delegate).
+    pub fn subagent_executor(&self) -> Option<Arc<SubagentExecutor>> {
+        self.inner.subagent_executor.clone()
+    }
+
+    /// The deep-research pipeline executor (for the `deep_research` tool and
+    /// the research dispatch kickoff).
+    pub fn research_executor(&self) -> Option<Arc<ResearchExecutor>> {
+        self.inner.research_executor.clone()
+    }
+
+    /// The operator-owned skills admin, for skill tools bound after build.
+    pub fn skill_admin(&self) -> Option<Arc<dyn SkillAdmin>> {
+        self.inner.skill_admin.clone()
+    }
+
+    /// The content-addressed blob store, when both a legacy store and an
+    /// artifacts directory are configured (the CLI sets both).
+    pub fn blob_store(&self) -> Option<BlobStore> {
+        self.inner.blob_store.clone()
     }
 
     pub fn with_run_lifecycle(mut self, lifecycle: Arc<dyn RunLifecycle>) -> Self {
@@ -1302,28 +1360,14 @@ impl AppServer {
                         return;
                     }
                 }
-                if params
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32602, "unsupported_content_part", false)),
-                        )
-                        .await;
-                    return;
-                }
-                let content = params
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let content =
+                    match self.expand_prompt_parts(&actor, &params.session_id, &params.content) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            let _ = self.send(&outbound, failure(id, error)).await;
+                            return;
+                        }
+                    };
                 if !self.prompt_start_frames_fit(
                     &params.session_id,
                     &content,
@@ -2059,6 +2103,7 @@ impl AppServer {
                             role_id: params.role_id,
                             profile_id: params.profile_id,
                             parent_run_id: params.parent_run_id,
+                            research_run_id: None,
                             name: params.name.clone(),
                             prompt: params.prompt.clone(),
                             model: params.model.clone(),
@@ -2097,6 +2142,7 @@ impl AppServer {
                                 role_id: item.role_id,
                                 profile_id: item.profile_id,
                                 parent_run_id: None,
+                                research_run_id: None,
                                 name: item.name.clone(),
                                 prompt: item.prompt.clone(),
                                 model: item.model.clone(),
@@ -2255,7 +2301,59 @@ impl AppServer {
                         )
                         .await
                         {
-                            Ok(payload) => success(id, payload),
+                            Ok(payload) => {
+                                // Post-dispatch kickoff: `research.create`/
+                                // `research.rerun` persist the row; here the
+                                // canonical run starts and the client learns
+                                // which run to stream via `runtime_run_id`.
+                                match payload {
+                                    created @ (ResponsePayload::ResearchCreated(_)
+                                    | ResponsePayload::ResearchReran(_)) => {
+                                        let (mut record, is_rerun) = match created {
+                                            ResponsePayload::ResearchCreated(record) => {
+                                                (record, false)
+                                            }
+                                            ResponsePayload::ResearchReran(record) => {
+                                                (record, true)
+                                            }
+                                            _ => unreachable!(),
+                                        };
+                                        let runtime = match record.conversation_id {
+                                            Some(conversation_id) => {
+                                                self.start_research_execution(
+                                                    record.id,
+                                                    conversation_id,
+                                                    &outbound,
+                                                    &connection,
+                                                )
+                                                .await
+                                            }
+                                            None => Ok(None),
+                                        };
+                                        match runtime {
+                                            Ok(run_id) => {
+                                                record.runtime_run_id = run_id;
+                                                let payload = if is_rerun {
+                                                    ResponsePayload::ResearchReran(record)
+                                                } else {
+                                                    ResponsePayload::ResearchCreated(record)
+                                                };
+                                                success(id, payload)
+                                            }
+                                            Err(error) => failure(id, error),
+                                        }
+                                    }
+                                    ResponsePayload::ResearchCancelled(result) => {
+                                        if let Some(executor) =
+                                            self.inner.research_executor.as_ref()
+                                        {
+                                            executor.signal_cancel(result.cancelled);
+                                        }
+                                        success(id, ResponsePayload::ResearchCancelled(result))
+                                    }
+                                    other => success(id, other),
+                                }
+                            }
                             Err(error) => failure(id, error),
                         }
                     }
@@ -3403,6 +3501,203 @@ impl AppServer {
         Ok(())
     }
 
+    /// Expand `ContentPart`s into the text-only user input the Rust runtime
+    /// accepts (Python `build_multimodal_content`, `backend/app/multimodal.py`):
+    /// extracted text is inlined as `[Attachment: name]`, supported images get
+    /// a marker pointing at `image_analyze` (the Rust `Message` has no vision
+    /// parts — tracked as an M12 checkpoint gap), opaque files get the
+    /// `no text extracted` marker. Ownership matches Python: when the session
+    /// is linked to a conversation, artifacts must belong to it.
+    fn expand_prompt_parts(
+        &self,
+        actor: &ActorRef,
+        session_id: &str,
+        parts: &[ContentPart],
+    ) -> Result<String, ProtocolError> {
+        if parts
+            .iter()
+            .all(|part| matches!(part, ContentPart::Text { .. }))
+        {
+            return Ok(parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return Err(error(-32010, "legacy_store_unavailable", false));
+        };
+        let mut seen = HashSet::new();
+        let mut artifact_ids = Vec::new();
+        for part in parts {
+            let raw = match part {
+                ContentPart::Artifact { artifact_id } => artifact_id,
+                ContentPart::Image { artifact_id, .. } => artifact_id,
+                ContentPart::Text { .. } => continue,
+            };
+            let id = raw
+                .parse::<i64>()
+                .map_err(|_| legacy::invalid_input(format!("invalid artifact id '{raw}'")))?;
+            if seen.insert(id) {
+                artifact_ids.push(id);
+            }
+        }
+        if artifact_ids.len() > 10 {
+            return Err(legacy::invalid_input(
+                "At most 10 artifacts may be attached to one message",
+            ));
+        }
+        let conversation_id = self
+            .inner
+            .store
+            .conversation_id_for_session(&actor.id, session_id)
+            .map_err(store_error)?;
+        let mut out = String::new();
+        let mut emitted = HashSet::new();
+        for part in parts {
+            match part {
+                ContentPart::Text { text } => {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(text);
+                }
+                ContentPart::Artifact { artifact_id } | ContentPart::Image { artifact_id, .. } => {
+                    let id = artifact_id.parse::<i64>().map_err(|_| {
+                        legacy::invalid_input(format!("invalid artifact id '{artifact_id}'"))
+                    })?;
+                    if !emitted.insert(id) {
+                        continue;
+                    }
+                    let artifact = legacy.get_artifact(&actor.id, id).map_err(|_| {
+                        legacy::invalid_input(format!(
+                            "Artifact {id} not found in this conversation"
+                        ))
+                    })?;
+                    if let Some(conversation_id) = conversation_id
+                        && artifact.conversation_id != conversation_id
+                    {
+                        return Err(legacy::invalid_input(format!(
+                            "Artifact {id} not found in this conversation"
+                        )));
+                    }
+                    if artifact.kind == "image"
+                        && blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str())
+                    {
+                        // Rust messages are text-only and there is no vision
+                        // tool; the attachment is acknowledged but its pixels
+                        // cannot be inspected (parity gap, tracked in M12).
+                        out.push_str(&format!(
+                            "\n[Attached image: {} — artifact #{}; image content is not visible to this runtime]",
+                            artifact.filename, artifact.id
+                        ));
+                    } else if let Some(text) = artifact.extracted_text.as_deref() {
+                        out.push_str(&format!("\n[Attachment: {}]\n{text}", artifact.filename));
+                    } else {
+                        out.push_str(&format!(
+                            "\n[Attached file: {}; no text extracted]",
+                            artifact.filename
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Kick off a canonical run for a research row created by `research.create`
+    /// / `research.rerun`. Returns the canonical run id the client streams via
+    /// `run.events` / `run.subscribe`. Idempotent: a replay of the same
+    /// `research-exec:{id}` key returns the original run without respawning.
+    /// `Ok(None)` means no executor is configured (store-only deployment).
+    async fn start_research_execution(
+        &self,
+        research_run_id: i64,
+        conversation_id: i64,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) -> Result<Option<String>, ProtocolError> {
+        let Some(executor) = self.inner.research_executor.as_ref() else {
+            return Ok(None);
+        };
+        let actor = local_actor();
+        let session_id = self.ensure_conversation_session(conversation_id)?;
+        // Auxiliary, not the session's active run: a rerun on the same
+        // conversation must not be gated by `session_run_active`, matching
+        // Python where the pipeline is a background task, not a turn.
+        let key = format!("research-exec:{research_run_id}");
+        if let Some(existing) = self
+            .inner
+            .store
+            .lookup_idempotent::<String>(&actor.id, "research.start", &key, &key)
+            .map_err(store_error)?
+        {
+            return Ok(Some(existing));
+        }
+        let run_id = self
+            .inner
+            .store
+            .start_auxiliary_run(&actor.id, &session_id)
+            .map_err(store_error)?;
+        self.inner
+            .store
+            .record_idempotent(&actor.id, "research.start", &key, &key, &run_id)
+            .map_err(store_error)?;
+        let (cancel, receiver) = watch::channel(None);
+        executor.register(research_run_id, cancel.clone());
+        self.inner.state.lock().await.runs.insert(
+            run_id.clone(),
+            RunRecord {
+                cancel,
+                terminal: false,
+            },
+        );
+        let connection_id = connection.lock().await.id.clone();
+        self.inner
+            .run_owners
+            .lock()
+            .await
+            .insert(run_id.clone(), connection_id);
+        let server = self.clone();
+        let outbound = outbound.clone();
+        let spawned = run_id.clone();
+        tokio::spawn(async move {
+            server
+                .run_research(research_run_id, spawned.clone(), outbound, receiver)
+                .await;
+            if let Some(record) = server.inner.state.lock().await.runs.get_mut(&spawned) {
+                record.terminal = true;
+            }
+        });
+        Ok(Some(run_id))
+    }
+
+    /// Run the research pipeline under the canonical run: emits `run.started`,
+    /// `research.*`, and the matching `run.*` terminal event on the run's
+    /// canonical stream (`run.subscribe`/`run.events`) and the owner's outbound.
+    async fn run_research(
+        &self,
+        research_run_id: i64,
+        run_id: String,
+        outbound: Outbound,
+        cancel_rx: watch::Receiver<Option<String>>,
+    ) {
+        let Some(executor) = self.inner.research_executor.clone() else {
+            return;
+        };
+        let sink = AppServerEventSink {
+            server: self.clone(),
+            run_id,
+            outbound,
+            steer_cursor: Arc::new(AtomicU64::new(0)),
+            own_user_items: Arc::new(Mutex::new(HashSet::new())),
+        };
+        let _ = executor.execute(research_run_id, &sink, cancel_rx).await;
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_plan_step(
         &self,
@@ -3505,6 +3800,7 @@ impl AppServer {
             role_id: Some(role.id),
             profile_id: None,
             parent_run_id: None,
+            research_run_id: None,
             name: Some(format!("plan-step-{}:{role_name}", step.position)),
             prompt: prompt.to_owned(),
             model: None,
@@ -4455,6 +4751,12 @@ fn local_actor() -> ActorRef {
     }
 }
 
+/// The single local operator actor id — blob routes in `cool-http` resolve it
+/// here instead of duplicating the literal.
+pub fn local_actor_id() -> String {
+    local_actor().id
+}
+
 fn runtime_actor() -> ActorRef {
     ActorRef {
         id: "cool-app-server".to_owned(),
@@ -5139,11 +5441,15 @@ fn mcp_store_error_frame(error: McpStoreError) -> ProtocolError {
 /// settings read failure degrades to no system prompt rather than failing the
 /// turn.
 async fn default_system_prompt(server: &AppServer) -> Option<String> {
-    let settings = server.inner.app_settings.as_ref()?;
-    match settings.system_prompt().await {
-        Ok(record) if !record.prompt.trim().is_empty() => Some(record.prompt),
-        _ => None,
+    if let Some(settings) = server.inner.app_settings.as_ref()
+        && let Ok(record) = settings.system_prompt().await
+        && !record.prompt.trim().is_empty()
+    {
+        return Some(record.prompt);
     }
+    // Python parity: an unset settings prompt falls back to the built-in
+    // default (a runtime file, `default_system_prompt.txt`).
+    Some(default_agent_system_prompt().to_owned())
 }
 
 fn store_error(value: StoreError) -> ProtocolError {

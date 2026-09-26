@@ -1128,7 +1128,9 @@ async fn oversized_outbound_frame_becomes_a_bounded_structured_error() {
 }
 
 #[tokio::test]
-async fn unsupported_multimodal_parts_fail_closed_before_run_creation() {
+async fn artifact_parts_fail_closed_without_a_legacy_store() {
+    // Artifact parts are expanded server-side; with no legacy store the
+    // expansion fails closed before any run is created.
     let server = AppServer::new(ServerConfig::default());
     let (mut client, task) = connection(server.clone());
     initialize(&mut client, 1).await;
@@ -1149,9 +1151,35 @@ async fn unsupported_multimodal_parts_fail_closed_before_run_creation() {
         .await;
     assert_eq!(
         client.failure(RpcId::Integer(3)).await.cool_code,
-        "unsupported_content_part"
+        "legacy_store_unavailable"
     );
     assert_eq!(server.prompt_executions().await, 0);
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+#[tokio::test]
+async fn steer_rejects_non_text_parts() {
+    let server = AppServer::new(ServerConfig::default());
+    let (mut client, task) = connection(server.clone());
+    initialize(&mut client, 1).await;
+    client
+        .send(
+            3,
+            json!({
+                "method": "session.steer",
+                "params": {
+                    "idempotencyKey": "steer-artifact",
+                    "runId": "run-nonexistent",
+                    "content": [{"type": "artifact", "artifactId": "artifact-1"}]
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        client.failure(RpcId::Integer(3)).await.cool_code,
+        "unsupported_content_part"
+    );
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }

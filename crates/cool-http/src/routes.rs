@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::extract::{DefaultBodyLimit, Multipart, Path as UrlPath, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware;
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use cool_app_server::{AppClient, ClientError};
+use cool_app_server::{AppClient, BlobError, ClientError};
 use cool_protocol::{
     CanonicalEvent, EventEnvelope, JsonRpcV2, ProtocolError, RpcFailure, RpcId, RpcRequest,
     RpcSuccess, ServerFrame, StreamEnd, StreamKeepalive,
@@ -30,6 +30,8 @@ use crate::{ClientId, FacadeState};
 
 /// Matches the App Protocol transport frame limit.
 const MAX_BODY_BYTES: usize = 1_048_576;
+/// Multipart upload cap: `BlobStore::MAX_UPLOAD_BYTES` + form overhead.
+const MAX_UPLOAD_BODY_BYTES: usize = 51_000_000;
 const DEFAULT_PAGE_LIMIT: u16 = 128;
 const MAX_PAGE_LIMIT: u16 = 256;
 const LIVE_IDLE: Duration = Duration::from_secs(15);
@@ -38,7 +40,21 @@ pub(crate) fn router(state: Arc<FacadeState>) -> Router {
     let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/rpc", post(rpc))
-        .route("/api/events", get(events));
+        .route("/api/events", get(events))
+        // Legacy binary/blob surface — too large for the JSON-RPC frame limit.
+        .route(
+            "/api/conversations/{conversation_id}/artifacts",
+            post(upload_artifact).layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES)),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/artifacts/{artifact_id}/download",
+            get(download_artifact),
+        )
+        .route("/api/memory/export", get(memory_export))
+        .route(
+            "/api/research/{research_run_id}/export",
+            get(research_export),
+        );
     let app = match &state.assets {
         Some(directory) => api.fallback_service(spa(directory)),
         None => api.fallback(placeholder),
@@ -57,6 +73,234 @@ pub(crate) fn router(state: Arc<FacadeState>) -> Router {
 
 fn spa(directory: &Path) -> ServeDir<ServeFile> {
     ServeDir::new(directory).fallback(ServeFile::new(directory.join("index.html")))
+}
+
+// --- blob routes -------------------------------------------------------------
+
+fn blob_error_response(error: BlobError) -> Response {
+    let (status, code) = match &error {
+        BlobError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        BlobError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_input"),
+        BlobError::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store_error"),
+        BlobError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
+        BlobError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),
+        BlobError::WorkerUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "worker_unavailable"),
+    };
+    (
+        status,
+        Json(json!({"coolCode": code, "message": error.to_string()})),
+    )
+        .into_response()
+}
+
+fn attachment_response(body: Vec<u8>, media_type: &'static str, filename: &str) -> Response {
+    let mut response = (StatusCode::OK, body).into_response();
+    if let Ok(value) = HeaderValue::from_str(media_type) {
+        response.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
+}
+
+/// `POST /api/conversations/{id}/artifacts` — Python `upload_artifact` parity.
+#[derive(Debug, Deserialize)]
+struct UploadQuery {
+    run_id: Option<i64>,
+    kind: Option<String>,
+}
+
+async fn upload_artifact(
+    State(state): State<Arc<FacadeState>>,
+    UrlPath(conversation_id): UrlPath<i64>,
+    Query(query): Query<UploadQuery>,
+    mut multipart: Multipart,
+) -> Response {
+    let Some(blobs) = state.blobs.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"coolCode": "blob_store_unavailable"})),
+        )
+            .into_response();
+    };
+    let mut filename = None;
+    let mut content = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            filename = field.file_name().map(str::to_owned);
+            match field.bytes().await {
+                Ok(bytes) => content = Some(bytes),
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            json!({"coolCode": "invalid_multipart", "message": error.to_string()}),
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+    let Some(content) = content else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"coolCode": "invalid_multipart", "message": "missing 'file' field"})),
+        )
+            .into_response();
+    };
+    let filename = filename.unwrap_or_else(|| "upload.bin".to_owned());
+    match blobs.upload(
+        &cool_app_server::local_actor_id(),
+        conversation_id,
+        &filename,
+        &content,
+        query.run_id,
+        query.kind.as_deref(),
+    ) {
+        Ok(artifact) => Json(json!({
+            // ArtifactUploadResponse (snake_case ArtifactOut), Python parity.
+            "artifact": {
+                "id": artifact.id,
+                "conversation_id": artifact.conversation_id,
+                "run_id": artifact.run_id,
+                "tool_call_id": artifact.tool_call_id,
+                "filename": artifact.filename,
+                "media_type": artifact.media_type,
+                "kind": artifact.kind,
+                "size_bytes": artifact.size_bytes,
+                "sha256": artifact.sha256,
+                "version": artifact.version,
+                "parent_id": artifact.parent_id,
+                "metadata_": artifact.metadata,
+                "created_at": artifact.created_at,
+                "updated_at": artifact.updated_at,
+            },
+            "message": "uploaded",
+        }))
+        .into_response(),
+        Err(error) => blob_error_response(error),
+    }
+}
+
+/// `GET /api/conversations/{id}/artifacts/{id}/download` — FileResponse parity.
+async fn download_artifact(
+    State(state): State<Arc<FacadeState>>,
+    UrlPath((conversation_id, artifact_id)): UrlPath<(i64, i64)>,
+) -> Response {
+    let Some(blobs) = state.blobs.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"coolCode": "blob_store_unavailable"})),
+        )
+            .into_response();
+    };
+    let file = match blobs.open_artifact(
+        &cool_app_server::local_actor_id(),
+        conversation_id,
+        artifact_id,
+    ) {
+        Ok(file) => file,
+        Err(error) => return blob_error_response(error),
+    };
+    match tokio::fs::read(&file.path).await {
+        Ok(bytes) => {
+            let mut response = (StatusCode::OK, bytes).into_response();
+            if let Ok(value) = HeaderValue::from_str(&file.artifact.media_type) {
+                response.headers_mut().insert(header::CONTENT_TYPE, value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&format!(
+                "attachment; filename=\"{}\"",
+                file.artifact.filename
+            )) {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_DISPOSITION, value);
+            }
+            response
+        }
+        Err(error) => blob_error_response(BlobError::Io(error)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportQuery {
+    #[serde(default = "default_json")]
+    format: String,
+    #[serde(default)]
+    include_archived: bool,
+}
+
+fn default_json() -> String {
+    "json".to_owned()
+}
+
+/// `GET /api/memory/export` — JSON/markdown memory dump, attachment response.
+async fn memory_export(
+    State(state): State<Arc<FacadeState>>,
+    Query(query): Query<ExportQuery>,
+) -> Response {
+    let Some(blobs) = state.blobs.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"coolCode": "blob_store_unavailable"})),
+        )
+            .into_response();
+    };
+    match blobs.export_memories(
+        &cool_app_server::local_actor_id(),
+        &query.format.to_lowercase(),
+        query.include_archived,
+    ) {
+        Ok((body, media_type, filename)) => {
+            attachment_response(body.into_bytes(), media_type, &filename)
+        }
+        Err(BlobError::Invalid(message)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"coolCode": "invalid_input", "message": message})),
+        )
+            .into_response(),
+        Err(error) => blob_error_response(error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ResearchExportQuery {
+    #[serde(default = "default_md")]
+    format: String,
+}
+
+fn default_md() -> String {
+    "md".to_owned()
+}
+
+/// `GET /api/research/{id}/export` — md/html here; pdf/docx on the optional
+/// Python worker lane.
+async fn research_export(
+    State(state): State<Arc<FacadeState>>,
+    UrlPath(run_id): UrlPath<i64>,
+    Query(query): Query<ResearchExportQuery>,
+) -> Response {
+    let Some(blobs) = state.blobs.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"coolCode": "blob_store_unavailable"})),
+        )
+            .into_response();
+    };
+    match blobs.export_research(
+        &cool_app_server::local_actor_id(),
+        run_id,
+        &query.format.to_lowercase(),
+    ) {
+        Ok((body, media_type, filename)) => attachment_response(body, media_type, &filename),
+        Err(error) => blob_error_response(error),
+    }
 }
 
 async fn health() -> Json<Value> {

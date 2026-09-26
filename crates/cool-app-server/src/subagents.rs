@@ -21,6 +21,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_agent::{
@@ -37,7 +38,7 @@ use cool_store::LegacyStore;
 use cool_store::StoreError;
 use cool_store::domains::conversations::{NewConversation, NewMessage};
 use cool_store::domains::runs::NewRun;
-use cool_store::domains::subagents::{NewSubagentRun, SubagentRun};
+use cool_store::domains::subagents::{NewSubagentRun, SubagentRun, TERMINAL_SUBAGENT_STATUSES};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -52,6 +53,8 @@ pub struct SubagentLaunchSpec {
     pub role_id: Option<i64>,
     pub profile_id: Option<i64>,
     pub parent_run_id: Option<i64>,
+    /// Owning `research_runs.id` when the subagent is a deep-research worker.
+    pub research_run_id: Option<i64>,
     pub name: Option<String>,
     pub prompt: String,
     pub model: Option<String>,
@@ -199,6 +202,46 @@ impl SubagentExecutor {
         Ok(outcome.value)
     }
 
+    /// Current state of a subagent run row (research polling loop).
+    pub fn get_run(&self, actor_id: &str, run_id: i64) -> Result<SubagentRun, StoreError> {
+        self.store.get_subagent_run(actor_id, run_id)
+    }
+
+    /// Signal a live execution to stop without touching the row (internal
+    /// callers that already cancelled or own the row, e.g. research cancel).
+    pub fn signal_cancel(&self, run_id: i64) {
+        if let Some(sender) = lock_live(&self.live).get(&run_id) {
+            let _ = sender.send(Some("cancelled".to_owned()));
+        }
+    }
+
+    /// Poll the row until terminal or `cancel_rx` fires; on cancel the live
+    /// sender is signaled once and the row is flipped to `cancelled` (the
+    /// executor's finalize step preserves that early terminal). Used by the
+    /// `spawn_subagent` tool and the research gather stage.
+    pub async fn await_terminal(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        cancel_rx: &mut watch::Receiver<Option<String>>,
+    ) -> Result<SubagentRun, StoreError> {
+        const POLL: Duration = Duration::from_millis(250);
+        let mut signaled = false;
+        loop {
+            if cancel_rx.borrow().is_some() && !signaled {
+                signaled = true;
+                self.signal_cancel(run_id);
+                let _ = self.store.cancel_subagent_run(actor_id, run_id);
+            }
+            let run = self.store.get_subagent_run(actor_id, run_id)?;
+            if TERMINAL_SUBAGENT_STATUSES.contains(&run.status.as_str()) {
+                return Ok(run);
+            }
+            // `changed()` wakes on cancel; otherwise poll again.
+            let _ = tokio::time::timeout(POLL, cancel_rx.changed()).await;
+        }
+    }
+
     async fn launch_inner(
         self: &Arc<Self>,
         actor_id: &str,
@@ -268,7 +311,7 @@ impl SubagentExecutor {
                 name: spec.name.clone(),
                 prompt: spec.prompt.clone(),
                 profile_id: spec.profile_id,
-                research_run_id: None,
+                research_run_id: spec.research_run_id,
             },
         )?;
         let (cancel_tx, cancel_rx) = watch::channel(None);
@@ -595,6 +638,22 @@ struct LiveGuard {
 impl Drop for LiveGuard {
     fn drop(&mut self) {
         lock_live(&self.executor.live).remove(&self.run_id);
+        // A panicking executor task would otherwise leave the row `running`
+        // forever; the store-level finalize preserves an earlier terminal
+        // status, so this only fires on abnormal termination.
+        let actor = crate::local_actor();
+        if let Ok(run) = self.executor.store.get_subagent_run(&actor.id, self.run_id)
+            && !TERMINAL_SUBAGENT_STATUSES.contains(&run.status.as_str())
+        {
+            let _ = self.executor.store.finalize_subagent_run(
+                &actor.id,
+                self.run_id,
+                "failed",
+                None,
+                None,
+                Some("executor terminated abnormally"),
+            );
+        }
     }
 }
 
