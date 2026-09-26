@@ -81,10 +81,8 @@ fn blob_error_response(error: BlobError) -> Response {
     let (status, code) = match &error {
         BlobError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
         BlobError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_input"),
+        error if error.is_not_found() => (StatusCode::NOT_FOUND, "not_found"),
         BlobError::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store_error"),
-        BlobError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            (StatusCode::NOT_FOUND, "not_found")
-        }
         BlobError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),
         BlobError::WorkerUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "worker_unavailable"),
     };
@@ -129,10 +127,12 @@ async fn upload_artifact(
             .into_response();
     };
     let mut filename = None;
+    let mut declared_media_type = None;
     let mut content = None;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
             filename = field.file_name().map(str::to_owned);
+            declared_media_type = field.content_type().map(str::to_owned);
             match field.bytes().await {
                 Ok(bytes) => content = Some(bytes),
                 Err(error) => {
@@ -154,7 +154,7 @@ async fn upload_artifact(
         )
             .into_response();
     };
-    let filename = filename.unwrap_or_else(|| "upload.bin".to_owned());
+    let filename = filename.unwrap_or_else(|| "unnamed".to_owned());
     match blobs.upload(
         &cool_app_server::local_actor_id(),
         conversation_id,
@@ -162,8 +162,11 @@ async fn upload_artifact(
         &content,
         query.run_id,
         query.kind.as_deref(),
+        declared_media_type.as_deref(),
     ) {
-        Ok(artifact) => Json(json!({
+        Ok(artifact) => (
+            StatusCode::CREATED,
+            Json(json!({
             // ArtifactUploadResponse (snake_case ArtifactOut), Python parity.
             "artifact": {
                 "id": artifact.id,
@@ -182,8 +185,9 @@ async fn upload_artifact(
                 "updated_at": artifact.updated_at,
             },
             "message": "uploaded",
-        }))
-        .into_response(),
+            })),
+        )
+            .into_response(),
         Err(error) => blob_error_response(error),
     }
 }

@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cool_store::domains::artifacts::{Artifact, NewArtifact};
+use cool_store::domains::artifacts::{ARTIFACT_KINDS, Artifact, NewArtifact};
 use cool_store::{LegacyStore, StoreError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -42,6 +42,14 @@ pub enum BlobError {
     Io(io::Error),
     /// Feature lives on the optional Python worker lane (HTTP 503).
     WorkerUnavailable(&'static str),
+}
+
+impl BlobError {
+    /// True when the store reported a missing record — callers map it to 404.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Store(StoreError::NotFound(_)))
+            || matches!(self, Self::Io(error) if error.kind() == io::ErrorKind::NotFound)
+    }
 }
 
 impl From<StoreError> for BlobError {
@@ -116,6 +124,7 @@ impl BlobStore {
     ///
     /// `filename`/`content` come from the multipart `file` field; `run_id` and
     /// `kind` are query params. Returns the registered artifact row.
+    #[allow(clippy::too_many_arguments)]
     pub fn upload(
         &self,
         actor_id: &str,
@@ -124,6 +133,7 @@ impl BlobStore {
         content: &[u8],
         run_id: Option<i64>,
         kind: Option<&str>,
+        declared_media_type: Option<&str>,
     ) -> Result<Artifact, BlobError> {
         if content.is_empty() {
             return Err(BlobError::Invalid("Uploaded file is empty".to_owned()));
@@ -131,13 +141,22 @@ impl BlobStore {
         if content.len() > MAX_UPLOAD_BYTES {
             return Err(BlobError::TooLarge(content.len()));
         }
-        let media_type = media_type_for(filename);
-        let kind = match kind {
-            Some("tool_result") => {
-                return Err(BlobError::Invalid(
-                    "artifact kind 'tool_result' is reserved".to_owned(),
-                ));
+        if let Some(value) = kind
+            && !ARTIFACT_KINDS.contains(&value)
+        {
+            return Err(BlobError::Invalid(format!(
+                "Invalid kind '{value}'. Must be one of: {ARTIFACT_KINDS:?}"
+            )));
+        }
+        // Python prefers the multipart Content-Type, falling back to a
+        // filename guess only when absent or generic.
+        let media_type = match declared_media_type {
+            Some(value) if !value.is_empty() && value != "application/octet-stream" => {
+                value.to_owned()
             }
+            _ => media_type_for(filename),
+        };
+        let kind = match kind {
             Some(value) => value.to_owned(),
             None => infer_kind(filename, &media_type).to_owned(),
         };
@@ -535,14 +554,21 @@ fn markdown_to_html(markdown: &str, title: &str) -> String {
             }
             continue;
         }
-        if let Some(heading) = trimmed.strip_prefix("####") {
-            html.push_str(&format!("<h4>{}</h4>\n", inline_md(heading.trim())));
-        } else if let Some(heading) = trimmed.strip_prefix("###") {
-            html.push_str(&format!("<h3>{}</h3>\n", inline_md(heading.trim())));
-        } else if let Some(heading) = trimmed.strip_prefix("##") {
-            html.push_str(&format!("<h2>{}</h2>\n", inline_md(heading.trim())));
-        } else if let Some(heading) = trimmed.strip_prefix('#') {
-            html.push_str(&format!("<h1>{}</h1>\n", inline_md(heading.trim())));
+        // Python skips table rows entirely (`_md_to_html`: "skip tables").
+        if trimmed.starts_with('|') {
+            if in_list {
+                html.push_str("</ul>\n");
+                in_list = false;
+            }
+            continue;
+        }
+        // Headings h1..h6 (Python `^(#{1,6})\s+`).
+        let level = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&level) && trimmed[level..].starts_with(char::is_whitespace) {
+            html.push_str(&format!(
+                "<h{level}>{}</h{level}>\n",
+                inline_md(trimmed[level..].trim())
+            ));
         } else if let Some(item) = trimmed
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
@@ -584,32 +610,38 @@ fn escape_html(text: &str) -> String {
 
 fn inline_md(text: &str) -> String {
     let text = escape_html(text);
-    // Links [text](url) — process before bold/italic to keep the markup simple.
+    // Links [text](url) — Python's regex only links http(s) URLs, so `[n]`
+    // citations and javascript:/data: schemes stay literal escaped text.
     let mut out = String::with_capacity(text.len());
     let mut rest = text.as_str();
     while let Some(open) = rest.find('[') {
-        let Some(close) = rest[open..].find("](") else {
+        let Some(close) = rest[open..].find(']') else {
             break;
         };
         let label = &rest[open + 1..open + close];
-        let after = &rest[open + close + 2..];
-        let Some(end) = after.find(')') else { break };
-        let url = &after[..end];
-        out.push_str(&rest[..open]);
-        out.push_str(&format!(
-            "<a href=\"{}\" rel=\"noopener noreferrer\">{}</a>",
-            url, label
-        ));
-        rest = &after[end + 1..];
-        if rest.is_empty() {
+        let after = &rest[open + close + 1..];
+        let Some(url_and_tail) = after.strip_prefix('(') else {
+            // Not a link — emit `[label]` literally and keep scanning.
+            out.push_str(&rest[..open + close + 1]);
+            rest = after;
+            continue;
+        };
+        let Some(end) = url_and_tail.find(')') else {
             break;
+        };
+        let url = &url_and_tail[..end];
+        out.push_str(&rest[..open]);
+        if !label.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
+            out.push_str(&format!(
+                "<a href=\"{}\" rel=\"noopener noreferrer\">{}</a>",
+                url, label
+            ));
+        } else {
+            out.push_str(&format!("[{label}]({url})"));
         }
+        rest = &url_and_tail[end + 1..];
     }
-    if out.is_empty() {
-        out = text.clone();
-        rest = "";
-    }
-    let _ = rest;
+    out.push_str(rest);
     let out = replace_pairs(&out, "**", "<strong>", "</strong>");
     replace_pairs(&out, "`", "<code>", "</code>")
 }

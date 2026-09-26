@@ -145,7 +145,12 @@ export type ResearchStage = { stage: string, message: string | null, progress: n
 
 export type ResearchStarted = { researchRunId: string, };
 
-export type ResearchSource = { url: string, title: string | null, snippet: string | null, confidence: number | null, };
+export type ResearchSource = { url: string, title: string | null, snippet: string | null, 
+/**
+ * Python stores confidence as a label (`high`/`medium`/`low`), not a
+ * numeric score.
+ */
+confidence: string | null, };
 
 export type ResearchSubquestion = { index: number, question: string, status: string, };
 

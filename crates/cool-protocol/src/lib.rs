@@ -1121,7 +1121,9 @@ pub struct ResearchSource {
     pub url: String,
     pub title: Option<String>,
     pub snippet: Option<String>,
-    pub confidence: Option<f64>,
+    /// Python stores confidence as a label (`high`/`medium`/`low`), not a
+    /// numeric score.
+    pub confidence: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]

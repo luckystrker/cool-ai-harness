@@ -52,6 +52,7 @@ pub struct TaskExecutor {
     policy: CapabilityPolicy,
     default_model: String,
     config: SchedulerConfig,
+    research_executor: Option<Arc<crate::research::ResearchExecutor>>,
     engine: Mutex<Scheduler>,
     /// Live cancel channels per `task_runs.id`.
     live: Mutex<HashMap<i64, watch::Sender<Option<String>>>>,
@@ -66,6 +67,7 @@ impl TaskExecutor {
         policy: CapabilityPolicy,
         default_model: String,
         config: SchedulerConfig,
+        research_executor: Option<Arc<crate::research::ResearchExecutor>>,
     ) -> Self {
         Self {
             store,
@@ -74,6 +76,7 @@ impl TaskExecutor {
             policy,
             default_model,
             config,
+            research_executor,
             engine: Mutex::new(Scheduler::new(config)),
             live: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
@@ -337,6 +340,27 @@ impl TaskExecutor {
         let actor = crate::local_actor();
         let started = Instant::now();
         let duration = || started.elapsed().as_millis() as i64;
+        if task.workflow_type.as_deref() == Some("deep_research") {
+            match &self.research_executor {
+                Some(executor) => {
+                    let executor = Arc::clone(executor);
+                    self.execute_deep_research(
+                        &actor, &executor, &task, run_id, cancel_rx, duration,
+                    )
+                    .await;
+                }
+                None => {
+                    self.fail_run(
+                        &actor,
+                        &task,
+                        run_id,
+                        "deep_research workflow requires the research executor",
+                        duration(),
+                    );
+                }
+            }
+            return;
+        }
         // A task that names an unusable working directory fails closed rather
         // than silently running tools against the server workspace.
         let workspace = match task.working_directory.as_deref() {
@@ -473,6 +497,67 @@ impl TaskExecutor {
             task.id,
             TASK_RUN_FAILED,
             false,
+            self.config.max_consecutive_failures,
+        );
+    }
+
+    /// `workflow_type = "deep_research"`: Python runs the research pipeline and
+    /// finalizes the task run with the report (truncated at 20k chars), usage,
+    /// and error exactly like an agent-loop run.
+    async fn execute_deep_research(
+        &self,
+        actor: &ActorRef,
+        executor: &Arc<crate::research::ResearchExecutor>,
+        task: &ScheduledTask,
+        run_id: i64,
+        cancel_rx: watch::Receiver<Option<String>>,
+        duration: impl Fn() -> i64,
+    ) {
+        // Python `run_research_for_task` defaults depth to 4.
+        let outcome = executor
+            .run_inline(&task.prompt, 4, task.model.clone(), None, Some(cancel_rx))
+            .await;
+        let (status, output, error, usage, conversation_id) = match outcome {
+            Ok(outcome) => {
+                let report = outcome.report.map(|report| {
+                    const MAX_REPORT_OUTPUT_CHARS: usize = 20_000;
+                    if report.chars().count() > MAX_REPORT_OUTPUT_CHARS {
+                        let truncated: String =
+                            report.chars().take(MAX_REPORT_OUTPUT_CHARS).collect();
+                        format!("{truncated}\n[... truncated]")
+                    } else {
+                        report
+                    }
+                });
+                let (usage, conversation_id) = self
+                    .store
+                    .get_research_run(&actor.id, outcome.run_id)
+                    .map(|run| (run.usage, run.conversation_id))
+                    .unwrap_or((None, None));
+                let status = match outcome.status {
+                    "completed" => TASK_RUN_COMPLETED,
+                    "cancelled" => TASK_RUN_CANCELLED,
+                    _ => TASK_RUN_FAILED,
+                };
+                (status, report, outcome.error, usage, conversation_id)
+            }
+            Err(error) => (TASK_RUN_FAILED, None, Some(error.to_string()), None, None),
+        };
+        let _ = self.store.finish_task_run(
+            &actor.id,
+            run_id,
+            status,
+            output.as_deref(),
+            error.as_deref(),
+            usage.as_ref(),
+            Some(duration()),
+            conversation_id,
+            None,
+        );
+        let _ = self.store.record_task_outcome(
+            task.id,
+            status,
+            status != TASK_RUN_FAILED,
             self.config.max_consecutive_failures,
         );
     }

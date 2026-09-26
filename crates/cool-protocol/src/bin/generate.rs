@@ -373,7 +373,7 @@ fn golden_traces() -> Vec<GoldenTrace> {
                 event(
                     3,
                     "research.source_found",
-                    json!({"url": "https://example.com", "title": "Primary", "snippet": "Evidence", "confidence": 0.9}),
+                    json!({"url": "https://example.com", "title": "Primary", "snippet": "Evidence", "confidence": "high"}),
                 ),
                 event(
                     4,

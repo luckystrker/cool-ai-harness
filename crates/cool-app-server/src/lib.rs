@@ -574,16 +574,6 @@ impl AppServer {
             !config.write_timeout.is_zero(),
             "write_timeout must be positive"
         );
-        let task_executor = config.legacy_store.as_ref().map(|legacy| {
-            Arc::new(TaskExecutor::new(
-                Arc::clone(legacy),
-                runtime.clone(),
-                workspace.clone(),
-                policy.clone(),
-                default_model.clone(),
-                cool_store::scheduler::SchedulerConfig::default(),
-            ))
-        });
         let subagent_executor = config.legacy_store.as_ref().map(|legacy| {
             Arc::new(SubagentExecutor::new(
                 Arc::clone(legacy),
@@ -607,6 +597,17 @@ impl AppServer {
                     config.artifacts_dir.clone(),
                 ))
             });
+        let task_executor = config.legacy_store.as_ref().map(|legacy| {
+            Arc::new(TaskExecutor::new(
+                Arc::clone(legacy),
+                runtime.clone(),
+                workspace.clone(),
+                policy.clone(),
+                default_model.clone(),
+                cool_store::scheduler::SchedulerConfig::default(),
+                research_executor.as_ref().map(Arc::clone),
+            ))
+        });
         let blob_store = config
             .legacy_store
             .as_ref()
@@ -3550,11 +3551,16 @@ impl AppServer {
                 "At most 10 artifacts may be attached to one message",
             ));
         }
+        // Attachments are conversation-scoped: without a linked conversation
+        // there is no scope to verify ownership against, so fail closed.
         let conversation_id = self
             .inner
             .store
             .conversation_id_for_session(&actor.id, session_id)
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                legacy::invalid_input("Artifact attachments require a linked conversation")
+            })?;
         let mut out = String::new();
         let mut emitted = HashSet::new();
         for part in parts {
@@ -3577,9 +3583,7 @@ impl AppServer {
                             "Artifact {id} not found in this conversation"
                         ))
                     })?;
-                    if let Some(conversation_id) = conversation_id
-                        && artifact.conversation_id != conversation_id
-                    {
+                    if artifact.conversation_id != conversation_id {
                         return Err(legacy::invalid_input(format!(
                             "Artifact {id} not found in this conversation"
                         )));
@@ -3665,9 +3669,31 @@ impl AppServer {
         let outbound = outbound.clone();
         let spawned = run_id.clone();
         tokio::spawn(async move {
-            server
-                .run_research(research_run_id, spawned.clone(), outbound, receiver)
-                .await;
+            // Isolate the pipeline in its own task so a panic cannot skip the
+            // terminal event: the aux run must never stay `running` forever.
+            let runner_server = server.clone();
+            let runner_spawned = spawned.clone();
+            let runner_outbound = outbound.clone();
+            let runner = tokio::spawn(async move {
+                runner_server
+                    .run_research(research_run_id, runner_spawned, runner_outbound, receiver)
+                    .await;
+            });
+            if runner.await.is_err() {
+                let sink = AppServerEventSink {
+                    server: server.clone(),
+                    run_id: spawned.clone(),
+                    outbound,
+                    steer_cursor: Arc::new(AtomicU64::new(0)),
+                    own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                };
+                let _ = sink
+                    .emit(CanonicalEvent::RunFailed(RunTerminal {
+                        reason: "research_panic".to_owned(),
+                        error_code: Some("internal".to_owned()),
+                    }))
+                    .await;
+            }
             if let Some(record) = server.inner.state.lock().await.runs.get_mut(&spawned) {
                 record.terminal = true;
             }
@@ -5447,8 +5473,16 @@ async fn default_system_prompt(server: &AppServer) -> Option<String> {
     {
         return Some(record.prompt);
     }
-    // Python parity: an unset settings prompt falls back to the built-in
-    // default (a runtime file, `default_system_prompt.txt`).
+    // Python parity: `system_prompt_file` (env SYSTEM_PROMPT_FILE) overrides
+    // the built-in default when the file exists.
+    if let Ok(path) = std::env::var("SYSTEM_PROMPT_FILE")
+        && !path.trim().is_empty()
+        && let Ok(contents) = std::fs::read_to_string(path)
+    {
+        return Some(contents);
+    }
+    // An unset settings prompt falls back to the built-in default
+    // (a runtime file, `default_system_prompt.txt`).
     Some(default_agent_system_prompt().to_owned())
 }
 

@@ -68,7 +68,7 @@
           "url": "https://example.com",
           "title": "Primary",
           "snippet": "Evidence",
-          "confidence": 0.9
+          "confidence": "high"
         }
       }
     },

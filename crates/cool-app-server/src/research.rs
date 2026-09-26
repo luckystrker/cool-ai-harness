@@ -209,6 +209,10 @@ impl ResearchExecutor {
         let (cancel_tx, default_rx) = watch::channel(None);
         let mut cancel_rx = cancel.unwrap_or(default_rx);
         self.register(run.id, cancel_tx);
+        let _guard = ResearchLiveGuard {
+            executor: self,
+            research_run_id: run.id,
+        };
         let outcome = self.pipeline(&run, None, &mut cancel_rx).await;
         self.unregister(run.id);
         Ok(outcome)
@@ -312,7 +316,10 @@ impl ResearchExecutor {
                             .get("snippet")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
-                        confidence: source.get("confidence").and_then(Value::as_f64),
+                        confidence: source
+                            .get("confidence")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                     }))
                     .await;
             }
@@ -485,6 +492,11 @@ impl ResearchExecutor {
             let mut child_cancel = cancel_rx.clone();
             set.spawn(async move {
                 let _permit = permit.acquire().await.expect("semaphore open");
+                // A queued sub-question must not spawn a subagent row once the
+                // run has been cancelled while it waited on the semaphore.
+                if child_cancel.borrow().is_some() {
+                    return (index, Ok(String::new()));
+                }
                 if let Some(sink) = &progress {
                     let _ = sink
                         .emit(CanonicalEvent::ResearchSubquestionStarted(
@@ -943,8 +955,21 @@ fn lookup_title(findings: &str, url: &str) -> String {
 /// A readable snippet around `position`, trimmed to a fixed window (Python
 /// `_snippet_around`: 140 chars before, 260 after, ellipsized).
 fn snippet_around(text: &str, position: usize) -> String {
-    let start = position.saturating_sub(140);
-    let end = (position + 260).min(text.len());
+    // Python slices by chars; mirror it by converting the char window to byte
+    // offsets so multibyte text can never panic `&str` indexing.
+    let start = position
+        - text[..position]
+            .chars()
+            .rev()
+            .take(140)
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
+    let end = position
+        + text[position..]
+            .chars()
+            .take(260)
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
     let mut snippet = text[start..end].replace('\n', " ").trim().to_owned();
     if start > 0 {
         snippet = format!("…{snippet}");
