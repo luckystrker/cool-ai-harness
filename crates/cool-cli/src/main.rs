@@ -360,6 +360,13 @@ async fn extension_registry(
     {
         registry = registry.extend(tools).unwrap_or(registry);
     }
+    // Web tools are env-configured (SEARCH_PROVIDER/SEARCH keys/allowlist) and
+    // always registered — an unset provider errors gracefully inside the tool.
+    registry = registry
+        .extend(cool_agent::web_tool_registry(
+            cool_agent::WebToolsConfig::from_env(),
+        ))
+        .unwrap_or(registry);
     let Ok(store) = PluginStore::open(data_dir.join("plugins")) else {
         return (registry, None, None);
     };
