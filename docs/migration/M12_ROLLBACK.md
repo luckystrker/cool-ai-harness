@@ -1,5 +1,11 @@
 # M12 — Rollback release
 
+> **Status note (2026-09-27):** the legacy Python server was removed from the
+> repository under ADR-0003, so there is no in-tree Python runtime to roll back
+> to. This runbook still applies when downgrading to a **pre-removal release**
+> (the last release tag that shipped `backend/`); restore the data root per the
+> procedures below, then run that release.
+
 This document defines the supported way to return an installation to the
 Python runtime after the M12 default cutover. It exists because the M12 exit
 criteria require a *documented* rollback release: an operator must be able to

@@ -1,51 +1,31 @@
-# --- Python ---
+# --- Python (optional worker packages only) ---
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 *.egg-info/
 *.egg
-build/
-dist/
 .eggs/
-parts/
-sdist/
-wheels/
-share/python-wheels/
-.installed.cfg
-MANIFEST
 
 # Virtual envs
 .venv/
 venv/
 env/
 ENV/
-.python-version
 
-# --- Testing / coverage ---
-.pytest_cache/
+# --- Build / coverage ---
+*.so
+build/
+dist/
 .coverage
 .coverage.*
 htmlcov/
 coverage.xml
-.tox/
-.nox/
 cache/
 # Local test-run / scratch artifacts (never commit)
-_pytest_out.txt
-_pytest_full.txt
 _tmp_*.db
 
 # --- Tooling ---
-.mypy_cache/
-.ruff_cache/
 target/
 /crates/cool-protocol/bindings/
-.dmypy.json
-dmypy.json
-.pyre/
-.pytype/
 
 # --- IDE ---
 .idea/

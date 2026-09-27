@@ -1,10 +1,13 @@
 # ADR-0003: Removal of the legacy Python server
 
-- Status: **Proposed** — execution requires maintainer approval and is gated
-  by the plan's release rule (§13: no legacy-code removal in the first
-  default-cutover commit; §14.13: removal no earlier than two stable
-  Rust-default releases).
-- Date: 2026-09-26
+- Status: **Executed** — accepted and executed by maintainer directive on
+  2026-09-27. The maintainer waived the remaining release-count wait of the
+  §14.13 gate (the Rust default had already shipped and run without rollback
+  since M12). The removal deleted `backend/` (server, Alembic, tests, evals),
+  `spikes/m0-rust-core/`, the `backend`/`store-parity`/`rust-m0-spike` CI jobs
+  and `crates/cool-store/examples/fixture_tool.rs`; the shared plugin fixtures
+  moved to `crates/cool-extensions/tests/fixtures/plugins/`.
+- Date: 2026-09-26 (proposed), 2026-09-27 (executed)
 - Scope: `backend/app` FastAPI server, its startup path, and the Python-only
   test/eval surface that guards it.
 

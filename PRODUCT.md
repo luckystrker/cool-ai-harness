@@ -30,7 +30,7 @@ web
 
 ## Operating Context
 
-- Пользователь запускает FastAPI backend и React SPA в собственной среде и подключает
+- Пользователь запускает Rust `cool` server и React SPA в собственной среде и подключает
   выбранного LLM-провайдера через API-ключ или совместимый endpoint.
 - Работа начинается с диалога или специализированного workflow; пользователь выбирает
   проект/рабочую директорию, модель, режим разрешений и при необходимости plan mode.
@@ -41,7 +41,7 @@ web
 
 ## Capabilities and Constraints
 
-- Текущий продукт — web-приложение: Python 3.12+ / FastAPI / SQLModel / SQLite backend и
+- Текущий продукт — web-приложение: Rust trusted core (`cool` binary) / SQLite backend и
   React 19 / TypeScript / Vite / Tailwind SPA.
 - Доступ к LLM проходит только через единый `LLMProvider`; продукт поддерживает OpenAI,
   Anthropic и OpenAI-compatible endpoints.
@@ -67,8 +67,8 @@ web
 - `README.md` — текущее описание продукта, запуска, реализованных подсистем и roadmap.
 - `docs/PLAN.md` и `docs/phases/` — цели, архитектурные принципы, подтверждённые фазы и
   будущие планы.
-- `backend/app/`, `backend/tests/` и `backend/evals/` — реализация, тесты и детерминированный
-  quality gate для agent loop, безопасности и бюджетов.
+- `crates/` — реализация, тесты и детерминированный eval gate
+  (`cool-agent/tests/deterministic_evals.rs`) для agent loop, безопасности и бюджетов.
 - `frontend/src/` — действующий web-интерфейс для чата, памяти, research, profiles,
   аналитики, задач, budgets, subagents, settings и inspector.
 - В `README.md` есть снимок существующего интерфейса; в репозитории нет подтверждённых

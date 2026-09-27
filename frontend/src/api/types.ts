@@ -1,8 +1,7 @@
-/** Types mirroring the backend Pydantic schemas (app/api/schemas.py).
+/** Wire types for the Rust App Protocol facade (`cool serve`).
 
- * Keep in sync when adding fields server-side. In Фаза 6 we can generate
- * these from the OpenAPI spec (openapi-typescript), but hand-written is
- * fine for the MVP. */
+ * Keep in sync with `crates/cool-protocol` and the generated SDK types in
+ * `sdk/typescript/src` — `npm run protocol:check` enforces the mapping. */
 
 export interface HealthResponse {
   status: string

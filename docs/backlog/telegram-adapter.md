@@ -42,7 +42,7 @@ so they do not belong in the M11 definition of done.
 
 ## Applies to
 
-- `backend/app/telegram/` (currently an empty placeholder) **or** a new Rust
-  adapter crate over `cool-http` — to be decided when scheduled.
+- A new Rust adapter crate over `cool-http` — `backend/` was removed under
+  ADR-0003, so this is now the only option.
 - `docs/RUST_CORE_MIGRATION_PLAN.md` §5.1 `telegram` profile.
 - `docs/PLAN.md` Фаза 5 (Telegram + Voice).

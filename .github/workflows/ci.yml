@@ -105,94 +105,6 @@ jobs:
         with:
           command: check
 
-  rust-m0-spike:
-    name: Rust M0 spike (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: spikes/m0-rust-core
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust 1.98.0
-        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
-
-      - name: Rustfmt
-        run: cargo +1.98.0 fmt --all -- --check
-
-      - name: Clippy
-        run: cargo +1.98.0 clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo +1.98.0 test --locked --all-features
-
-      - name: Build
-        run: cargo +1.98.0 build --locked --all-targets
-
-  backend:
-    name: Backend (ruff + mypy + pytest + evals)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install backend dependencies
-        working-directory: backend
-        run: |
-          pip install -e ".[dev]"
-          pip install pytest-github-actions-annotate-failures
-
-      - name: Ruff check
-        working-directory: backend
-        run: ruff check .
-
-      - name: Mypy
-        working-directory: backend
-        run: mypy app
-
-      - name: Pytest
-        working-directory: backend
-        run: pytest --tb=short -q -n auto --dist=loadfile
-
-      - name: Deterministic eval gate
-        working-directory: backend
-        run: python -m evals
-
-  store-parity:
-    name: Store parity (Rust legacy store vs Python schema)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust 1.98.0
-        # rust-toolchain.toml declares rustfmt/clippy; install them up front so
-        # the pytest-invoked `cargo run` does not hit rustup's component
-        # conflict with the runner image's preinstalled cargo-fmt binary.
-        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install backend dependencies
-        working-directory: backend
-        run: pip install -e ".[dev]"
-
-      - name: Cross-language store contract tests
-        working-directory: backend
-        run: pytest tests/test_rust_store_contract.py -q --tb=short
-
   frontend:
     name: Frontend (oxlint + build)
     runs-on: ubuntu-latest
@@ -274,8 +186,8 @@ jobs:
               http://127.0.0.1:18000/api/rpc
           }
           rpc '{"jsonrpc":"2.0","id":1,"method":"cool.command","params":{"protocolVersion":1,"commandId":"smoke-init","command":{"method":"initialize","params":{"clientName":"ci-smoke","clientVersion":"1","supportedProtocolVersions":[1],"capabilities":[]}}}}' >/dev/null
-          session_id="$(rpc '{"jsonrpc":"2.0","id":2,"method":"cool.command","params":{"protocolVersion":1,"commandId":"smoke-session","command":{"method":"session.create","params":{"idempotencyKey":"smoke-session","title":"image smoke","projectKey":null}}}}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["value"]["sessionId"])')"
-          run_id="$(rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"cool.command\",\"params\":{\"protocolVersion\":1,\"commandId\":\"smoke-prompt\",\"command\":{\"method\":\"session.prompt\",\"params\":{\"idempotencyKey\":\"smoke-prompt\",\"sessionId\":\"${session_id}\",\"content\":[{\"type\":\"text\",\"text\":\"transport smoke\"}],\"model\":null,\"planMode\":false,\"systemPrompt\":null}}}}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["value"]["runId"])')"
+          session_id="$(rpc '{"jsonrpc":"2.0","id":2,"method":"cool.command","params":{"protocolVersion":1,"commandId":"smoke-session","command":{"method":"session.create","params":{"idempotencyKey":"smoke-session","title":"image smoke","projectKey":null}}}}' | jq -r '.result.value.sessionId')"
+          run_id="$(rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"cool.command\",\"params\":{\"protocolVersion\":1,\"commandId\":\"smoke-prompt\",\"command\":{\"method\":\"session.prompt\",\"params\":{\"idempotencyKey\":\"smoke-prompt\",\"sessionId\":\"${session_id}\",\"content\":[{\"type\":\"text\",\"text\":\"transport smoke\"}],\"model\":null,\"planMode\":false,\"systemPrompt\":null}}}}" | jq -r '.result.value.runId')"
 
           curl --fail --silent --show-error --max-time 30 \
             --header 'Authorization: Bearer ci-only-api-token-123456' \

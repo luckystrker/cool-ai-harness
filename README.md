@@ -12,26 +12,22 @@ inspector/replay console, and durable agent runs. Control via the web UI.
 
 ## Stack
 
-- **Runtime (default):** Rust trusted core — the single `cool` binary serves
-  the SPA, the canonical App Protocol (`POST /api/rpc` + `GET /api/events`),
-  blob transports, the agent loop, tools, subagents and deep research.
-- **Legacy lane (optional, not on the default startup path):** Python 3.12+,
-  FastAPI, Uvicorn, SQLModel + SQLite, Alembic under `backend/` — kept until
-  [ADR-0003](docs/migration/adr/0003-remove-legacy-python-server.md) executes;
-  optional Python workers follow
+- **Runtime:** Rust trusted core — the single `cool` binary serves the SPA,
+  the canonical App Protocol (`POST /api/rpc` + `GET /api/events`), blob
+  transports, the agent loop, tools, subagents and deep research. There is no
+  Python runtime: the legacy FastAPI server was removed under
+  [ADR-0003](docs/migration/adr/0003-remove-legacy-python-server.md); optional
+  out-of-process workers follow
   [`docs/backlog/python-workers.md`](docs/backlog/python-workers.md)
 - **Frontend:** React 19 + TypeScript + Vite 8 + Tailwind 4 (zustand,
   @tanstack/react-query, Radix-based UI primitives)
-- **LLM providers:** OpenAI + Anthropic via a single `LLMProvider` interface
+- **LLM providers:** OpenAI + Anthropic via a single provider interface
   (OpenAI-compatible base URL works for OpenRouter/DeepSeek/Groq/Ollama)
-- **Scheduler:** APScheduler (AsyncIOScheduler) + croniter — cron/interval/date
-  recurring agent tasks (Фаза 3b)
-- **RSS:** feedparser-based aggregator with per-subscription filters and LLM
-  summarization (Фаза 3b)
-- **Observability:** unified LLM-call log, aggregating dashboards, optional
-  OpenTelemetry export (Фаза 3a)
-- **Telegram:** python-telegram-bot dependency present (Bot + Web App — planned,
-  Фаза 5)
+- **Scheduler:** in-process cron/interval/date recurring agent tasks (Фаза 3b)
+- **RSS:** aggregator with per-subscription filters and LLM summarization
+  (Фаза 3b)
+- **Observability:** unified LLM-call log, aggregating dashboards (Фаза 3a)
+- **Telegram:** Bot + Web App adapter — planned (Фаза 5)
 
 ## Quick start
 
@@ -43,7 +39,6 @@ cp .env.example .env
 # OpenAI-compatible backend like OpenRouter/DeepSeek/Groq/Ollama)
 # also generate a SECRET_KEY (Fernet = 32 url-safe base64 bytes):
 openssl rand -base64 32
-# or with the Python lane: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 ### 2. Run the packaged app (recommended)
@@ -68,10 +63,10 @@ with it — `http://127.0.0.1:8000/?token=<COOL_API_TOKEN>` — and the bundle s
 it for the tab and strips it from the URL; the static bundle is public while
 `/api/rpc` and `/api/events` stay token-gated.
 
-#### Upgrading an existing Python install
+#### Upgrading a pre-M12 install
 
-A legacy data root (`harness.db` at the Alembic baseline plus `rust-core.db`)
-keeps serving read-only until an operator adopts it:
+A data root written by the retired Python server (`harness.db` at the Alembic
+baseline) keeps serving read-only until an operator adopts it:
 
 ```bash
 cool store adopt --data-dir /var/lib/cool   # verified backup, then Rust owns migrations
@@ -80,7 +75,7 @@ cool serve --data-dir /var/lib/cool --assets frontend/dist --legacy-store
 
 In the container the image CMD already serves the legacy families
 (`--legacy-store`). A fresh volume gets a baseline `harness.db`; an existing
-Python-owned one stays read-only until it is adopted:
+pre-adoption one stays read-only until it is adopted:
 
 ```bash
 docker compose run --rm cool cool store adopt --data-dir /var/lib/cool
@@ -89,8 +84,7 @@ docker compose up
 
 Adoption takes a verified backup before the first Rust write and records the
 migration owner, so the pre-adoption snapshot can be restored. Re-running adopt
-is idempotent; a database at another Alembic revision fails closed. Never run
-Alembic and the Rust store against the same file.
+is idempotent; a database at another Alembic revision fails closed.
 
 ### 3. Unified source install
 
@@ -106,15 +100,11 @@ cargo build --release -p cool-cli
 
 This opens the complete application at http://127.0.0.1:8000 (App Protocol API +
 SPA). `--legacy-store` initializes a fresh baseline store on first run, or serves
-an existing Python-owned data root read-only until you adopt it (see above). For
+an existing pre-adoption data root read-only until you adopt it (see above). For
 frontend hot reload, run `cool serve` in one terminal and `npm run dev`
-from `frontend/` in another; Vite remains the development-only split mode. The
-legacy Python/FastAPI backend in `backend/` still exists during the migration
-but is not on the default startup path and is not the production packaging.
-Rolling an installation back to the Python runtime is documented in
-[`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md); removing
-the legacy server entirely is gated on
-[ADR-0003](docs/migration/adr/0003-remove-legacy-python-server.md).
+from `frontend/` in another; Vite remains the development-only split mode.
+Rolling an installation back to the retired Python runtime is documented in
+[`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md).
 
 ### 4. Smoke test
 
@@ -122,10 +112,10 @@ the legacy server entirely is gated on
 # health
 curl http://localhost:8000/api/health
 
-# chat (non-streaming MVP endpoint)
-curl -X POST http://localhost:8000/api/chat \
+# canonical App Protocol command (initialize handshake)
+curl -X POST http://localhost:8000/api/rpc \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Say hello in one short sentence."}]}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"cool.command","params":{"protocolVersion":1,"commandId":"smoke-init","command":{"method":"initialize","params":{"clientName":"curl","clientVersion":"1","supportedProtocolVersions":[1],"capabilities":[]}}}}'
 ```
 
 The stable entrypoint, path layout, Docker persistence, VPS limitations, and
@@ -156,83 +146,22 @@ curl -X POST http://localhost:8000/api/rpc \
 ```
 
 Schema changes are owned by the Rust store (`crates/cool-store`) at the frozen
-Alembic baseline `0022_phase4_completion`; the legacy **Alembic** toolchain
-(`backend/alembic`) only remains for the optional legacy lane and refuses a
-Rust-owned database. In development/tests the Python lane still uses
-`SQLModel.create_all` (models are the source of truth there).
-
-```bash
-cd backend
-alembic upgrade head                          # apply migrations
-alembic revision --autogenerate -m "..."      # create a new migration
-```
+baseline `0022_phase4_completion`; `harness.db` files that were never adopted
+open read-only and `cool store adopt` is the explicit ownership transfer.
 
 ## Agent evals (CI quality gate)
 
-The `backend/evals/` package contains a scenario-driven evaluation framework
-that verifies the agent loop's tool selection, safety policy enforcement, and
-cost/iteration limits. All scenarios are **deterministic** (scripted LLM
-responses) — no API keys needed.
+Deterministic, scripted-driver scenarios verify the agent loop's tool
+selection, safety policy enforcement, and cost/iteration limits — no API keys
+needed. They run as part of the Rust test suite:
 
 ```bash
-cd backend
-
-# Run all 23 scenarios (gate fails if any critical scenario fails)
-python -m evals
-
-# Filter by tag (repeatable)
-python -m evals --tag safety
-python -m evals --tag tool_selection
-python -m evals --tag cost
-
-# Verbose output (shows per-assertion details on failure)
-python -m evals -v
-
-# Save current results as a baseline for future comparison
-python -m evals --update-baseline
-
-# Compare against a saved baseline (fails on critical regressions)
-python -m evals --baseline default
-
-# Machine-readable output for CI
-python -m evals --json
+cargo test -p cool-agent --test deterministic_evals
 ```
 
-Scenarios live in four suites under `backend/evals/scenarios/`: `safety` (8),
-`tool_selection` (8), `cost_limits` (5), and `research` (2).
-
-**Exit codes:** `0` = gate passed, `1` = critical regression/failure, `2` = config error.
-
-**Pytest integration** — evals also run as part of the test suite:
-
-```bash
-python -m pytest tests/test_evals.py -v
-```
-
-**Writing new scenarios** — add an `EvalScenario` to the appropriate suite in
-`backend/evals/scenarios/` (tool_selection, safety, or cost_limits). Each
-scenario declares a scripted LLM response and assertions:
-
-```python
-from evals.scenario import EvalScenario, ScenarioAssertion, Severity
-
-EvalScenario(
-    id="my_scenario",
-    name="Description",
-    tags=["safety"],
-    severity=Severity.CRITICAL,
-    input="User message",
-    script=[
-        [{"name": "tool_name", "arguments": {"key": "value"}}],  # LLM calls a tool
-        "Final text response",                                     # LLM responds
-    ],
-    assertions=[
-        ScenarioAssertion(type="tool_called", name="tool_name"),
-        ScenarioAssertion(type="finish_reason", reason="stop"),
-    ],
-    config={"capability_policy": {"execute": "deny"}},  # optional overrides
-)
-```
+Scenarios are declared in
+`crates/cool-agent/tests/fixtures/evals.json` and driven by
+`crates/cool-agent/tests/deterministic_evals.rs`.
 
 ## Subsystems
 
@@ -300,47 +229,34 @@ Beyond the core agent loop, these subsystems are implemented:
 
 ```
 cool-ai-harness/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI entrypoint (create_app, lifespan, routers, /ws)
-│   │   ├── core/                # config (pydantic-settings), db, logging, security (Fernet)
-│   │   ├── providers/           # LLMProvider + OpenAI/Anthropic impls, registry, resilience, pricing
-│   │   ├── agent/               # loop: executor, runners, service, events, runs, approvals,
-│   │   │                        #       permissions, planning, subagents, personalities,
-│   │   │                        #       context_window, project_instructions
-│   │   ├── security/            # capability policy, SSRF, secrets, sandbox, breakpoints, cost
-│   │   ├── tools/               # tool registry + builtins (files, code, bash, git, github, web,
-│   │   │                        #   mcp, memory, skills, plan, subagent, task, rss, wiki, context)
-│   │   ├── skills/              # skill registry + discovery + TF-IDF/embedding matching
-│   │   ├── mcp/                 # MCP client (stdio + HTTP), registry, marketplace, tool bridge
-│   │   ├── memory/              # long-term + working memory: extractor, retrieval (FTS5),
-│   │   │                        #   entities, context_builder, lifecycle, tools
-│   │   ├── observability/       # run inspector: live tail, timeline, compare, replay
-│   │   ├── analytics/           # aggregating dashboards, LLM-call log, OTel export
-│   │   ├── budgets/             # spend/budget service
-│   │   ├── artifacts/           # content-addressed artifact storage
-│   │   ├── tasks/               # recurring tasks: scheduler, cron, delivery, templates (Фаза 3b)
-│   │   ├── rss/                 # RSS aggregator: subscriptions, fetch, summarize (Фаза 3b)
-│   │   ├── webhooks/            # webhook router (Фаза 3b)
-│   │   ├── wiki/                # wiki article store + tools
-│   │   ├── api/                 # HTTP + WebSocket routes + schemas
-│   │   ├── models/              # SQLModel tables
-│   │   └── telegram/            # bot + web app (planned, Фаза 5)
-│   ├── evals/                   # agent eval scenarios + CI gate (21 scenarios)
-│   ├── alembic/                 # database migrations (head: 0022_phase4_completion)
-│   ├── tests/                   # pytest suite (~725 tests)
-│   └── pyproject.toml
+├── crates/                      # Rust workspace (the trusted core + CLI)
+│   ├── cool-protocol/           # versioned App Protocol schema + generator
+│   ├── cool-state/              # durable append-only store (rust-core.db)
+│   ├── cool-store/              # domain store (harness.db schema owner)
+│   ├── cool-security/           # capability policy, SSRF, secrets, sandboxing
+│   ├── cool-agent/              # agent loop, providers, tools, evals
+│   ├── cool-extensions/         # plugin loader + compatibility workers
+│   ├── cool-app-server/         # App Protocol server + legacy family dispatch
+│   ├── cool-http/               # browser-facing HTTP/SSE facade (cool serve)
+│   ├── cool-cli/                # the `cool` binary (serve/run/store/doctor/...)
+│   ├── cool-tui/                # terminal UI
+│   └── cool-acp/                # Agent Client Protocol adapter
 ├── frontend/                    # React 19 SPA (Vite + TypeScript + Tailwind 4)
 │   └── src/
-│       ├── api/                 # typed boundary to backend (types, streaming, clients)
-│       ├── hooks/               # useConversationStream (SSE/WS) + others
+│       ├── api/                 # typed boundary to the server (sdk, streaming, clients)
+│       ├── hooks/               # useConversationStream + others
 │       ├── components/          # chat/, memory/, inspector/, subagents/, layout/, settings/, ui/
 │       ├── pages/               # ChatPage, MemoryPage, WikiPage, ProfilesPage, AnalyticsPage,
 │       │                        #   TasksPage, SettingsPage, BudgetsPage, SubagentsPage, InspectorPage
 │       └── lib/                 # utils, queryClient, agentConfig, modelFormat, projects
+├── sdk/typescript/              # generated typed App Protocol client
+├── schemas/                     # protocol JSON schemas (acp-v1, cool-protocol-v1)
+├── skills/                      # bundled SKILL.md skills
 ├── docs/
 │   ├── PLAN.md                  # full roadmap
-│   └── phases/                  # per-phase specs (phase-0 .. phase-7)
+│   ├── phases/                  # per-phase specs (phase-0 .. phase-7)
+│   ├── migration/               # Rust-core migration checkpoints/ADRs (evidence)
+│   └── backlog/                 # parked workstreams (optional workers, Telegram)
 ├── LICENSE                      # MIT
 └── .env.example
 ```

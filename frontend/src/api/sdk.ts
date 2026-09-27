@@ -1,9 +1,9 @@
 // Single typed boundary to the Rust App Protocol facade (`cool serve`).
 //
 // In production the facade serves both the SPA and `/api/rpc` on the same
-// origin, so the transport defaults to a relative base URL. During the
-// migration the Python REST/WS backend is still a fallback; point
-// `VITE_COOL_API_URL` at the Rust facade to route commands there.
+// origin, so the transport defaults to a relative base URL. For the split dev
+// mode (`npm run dev`), Vite proxies `/api` to `cool serve` — or point
+// `VITE_COOL_API_URL` at the facade explicitly.
 //
 // Token resolution: a `server`/container deployment requires a bearer token for
 // the API surface. `VITE_COOL_API_TOKEN` is a build-time override (it bakes the

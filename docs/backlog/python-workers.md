@@ -43,8 +43,9 @@ does not depend on a heavy Python/ML toolchain.
 
 ## Applies to
 
-- `backend/app/` optional worker entrypoints (new; no current code) **or** a
-  dedicated optional worker package — to be decided when scheduled.
+- A dedicated optional worker package — `backend/` was removed under ADR-0003,
+  so the workers live out-of-process in their own package/repo and talk to the
+  core over the compatibility-worker protocol.
 - `crates/cool-extensions/` / the compatibility-worker protocol and the
   `docs/RUST_CORE_MIGRATION_PLAN.md` §M11 compatibility-worker deliverables.
 - `docs/RUST_CORE_MIGRATION_PLAN.md` §14 items 11–12 (base product without

@@ -1,73 +1,59 @@
 # AGENTS.md
 
 Guidance for AI coding agents working in this repository. Read this before
-editing. Cool AI Harness is a personal AI agent harness: as of M12 the
-**Rust trusted core is the default runtime** — the `cool` binary serves the
-React/TypeScript SPA, the canonical App Protocol, the agent loop, tools,
-subagents and deep research with no Python/Node/Bun on the default path. The
-Python/FastAPI backend under `backend/` is the legacy lane (kept until
+editing. Cool AI Harness is a personal AI agent harness: the **Rust trusted
+core is the runtime** — the `cool` binary serves the React/TypeScript SPA, the
+canonical App Protocol, the agent loop, tools, subagents and deep research. The
+Python/FastAPI backend was removed under
 [`docs/migration/adr/0003-remove-legacy-python-server.md`](docs/migration/adr/0003-remove-legacy-python-server.md)
-executes); optional Python workers are specified in
-[`docs/backlog/python-workers.md`](docs/backlog/python-workers.md), and the
-documented rollback release is
+(M12); optional out-of-process workers are specified in
+[`docs/backlog/python-workers.md`](docs/backlog/python-workers.md), and rollback
+for pre-removal installs is documented in
 [`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md). The product
 roadmap lives in [`docs/PLAN.md`](docs/PLAN.md) and
 [`docs/phases/`](docs/phases/). Phases 0–3b and **Фаза 4** (Deep Research,
 Code/Git, multimodal, browser automation, Agent Constructor) are done.
 Telegram (Фаза 5) is still an empty placeholder.
 
-The active architecture-migration roadmap is
-[`docs/RUST_CORE_MIGRATION_PLAN.md`](docs/RUST_CORE_MIGRATION_PLAN.md). It replaces the earlier
-TypeScript-core proposal with a Rust trusted core, versioned App Protocol, Rust TUI, native
-Skills/MCP/hooks, and isolated TypeScript/Python compatibility workers. M12 is complete: the
-Rust core is the default and the Python server is off the startup path; the `backend/` constraints
-below still apply to the legacy lane (and to the optional-worker work when scheduled), and the
-server's deletion stays gated on ADR-0003 — do not remove it in regular tasks.
+The completed architecture-migration roadmap is
+[`docs/RUST_CORE_MIGRATION_PLAN.md`](docs/RUST_CORE_MIGRATION_PLAN.md): a Rust trusted core,
+versioned App Protocol, Rust TUI, native Skills/MCP/hooks, and isolated compatibility workers.
 
 ## Repository layout
 
 Two source roots live in one repo:
 
-- `backend/app` — the FastAPI application (Python package `app`).
+- `crates/` — the Rust trusted core workspace (`cool-protocol`, `cool-state`,
+  `cool-store`, `cool-agent`, `cool-cli`, `cool-tui`, `cool-acp`,
+  `cool-extensions`, `cool-app-server`, `cool-http`, `cool-security`).
 - `frontend/src` — the React SPA (Vite + TypeScript).
 
-The Rust trusted core lives in the root Cargo workspace under `crates/`
-(`cool-protocol`, `cool-state`, `cool-store`, `cool-agent`, `cool-cli`,
-`cool-tui`, `cool-acp`, `cool-extensions`, ...). Phase M10 added
-`crates/cool-store`: it adopts the Python SQLite schema at Alembic baseline
-`0022`, takes a verified backup before the first write, owns Rust migrations
-(`rust_store_meta`, `rust_idempotency`), and exposes typed subsystem stores. The
-Python runtimes (`backend/app/core/db.py`, `backend/alembic/env.py`) refuse a
-store owned by Rust, so do not bypass those guards. M10 also added the typed
-legacy command families in `crates/cool-protocol/src/families/`, their dispatch
-in `crates/cool-app-server/src/legacy/`, and the frontend contract gate
+`crates/cool-store` owns the SQLite schema at the frozen Alembic baseline
+`0022`, takes a verified backup before adopting a pre-M12 `harness.db`, owns
+Rust migrations (`rust_store_meta`, `rust_idempotency`), and exposes typed
+subsystem stores. The typed legacy command families live in
+`crates/cool-protocol/src/families/`, their dispatch in
+`crates/cool-app-server/src/legacy/`, and the frontend contract gate is
 `frontend/protocol-tests/{inventory.json,coverage.ts}` with the typed SDK in
 `sdk/typescript/src/client.ts`. The app server serves the legacy families only
-when `ServerConfig::legacy_store` is set (CLI: `cool app-server --legacy-store`,
+when `ServerConfig::legacy_store` is set (CLI: `cool serve --legacy-store`,
 read-only unless the file is already Rust-owned).
 
-M11 (in progress) added `crates/cool-http`: a browser-facing HTTP/SSE projection
-of the App Protocol (`cool serve`). It owns no business logic — each browser
-identity is one in-process `AppServer::serve_io` connection driven by
-`AppClient`; `POST /api/rpc` carries canonical `RpcRequest`/`ServerFrame` and
+`crates/cool-http` is the browser-facing HTTP/SSE projection of the App
+Protocol (`cool serve`). It owns no business logic — each browser identity is
+one in-process `AppServer::serve_io` connection driven by `AppClient`;
+`POST /api/rpc` carries canonical `RpcRequest`/`ServerFrame` and
 `GET /api/events` is the canonical cursor/reconnect SSE stream. The `local`
 (loopback, optional token) and `server` (token + TLS/reverse-proxy boundary)
 profiles are validated at startup and fail closed. `sdk/typescript/src/http.ts`
-adds the fetch/SSE `CoolTransport`. The React `frontend/src/api/*` cutover and
-the live-stream canonicalization (`run.subscribe` fan-out in the SSE facade) have
-landed, as have the experimental OpenCode Bun compatibility worker
-(`crates/cool-extensions/src/opencode.rs`, opt-in via `COOL_OPENCODE_WORKER`) and
-the Rust single-binary packaging/upgrade path (`cool store adopt` + the multi-stage
-`Dockerfile`; `docs/migration/checkpoints/M11.md` tracks the local-vs-CI evidence).
-The worker permission-review web UI, the optional Python workers and the
-`server`-profile operationalization remain pending; the Telegram adapter and
-`server`-profile operationalization are parked in
+adds the fetch/SSE `CoolTransport`. The experimental OpenCode Bun compatibility
+worker (`crates/cool-extensions/src/opencode.rs`) is opt-in via
+`COOL_OPENCODE_WORKER`; the Telegram adapter is parked in
 [`docs/backlog/telegram-adapter.md`](docs/backlog/telegram-adapter.md).
 
-Supporting roots: `backend/tests` (pytest suite), `backend/evals`
-(scenario-driven agent evals / CI gate), `backend/alembic` (DB migrations),
-`docs/` (roadmap + per-phase specs), and `spikes/m0-rust-core` (the isolated,
-non-production Rust M0 evidence harness). Run the command for **every root you
+Supporting roots: `sdk/typescript` (generated typed client), `schemas/`
+(protocol JSON schemas), `skills/` (bundled SKILL.md skills), `docs/` (roadmap,
+per-phase specs, migration evidence). Run the command for **every root you
 touched** before declaring a task done (see [Definition of done](#definition-of-done)).
 
 ## Cross-cutting architecture constraints
@@ -75,208 +61,60 @@ touched** before declaring a task done (see [Definition of done](#definition-of-
 These come from [`docs/PLAN.md`](docs/PLAN.md) "Архитектурные принципы" and the
 phase specs; do not violate them without an explicit decision:
 
-- **Provider abstraction.** All LLM access goes through the single
-  `LLMProvider` interface in `backend/app/providers/base.py`. Never call an LLM
-  SDK directly from the agent loop, tools, or API layer.
-- **Streaming-first.** LLM calls stream tokens via SSE/WebSocket. Interactive
-  runs are cancellable through the in-process `run_registry`.
+- **Provider abstraction.** All LLM access goes through the single provider
+  interface in `crates/cool-agent` (`ModelProvider`/`ScriptedDriver`). Never
+  call an LLM SDK directly from the agent loop, tools, or the protocol layer.
+- **Streaming-first.** LLM calls stream tokens; interactive runs are
+  cancellable through the run registry and the canonical `run.cancel` command.
 - **Pluggable registries.** Tools, skills, MCP servers, and subagent roles are
   registries/plugins. New tools are registered, not hard-wired into the loop.
 - **Capability security model.** Permissions split into
   `read`/`write`/`execute`/`network`/`git`/`send_external` (see
-  `backend/app/security/`). File tools are confined to allowed workspaces;
+  `crates/cool-security/`). File tools are confined to allowed workspaces;
   network tools use an allowlist with size/time limits and SSRF protection;
   code execution is sandboxed without access to host secrets; secrets are
   masked in messages, traces, and logs.
-- **Durable execution.** Every agent turn is an `AgentRun` with an append-only
+- **Durable execution.** Every agent turn is a run with an append-only
   `run_events` log, status (`running`/`awaiting_approval`/`completed`/`failed`/
   `cancelled`), cumulative token/cost usage, a checkpoint after each tool call,
   and budget guards. Subagent, planning, and scheduled (cron) runs are durable
   too. Do not add side effects outside a run's event log.
 - **Memory is append-first and project-scoped.** Long-term memory lives in
-  `backend/app/memory/` (`MemoryItem`/`Episode`/`WorkingMemory`, plus entity
+  `crates/cool-store/src/memory.rs` (items/episodes/working memory, plus entity
   extraction); recall is FTS5 + composite reranking,
   extraction/decay/consolidation are background sweeps. Memory visibility is
   keyed by the working directory (`_project_key`). The agent reaches memory only
   through registered memory tools — never write to the memory tables directly
   from the loop.
-- **Observability = the event log, not side channels.** The run inspector
-  (`backend/app/observability/`) reconstructs timelines/comparisons/replay from
-  `run_events`; `backend/app/analytics/` aggregates spend/tool/runs stats from
-  the DB. Prefer emitting an event over adding a separate logging path.
-- **Context window is budgeted.** `agent/context_window.py` estimates tokens
-  and truncates history within a budget; `agent/project_instructions.py` loads
-  AGENTS.md-style project instructions from the working directory; context
-  compaction collapses old turns. Keep token estimation in one place when
-  adding prompt content.
-- **Models are the source of truth in dev/tests** (`SQLModel.create_all`); in
-  production the app applies Alembic migrations on startup. Any change to
-  `backend/app/models/*.py` **must** ship a matching migration in
-  `backend/alembic/versions/`.
-- **API contract is shared.** `backend/app/api/schemas.py` and the
-  `app/api/*_router.py` files define the contract consumed by
-  `frontend/src/api/types.ts`. WebSocket/SSE event shapes in
-  `backend/app/agent/events.py` + `backend/app/api/websocket.py` are mirrored by
-  `frontend/src/api/streaming.ts` and `frontend/src/hooks/useConversationStream.ts`.
-  Keep both sides in sync.
+- **Observability = the event log, not side channels.** The inspector
+  (`crates/cool-store/src/observability.rs`) reconstructs
+  timelines/comparisons/replay from `run_events`; analytics aggregate
+  spend/tool/runs stats from the DB. Prefer emitting an event over adding a
+  separate logging path.
+- **Context window is budgeted.** Token estimation and history truncation live
+  in `crates/cool-agent` (context budgeting, AGENTS.md-style project
+  instructions, compaction). Keep token estimation in one place when adding
+  prompt content.
+- **The Rust store owns the schema.** `crates/cool-store` is the only writer of
+  `harness.db`; schema changes ship as Rust migrations at/above the frozen
+  `0022` baseline. A pre-adoption database opens read-only — never bypass the
+  ownership guard.
+- **API contract is the App Protocol.** `crates/cool-protocol` defines the
+  command union consumed by `sdk/typescript` and `frontend/src/api/*`. Regenerate
+  bindings with `cargo run -p cool-protocol --bin generate` and keep schema,
+  SDK and dispatch arms in sync.
 
 ### Secrets, env, and data
 
 - `.env` is gitignored (only root `.env.example` is tracked). API keys are
-  encrypted at rest via `backend/app/core/security.py` (Fernet). **Never commit
-  `.env`, `*.db`, or runtime data.**
-- Runtime artifacts (`data/`, `workspaces/`, `evals_data*/`) are gitignored —
-  this includes the SQLite DB, working-memory scratchpads, memory FTS index,
-  artifact storage, and eval baselines/traces.
+  encrypted at rest by `crates/cool-security` (Fernet). **Never commit `.env`,
+  `*.db`, or runtime data.**
+- Runtime artifacts (`data/`, `workspaces/`) are gitignored — this includes the
+  SQLite DBs, working-memory scratchpads, memory FTS index, and artifact
+  storage.
 - To configure locally: `cp .env.example .env` and set at least
   `OPENAI_API_KEY` (or `OPENAI_BASE_URL` for an OpenAI-compatible backend) plus
   a `SECRET_KEY` Fernet key.
-
-## `backend/app`
-
-### Layout
-
-```
-backend/app/
-├── main.py            # create_app(): routers under /api, WS at /ws; lifespan runs init_db()
-├── core/              # config (pydantic-settings), db, logging, security (Fernet)
-├── providers/         # LLMProvider + OpenAI/Anthropic impls, registry, resilience, pricing
-├── agent/             # loop: executor, runners, service, events, runs, approvals,
-│                      #       permissions, planning, subagents, personalities,
-│                      #       context_window, project_instructions
-├── security/          # capability policy, SSRF, secrets, sandbox, breakpoints, cost
-├── tools/             # tool registry + builtins (files, code, bash, git, github, web,
-│                      #   mcp, memory, skills, plan, subagent, task, rss, wiki, context)
-├── skills/            # skill registry + discovery + TF-IDF/embedding matching (Фаза 2)
-├── mcp/               # MCP client (stdio + HTTP), registry, marketplace, tool bridge (Фаза 2)
-├── memory/            # long-term + working memory: extractor, retrieval (FTS5),
-│                      #   entities, context_builder, lifecycle, tools (Фаза 3a)
-├── observability/     # run inspector: live tail, timeline, compare, replay
-├── analytics/         # aggregating dashboards, LLM-call log, OTel export (Фаза 3a)
-├── budgets/           # spend/budget service
-├── artifacts/         # content-addressed artifact storage
-├── tasks/             # recurring tasks: scheduler, cron, delivery, templates (Фаза 3b)
-├── rss/               # RSS aggregator: subscriptions, fetch, summarize (Фаза 3b)
-├── webhooks/          # webhook router (Фаза 3b)
-├── wiki/              # wiki article store + tools
-├── api/               # HTTP + WebSocket routes + schemas
-├── models/            # SQLModel tables
-└── telegram/          # bot + web app (EMPTY — Фаза 5)
-```
-
-> `telegram/` is still an empty placeholder (0-byte `__init__.py`); its deps
-> are listed in `pyproject.toml` but no code exists.
-
-### Conventions
-
-- Tests use the deterministic `ScriptedProvider` (see `backend/tests/conftest.py`)
-  — **no API keys needed**. `conftest.py` redirects `DATABASE_URL` to a
-  throwaway temp DB *before* any `app.*` import; do not import `app` first or
-  you will pollute `data/harness.db`.
-- `asyncio_mode = "auto"` (from `[tool.pytest.ini_options]`); async tests need
-  no `@pytest.mark.asyncio`.
-- Use the `workspace` fixture for file-tool tests so they stay isolated under
-  `tmp_path`.
-- Ruff config: line-length 100, `target-version = "py312"`, rule set
-  `E,F,I,B,UP,SIM,RUF` with `E501` and `B008` ignored. `isort` knows
-  `app` as first-party.
-
-### Required commands (run from `backend/`)
-
-```bash
-pip install -e ".[dev]"          # install backend + dev deps
-ruff check .                     # lint (required)
-ruff format .                    # format (optional)
-mypy app                         # typecheck (dev dep; strict=false)
-pytest                           # run the ~725-test suite (required)
-pytest tests/test_agent.py -v    # single file
-pytest -n auto                   # run tests in parallel (xdist)
-python -m evals                  # agent eval CI gate: exit 0 pass / 1 regression / 2 config
-pytest tests/test_evals.py -v   # evals as pytest
-alembic upgrade head             # apply migrations
-alembic revision --autogenerate -m "describe change"   # new migration after model edits
-```
-
-### Co-change expectations (from git history)
-
-- `agent/executor.py` + `agent/runners.py` → update `tests/test_agent.py`.
-  Every agent-loop change in history shipped with agent tests.
-- `agent/context_window.py` / `agent/project_instructions.py` (context budget,
-  AGENTS.md loading, compaction) → update `tests/test_agent.py`; UI in
-  `frontend/src/components/chat/` (collapsible history, composer toolbar).
-- `agent/planning.py` → update `tests/test_planning.py`; UI in
-  `frontend/src/components/chat/PlanCard.tsx` + `frontend/src/api/plans.ts`.
-- `agent/subagents.py` → update `tests/test_subagents.py`; UI in
-  `frontend/src/components/subagents/` + `frontend/src/pages/SubagentsPage.tsx`.
-- `agent/personalities/` (multi-profile agents) → update
-  `tests/test_profiles.py`; UI in `frontend/src/pages/ProfilesPage.tsx` +
-  `frontend/src/api/profiles.ts` + `frontend/src/components/chat/ProfileSwitcher.tsx`.
-- `memory/*` (service, retrieval, extractor, entities, lifecycle, tools) →
-  update `tests/test_memory.py`; UI in `frontend/src/pages/MemoryPage.tsx` +
-  `frontend/src/api/memory.ts` + `frontend/src/components/memory/`
-  (EntitiesPanel, ExplainPanel, ReviewQueue). Memory is reached only via
-  `memory/tools.py`.
-- `analytics/*` + `api/analytics.py` → update `tests/test_analytics.py`; UI in
-  `frontend/src/pages/AnalyticsPage.tsx` + `frontend/src/api/analytics.ts`.
-- `tasks/*` (scheduler, cron, delivery, templates) → update
-  `tests/test_tasks.py`; UI in `frontend/src/pages/TasksPage.tsx` +
-  `frontend/src/api/tasks.ts`.
-- `rss/*` → update `tests/test_rss.py`; UI/API in `frontend/src/api/rss.ts`.
-- `webhooks/*` → update `tests/test_webhooks.py`; UI/API in
-  `frontend/src/api/webhooks.ts`.
-- `wiki/*` → UI/API in `frontend/src/pages/WikiPage.tsx` +
-  `frontend/src/api/wiki.ts`.
-- `skills/*` → update `tests/test_skills.py`; UI/API in
-  `frontend/src/api/skills.ts`.
-- `mcp/*` → update `tests/test_mcp.py`; UI/API in
-  `frontend/src/api/mcp.ts`.
-- `observability/*` (inspector) → update `tests/test_inspector.py`; UI in
-  `frontend/src/pages/InspectorPage.tsx` + `frontend/src/components/inspector/`.
-- `budgets/*` → update `tests/test_budgets.py`; UI in
-  `frontend/src/pages/BudgetsPage.tsx` + `frontend/src/api/budgets.ts`.
-- `artifacts/*` → update `tests/test_artifacts.py`.
-- `tools/*` — git/code/bash tools → update `tests/test_git_tools.py` /
-  `tests/test_tools.py` / `tests/test_sandbox.py` (code execution requires
-  sandboxing and capability checks).
-- `app/models/*.py` → add a `backend/alembic/versions/*.py` migration
-  (autogenerate it; verify with `alembic upgrade head`). Current head is
-  `0022_phase4_completion`, which is also the frozen baseline for
-  `crates/cool-store`; regenerate the Rust schema snapshot with
-  `backend $ python -m tests.schema_snapshot --update ../crates/cool-store/tests/fixtures/python_schema_0022.sql`
-  and update `crates/cool-store` if the baseline changes.
-- `crates/cool-store/*` → keep `backend/tests/test_rust_store_contract.py` green
-  (cross-language read/write, snapshot drift, migration-ownership guards) and the
-  Rust suite `cargo test -p cool-store`; store changes that touch adoption,
-  backups or datetime/JSON conventions need a cross-language test.
-- `backend/app/core/db.py` or `backend/alembic/env.py` (Rust-ownership guards) →
-  update `backend/tests/test_rust_store_contract.py`.
-- `crates/cool-protocol/src/families/*` or `crates/cool-protocol/src/lib.rs` (command
-  schema) → re-run `cargo run -p cool-protocol --bin generate` and commit the schema +
-  both generated TS files; keep the `declarations!` list in
-  `crates/cool-protocol/src/bin/generate.rs` in sync.
-- `crates/cool-app-server/src/legacy/*` (legacy family dispatch) → update
-  `crates/cool-app-server/tests/legacy_surface.rs` and the matching inventory entry in
-  `frontend/protocol-tests/inventory.json`; every mutation must go through
-  `LegacyStore::run_idempotent` (or the async variant) and every command must stay
-  actor-scoped and store-backed.
-- A frontend API operation in `frontend/src/api/*.ts` → add/update its entry in
-  `frontend/protocol-tests/inventory.json` (status `sdk` with a command, or an
-  exception with a rationale). `npm run protocol:check` discovers operations, checks
-  the generated `Command` union, the `CoolSdk` member in
-  `sdk/typescript/src/client.ts`, and the app-server dispatch arm; it fails on
-  undeclared operations, phantom commands and missing handlers.
-- A new protocol command → add the typed SDK method to `sdk/typescript/src/client.ts`
-  (member name = camelCase of `family.operation`; this convention is enforced).
-- `app/api/schemas.py` or `app/api/*_router.py` → update
-  `frontend/src/api/types.ts` and the consuming hook/component.
-- `app/agent/events.py` + `app/api/websocket.py` → update
-  `frontend/src/api/streaming.ts` and `frontend/src/hooks/useConversationStream.ts`.
-- `app/security/*` or `app/tools/*` → adjust the matching tests
-  (`test_permissions.py`, `test_tools.py`, `test_sandbox.py`, `test_ssrf.py`,
-  `test_secret_masking.py`, `test_capabilities.py`).
-- `providers/*` (openai, anthropic, resilience, pricing, registry) → update
-  `test_anthropic_provider.py`, `test_providers_api.py`, `test_pricing.py`,
-  `test_resilience.py`; UI lives in `frontend/src/pages/SettingsPage.tsx`.
 
 ## `frontend/src`
 
@@ -322,8 +160,9 @@ frontend/src/
   `noFallthroughCasesInSwitch`, `verbatimModuleSyntax`, `erasableSyntaxOnly`.
 - oxlint config (`.oxlintrc.json`): plugins `react`, `typescript`, `oxc`;
   `react/rules-of-hooks` is an error, `react/only-export-components` is a warn.
-- `src/api/*` is the **only** typed boundary to the backend — keep it in sync
-  with `backend/app/api`.
+- `src/api/*` is the **only** typed boundary to the server — every op maps to
+  a canonical App Protocol command or a documented transport exception
+  (`frontend/protocol-tests/inventory.json`).
 
 ### Required commands (run from `frontend/`)
 
@@ -340,15 +179,13 @@ npm run preview           # preview the production build
 
 ### Co-change expectations
 
-- `src/api/types.ts` ↔ `backend/app/api/schemas.py` — keep shapes in sync. Each
-  subsystem also has its own client (`src/api/{memory,plans,subagents,tasks,
-  rss,webhooks,wiki,profiles,analytics,...}.ts`) mirroring the matching
-  `app/api/*_router.py`.
-- `src/hooks/useConversationStream.ts` ↔ `backend/app/api/websocket.py` +
-  `backend/app/agent/events.py`.
-- A new backend SSE/WS event → add a handler in `useConversationStream.ts` and
+- `src/api/types.ts` ↔ `crates/cool-protocol` — the wire shapes are generated
+  from the protocol schema; keep types aligned with the generated SDK.
+- `src/hooks/useConversationStream.ts` ↔ the canonical event stream
+  (`GET /api/events` / `run.subscribe` fan-out in `crates/cool-http`).
+- A new server event → add a handler in `useConversationStream.ts` and
   render it in `src/components/chat/*`.
-- A new backend subsystem → add a client in `src/api/`, types in `types.ts`,
+- A new server subsystem → add a client in `src/api/`, types in `types.ts`,
   and a page/component to surface it.
 - A change to `src/api/*.ts` operations → keep `protocol-tests/inventory.json`
   and `sdk/typescript/src/client.ts` in sync; `npm run protocol:check` fails on
@@ -382,23 +219,12 @@ Required root commands:
   cargo run -p cool-protocol --bin generate -- --check
   ```
 
-- Touched `backend/`? From `backend/`:
-  ```bash
-  ruff check . && mypy app && pytest && python -m evals
-  ```
 - Touched `frontend/`? From `frontend/`:
   ```bash
   npm run protocol:check && npm run lint && npm run build
   ```
   `protocol:check` also typechecks the SDK client (`sdk/typescript`) and runs the
   inventory coverage gate.
-- Touched `spikes/m0-rust-core/`? From that directory:
-  ```bash
-  cargo fmt --all -- --check
-  cargo clippy --all-targets --all-features -- -D warnings
-  cargo test --all-features
-  cargo build --all-targets
-  ```
 - Touched release packaging (`Dockerfile`, `docker-compose.yml`, `packaging/`, or the runtime path/
   entrypoint contract)? From the repository root:
   ```bash
@@ -406,9 +232,8 @@ Required root commands:
   docker build --tag cool-ai-harness:local .
   ```
   Then start the image and smoke `/`, `/api/health`, SSE, and WebSocket. If a local Docker daemon is
-  unavailable, run the backend packaging smoke test and record that the image build remains CI-only
-  evidence; do not report a local image build as passed.
-- Touched the **API contract** (schemas/events/WebSocket)? Update **both**
-  sides and re-run both root command sets.
-- Touched `app/models/*.py`? Add the Alembic migration and verify
-  `alembic upgrade head`.
+  unavailable, record that the image build remains CI-only evidence; do not report a local image
+  build as passed.
+- Touched the **API contract** (protocol schema/commands/events)? Update the
+  schema, the generated SDK bindings and the dispatch arms, then re-run the
+  generator check plus the frontend `protocol:check`.
