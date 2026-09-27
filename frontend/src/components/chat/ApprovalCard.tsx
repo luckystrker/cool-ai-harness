@@ -138,7 +138,7 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           <span
             className={cn(
               "text-xs font-medium",
-              approval.status === "approved" ? "text-emerald-600" : "text-destructive"
+              approval.status === "approved" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
             )}
           >
             {approval.status === "approved"
@@ -182,20 +182,60 @@ interface DiffLine {
   text: string
 }
 
-/** Simple line-by-line diff (LCS-free: mark removed then added). */
+/**
+ * Line-level diff via longest-common-subsequence DP, so edits in the middle
+ * of a file produce a real diff instead of a removed-block/added-block dump.
+ * Falls back to the prefix/suffix heuristic for very large files.
+ */
 function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   const oldLines = oldText.split("\n")
   const newLines = newText.split("\n")
+  const m = oldLines.length
+  const n = newLines.length
+  if (m * n > 4_000_000) return naiveDiff(oldLines, newLines)
+
+  const w = n + 1
+  const dp = new Int32Array((m + 1) * w)
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i * w + j] =
+        oldLines[i] === newLines[j]
+          ? dp[(i + 1) * w + j + 1] + 1
+          : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1])
+    }
+  }
+
+  const result: DiffLine[] = []
+  let i = 0
+  let j = 0
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      result.push({ type: "same", text: oldLines[i] })
+      i++
+      j++
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
+      result.push({ type: "removed", text: oldLines[i] })
+      i++
+    } else {
+      result.push({ type: "added", text: newLines[j] })
+      j++
+    }
+  }
+  while (i < m) result.push({ type: "removed", text: oldLines[i++] })
+  while (j < n) result.push({ type: "added", text: newLines[j++] })
+  return result
+}
+
+/** Common prefix + common suffix, everything between marked removed/added. */
+function naiveDiff(oldLines: string[], newLines: string[]): DiffLine[] {
   const result: DiffLine[] = []
 
-  // Find common prefix.
   let prefix = 0
   while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
     result.push({ type: "same", text: oldLines[prefix] })
     prefix++
   }
 
-  // Find common suffix.
   let suffix = 0
   while (
     suffix < oldLines.length - prefix &&
@@ -205,16 +245,12 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
     suffix++
   }
 
-  // Removed lines (from old, not in common prefix/suffix).
   for (let i = prefix; i < oldLines.length - suffix; i++) {
     result.push({ type: "removed", text: oldLines[i] })
   }
-  // Added lines (from new, not in common prefix/suffix).
   for (let i = prefix; i < newLines.length - suffix; i++) {
     result.push({ type: "added", text: newLines[i] })
   }
-
-  // Append common suffix.
   for (let i = 0; i < suffix; i++) {
     result.push({ type: "same", text: oldLines[oldLines.length - suffix + i] })
   }
@@ -247,7 +283,7 @@ function WriteDiffPreview({ path, oldContent, newContent }: { path: string; oldC
               key={i}
               className={cn(
                 "px-1",
-                line.type === "added" && "bg-emerald-500/15 text-emerald-800",
+                line.type === "added" && "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
                 line.type === "removed" && "bg-destructive/10 text-destructive line-through"
               )}
             >
@@ -281,7 +317,7 @@ function NewFilePreview({ path, content }: { path: string; content: string }) {
       {open && (
         <pre className="mt-1 max-h-64 overflow-auto rounded bg-muted p-2 font-mono text-[11px] leading-4">
           {content.split("\n").map((line, i) => (
-            <div key={i} className="bg-emerald-500/10 px-1 text-emerald-800">
+            <div key={i} className="bg-emerald-500/10 px-1 text-emerald-800 dark:text-emerald-300">
               <span className="mr-1 select-none text-muted-foreground">+</span>
               {line}
             </div>

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 const TYPE_COLORS: Record<string, string> = {
@@ -20,7 +21,7 @@ const TYPE_COLORS: Record<string, string> = {
 /** Pending-confirmation queue: agent-extracted memories awaiting user review. */
 export function ReviewQueue() {
   const queryClient = useQueryClient()
-  const { data: pending = [], isLoading } = useQuery({
+  const { data: pending = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["memories", "pending"],
     queryFn: () => memoryApi.listPending(),
   })
@@ -61,6 +62,13 @@ export function ReviewQueue() {
           <div className="flex items-center justify-center py-12 text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
+        ) : isError ? (
+          <QueryErrorState
+            compact
+            title="Review queue could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : pending.length === 0 ? (
           <div className="py-12 text-center text-muted-foreground">
             <Clock className="mx-auto mb-3 h-10 w-10 opacity-30" />

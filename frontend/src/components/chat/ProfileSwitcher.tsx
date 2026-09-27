@@ -39,6 +39,9 @@ export function ProfileSwitcher({ conversation }: ProfileSwitcherProps) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      if (conversation) {
+        queryClient.invalidateQueries({ queryKey: ["conversation", conversation.id] })
+      }
     },
     onError: (error) =>
       toast.error("Agent profile was not changed", {

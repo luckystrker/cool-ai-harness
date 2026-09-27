@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { FolderOpen, Globe, HardDrive, Loader2, Plus } from "lucide-react"
+import { FolderOpen, HardDrive, Loader2, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
@@ -124,10 +124,11 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
           </DialogHeader>
 
           <div className="space-y-4">
-            {/* Project type: local / remote */}
+            {/* Project type — only local is supported for now; the remote
+                option returns once the backend supports it. */}
             <div className="space-y-1.5">
               <div className="text-xs font-medium text-muted-foreground">Type</div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 <button
                   type="button"
                   onClick={() => setType("local")}
@@ -141,22 +142,7 @@ export function ProjectDialog({ open, onOpenChange, onCreated }: ProjectDialogPr
                   <HardDrive className="h-4 w-4" />
                   Local
                 </button>
-                <button
-                  type="button"
-                  disabled
-                  title="Remote projects are not available yet"
-                  className={cn(
-                    "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
-                    "cursor-not-allowed border-muted-foreground/20 text-muted-foreground opacity-60"
-                  )}
-                >
-                  <Globe className="h-4 w-4" />
-                  Remote
-                </button>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Remote projects are not available yet.
-              </p>
             </div>
 
             {/* Folder selection (local only) */}

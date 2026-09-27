@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @font-face {
   font-family: "Cool Flight Display";
   src: url("/fonts/IBMPlexSansCondensed-SemiBold.ttf") format("truetype");

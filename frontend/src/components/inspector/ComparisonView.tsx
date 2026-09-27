@@ -18,9 +18,9 @@ function DeltaBadge({ value, unit }: { value: number | null; unit: string }) {
       variant="outline"
       className={
         positive
-          ? "border-orange-300 bg-orange-50 text-orange-700"
+          ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950/40 dark:text-orange-300"
           : negative
-            ? "border-green-300 bg-green-50 text-green-700"
+            ? "border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950/40 dark:text-green-300"
             : ""
       }
     >

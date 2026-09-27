@@ -1,5 +1,6 @@
 /** RunTimeline: vertical stepper showing per-iteration breakdown. */
 
+import { useState } from "react"
 import type { IterationDetail } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -14,6 +15,27 @@ function formatMs(ms: number | null): string {
   if (ms === null) return "—"
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(2)}s`
+}
+
+/** Args are truncated past 120 chars with a tap-to-expand toggle. */
+function ToolArgsPreview({ args }: { args: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const truncated = args.length > 120
+  const shown = expanded || !truncated ? args : args.slice(0, 120)
+  return (
+    <span className="ml-1 break-all text-muted-foreground">
+      {shown}
+      {truncated && (
+        <button
+          type="button"
+          className="ml-1 text-primary hover:underline"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "show less" : `… +${args.length - 120} chars`}
+        </button>
+      )}
+    </span>
+  )
 }
 
 function formatTokens(usage: Record<string, unknown> | null): string {
@@ -89,9 +111,7 @@ export function RunTimeline({ iterations, totalDurationMs }: RunTimelineProps) {
                       >
                         <span className="text-primary">{String(tc.name ?? "unknown")}</span>
                         {tc.arguments != null && Object.keys(tc.arguments as object).length > 0 ? (
-                          <span className="ml-1 text-muted-foreground">
-                            {JSON.stringify(tc.arguments).slice(0, 120)}
-                          </span>
+                          <ToolArgsPreview args={JSON.stringify(tc.arguments)} />
                         ) : null}
                       </div>
                     ))}

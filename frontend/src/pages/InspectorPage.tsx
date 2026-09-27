@@ -4,7 +4,7 @@
  */
 
 import { useState } from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, Bug, GitCompareArrows, Loader2, Play } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
@@ -26,6 +26,7 @@ type Mode = "timeline" | "compare"
 
 export function InspectorPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [mode, setMode] = useState<Mode>("timeline")
   const [selectedConvId, setSelectedConvId] = useState<number | null>(null)
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
@@ -44,14 +45,14 @@ export function InspectorPage() {
   })
 
   // Load runs for the selected conversation.
-  const { data: runs = [] } = useQuery({
+  const { data: runs = [], isError: runsError, refetch: refetchRuns } = useQuery({
     queryKey: ["runs", selectedConvId],
     queryFn: () => listRuns(selectedConvId!),
     enabled: selectedConvId !== null,
   })
 
   // Load timeline for the selected run.
-  const { data: timeline, isLoading: timelineLoading } = useQuery({
+  const { data: timeline, isLoading: timelineLoading, isError: timelineError, refetch: refetchTimeline } = useQuery({
     queryKey: ["timeline", selectedConvId, selectedRunId],
     queryFn: () => getRunTimeline(selectedConvId!, selectedRunId!),
     enabled: selectedConvId !== null && selectedRunId !== null && mode === "timeline",
@@ -72,6 +73,7 @@ export function InspectorPage() {
       }),
     onSuccess: (data) => {
       toast.success(`Replay started: new run #${data.new_run_id}`)
+      queryClient.invalidateQueries({ queryKey: ["runs", selectedConvId] })
     },
     onError: (error) =>
       toast.error("Run replay did not start", {
@@ -163,6 +165,14 @@ export function InspectorPage() {
                   </option>
                 ))}
               </select>
+              {runsError && (
+                <QueryErrorState
+                  compact
+                  title="Runs could not be loaded"
+                  description="Check that Cool is running locally, then try again."
+                  onRetry={() => void refetchRuns()}
+                />
+              )}
             </div>
           )}
 
@@ -239,7 +249,15 @@ export function InspectorPage() {
                   totalDurationMs={timeline.total_duration_ms}
                 />
               )}
-              {!timelineLoading && !timeline && (
+              {!timelineLoading && !timeline && timelineError && (
+                <QueryErrorState
+                  title="Timeline could not be loaded"
+                  description="Check that Cool is running locally, then try again."
+                  onRetry={() => void refetchTimeline()}
+                  className="py-10"
+                />
+              )}
+              {!timelineLoading && !timeline && !timelineError && (
                 <div className="mx-auto flex max-w-xl flex-col items-center py-10 text-center sm:py-16">
                   <div className="cool-event-strip grid h-12 w-12 place-items-center rounded-md text-primary">
                     <Bug className="h-5 w-5" />

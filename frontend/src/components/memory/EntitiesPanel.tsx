@@ -18,10 +18,14 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import { QueryErrorState } from "@/components/ui/query-state"
+import { useDebouncedValue } from "@/hooks/useDebouncedValue"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -42,15 +46,17 @@ const ENTITY_TYPES = [
 export function EntitiesPanel() {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState("")
+  const debouncedSearch = useDebouncedValue(search, 300)
   const [typeFilter, setTypeFilter] = useState<string>("")
   const [editing, setEditing] = useState<Entity | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Entity | null>(null)
 
-  const { data: entities = [], isLoading } = useQuery({
-    queryKey: ["entities", search, typeFilter],
+  const { data: entities = [], isLoading, isError, refetch } = useQuery({
+    queryKey: ["entities", debouncedSearch, typeFilter],
     queryFn: () =>
       entitiesApi.list({
-        query: search || undefined,
+        query: debouncedSearch || undefined,
         entity_type: typeFilter || undefined,
         limit: 200,
       }),
@@ -61,6 +67,7 @@ export function EntitiesPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["entities"] })
       queryClient.invalidateQueries({ queryKey: ["memory-stats"] })
+      setDeleteTarget(null)
       toast.success("Entity deleted")
     },
     onError: (error) =>
@@ -107,6 +114,13 @@ export function EntitiesPanel() {
             <div className="flex items-center justify-center py-12 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
             </div>
+          ) : isError ? (
+            <QueryErrorState
+              compact
+              title="Entities could not be loaded"
+              description="Check that Cool is running locally, then try again."
+              onRetry={() => void refetch()}
+            />
           ) : entities.length === 0 ? (
             <div className="py-12 text-center text-muted-foreground">
               <Box className="mx-auto mb-3 h-10 w-10 opacity-30" />
@@ -121,7 +135,7 @@ export function EntitiesPanel() {
                 key={entity.id}
                 entity={entity}
                 onEdit={() => setEditing(entity)}
-                onDelete={() => deleteMutation.mutate(entity.id)}
+                onDelete={() => setDeleteTarget(entity)}
               />
             ))
           )}
@@ -130,6 +144,19 @@ export function EntitiesPanel() {
 
       <EntityEditDialog entity={editing} onClose={() => setEditing(null)} />
       <EntityCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete this entity?"
+        description={
+          deleteTarget
+            ? `“${deleteTarget.name}” and its aliases will be permanently deleted.`
+            : ""
+        }
+        confirmLabel="Delete entity"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+      />
     </div>
   )
 }
@@ -321,6 +348,9 @@ function EntityEditDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Edit Entity</DialogTitle>
+          <DialogDescription className="sr-only">
+            Update the entity name, type, aliases, and description.
+          </DialogDescription>
         </DialogHeader>
         <EntityFormFields
           idPrefix="entity-edit"
@@ -402,6 +432,9 @@ function EntityCreateDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Add Entity</DialogTitle>
+          <DialogDescription className="sr-only">
+            Create a named entity the agent can reference in memories.
+          </DialogDescription>
         </DialogHeader>
         <EntityFormFields
           idPrefix="entity-create"

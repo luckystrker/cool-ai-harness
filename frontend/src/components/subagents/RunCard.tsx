@@ -1,9 +1,11 @@
+import { useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { Loader2, Square, Trash2, CheckCircle2, XCircle, Clock } from "lucide-react"
+import { FileText, Loader2, Square, Trash2, CheckCircle2, XCircle, Clock } from "lucide-react"
 import { toast } from "sonner"
 import { subagentsApi } from "@/api/subagents"
 import type { SubagentRun } from "@/api/types"
 import { Button } from "@/components/ui/button"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import { cn } from "@/lib/utils"
 
 const STATUS_META: Record<string, { icon: typeof Clock; color: string; label: string }> = {
@@ -14,11 +16,12 @@ const STATUS_META: Record<string, { icon: typeof Clock; color: string; label: st
   cancelled: { icon: Square, color: "text-yellow-500", label: "Cancelled" },
 }
 
-export function RunCard({ run }: { run: SubagentRun }) {
+export function RunCard({ run, onViewOutput }: { run: SubagentRun; onViewOutput?: (id: number) => void }) {
   const queryClient = useQueryClient()
   const meta = STATUS_META[run.status] ?? STATUS_META.queued
   const Icon = meta.icon
   const isTerminal = ["completed", "failed", "cancelled"].includes(run.status)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const cancelMutation = useMutation({
     mutationFn: () => subagentsApi.cancelRun(run.id),
@@ -31,6 +34,7 @@ export function RunCard({ run }: { run: SubagentRun }) {
   const deleteMutation = useMutation({
     mutationFn: () => subagentsApi.deleteRun(run.id),
     onSuccess: () => {
+      setConfirmingDelete(false)
       queryClient.invalidateQueries({ queryKey: ["subagent-runs"] })
     },
   })
@@ -69,6 +73,18 @@ export function RunCard({ run }: { run: SubagentRun }) {
         </div>
 
         <div className="flex shrink-0 gap-1">
+          {isTerminal && onViewOutput && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 md:h-6 md:w-6"
+              onClick={() => onViewOutput(run.id)}
+              title="View output"
+              aria-label={`View output of ${run.name || `run ${run.id}`}`}
+            >
+              <FileText className="h-3.5 w-3.5 md:h-3 md:w-3" />
+            </Button>
+          )}
           {!isTerminal && (
             <Button
               variant="ghost"
@@ -85,14 +101,25 @@ export function RunCard({ run }: { run: SubagentRun }) {
               variant="ghost"
               size="icon"
               className="h-9 w-9 md:h-6 md:w-6"
-              onClick={() => deleteMutation.mutate()}
+              onClick={() => setConfirmingDelete(true)}
               title="Delete"
+              aria-label={`Delete ${run.name || `run ${run.id}`}`}
             >
               <Trash2 className="h-3.5 w-3.5 md:h-3 md:w-3" />
             </Button>
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        onOpenChange={setConfirmingDelete}
+        title="Delete this run record?"
+        description={`“${run.name || `Run #${run.id}`}” and its result history will be permanently removed.`}
+        confirmLabel="Delete run"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleteMutation.mutate()}
+      />
     </div>
   )
 }

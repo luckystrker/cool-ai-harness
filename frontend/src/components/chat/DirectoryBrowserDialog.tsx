@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { cn } from "@/lib/utils"
 
 interface DirectoryBrowserDialogProps {
@@ -39,7 +40,7 @@ export function DirectoryBrowserDialog({
     if (open) setPath(initialPath ?? undefined)
   }, [open, initialPath])
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["directories", path ?? "__default__"],
     queryFn: () => workspaceApi.directories(path),
     enabled: open,
@@ -81,6 +82,14 @@ export function DirectoryBrowserDialog({
             <div className="flex h-[220px] items-center justify-center">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             </div>
+          ) : isError ? (
+            <QueryErrorState
+              compact
+              title="Folders could not be listed"
+              description="Check that Cool is running locally, then try again."
+              onRetry={() => void refetch()}
+              className="h-[220px]"
+            />
           ) : (
             <div className="max-h-[280px] overflow-y-auto p-1">
               {/* Up navigation */}
