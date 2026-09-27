@@ -173,8 +173,7 @@ fn loader_rejects_routing_framing_and_session_headers() {
 
 #[test]
 fn repository_m3_portable_fixture_keeps_bare_command_and_placeholders() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/plugins/portable-valid");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/portable-valid");
     let temporary = TempDir::new().unwrap();
     let data = temporary.path().join("data");
     let bundle = PluginLoader.load(&root, &data).unwrap();
@@ -862,8 +861,7 @@ fn vendor_manifest_is_diagnostic_only_compatibility() {
 
 #[test]
 fn m3_codex_and_claude_fixtures_have_explicit_tier_two_mappings() {
-    let fixtures =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
     let temporary = TempDir::new().unwrap();
     let codex = PluginLoader
         .load(
