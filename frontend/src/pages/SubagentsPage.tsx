@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, Bot, Plus, Trash2 } from "lucide-react"
+import { ArrowLeft, Bot, Loader2, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
@@ -167,7 +167,11 @@ export function SubagentsPage() {
   const parentConvId =
     parentConvOverride ?? runs[0]?.parent_conversation_id ?? conversations[0]?.id ?? null
 
-  const roleList = (
+  const roleList = rolesLoading ? (
+    <div className="flex justify-center py-6">
+      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+    </div>
+  ) : (
     <RoleList
       roles={roles}
       selectedId={editingRole?.id ?? null}

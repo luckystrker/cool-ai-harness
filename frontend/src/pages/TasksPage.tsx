@@ -472,6 +472,16 @@ function InboxPanel() {
   const runs: TaskRun[] = inbox?.runs ?? []
   const unreadRuns = runs.filter((r) => !r.is_read)
 
+  const markAllReadMutation = useMutation({
+    mutationFn: () =>
+      Promise.all(unreadRuns.map((r) => tasksApi.markRead(r.id, true))),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+    onError: (error) =>
+      toast.error("Some results could not be marked read", {
+        description: getErrorDescription(error, "Try again."),
+      }),
+  })
+
   if (runs.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
@@ -488,10 +498,8 @@ function InboxPanel() {
             variant="ghost"
             size="sm"
             className="text-xs"
-            disabled={markReadMutation.isPending}
-            onClick={() =>
-              unreadRuns.forEach((r) => markReadMutation.mutate(r.id))
-            }
+            disabled={markAllReadMutation.isPending}
+            onClick={() => markAllReadMutation.mutate()}
           >
             Mark all read ({unreadRuns.length})
           </Button>
