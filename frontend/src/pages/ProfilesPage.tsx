@@ -28,7 +28,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -39,6 +40,8 @@ export function ProfilesPage() {
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
   const [editing, setEditing] = useState<AgentProfile | null>(null)
   const [macroDialogOpen, setMacroDialogOpen] = useState(false)
+  const [deletingProfile, setDeletingProfile] = useState<AgentProfile | null>(null)
+  const [deletingMacro, setDeletingMacro] = useState<{ id: number; name: string } | null>(null)
 
   const { data: profiles = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["profiles"],
@@ -82,7 +85,10 @@ export function ProfilesPage() {
   })
   const deleteMutation = useMutation({
     mutationFn: profilesApi.delete,
-    onSuccess: refreshProfiles,
+    onSuccess: () => {
+      setDeletingProfile(null)
+      refreshProfiles()
+    },
     onError: showError("Agent blueprint was not deleted"),
   })
   const cloneMutation = useMutation({
@@ -109,24 +115,12 @@ export function ProfilesPage() {
   })
   const deleteMacroMutation = useMutation({
     mutationFn: constructorApi.deleteMacro,
-    onSuccess: refreshMacros,
+    onSuccess: () => {
+      setDeletingMacro(null)
+      refreshMacros()
+    },
     onError: showError("Macro tool was not deleted"),
   })
-
-  if (isLoading) {
-    return <QueryLoadingState label="Loading agent blueprints…" className="h-64" />
-  }
-
-  if (isError) {
-    return (
-      <QueryErrorState
-        title="Agent blueprints could not be loaded"
-        description="Check that Cool is running locally, then try again."
-        onRetry={() => void refetch()}
-        className="h-64 justify-center"
-      />
-    )
-  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 p-6">
@@ -147,6 +141,16 @@ export function ProfilesPage() {
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Blueprints</h2>
+        {isLoading ? (
+          <QueryLoadingState label="Loading agent blueprints…" className="h-64" />
+        ) : isError ? (
+          <QueryErrorState
+            title="Agent blueprints could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetch()}
+            className="h-64 justify-center"
+          />
+        ) : null}
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {profiles.map((profile) => (
             <Card key={profile.id} className={!profile.is_active ? "opacity-55" : ""}>
@@ -169,7 +173,7 @@ export function ProfilesPage() {
                   <Button size="sm" variant="ghost" onClick={() => { setEditing(profile); setProfileDialogOpen(true) }}><Pencil /> Edit</Button>
                   <Button size="sm" variant="ghost" onClick={() => cloneMutation.mutate(profile.id)}><Copy /> Copy</Button>
                   <Button size="sm" variant="ghost" disabled={!profile.is_active} onClick={() => playgroundMutation.mutate(profile.id)}><Play /> Test in conversation</Button>
-                  {!profile.is_builtin && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deleteMutation.mutate(profile.id)}><Trash2 /> Delete</Button>}
+                  {!profile.is_builtin && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setDeletingProfile(profile)}><Trash2 /> Delete</Button>}
                 </div>
               </CardContent>
             </Card>
@@ -197,7 +201,7 @@ export function ProfilesPage() {
                 </CardHeader>
                 <CardContent className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{macro.steps.map((step) => step.tool_name).join(" → ")}</span>
-                  <Button size="icon" variant="ghost" className="text-destructive" onClick={() => deleteMacroMutation.mutate(macro.id)}><Trash2 /></Button>
+                  <Button size="icon" variant="ghost" className="text-destructive" aria-label={`Delete macro ${macro.name}`} onClick={() => setDeletingMacro({ id: macro.id, name: macro.name })}><Trash2 /></Button>
                 </CardContent>
               </Card>
             ))}
@@ -218,6 +222,32 @@ export function ProfilesPage() {
         onOpenChange={setMacroDialogOpen}
         tools={tools.filter((tool) => !tool.is_macro)}
         onCreate={(body) => createMacroMutation.mutate(body)}
+      />
+      <ConfirmDialog
+        open={deletingProfile !== null}
+        onOpenChange={(open) => !open && setDeletingProfile(null)}
+        title="Delete this blueprint?"
+        description={
+          deletingProfile
+            ? `“${deletingProfile.name}” will be permanently deleted.`
+            : ""
+        }
+        confirmLabel="Delete blueprint"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deletingProfile && deleteMutation.mutate(deletingProfile.id)}
+      />
+      <ConfirmDialog
+        open={deletingMacro !== null}
+        onOpenChange={(open) => !open && setDeletingMacro(null)}
+        title="Delete this macro tool?"
+        description={
+          deletingMacro
+            ? `“${deletingMacro.name}” will be unregistered; blueprints referencing it will lose the tool.`
+            : ""
+        }
+        confirmLabel="Delete macro"
+        pending={deleteMacroMutation.isPending}
+        onConfirm={() => deletingMacro && deleteMacroMutation.mutate(deletingMacro.id)}
       />
     </div>
   )
@@ -283,7 +313,12 @@ function BlueprintDialog({ open, onOpenChange, profile, tools, skills, onSave }:
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader><DialogTitle>{profile ? "Edit blueprint" : "New agent blueprint"}</DialogTitle></DialogHeader>
+        <DialogHeader>
+          <DialogTitle>{profile ? "Edit blueprint" : "New agent blueprint"}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {profile ? "Edit the agent blueprint settings." : "Create a reusable agent blueprint."}
+          </DialogDescription>
+        </DialogHeader>
         <div className="space-y-5">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Name"><Input value={name} onChange={(event) => setName(event.target.value)} /></Field>
@@ -352,7 +387,12 @@ function MacroDialog({ open, onOpenChange, tools, onCreate }: {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
-        <DialogHeader><DialogTitle>Compose macro tool</DialogTitle></DialogHeader>
+        <DialogHeader>
+          <DialogTitle>Compose macro tool</DialogTitle>
+          <DialogDescription className="sr-only">
+            Build a macro that runs several tools in sequence.
+          </DialogDescription>
+        </DialogHeader>
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2"><Field label="Tool name"><Input value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Input names (comma-separated)"><Input value={inputs} onChange={(event) => setInputs(event.target.value)} /></Field></div>
           <Field label="Description"><Input value={description} onChange={(event) => setDescription(event.target.value)} /></Field>

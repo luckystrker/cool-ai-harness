@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
+import { Link } from "react-router-dom"
 import { Wallet } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
 import { budgetsApi } from "@/api/budgets"
@@ -137,12 +138,12 @@ function Popover({
               A block override is active.
             </p>
           )}
-          <a
-            href="/budgets"
+          <Link
+            to="/budgets"
             className="block pt-1 text-[11px] text-primary hover:underline"
           >
             Manage budgets →
-          </a>
+          </Link>
         </div>
       )}
     </div>

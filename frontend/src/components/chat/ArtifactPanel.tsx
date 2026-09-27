@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Download,
@@ -8,12 +9,15 @@ import {
   Music,
   Trash2,
   FileSpreadsheet,
+  X,
 } from "lucide-react"
 import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { artifactsApi } from "@/api/artifacts"
 import type { Artifact, ArtifactKind } from "@/api/types"
 import { Button } from "@/components/ui/button"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import { QueryErrorState } from "@/components/ui/query-state"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 const KIND_ICON: Record<ArtifactKind, typeof File> = {
@@ -38,13 +42,16 @@ const KIND_LABEL: Record<ArtifactKind, string> = {
 
 interface ArtifactPanelProps {
   conversationId: number
+  /** When set, shows an X button in the header (the panel is an overlay on mobile). */
+  onClose?: () => void
 }
 
 /** Side panel listing all artifacts for a conversation with download/delete actions. */
-export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
+export function ArtifactPanel({ conversationId, onClose }: ArtifactPanelProps) {
   const queryClient = useQueryClient()
+  const [deleteTarget, setDeleteTarget] = useState<Artifact | null>(null)
 
-  const { data: artifacts = [], isLoading } = useQuery({
+  const { data: artifacts = [], isLoading, isError, refetch } = useQuery({
     queryKey: ["artifacts", conversationId],
     queryFn: () => artifactsApi.list(conversationId),
   })
@@ -53,6 +60,7 @@ export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
     mutationFn: (artifactId: number) => artifactsApi.delete(conversationId, artifactId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["artifacts", conversationId] })
+      setDeleteTarget(null)
     },
     onError: (error) =>
       toast.error("Attachment was not deleted", {
@@ -67,10 +75,28 @@ export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
         <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
           {artifacts.length}
         </span>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto grid h-9 w-9 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Close attachments"
+            aria-label="Close attachments panel"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
       </div>
 
       <ScrollArea className="flex-1">
-        {isLoading ? (
+        {isError ? (
+          <QueryErrorState
+            compact
+            title="Attachments could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetch()}
+          />
+        ) : isLoading ? (
           <div className="py-8 text-center text-sm text-muted-foreground">Loading attachments…</div>
         ) : artifacts.length === 0 ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">
@@ -83,12 +109,26 @@ export function ArtifactPanel({ conversationId }: ArtifactPanelProps) {
                 key={a.id}
                 artifact={a}
                 conversationId={conversationId}
-                onDelete={() => deleteMutation.mutate(a.id)}
+                onDelete={() => setDeleteTarget(a)}
               />
             ))}
           </ul>
         )}
       </ScrollArea>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete this attachment?"
+        description={
+          deleteTarget
+            ? `\u201c${deleteTarget.filename}\u201d will be permanently deleted.`
+            : ""
+        }
+        confirmLabel="Delete attachment"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+      />
     </div>
   )
 }
@@ -131,7 +171,7 @@ function ArtifactRow({
           {artifact.version > 1 && ` · v${artifact.version}`}
         </span>
       </div>
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
         <a href={downloadHref} download={artifact.filename}>
           <Button
             size="icon"

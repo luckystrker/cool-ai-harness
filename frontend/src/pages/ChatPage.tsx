@@ -170,11 +170,32 @@ export function ChatPage() {
     [providers]
   )
 
-  // Auto-scroll on any new content.
+  // Stick-to-bottom scrolling: follow new content only while the user is at
+  // (or near) the bottom; scrolling up pins the position and shows a jump
+  // button instead of yanking the viewport on every stream flush.
+  const stickToBottomRef = useRef(true)
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false)
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    stickToBottomRef.current = atBottom
+    setShowJumpToBottom(!atBottom)
+  }, [])
+
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight
   }, [historyMsgs, pendingMsgs])
+
+  // Snap to the latest message when switching conversations.
+  useEffect(() => {
+    stickToBottomRef.current = true
+    setShowJumpToBottom(false)
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [convId])
 
   const updateMutation = useMutation({
     mutationFn: (vars: { id: number; model: string }) =>
@@ -579,7 +600,7 @@ export function ChatPage() {
 
       <div className="relative flex flex-1 overflow-hidden">
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div ref={scrollRef} className="flex-1 overflow-y-auto">
+          <div ref={scrollRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl py-4">
               {isError ? (
                 <QueryErrorState
@@ -620,6 +641,22 @@ export function ChatPage() {
             </div>
           </div>
 
+          {showJumpToBottom && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="absolute bottom-28 right-4 z-20 gap-1 shadow-md"
+              onClick={() => {
+                stickToBottomRef.current = true
+                const el = scrollRef.current
+                if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" })
+                setShowJumpToBottom(false)
+              }}
+            >
+              <ChevronDown className="h-4 w-4" /> Latest
+            </Button>
+          )}
+
           <div className="mx-auto w-full max-w-3xl">
             <ChatComposer
               key={convId}
@@ -628,6 +665,7 @@ export function ChatPage() {
               onCancel={cancel}
               onAttach={handleAttach}
               streaming={isStreaming}
+              disabled={isError}
               pendingFiles={pendingFiles}
               onRemoveFile={handleRemoveFile}
               leading={
@@ -666,6 +704,7 @@ export function ChatPage() {
               <ComposerSheet
                 open={sheetOpen}
                 onClose={() => setSheetOpen(false)}
+                conversation={detail ?? null}
                 workingDirectory={detail?.working_directory ?? null}
                 onWorkingDirectoryChange={handleWorkdirChange}
                 mode={modeFromPerms((detail?.permissions as ToolPermissions | null) ?? {})}
@@ -685,9 +724,20 @@ export function ChatPage() {
         </div>
 
         {artifactsOpen && (
-          <div className="absolute inset-y-0 right-0 z-30 w-72 shrink-0 shadow-xl md:static md:z-auto md:shadow-none">
-            <ArtifactPanel conversationId={convId} />
-          </div>
+          <>
+            {/* Mobile: the panel is an overlay — give it a backdrop to tap
+                and an X button inside (there is no header toggle under md). */}
+            <div
+              className="absolute inset-0 z-20 bg-black/30 md:hidden"
+              onClick={() => setArtifactsOpen(false)}
+            />
+            <div className="absolute inset-y-0 right-0 z-30 w-72 shrink-0 shadow-xl md:static md:z-auto md:shadow-none">
+              <ArtifactPanel
+                conversationId={convId}
+                onClose={() => setArtifactsOpen(false)}
+              />
+            </div>
+          </>
         )}
 
         <aside className="hidden w-60 shrink-0 border-l bg-card/95 xl:block">

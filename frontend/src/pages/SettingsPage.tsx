@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store, Eye, EyeOff } from "lucide-react"
+import { KeyRound, Plus, Trash2, Loader2, CheckCircle2, ChevronRight, Pencil, ShieldCheck, FileText, RotateCcw, Star, Sparkles, Plug, Unplug, RefreshCw, Server, Search, Download, Store, Eye, EyeOff, Monitor, Moon, Sun } from "lucide-react"
 import { toast } from "sonner"
 import { providersApi } from "@/api/providers"
 import { settingsApi } from "@/api/settings"
@@ -33,6 +33,7 @@ import {
   saveAgentDefaults,
 } from "@/lib/agentConfig"
 import { Button } from "@/components/ui/button"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Input } from "@/components/ui/input"
 import { ChatModelsPicker } from "@/components/settings/ChatModelsPicker"
@@ -55,6 +56,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import {
+  loadThemePreference,
+  saveThemePreference,
+  type ThemePreference,
+} from "@/lib/theme"
 import { cn } from "@/lib/utils"
 
 const EMPTY_FORM: ProviderCreate = {
@@ -103,7 +109,7 @@ export function SettingsPage() {
       ? requestedReturnTo
       : "/"
   const [activeSection, setActiveSection] = useState<
-    "connections" | "agent" | "extensions" | "prompt"
+    "connections" | "agent" | "extensions" | "appearance" | "prompt"
   >("connections")
   const [createOpen, setCreateOpen] = useState(isProviderSetup)
   const [createForm, setCreateForm] = useState<ProviderCreate>(EMPTY_FORM)
@@ -183,11 +189,12 @@ export function SettingsPage() {
           </p>
         </header>
 
-        <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1 sm:grid-cols-4" role="tablist" aria-label="Settings sections">
+        <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1 sm:grid-cols-5" role="tablist" aria-label="Settings sections">
           {([
             ["connections", "Connections", KeyRound],
             ["agent", "Agent", ShieldCheck],
-            ["extensions", "Extensions", Plug],
+            ["extensions", "Skills & MCP", Plug],
+            ["appearance", "Appearance", Monitor],
             ["prompt", "Prompt", FileText],
           ] as const).map(([id, label, Icon]) => (
             <button
@@ -297,6 +304,7 @@ export function SettingsPage() {
         )}
 
         {activeSection === "agent" && <AgentConfigSection />}
+        {activeSection === "appearance" && <AppearanceSection />}
         {activeSection === "extensions" && (
           <div className="space-y-6">
             <SkillsSection />
@@ -623,6 +631,7 @@ function EditProviderDialog({
   const [chat_models, setChatModels] = useState<string[]>(provider?.chat_models ?? [])
   // Empty api_key means "keep the stored secret unchanged".
   const [api_key, setApiKey] = useState("")
+  const [revealKey, setRevealKey] = useState(false)
   const [is_fallback, setIsFallback] = useState(!!provider?.is_fallback)
 
   const handleSubmit = () => {
@@ -648,6 +657,9 @@ function EditProviderDialog({
               </Badge>
             )}
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            Update the connection label, endpoint, models, or API key.
+          </DialogDescription>
         </DialogHeader>
         {provider && (
           <div className="space-y-3">
@@ -683,14 +695,26 @@ function EditProviderDialog({
                   (leave blank to keep current: {provider.api_key_hint || "none"})
                 </span>
               </Label>
-              <Textarea
-                id="e-key"
-                placeholder="sk-…"
-                value={api_key}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="font-mono text-xs"
-                rows={2}
-              />
+              <div className="relative">
+                <Input
+                  id="e-key"
+                  type={revealKey ? "text" : "password"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="sk-…"
+                  value={api_key}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="pr-11 font-mono text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setRevealKey((value) => !value)}
+                  className="absolute inset-y-0 right-0 grid w-10 place-items-center rounded-r-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  aria-label={revealKey ? "Hide API key" : "Show API key"}
+                >
+                  {revealKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </div>
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -990,6 +1014,79 @@ function AgentConfigSection() {
   )
 }
 
+// --- Appearance ---
+
+/**
+ * Appearance section: light/dark/system theme. The .dark class toggles CSS
+ * variables defined in index.css; the preference persists in localStorage and
+ * "system" follows the OS via matchMedia. Inside Telegram, the WebApp
+ * colorScheme overrides this (telegramWebApp.ts).
+ */
+const THEME_OPTIONS: {
+  value: ThemePreference
+  label: string
+  hint: string
+  icon: typeof Sun
+}[] = [
+  { value: "system", label: "System", hint: "Follow your OS setting", icon: Monitor },
+  { value: "light", label: "Light", hint: "Always light", icon: Sun },
+  { value: "dark", label: "Dark", hint: "Always dark", icon: Moon },
+]
+
+function AppearanceSection() {
+  const [pref, setPref] = useState<ThemePreference>(() => loadThemePreference())
+
+  const choose = (value: ThemePreference) => {
+    setPref(value)
+    saveThemePreference(value)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <Monitor className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-lg">Appearance</CardTitle>
+            <CardDescription>
+              Light, dark, or follow your operating system.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-1.5" role="radiogroup" aria-label="Theme">
+          {THEME_OPTIONS.map(({ value, label, hint, icon: Icon }) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={pref === value}
+              onClick={() => choose(value)}
+              className={cn(
+                "flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left",
+                pref === value ? "border-primary/50 bg-accent" : "hover:bg-accent/50"
+              )}
+            >
+              <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">{label}</span>
+                <span className="block text-xs text-muted-foreground">{hint}</span>
+              </span>
+              {pref === value && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Inside the Telegram mini app, the theme follows Telegram instead.
+        </p>
+      </CardContent>
+    </Card>
+  )
+}
+
 // --- Skills management ---
 
 /**
@@ -999,8 +1096,9 @@ function AgentConfigSection() {
  */
 function SkillsSection() {
   const queryClient = useQueryClient()
+  const [deleteTarget, setDeleteTarget] = useState<SkillInfo | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["skills"],
     queryFn: () => skillsApi.list(),
   })
@@ -1009,6 +1107,7 @@ function SkillsSection() {
     mutationFn: skillsApi.delete,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills"] })
+      setDeleteTarget(null)
       toast.success("Skill deleted")
     },
     onError: () => toast.error("Skill was not deleted", {
@@ -1039,6 +1138,13 @@ function SkillsSection() {
           <div className="flex justify-center py-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
+        ) : isError ? (
+          <QueryErrorState
+            compact
+            title="Skills could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : skills.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
             No skills available.
@@ -1081,7 +1187,7 @@ function SkillsSection() {
                     variant="ghost"
                     size="icon"
                     className="ml-2 shrink-0 text-muted-foreground hover:text-destructive"
-                    onClick={() => deleteMutation.mutate(skill.name)}
+                    onClick={() => setDeleteTarget(skill)}
                     disabled={deleteMutation.isPending}
                     title="Delete skill"
                   >
@@ -1102,6 +1208,20 @@ function SkillsSection() {
           or the <code className="rounded bg-muted px-1">skill-creation</code> skill.
         </p>
       </CardContent>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete this skill?"
+        description={
+          deleteTarget
+            ? `“${deleteTarget.name}” will be permanently deleted and no longer offered to the agent.`
+            : ""
+        }
+        confirmLabel="Delete skill"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.name)}
+      />
     </Card>
   )
 }
@@ -1146,8 +1266,9 @@ function MCPServersSection() {
   const [addOpen, setAddOpen] = useState(false)
   const [form, setForm] = useState<MCPServerCreate>(EMPTY_MCP_FORM)
   const [argsText, setArgsText] = useState("")
+  const [removeTarget, setRemoveTarget] = useState<MCPServer | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => mcpApi.listServers(),
   })
@@ -1170,6 +1291,7 @@ function MCPServersSection() {
     mutationFn: mcpApi.removeServer,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+      setRemoveTarget(null)
       toast.success("MCP server removed")
     },
     onError: () => toast.error("MCP server was not removed", {
@@ -1222,7 +1344,7 @@ function MCPServersSection() {
     }
     const body = {
       ...form,
-      args: argsText.split(/\s+/).filter(Boolean),
+      args: splitArgs(argsText),
     }
     addMutation.mutate(body)
   }
@@ -1269,6 +1391,9 @@ function MCPServersSection() {
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Add MCP server</DialogTitle>
+                  <DialogDescription className="sr-only">
+                    Register a local MCP server the agent can call tools from.
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1306,10 +1431,12 @@ function MCPServersSection() {
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <Label htmlFor="mcp-args">Arguments (space-separated)</Label>
+                        <Label htmlFor="mcp-args">
+                          Arguments (space-separated; quote values containing spaces)
+                        </Label>
                         <Input
                           id="mcp-args"
-                          placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
+                          placeholder='-y @modelcontextprotocol/server-filesystem "C:\My Data"'
                           value={argsText}
                           onChange={(e) => setArgsText(e.target.value)}
                         />
@@ -1355,6 +1482,13 @@ function MCPServersSection() {
           <div className="flex justify-center py-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
+        ) : isError ? (
+          <QueryErrorState
+            compact
+            title="MCP servers could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : servers.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
             No MCP servers configured. Add one to extend the agent with external tools.
@@ -1422,7 +1556,7 @@ function MCPServersSection() {
                       variant="ghost"
                       size="icon"
                       className="h-9 w-9 text-muted-foreground hover:text-destructive"
-                      onClick={() => removeMutation.mutate(server.name)}
+                      onClick={() => setRemoveTarget(server)}
                       disabled={removeMutation.isPending}
                       title={`Remove ${server.name}`}
                       aria-label={`Remove ${server.name}`}
@@ -1467,7 +1601,30 @@ function MCPServersSection() {
           the data root. Tools from connected servers are automatically available to the agent.
         </p>
       </CardContent>
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => !open && setRemoveTarget(null)}
+        title="Remove this MCP server?"
+        description={
+          removeTarget
+            ? `“${removeTarget.name}” will be disconnected and its tools removed from the agent.`
+            : ""
+        }
+        confirmLabel="Remove server"
+        pending={removeMutation.isPending}
+        onConfirm={() => removeTarget && removeMutation.mutate(removeTarget.name)}
+      />
     </Card>
+  )
+}
+
+/** Space-split args while honoring single/double-quoted segments. */
+function splitArgs(text: string): string[] {
+  return (text.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((a) =>
+    (a.startsWith('"') && a.endsWith('"')) || (a.startsWith("'") && a.endsWith("'"))
+      ? a.slice(1, -1)
+      : a
   )
 }
 
@@ -1482,7 +1639,7 @@ function MCPStoreSection() {
   const [searchQuery, setSearchQuery] = useState("")
   const [submittedQuery, setSubmittedQuery] = useState("")
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ["mcp-store", submittedQuery],
     queryFn: () =>
       submittedQuery
@@ -1564,6 +1721,13 @@ function MCPStoreSection() {
           <div className="flex justify-center py-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
+        ) : isError ? (
+          <QueryErrorState
+            compact
+            title="MCP catalog could not be loaded"
+            description="Check the connection to the MCP registry, then try again."
+            onRetry={() => void refetch()}
+          />
         ) : results.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
             {submittedQuery

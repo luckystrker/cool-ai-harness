@@ -326,7 +326,11 @@ export function useConversationStream() {
       }
       case "run.failed": {
         const message = canonical.payload.errorCode ?? canonical.payload.reason
-        acc.content += `\n\n⚠️ **Error:** ${message}`
+        // Notices go into both `content` (persisted-history path) and `blocks`
+        // (live interleaved render path) — content is hidden once text blocks exist.
+        const note = `\n\n⚠️ **Error:** ${message}`
+        acc.content += note
+        pushTextDelta(acc, note)
         acc.finishReason = acc.finishReason ?? "error"
         acc.errored = true
         toast.error(message)
@@ -408,25 +412,29 @@ export function useConversationStream() {
       }
       case "subagent.started": {
         const name = canonical.payload.name ?? "subagent"
-        acc.content += `\n\n> 🤖 **Subagent launched:** ${name}\n`
+        const note = `\n\n> 🤖 **Subagent launched:** ${name}\n`
+        acc.content += note
+        pushTextDelta(acc, note)
         flush(acc)
         break
       }
       case "subagent.completed": {
         const summary = canonical.payload.summary ?? "Done"
-        acc.content += `> ✅ **Subagent completed:** ${summary.slice(0, 200)}\n`
+        const note = `> ✅ **Subagent completed:** ${summary.slice(0, 200)}\n`
+        acc.content += note
+        pushTextDelta(acc, note)
         flush(acc)
         break
       }
       case "subagent.failed": {
         // The runtime reports a cancellation through the same event kind with
         // `status: "cancelled"`, so render it distinctly.
-        if (canonical.payload.status === "cancelled") {
-          acc.content += `> 🛑 **Subagent cancelled**\n`
-        } else {
-          const error = canonical.payload.error ?? "Unknown error"
-          acc.content += `> ❌ **Subagent failed:** ${error}\n`
-        }
+        const note =
+          canonical.payload.status === "cancelled"
+            ? `> 🛑 **Subagent cancelled**\n`
+            : `> ❌ **Subagent failed:** ${canonical.payload.error ?? "Unknown error"}\n`
+        acc.content += note
+        pushTextDelta(acc, note)
         flush(acc)
         break
       }
@@ -434,7 +442,9 @@ export function useConversationStream() {
         // Progress updates are too frequent to render inline; skip.
         break
       case "session.compacted": {
-        acc.content += `\n\n> 🗜️ **Compacted** — older turns summarized (kept ${canonical.payload.retainedItems} recent items).\n`
+        const note = `\n\n> 🗜️ **Compacted** — older turns summarized (kept ${canonical.payload.retainedItems} recent items).\n`
+        acc.content += note
+        pushTextDelta(acc, note)
         flush(acc)
         break
       }
@@ -487,10 +497,12 @@ export function useConversationStream() {
         }
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
-          acc.content += `\n\n**Reply interrupted.** ${getErrorDescription(
+          const note = `\n\n**Reply interrupted.** ${getErrorDescription(
             e,
             "Check that Cool is running locally, then send your message again."
           )}`
+          acc.content += note
+          pushTextDelta(acc, note)
           acc.errored = true
           flush(acc)
         }

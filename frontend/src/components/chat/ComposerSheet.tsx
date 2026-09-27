@@ -1,8 +1,9 @@
 import { useMemo, useRef, useState } from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
 import { Check, FolderOpen, Paperclip, X } from "lucide-react"
-import type { ModelInfo } from "@/api/types"
+import type { Conversation, ModelInfo } from "@/api/types"
 import { DirectoryBrowserDialog } from "@/components/chat/DirectoryBrowserDialog"
+import { ProfileSwitcher } from "@/components/chat/ProfileSwitcher"
 import { Button } from "@/components/ui/button"
 import { MODE_LABELS, type PermissionMode } from "@/lib/agentConfig"
 import { formatContextWindow, hasModelMeta } from "@/lib/modelFormat"
@@ -11,6 +12,8 @@ import { cn } from "@/lib/utils"
 export interface ComposerSheetProps {
   open: boolean
   onClose: () => void
+  /** Current conversation — feeds the agent-profile picker. */
+  conversation: Conversation | null
   workingDirectory: string | null
   onWorkingDirectoryChange: (dir: string) => void
   mode: PermissionMode | null
@@ -35,6 +38,7 @@ export interface ComposerSheetProps {
 export function ComposerSheet({
   open,
   onClose,
+  conversation,
   workingDirectory,
   onWorkingDirectoryChange,
   mode,
@@ -164,6 +168,14 @@ export function ComposerSheet({
                 {workingDirectory ? dirLabel(workingDirectory) : "Not set — browse…"}
               </span>
             </button>
+          </section>
+
+          {/* --- Agent profile --- */}
+          <section>
+            <SheetLabel>Agent profile</SheetLabel>
+            <div className="rounded-lg border px-3 py-1">
+              <ProfileSwitcher conversation={conversation} />
+            </div>
           </section>
 
           {/* --- Agent mode (permissions) --- */}

@@ -4,6 +4,7 @@ import { subagentsApi } from "@/api/subagents"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -49,6 +50,9 @@ export function SubagentOutputDialog({
               </span>
             )}
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            Prompt, result, and full message history of this subagent run.
+          </DialogDescription>
         </DialogHeader>
 
         {isLoading && (

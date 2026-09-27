@@ -31,10 +31,12 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -68,6 +70,7 @@ export function MemoryPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("global")
   const [editingMemory, setEditingMemory] = useState<MemoryItem | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [archivingMemory, setArchivingMemory] = useState<MemoryItem | null>(null)
 
   // Fetch memories by scope
   const {
@@ -100,6 +103,7 @@ export function MemoryPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["memories"] })
       queryClient.invalidateQueries({ queryKey: ["memory-stats"] })
+      setArchivingMemory(null)
       toast.success("Memory archived")
     },
     onError: (error) =>
@@ -174,7 +178,11 @@ export function MemoryPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex min-h-14 gap-1 overflow-x-auto border-b px-4 py-2 sm:px-6">
+      <div
+        className="flex min-h-14 gap-1 overflow-x-auto border-b px-4 py-2 sm:px-6"
+        role="tablist"
+        aria-label="Memory sections"
+      >
         <TabButton
           active={activeTab === "global"}
           onClick={() => setActiveTab("global")}
@@ -218,7 +226,11 @@ export function MemoryPage() {
           isError={scopeError}
           onRetry={() => void refetchScope()}
           onEdit={(m) => setEditingMemory(m)}
-          onDelete={(id) => deleteMutation.mutate(id)}
+          onDelete={(id) =>
+            setArchivingMemory(
+              scopeMemories.find((m) => m.id === id) ?? null
+            )
+          }
         />
       )}
 
@@ -233,6 +245,16 @@ export function MemoryPage() {
         open={createOpen}
         defaultScope={activeTab === "agent" ? "agent" : "global"}
         onClose={() => setCreateOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={archivingMemory !== null}
+        onOpenChange={(open) => !open && setArchivingMemory(null)}
+        title="Archive this memory?"
+        description="The agent will no longer see it in future conversations."
+        confirmLabel="Archive"
+        pending={deleteMutation.isPending}
+        onConfirm={() => archivingMemory && deleteMutation.mutate(archivingMemory.id)}
       />
     </div>
   )
@@ -274,6 +296,8 @@ function TabButton({
 }) {
   return (
     <button
+      role="tab"
+      aria-selected={active}
       className={cn(
         "flex min-h-11 shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
         active
@@ -514,6 +538,9 @@ function MemoryEditDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Edit memory</DialogTitle>
+          <DialogDescription className="sr-only">
+            Update the memory text, importance, and tags.
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
@@ -583,6 +610,16 @@ function MemoryCreateDialog({
   const [importance, setImportance] = useState(0.5)
   const [tags, setTags] = useState("")
 
+  // Re-sync the scope picker each time the dialog opens — the initial
+  // useState only ran on mount, so switching tabs kept a stale scope.
+  const [lastOpen, setLastOpen] = useState(false)
+  if (open && !lastOpen) {
+    setLastOpen(true)
+    setScope(defaultScope)
+  } else if (!open && lastOpen) {
+    setLastOpen(false)
+  }
+
   const createMutation = useMutation({
     mutationFn: memoryApi.create,
     onSuccess: () => {
@@ -618,6 +655,9 @@ function MemoryCreateDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Add memory</DialogTitle>
+          <DialogDescription className="sr-only">
+            Save a fact or preference the agent can reuse later.
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">

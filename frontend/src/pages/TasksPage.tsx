@@ -2,10 +2,15 @@ import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   AlertCircle,
+  Ban,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
+  Copy,
+  Eye,
+  EyeOff,
   Globe,
   Inbox,
   Loader2,
@@ -39,11 +44,13 @@ import type {
 } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -68,18 +75,18 @@ function formatDuration(ms: number | null): string {
 }
 
 const STATUS_ICONS: Record<TaskRunStatus, typeof CheckCircle2> = {
-  queued: Loader2,
+  queued: Clock,
   running: Loader2,
   completed: CheckCircle2,
   failed: XCircle,
-  cancelled: XCircle,
+  cancelled: Ban,
   skipped: SkipForward,
 }
 
 function StatusBadge({ status }: { status: TaskRunStatus | null }) {
   if (!status) return <Badge variant="outline">never run</Badge>
   const Icon = STATUS_ICONS[status] ?? AlertCircle
-  const spinning = status === "running" || status === "queued"
+  const spinning = status === "running"
   const variant =
     status === "completed" ? "secondary" : status === "failed" ? "destructive" : "outline"
   return (
@@ -94,6 +101,7 @@ export function TasksPage() {
   const [tab, setTab] = useState<Tab>("tasks")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<ScheduledTask | null>(null)
+  const [deletingTask, setDeletingTask] = useState<ScheduledTask | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
 
   const { data: tasks = [], isLoading, isError, refetch } = useQuery({
@@ -147,6 +155,7 @@ export function TasksPage() {
     mutationFn: (id: number) => tasksApi.delete(id),
     onSuccess: () => {
       invalidate()
+      setDeletingTask(null)
       toast.success("Task deleted")
     },
     onError: (error) =>
@@ -173,21 +182,6 @@ export function TasksPage() {
     onSuccess: () => invalidate(),
   })
 
-  if (isLoading) {
-    return <QueryLoadingState label="Loading scheduled tasks…" className="h-64" />
-  }
-
-  if (isError) {
-    return (
-      <QueryErrorState
-        title="Scheduled tasks could not be loaded"
-        description="Check that Cool is running locally, then try again."
-        onRetry={() => void refetch()}
-        className="h-64 justify-center"
-      />
-    )
-  }
-
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -210,10 +204,12 @@ export function TasksPage() {
         </Button>
       </div>
 
-      <div className="flex gap-1 border-b">
+      <div className="flex gap-1 border-b" role="tablist" aria-label="Task sections">
         {(["tasks", "inbox", "rss", "webhooks"] as Tab[]).map((t) => (
           <button
             key={t}
+            role="tab"
+            aria-selected={tab === t}
             onClick={() => setTab(t)}
             className={cn(
               "flex items-center gap-1.5 px-4 py-2 text-sm font-medium capitalize transition-colors",
@@ -233,7 +229,16 @@ export function TasksPage() {
         ))}
       </div>
 
-      {tab === "tasks" && (
+      {isLoading ? (
+        <QueryLoadingState label="Loading scheduled tasks…" className="h-64" />
+      ) : isError ? (
+        <QueryErrorState
+          title="Scheduled tasks could not be loaded"
+          description="Check that Cool is running locally, then try again."
+          onRetry={() => void refetch()}
+          className="h-64 justify-center"
+        />
+      ) : tab === "tasks" && (
         <div className="space-y-3">
           {tasks.length === 0 && (
             <p className="py-8 text-center text-sm text-muted-foreground">
@@ -251,7 +256,7 @@ export function TasksPage() {
                 setEditing(task)
                 setDialogOpen(true)
               }}
-              onDelete={() => deleteMutation.mutate(task.id)}
+              onDelete={() => setDeletingTask(task)}
               onRun={() => runMutation.mutate(task.id)}
               onToggleEnabled={() =>
                 toggleMutation.mutate({ id: task.id, enabled: !task.enabled })
@@ -261,11 +266,11 @@ export function TasksPage() {
         </div>
       )}
 
-      {tab === "inbox" && <InboxPanel />}
+      {!isLoading && !isError && tab === "inbox" && <InboxPanel />}
 
-      {tab === "rss" && <RssPanel />}
+      {!isLoading && !isError && tab === "rss" && <RssPanel />}
 
-      {tab === "webhooks" && <WebhooksPanel />}
+      {!isLoading && !isError && tab === "webhooks" && <WebhooksPanel />}
 
       <TaskDialog
         open={dialogOpen}
@@ -273,6 +278,20 @@ export function TasksPage() {
         task={editing}
         onCreate={(body) => createMutation.mutate(body)}
         onUpdate={(id, body) => updateMutation.mutate({ id, body })}
+      />
+
+      <ConfirmDialog
+        open={deletingTask !== null}
+        onOpenChange={(open) => !open && setDeletingTask(null)}
+        title="Delete this scheduled task?"
+        description={
+          deletingTask
+            ? `\u201c${deletingTask.name}\u201d and its schedule will be permanently removed.`
+            : ""
+        }
+        confirmLabel="Delete task"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deletingTask && deleteMutation.mutate(deletingTask.id)}
       />
     </div>
   )
@@ -436,12 +455,22 @@ function InboxPanel() {
     refetchInterval: 10_000,
   })
 
+  // Task names come from the already-cached tasks list (same queryKey as the
+  // page), so this is a cache hit rather than an extra request.
+  const { data: tasks = [] } = useQuery({
+    queryKey: ["tasks"],
+    queryFn: () => tasksApi.list(),
+  })
+  const taskName = (id: number) =>
+    tasks.find((t) => t.id === id)?.name ?? `Task #${id}`
+
   const markReadMutation = useMutation({
     mutationFn: (runId: number) => tasksApi.markRead(runId, true),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks"] }),
   })
 
   const runs: TaskRun[] = inbox?.runs ?? []
+  const unreadRuns = runs.filter((r) => !r.is_read)
 
   if (runs.length === 0) {
     return (
@@ -453,6 +482,21 @@ function InboxPanel() {
 
   return (
     <div className="space-y-2">
+      {unreadRuns.length > 0 && (
+        <div className="flex justify-end">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs"
+            disabled={markReadMutation.isPending}
+            onClick={() =>
+              unreadRuns.forEach((r) => markReadMutation.mutate(r.id))
+            }
+          >
+            Mark all read ({unreadRuns.length})
+          </Button>
+        </div>
+      )}
       {runs.map((run) => (
         <div
           key={run.id}
@@ -464,7 +508,7 @@ function InboxPanel() {
           <StatusBadge status={run.status} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>#{run.task_id}</span>
+              <span className="font-medium text-foreground">{taskName(run.task_id)}</span>
               <span>{run.trigger_source}</span>
               <span>{formatWhen(run.started_at)}</span>
               <span>{formatDuration(run.duration_ms)}</span>
@@ -524,6 +568,10 @@ function TaskDialog({
   const [preview, setPreview] = useState<{ description: string | null; next_runs: string[] } | null>(
     null
   )
+  // The schedule text `preview` was generated from — lets submit detect edits
+  // made after the last parse and re-parse before saving.
+  const [parsedFor, setParsedFor] = useState("")
+  const [parsing, setParsing] = useState(false)
 
   // Sync form when dialog opens.
   const [lastTask, setLastTask] = useState<ScheduledTask | null>(null)
@@ -564,21 +612,51 @@ function TaskDialog({
       const resp = await tasksApi.parseCron(schedule.trim())
       if (resp.cron_expression) {
         setSchedule(resp.cron_expression)
+        setParsedFor(resp.cron_expression)
         setPreview({ description: resp.description, next_runs: resp.next_runs })
       } else {
         setPreview(null)
+        setParsedFor("")
         toast.error("Could not parse schedule", { description: resp.detail ?? undefined })
       }
     } catch {
       setPreview(null)
+      setParsedFor("")
     }
   }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    let cron = schedule.trim()
+    // Parse natural language on submit too — blur-based parsing alone lets an
+    // unedited-after-blur raw phrase slip through as an invalid cron string.
+    if (cron && parsedFor !== cron) {
+      setParsing(true)
+      try {
+        const resp = await tasksApi.parseCron(cron)
+        if (!resp.cron_expression) {
+          toast.error("Could not parse schedule", {
+            description:
+              resp.detail ?? "Use a cron expression like “0 9 * * 1” or a phrase like “every Monday at 9 AM”.",
+          })
+          return
+        }
+        cron = resp.cron_expression
+        setSchedule(resp.cron_expression)
+        setParsedFor(resp.cron_expression)
+        setPreview({ description: resp.description, next_runs: resp.next_runs })
+      } catch {
+        toast.error("Could not parse schedule", {
+          description: "Check the connection to Cool and try again.",
+        })
+        return
+      } finally {
+        setParsing(false)
+      }
+    }
     const body: ScheduledTaskCreate = {
       name: name.trim(),
       prompt: prompt.trim() || undefined,
-      cron_expression: schedule.trim() || undefined,
+      cron_expression: cron || undefined,
       timezone: timezone.trim() || undefined,
       model: model.trim() || undefined,
       max_iterations: Number(maxIterations) || 10,
@@ -607,6 +685,9 @@ function TaskDialog({
       <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{task ? "Edit scheduled task" : "New scheduled task"}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {task ? "Edit the scheduled task settings." : "Schedule a new recurring agent task."}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <div className="space-y-1">
@@ -728,7 +809,11 @@ function TaskDialog({
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={!name.trim() || !schedule.trim()}>
+            <Button
+              onClick={() => void handleSubmit()}
+              disabled={!name.trim() || !schedule.trim() || parsing}
+            >
+              {parsing && <Loader2 className="h-4 w-4 animate-spin" />}
               {task ? "Save task" : "Create scheduled task"}
             </Button>
           </div>
@@ -744,8 +829,9 @@ function RssPanel() {
   const queryClient = useQueryClient()
   const [url, setUrl] = useState("")
   const [category, setCategory] = useState("")
+  const [unsubTarget, setUnsubTarget] = useState<RssSubscription | null>(null)
 
-  const { data: subscriptions = [] } = useQuery({
+  const { data: subscriptions = [], isError: subsError, refetch: refetchSubs } = useQuery({
     queryKey: ["rss", "subscriptions"],
     queryFn: () => rssApi.listSubscriptions(),
     refetchInterval: 30_000,
@@ -779,6 +865,7 @@ function RssPanel() {
     mutationFn: (id: number) => rssApi.unsubscribe(id),
     onSuccess: () => {
       invalidate()
+      setUnsubTarget(null)
       toast.success("Unsubscribed")
     },
   })
@@ -822,6 +909,14 @@ function RssPanel() {
         <h3 className="text-sm font-medium text-muted-foreground">
           Subscriptions ({subscriptions.length})
         </h3>
+        {subsError && (
+          <QueryErrorState
+            compact
+            title="Subscriptions could not be loaded"
+            description="Check that Cool is running locally, then try again."
+            onRetry={() => void refetchSubs()}
+          />
+        )}
         {subscriptions.map((sub: RssSubscription) => (
           <Card key={sub.id}>
             <CardContent className="flex items-center justify-between py-3">
@@ -850,7 +945,7 @@ function RssPanel() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => unsubscribeMutation.mutate(sub.id)}
+                  onClick={() => setUnsubTarget(sub)}
                   title="Unsubscribe"
                 >
                   <Trash2 className="h-4 w-4" />
@@ -910,6 +1005,20 @@ function RssPanel() {
           </div>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={unsubTarget !== null}
+        onOpenChange={(open) => !open && setUnsubTarget(null)}
+        title="Unsubscribe from this feed?"
+        description={
+          unsubTarget
+            ? `“${unsubTarget.title || unsubTarget.url}” will be removed and its entries will stop updating.`
+            : ""
+        }
+        confirmLabel="Unsubscribe"
+        pending={unsubscribeMutation.isPending}
+        onConfirm={() => unsubTarget && unsubscribeMutation.mutate(unsubTarget.id)}
+      />
     </div>
   )
 }
@@ -921,8 +1030,9 @@ function WebhooksPanel() {
   const [name, setName] = useState("")
   const [sourceType, setSourceType] = useState("custom")
   const [expandedEp, setExpandedEp] = useState<number | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<WebhookEndpoint | null>(null)
 
-  const { data: endpoints = [] } = useQuery({
+  const { data: endpoints = [], isError: endpointsError, refetch: refetchEndpoints } = useQuery({
     queryKey: ["webhooks"],
     queryFn: () => webhooksApi.list(),
     refetchInterval: 15_000,
@@ -947,6 +1057,7 @@ function WebhooksPanel() {
     mutationFn: (id: number) => webhooksApi.delete(id),
     onSuccess: () => {
       invalidate()
+      setDeleteTarget(null)
       toast.success("Webhook deleted")
     },
   })
@@ -986,7 +1097,15 @@ function WebhooksPanel() {
       </div>
 
       {/* Endpoints list */}
-      {endpoints.length === 0 && (
+      {endpointsError && (
+        <QueryErrorState
+          compact
+          title="Webhook endpoints could not be loaded"
+          description="Check that Cool is running locally, then try again."
+          onRetry={() => void refetchEndpoints()}
+        />
+      )}
+      {endpoints.length === 0 && !endpointsError && (
         <p className="py-8 text-center text-sm text-muted-foreground">
           No webhook endpoints yet. Create one to receive events from external systems.
         </p>
@@ -997,10 +1116,24 @@ function WebhooksPanel() {
           endpoint={ep}
           expanded={expandedEp === ep.id}
           onToggle={() => setExpandedEp(expandedEp === ep.id ? null : ep.id)}
-          onDelete={() => deleteMutation.mutate(ep.id)}
+          onDelete={() => setDeleteTarget(ep)}
           onReplay={(evId) => replayMutation.mutate({ epId: ep.id, evId })}
         />
       ))}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete this webhook endpoint?"
+        description={
+          deleteTarget
+            ? `“${deleteTarget.name}” will stop receiving events; its URL and secret become invalid.`
+            : ""
+        }
+        confirmLabel="Delete webhook"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+      />
     </div>
   )
 }
@@ -1023,29 +1156,41 @@ function EndpointCard({
     queryFn: () => webhooksApi.listEvents(endpoint.id, { limit: 20 }),
     enabled: expanded,
   })
+  const [secretShown, setSecretShown] = useState(false)
+
+  const copySecret = async () => {
+    try {
+      await navigator.clipboard.writeText(endpoint.secret)
+      toast.success("Secret copied")
+    } catch {
+      toast.error("Could not copy the secret")
+    }
+  }
 
   return (
     <Card>
-      <CardHeader className="cursor-pointer py-3" onClick={onToggle}>
+      <CardHeader className="py-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-2 rounded text-left"
+            onClick={onToggle}
+            aria-expanded={expanded}
+          >
             {expanded ? (
-              <ChevronDown className="h-4 w-4" />
+              <ChevronDown className="h-4 w-4 shrink-0" />
             ) : (
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-4 w-4 shrink-0" />
             )}
-            <CardTitle className="text-sm">{endpoint.name}</CardTitle>
-            <Badge variant="outline">{endpoint.source_type}</Badge>
-            {!endpoint.enabled && <Badge variant="secondary">disabled</Badge>}
-          </div>
+            <CardTitle className="truncate text-sm">{endpoint.name}</CardTitle>
+            <Badge variant="outline" className="shrink-0">{endpoint.source_type}</Badge>
+            {!endpoint.enabled && <Badge variant="secondary" className="shrink-0">disabled</Badge>}
+          </button>
           <Button
             variant="ghost"
             size="icon"
-            aria-label="Delete webhook event"
-            onClick={(e) => {
-              e.stopPropagation()
-              onDelete()
-            }}
+            aria-label={`Delete webhook ${endpoint.name}`}
+            onClick={onDelete}
           >
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -1055,9 +1200,33 @@ function EndpointCard({
         <CardContent className="space-y-3 pt-0">
           <div className="rounded-md bg-muted p-2 text-xs font-mono">
             <p className="text-muted-foreground">URL</p>
-            <p className="select-all">{endpoint.url_path}</p>
-            <p className="mt-1 text-muted-foreground">Secret</p>
-            <p className="select-all">{endpoint.secret}</p>
+            <p className="select-all break-all">{endpoint.url_path}</p>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <p className="text-muted-foreground">Secret</p>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => setSecretShown((v) => !v)}
+                  title={secretShown ? "Hide secret" : "Show secret"}
+                  aria-label={secretShown ? "Hide webhook secret" : "Show webhook secret"}
+                >
+                  {secretShown ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                </button>
+                <button
+                  type="button"
+                  className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => void copySecret()}
+                  title="Copy secret"
+                  aria-label="Copy webhook secret"
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+            <p className="select-all break-all">
+              {secretShown ? endpoint.secret : "••••••••••••••••"}
+            </p>
           </div>
           <div className="space-y-1">
             <h4 className="text-xs font-medium text-muted-foreground">

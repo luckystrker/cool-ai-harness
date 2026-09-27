@@ -43,7 +43,7 @@ export function DeepResearchPage() {
     },
   })
 
-  const { data: detail } = useQuery({
+  const { data: detail, isError: detailError, refetch: refetchDetail } = useQuery({
     queryKey: ["research-run", selectedId],
     queryFn: () => deepResearchApi.get(selectedId!),
     enabled: selectedId != null,
@@ -125,9 +125,7 @@ export function DeepResearchPage() {
 
   const compareCandidates = useMemo(
     () =>
-      runs
-        .filter((r) => r.status === "completed" && r.id !== selectedId)
-        .slice(0, 10),
+      runs.filter((r) => r.status === "completed" && r.id !== selectedId),
     [runs, selectedId]
   )
 
@@ -384,6 +382,17 @@ export function DeepResearchPage() {
                 </p>
               ) : selected.status === "cancelled" ? (
                 <p className="text-sm text-muted-foreground">Research was cancelled.</p>
+              ) : selected.status === "completed" && detailError ? (
+                <QueryErrorState
+                  compact
+                  title="The report could not be loaded"
+                  description="Check that Cool is running locally, then try again."
+                  onRetry={() => void refetchDetail()}
+                />
+              ) : selected.status === "completed" ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading report…
+                </div>
               ) : (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" /> Running in the background…

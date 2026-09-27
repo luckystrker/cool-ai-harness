@@ -43,7 +43,7 @@ export function BudgetsPage() {
     queryFn: budgetsApi.getStatus,
   })
 
-  const { data: spend = [], isLoading: spendLoading } = useQuery({
+  const { data: spend = [], isLoading: spendLoading, isError: spendError, refetch: refetchSpend } = useQuery({
     queryKey: ["budgets", "spend"],
     queryFn: () => budgetsApi.spend({ limit: 100 }),
   })
@@ -132,7 +132,16 @@ export function BudgetsPage() {
               clearPending={clearOverrideMutation.isPending}
             />
 
-            <SpendHistory rows={spend} loading={spendLoading} />
+            {spendError ? (
+              <QueryErrorState
+                compact
+                title="Spend history could not be loaded"
+                description="Check that Cool is running locally, then try again."
+                onRetry={() => void refetchSpend()}
+              />
+            ) : (
+              <SpendHistory rows={spend} loading={spendLoading} />
+            )}
           </>
         )}
       </div>

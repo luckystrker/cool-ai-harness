@@ -23,7 +23,10 @@ export interface ToolCallBlockProps {
 
 /** Collapsible block showing a single tool invocation + its result. */
 export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolCallBlockProps) {
-  const [open, setOpen] = useState(awaitingApproval)
+  // null = follow `awaitingApproval` (auto-expand while a decision is needed,
+  // collapse once resolved); a user click latches an explicit override.
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null)
+  const open = openOverride ?? (awaitingApproval ?? false)
   const [showSubagentDialog, setShowSubagentDialog] = useState(false)
 
   const isSubagentTool = call.name === "spawn_subagent"
@@ -56,7 +59,7 @@ export function ToolCallBlock({ call, result, pending, awaitingApproval }: ToolC
     <div className="rounded-md border bg-muted/40 text-xs">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setOpenOverride(!open)}
       >
         <ChevronRight
           className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")}

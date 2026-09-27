@@ -24,9 +24,15 @@ export function MobileAppBar() {
         variant="ghost"
         size="icon"
         className="h-11 w-11 shrink-0"
-        onClick={() => navigate("/")}
-        title="Back to chat"
-        aria-label="Back to chat"
+        onClick={() => {
+          // Prefer the real back stack (react-router stamps history.state.idx);
+          // fall back to the chat home when there's nothing to pop.
+          const idx = (window.history.state as { idx?: number } | null)?.idx
+          if (typeof idx === "number" && idx > 0) navigate(-1)
+          else navigate("/")
+        }}
+        title="Back"
+        aria-label="Back"
       >
         <ArrowLeft className="h-5 w-5" />
       </Button>

@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, Bot, Pencil, Plus, Trash2 } from "lucide-react"
+import { ArrowLeft, Bot, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { getErrorDescription } from "@/api/client"
 import { conversationsApi } from "@/api/conversations"
@@ -9,7 +9,10 @@ import type { SubagentRole } from "@/api/types"
 import { RoleEditor } from "@/components/subagents/RoleEditor"
 import { RunCard } from "@/components/subagents/RunCard"
 import { LaunchForm } from "@/components/subagents/LaunchForm"
+import { SubagentOutputDialog } from "@/components/subagents/SubagentOutputDialog"
 import { Button } from "@/components/ui/button"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
 import { useIsMobile } from "@/hooks/useMediaQuery"
@@ -28,7 +31,7 @@ function RoleList({
   roles: SubagentRole[]
   selectedId: number | null
   onSelect: (role: SubagentRole) => void
-  onDelete: (id: number) => void
+  onDelete: (role: SubagentRole) => void
 }) {
   return (
     <ul className="space-y-0.5 p-2">
@@ -51,23 +54,15 @@ function RoleList({
               <p className="truncate text-xs text-muted-foreground">{role.description}</p>
             )}
           </button>
-          <div className="flex shrink-0 gap-0.5 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 md:h-5 md:w-5"
-              onClick={() => onSelect(role)}
-              title="Edit"
-            >
-              <Pencil className="h-3.5 w-3.5 md:h-3 md:w-3" />
-            </Button>
+          <div className="flex shrink-0 gap-0.5 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100">
             {!role.is_builtin && (
               <Button
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8 md:h-5 md:w-5"
-                onClick={() => onDelete(role.id)}
+                onClick={() => onDelete(role)}
                 title="Delete"
+                aria-label={`Delete role ${role.name}`}
               >
                 <Trash2 className="h-3.5 w-3.5 md:h-3 md:w-3" />
               </Button>
@@ -90,6 +85,9 @@ export function SubagentsPage() {
   const [tab, setTab] = useState<Tab>("monitor")
   const [editingRole, setEditingRole] = useState<SubagentRole | null>(null)
   const [showEditor, setShowEditor] = useState(false)
+  const [deletingRole, setDeletingRole] = useState<SubagentRole | null>(null)
+  const [outputRunId, setOutputRunId] = useState<number | null>(null)
+  const [parentConvOverride, setParentConvOverride] = useState<number | null>(null)
 
   const {
     data: roles = [],
@@ -109,7 +107,12 @@ export function SubagentsPage() {
   } = useQuery({
     queryKey: ["subagent-runs"],
     queryFn: () => subagentsApi.listRuns(),
-    refetchInterval: 3000,
+    // Poll only while something is still in flight — a settled list doesn't
+    // need a 3s heartbeat.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((r) => ["queued", "running"].includes(r.status))
+        ? 3000
+        : false,
   })
 
   // Fetch conversations to get a valid parent for standalone launches.
@@ -127,6 +130,7 @@ export function SubagentsPage() {
     mutationFn: (id: number) => subagentsApi.deleteRole(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["subagent-roles"] })
+      setDeletingRole(null)
       toast.success("Role deleted")
     },
     onError: (error) =>
@@ -135,21 +139,10 @@ export function SubagentsPage() {
       }),
   })
 
-  if (rolesLoading || runsLoading || conversationsLoading) {
-    return <QueryLoadingState label="Loading subagents…" className="h-64" />
-  }
-
-  if (rolesError || runsError || conversationsError) {
-    return (
-      <QueryErrorState
-        title="Subagents could not be loaded"
-        description="Check that Cool is running locally, then try again."
-        onRetry={() => {
-          void Promise.all([refetchRoles(), refetchRuns(), refetchConversations()])
-        }}
-        className="h-64 justify-center"
-      />
-    )
+  const pageLoading = rolesLoading || runsLoading || conversationsLoading
+  const pageError = rolesError || runsError || conversationsError
+  const retryAll = () => {
+    void Promise.all([refetchRoles(), refetchRuns(), refetchConversations()])
   }
 
   const openNewRole = () => {
@@ -172,14 +165,14 @@ export function SubagentsPage() {
   // Use the first available conversation as parent for standalone launches.
   // Prefer the parent from existing runs; fall back to the first conversation.
   const parentConvId =
-    runs[0]?.parent_conversation_id ?? conversations[0]?.id ?? null
+    parentConvOverride ?? runs[0]?.parent_conversation_id ?? conversations[0]?.id ?? null
 
   const roleList = (
     <RoleList
       roles={roles}
       selectedId={editingRole?.id ?? null}
       onSelect={openRole}
-      onDelete={(id) => deleteRoleMutation.mutate(id)}
+      onDelete={setDeletingRole}
     />
   )
 
@@ -222,7 +215,7 @@ export function SubagentsPage() {
           </div>
           <div className="space-y-1.5 p-2">
             {standaloneRuns.slice(0, 20).map((run) => (
-              <RunCard key={run.id} run={run} />
+              <RunCard key={run.id} run={run} onViewOutput={setOutputRunId} />
             ))}
             {standaloneRuns.length === 0 && (
               <p className="px-2 py-3 text-center text-xs text-muted-foreground">
@@ -236,10 +229,12 @@ export function SubagentsPage() {
       {/* Content panel with the tab bar */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Tab bar — M3-style tabs, full-width and touch-friendly on mobile */}
-        <div className="flex shrink-0 border-b">
+        <div className="flex shrink-0 border-b" role="tablist" aria-label="Subagent sections">
           {(["monitor", "launch", "roles"] as Tab[]).map((t) => (
             <button
               key={t}
+              role="tab"
+              aria-selected={tab === t}
               onClick={() => setTab(t)}
               className={cn(
                 "min-h-11 flex-1 px-4 text-sm font-medium capitalize transition-colors hover:text-foreground md:flex-none",
@@ -254,7 +249,16 @@ export function SubagentsPage() {
         </div>
 
         <ScrollArea className="flex-1">
-          {tab === "monitor" && (
+          {pageLoading && <QueryLoadingState label="Loading subagents…" className="h-64" />}
+          {pageError && (
+            <QueryErrorState
+              title="Subagents could not be loaded"
+              description="Check that Cool is running locally, then try again."
+              onRetry={retryAll}
+              className="h-64 justify-center"
+            />
+          )}
+          {!pageLoading && !pageError && tab === "monitor" && (
             <div className="p-4">
               <h3 className="mb-3 text-sm font-semibold">Active subagents</h3>
               {activeRuns.length === 0 ? (
@@ -264,7 +268,7 @@ export function SubagentsPage() {
               ) : (
                 <div className="grid gap-2">
                   {activeRuns.map((run) => (
-                    <RunCard key={run.id} run={run} />
+                    <RunCard key={run.id} run={run} onViewOutput={setOutputRunId} />
                   ))}
                 </div>
               )}
@@ -274,7 +278,7 @@ export function SubagentsPage() {
                   <h3 className="mb-3 mt-6 text-sm font-semibold">History</h3>
                   <div className="grid gap-2">
                     {pastRuns.map((run) => (
-                      <RunCard key={run.id} run={run} />
+                      <RunCard key={run.id} run={run} onViewOutput={setOutputRunId} />
                     ))}
                   </div>
                 </>
@@ -282,9 +286,30 @@ export function SubagentsPage() {
             </div>
           )}
 
-          {tab === "launch" &&
-            (parentConvId != null ? (
-              <LaunchForm parentConversationId={parentConvId} />
+          {!pageLoading && !pageError && tab === "launch" &&
+            (conversations.length > 0 ? (
+              <div className="space-y-3 p-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="subagent-parent-conv" className="text-xs text-muted-foreground">
+                    Parent conversation
+                  </Label>
+                  <select
+                    id="subagent-parent-conv"
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={parentConvId ?? ""}
+                    onChange={(e) => setParentConvOverride(Number(e.target.value))}
+                  >
+                    {conversations.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.title || `Conversation #${c.id}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {parentConvId != null && (
+                  <LaunchForm parentConversationId={parentConvId} />
+                )}
+              </div>
             ) : (
               <div className="p-4 text-sm text-muted-foreground">
                 No conversations available. Create a conversation first to launch
@@ -293,7 +318,7 @@ export function SubagentsPage() {
             ))}
 
           {/* Mobile Roles tab: list ↔ editor navigation with a back action. */}
-          {tab === "roles" && isMobile && (
+          {!pageLoading && !pageError && tab === "roles" && isMobile && (
             <>
               {showEditor ? (
                 <div>
@@ -344,7 +369,7 @@ export function SubagentsPage() {
           )}
 
           {/* Desktop Roles tab: editor only (list is in the left panel). */}
-          {tab === "roles" && !isMobile && showEditor && (
+          {!pageLoading && !pageError && tab === "roles" && !isMobile && showEditor && (
             <RoleEditor
               key={editingRole?.id ?? "new"}
               role={editingRole}
@@ -354,13 +379,33 @@ export function SubagentsPage() {
               }}
             />
           )}
-          {tab === "roles" && !isMobile && !showEditor && (
+          {!pageLoading && !pageError && tab === "roles" && !isMobile && !showEditor && (
             <div className="p-4 text-sm text-muted-foreground">
               Select a role from the left panel to edit it, or use the plus button to create one.
             </div>
           )}
         </ScrollArea>
       </div>
+
+      <ConfirmDialog
+        open={deletingRole !== null}
+        onOpenChange={(open) => !open && setDeletingRole(null)}
+        title="Delete this subagent role?"
+        description={
+          deletingRole
+            ? `“${deletingRole.name}” will be permanently deleted.`
+            : ""
+        }
+        confirmLabel="Delete role"
+        pending={deleteRoleMutation.isPending}
+        onConfirm={() => deletingRole && deleteRoleMutation.mutate(deletingRole.id)}
+      />
+
+      <SubagentOutputDialog
+        open={outputRunId !== null}
+        onOpenChange={(open) => !open && setOutputRunId(null)}
+        subagentRunId={outputRunId ?? 0}
+      />
     </div>
   )
 }

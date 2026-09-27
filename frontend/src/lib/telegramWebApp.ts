@@ -59,12 +59,29 @@ function applyTheme(scheme: "light" | "dark") {
 let initialized = false
 
 /**
- * Load the SDK (if missing) and wire theme/viewport integration.
- * Safe to call unconditionally at startup — does nothing outside Telegram.
+ * Cheap heuristic for "this page is probably inside a Telegram WebApp view".
+ * Avoids fetching the SDK (and the postEvent console spam) in a regular
+ * browser: Telegram launches web apps with `tgWebAppData` in the URL fragment
+ * and injects a bridge object (WebApp / TelegramWebviewProxy) early.
+ */
+function maybeTelegramEnvironment(): boolean {
+  if (typeof window === "undefined") return false
+  return (
+    Boolean(window.Telegram?.WebApp) ||
+    "TelegramWebviewProxy" in window ||
+    window.location.hash.includes("tgWebAppData=") ||
+    /Telegram/i.test(navigator.userAgent)
+  )
+}
+
+/**
+ * Load the SDK (only when the page looks like it's inside Telegram) and wire
+ * theme/viewport integration. Does nothing in a regular browser.
  */
 export function initTelegramWebApp(): void {
   if (initialized || typeof window === "undefined") return
   initialized = true
+  if (!maybeTelegramEnvironment()) return
 
   const boot = () => {
     const app = tg()

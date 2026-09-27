@@ -109,6 +109,11 @@ export function ChatComposer({
             ))}
           </div>
         )}
+        {pendingFiles.length > 0 && !value.trim() && (
+          <p className="mb-2 text-xs text-muted-foreground">
+            No message text — the agent will be sent “Analyze the attached file(s).”
+          </p>
+        )}
 
         <div className="relative flex items-end gap-2">
           {/* Leading control: custom (mobile "+") or the attach button */}

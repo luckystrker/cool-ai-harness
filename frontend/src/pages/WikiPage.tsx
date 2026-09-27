@@ -19,17 +19,25 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { Markdown } from "@/components/chat/Markdown"
 import { QueryErrorState, QueryLoadingState } from "@/components/ui/query-state"
+import { useDebouncedValue } from "@/hooks/useDebouncedValue"
+import { cn } from "@/lib/utils"
 
 export function WikiPage() {
   const queryClient = useQueryClient()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<WikiArticle | null>(null)
+  const [viewing, setViewing] = useState<WikiArticle | null>(null)
+  const [deleting, setDeleting] = useState<WikiArticle | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
+  const debouncedSearch = useDebouncedValue(searchQuery, 300)
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
 
   const { data: articles = [], isLoading, isError, refetch } = useQuery({
@@ -43,9 +51,9 @@ export function WikiPage() {
   })
 
   const { data: searchResults } = useQuery({
-    queryKey: ["wiki-search", searchQuery],
-    queryFn: () => wikiApi.search(searchQuery),
-    enabled: searchQuery.length >= 2,
+    queryKey: ["wiki-search", debouncedSearch],
+    queryFn: () => wikiApi.search(debouncedSearch),
+    enabled: debouncedSearch.length >= 2,
   })
 
   const createMutation = useMutation({
@@ -81,6 +89,7 @@ export function WikiPage() {
     mutationFn: (id: number) => wikiApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wiki"] })
+      setDeleting(null)
       toast.success("Article deleted")
     },
     onError: (error) =>
@@ -99,7 +108,7 @@ export function WikiPage() {
       }),
   })
 
-  const displayArticles = searchQuery.length >= 2 ? (searchResults ?? []) : articles
+  const displayArticles = debouncedSearch.length >= 2 ? (searchResults ?? []) : articles
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">
@@ -150,7 +159,7 @@ export function WikiPage() {
         />
       ) : displayArticles.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">
-          {searchQuery.length >= 2
+          {debouncedSearch.length >= 2
             ? "No articles match your search. Try different words or clear the search."
             : categoryFilter
               ? `No articles in “${categoryFilter}”. Choose another category or create one.`
@@ -164,8 +173,14 @@ export function WikiPage() {
                 <div className="flex items-start justify-between">
                   <div>
                     <CardTitle className="text-base">
-                      {article.is_pinned && <Pin className="mr-1 inline h-3.5 w-3.5 text-yellow-500" />}
-                      {article.title}
+                      <button
+                        type="button"
+                        className="text-left hover:underline"
+                        onClick={() => setViewing(article)}
+                      >
+                        {article.is_pinned && <Pin className="mr-1 inline h-3.5 w-3.5 text-yellow-500" />}
+                        {article.title}
+                      </button>
                     </CardTitle>
                     <CardDescription className="mt-1 flex items-center gap-2">
                       <Badge variant="secondary">{article.category}</Badge>
@@ -199,7 +214,7 @@ export function WikiPage() {
                       size="sm"
                       title={`Permanently delete ${article.title}`}
                       aria-label={`Permanently delete ${article.title}`}
-                      onClick={() => deleteMutation.mutate(article.id)}
+                      onClick={() => setDeleting(article)}
                     >
                       <Trash2 className="h-3.5 w-3.5 text-red-500" />
                     </Button>
@@ -224,7 +239,69 @@ export function WikiPage() {
         onCreate={(body) => createMutation.mutate(body)}
         onUpdate={(id, body) => updateMutation.mutate({ id, body })}
       />
+
+      {/* Read-only view */}
+      <ArticleViewDialog
+        article={viewing}
+        onClose={() => setViewing(null)}
+        onEdit={(a) => {
+          setViewing(null)
+          setEditing(a)
+          setDialogOpen(true)
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        title="Delete this article?"
+        description={
+          deleting
+            ? `\u201c${deleting.title}\u201d will be permanently deleted.`
+            : ""
+        }
+        confirmLabel="Delete article"
+        pending={deleteMutation.isPending}
+        onConfirm={() => deleting && deleteMutation.mutate(deleting.id)}
+      />
     </div>
+  )
+}
+
+function ArticleViewDialog({
+  article,
+  onClose,
+  onEdit,
+}: {
+  article: WikiArticle | null
+  onClose: () => void
+  onEdit: (article: WikiArticle) => void
+}) {
+  return (
+    <Dialog open={article !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{article?.title}</DialogTitle>
+          <DialogDescription className="flex flex-wrap items-center gap-2">
+            {article && <Badge variant="secondary">{article.category}</Badge>}
+            {article?.tags.map((t) => (
+              <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
+            ))}
+            {article && (
+              <span className="text-xs text-muted-foreground">
+                v{article.version}
+              </span>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        {article && <Markdown content={article.content} />}
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={() => article && onEdit(article)}>
+            <Pencil className="mr-1 h-3.5 w-3.5" /> Edit article
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -241,10 +318,28 @@ function ArticleDialog({
   onCreate: (body: { title: string; content: string; category: string; tags: string[] }) => void
   onUpdate: (id: number, body: Record<string, unknown>) => void
 }) {
-  const [title, setTitle] = useState(article?.title ?? "")
-  const [content, setContent] = useState(article?.content ?? "")
-  const [category, setCategory] = useState(article?.category ?? "general")
-  const [tagsStr, setTagsStr] = useState(article?.tags.join(", ") ?? "")
+  const [title, setTitle] = useState("")
+  const [content, setContent] = useState("")
+  const [category, setCategory] = useState("general")
+  const [tagsStr, setTagsStr] = useState("")
+  const [preview, setPreview] = useState(false)
+
+  // Re-seed the form whenever the dialog opens for a different article
+  // (same render-phase pattern as TaskDialog): `article` can arrive after
+  // the component first mounted with null, so useState initializers alone
+  // would leave the fields empty.
+  const [lastArticle, setLastArticle] = useState<WikiArticle | null>(null)
+  if (open && article !== lastArticle) {
+    setLastArticle(article)
+    setTitle(article?.title ?? "")
+    setContent(article?.content ?? "")
+    setCategory(article?.category ?? "general")
+    setTagsStr(article?.tags.join(", ") ?? "")
+    setPreview(false)
+  }
+  if (!open && lastArticle !== null) {
+    setLastArticle(null)
+  }
 
   const handleSubmit = () => {
     const tags = tagsStr.split(",").map((t) => t.trim()).filter(Boolean)
@@ -257,9 +352,12 @@ function ArticleDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{article ? "Edit article" : "New article"}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {article ? "Edit the knowledge base article." : "Create a knowledge base article."}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div>
@@ -273,14 +371,45 @@ function ArticleDialog({
             <p className="mt-1 text-xs text-muted-foreground">A title is required.</p>
           </div>
           <div>
-            <Label htmlFor="wiki-article-content">Content (Markdown)</Label>
-            <Textarea
-              id="wiki-article-content"
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              rows={10}
-              placeholder="Write the article in Markdown…"
-            />
+            <div className="flex items-center justify-between">
+              <Label htmlFor="wiki-article-content">Content (Markdown)</Label>
+              <div className="flex gap-1 rounded-md bg-muted p-0.5" role="tablist">
+                {(["write", "preview"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === "preview" ? preview : !preview}
+                    onClick={() => setPreview(mode === "preview")}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs capitalize",
+                      (mode === "preview") === preview
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground"
+                    )}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {preview ? (
+              <div className="min-h-[240px] rounded-md border p-3">
+                {content.trim() ? (
+                  <Markdown content={content} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Nothing to preview yet.</p>
+                )}
+              </div>
+            ) : (
+              <Textarea
+                id="wiki-article-content"
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                rows={10}
+                placeholder="Write the article in Markdown…"
+              />
+            )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex-1">

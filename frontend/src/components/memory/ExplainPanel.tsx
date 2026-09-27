@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge"
 
 /** Expandable "why is this remembered" breakdown for a memory card. */
 export function ExplainPanel({ memoryId }: { memoryId: number }) {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["memory-explain", memoryId],
     queryFn: () => memoryApi.explain(memoryId),
   })
@@ -20,7 +20,14 @@ export function ExplainPanel({ memoryId }: { memoryId: number }) {
   if (error || !data) {
     return (
       <div className="py-2 text-xs text-muted-foreground">
-        Could not load explanation.
+        Could not load explanation.{" "}
+        <button
+          type="button"
+          className="underline underline-offset-2 hover:text-foreground"
+          onClick={() => void refetch()}
+        >
+          Retry
+        </button>
       </div>
     )
   }

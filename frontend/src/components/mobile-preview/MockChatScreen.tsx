@@ -75,7 +75,7 @@ export function MockChatScreen({
   }
 
   return (
-    <div className={cn("relative flex min-h-0 flex-1 flex-col bg-background", className)}>
+    <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background", className)}>
       {/* --- Mobile header (48px, 3 zones: menu / title / overflow) --- */}
       <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
         {!hideMenuButton && (
