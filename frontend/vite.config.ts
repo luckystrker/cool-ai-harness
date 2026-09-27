@@ -18,15 +18,10 @@ export default defineConfig({
     // Windows setups, which makes `curl 127.0.0.1:5173` silently fail.
     host: "127.0.0.1",
     port: 5173,
-    // Proxy /api and /ws to the backend so the SPA can call same-origin URLs.
+    // Proxy /api to `cool serve` so the SPA can call same-origin URLs.
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-      },
-      "/ws": {
-        target: "ws://127.0.0.1:8000",
-        ws: true,
         changeOrigin: true,
       },
     },

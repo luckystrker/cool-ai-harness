@@ -43,9 +43,9 @@ const MODELS = [
 const CAPABILITIES: { key: string; label: string; hint: string }[] = [
   { key: "read", label: "Read files", hint: "read_file, list_files" },
   { key: "write", label: "Write files", hint: "write_file, artifacts" },
-  { key: "execute", label: "Execute code", hint: "python_execute, bash" },
+  { key: "execute", label: "Execute code", hint: "shell, git" },
   { key: "network", label: "Network", hint: "web_search, web_fetch" },
-  { key: "git", label: "Git / GitHub", hint: "git_*, github_*" },
+  { key: "git", label: "Git / GitHub", hint: "git (via gh/MCP)" },
   { key: "send_external", label: "External send", hint: "Telegram, webhooks" },
 ]
 

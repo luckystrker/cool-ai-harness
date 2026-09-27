@@ -14,7 +14,8 @@ import type {
   ToolPermissions,
 } from "@/api/types"
 
-// Tools the agent exposes (kept in sync with backend register_builtins()).
+// Tools the agent exposes (kept in sync with the Rust tool registry in
+// `crates/cool-agent/src/tools.rs` + `crates/cool-cli/src/{store,executor}_tools.rs`).
 // The "*" entry is the wildcard default applied to any tool not listed.
 export const TOOL_NAMES = [
   "*",
@@ -22,25 +23,19 @@ export const TOOL_NAMES = [
   "read_file",
   "write_file",
   "list_files",
-  // Code execution
-  "python_execute",
+  // Execution
+  "shell",
+  "git",
   // Web tools
   "web_search",
   "web_fetch",
-  // Planning
-  "plan_step_update",
+  // Planning / research
+  "update_plan",
+  "deep_research",
   // Skills
   "list_skills",
   "use_skill",
   "create_skill",
-  // MCP management
-  "mcp_list_servers",
-  "mcp_add_server",
-  "mcp_remove_server",
-  "mcp_connect_server",
-  "mcp_disconnect_server",
-  "mcp_search_store",
-  "mcp_install_server",
   // Subagents
   "spawn_subagent",
   // Memory
@@ -57,8 +52,11 @@ export const TOOL_NAMES = [
   "list_tasks",
   "update_task",
   "delete_task",
-  "run_task_now",
   "parse_cron",
+  // RSS feeds
+  "rss_subscribe",
+  "rss_list",
+  "rss_unsubscribe",
   // Wiki / knowledge base
   "read_wiki",
   "write_wiki",
@@ -97,14 +95,14 @@ export const PERM_STYLES: Record<ToolPermission, string> = {
  * Quick permission presets. Selecting one writes a permission map that
  * expresses the chosen posture; the user can then fine-tune individual tools
  * in the Settings page matrix. "allow edits" runs file/list tools freely but
- * still confirms before executing code (the riskiest built-in).
+ * still confirms before running processes (the riskiest built-in).
  */
 export type PermissionMode = "ask" | "allow" | "allow_edits"
 
 export const MODE_PRESETS: Record<PermissionMode, ToolPermissions> = {
   ask: { "*": "ask" },
   allow: { "*": "allow" },
-  allow_edits: { "*": "allow", python_execute: "ask" },
+  allow_edits: { "*": "allow", shell: "ask" },
 }
 
 export const MODE_LABELS: { mode: PermissionMode; label: string; hint: string }[] = [

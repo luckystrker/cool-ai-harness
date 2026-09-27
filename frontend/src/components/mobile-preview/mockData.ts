@@ -54,8 +54,8 @@ export const mockMessages: MockMessage[] = [
     type: "assistant",
     text: "I'll inspect the last run and compare it against the baseline traces.",
   },
-  { type: "tool", name: "read_file · evals/gate.py", status: "done" },
-  { type: "tool", name: "run_tests · pytest evals", status: "running" },
+  { type: "tool", name: "read_file · crates/cool-agent/tests/fixtures/evals.json", status: "done" },
+  { type: "tool", name: "shell · cargo test -p cool-agent --test deterministic_evals", status: "running" },
   {
     type: "assistant",
     text: "The gate fails because the baseline was recorded with an older scenario set. I need to write a new baseline file — approve the change below.",
