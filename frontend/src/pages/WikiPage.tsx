@@ -282,18 +282,21 @@ function ArticleViewDialog({
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{article?.title}</DialogTitle>
-          <DialogDescription className="flex flex-wrap items-center gap-2">
-            {article && <Badge variant="secondary">{article.category}</Badge>}
-            {article?.tags.map((t) => (
-              <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
-            ))}
-            {article && (
-              <span className="text-xs text-muted-foreground">
-                v{article.version}
-              </span>
-            )}
+          <DialogDescription className="sr-only">
+            Full article content with category, tags, and version.
           </DialogDescription>
         </DialogHeader>
+        {article && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">{article.category}</Badge>
+            {article.tags.map((t) => (
+              <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
+            ))}
+            <span className="text-xs text-muted-foreground">
+              v{article.version}
+            </span>
+          </div>
+        )}
         {article && <Markdown content={article.content} />}
         <div className="flex justify-end">
           <Button variant="outline" onClick={() => article && onEdit(article)}>
@@ -324,21 +327,19 @@ function ArticleDialog({
   const [tagsStr, setTagsStr] = useState("")
   const [preview, setPreview] = useState(false)
 
-  // Re-seed the form whenever the dialog opens for a different article
-  // (same render-phase pattern as TaskDialog): `article` can arrive after
-  // the component first mounted with null, so useState initializers alone
-  // would leave the fields empty.
-  const [lastArticle, setLastArticle] = useState<WikiArticle | null>(null)
-  if (open && article !== lastArticle) {
-    setLastArticle(article)
+  // Re-seed the form on every open transition — covers "new after edit"
+  // (article is null both times) and "different article" alike.
+  const [wasOpen, setWasOpen] = useState(false)
+  if (open && !wasOpen) {
+    setWasOpen(true)
     setTitle(article?.title ?? "")
     setContent(article?.content ?? "")
     setCategory(article?.category ?? "general")
     setTagsStr(article?.tags.join(", ") ?? "")
     setPreview(false)
   }
-  if (!open && lastArticle !== null) {
-    setLastArticle(null)
+  if (!open && wasOpen) {
+    setWasOpen(false)
   }
 
   const handleSubmit = () => {

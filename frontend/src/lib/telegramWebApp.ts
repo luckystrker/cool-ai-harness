@@ -80,8 +80,8 @@ function maybeTelegramEnvironment(): boolean {
  */
 export function initTelegramWebApp(): void {
   if (initialized || typeof window === "undefined") return
-  initialized = true
   if (!maybeTelegramEnvironment()) return
+  initialized = true
 
   const boot = () => {
     const app = tg()

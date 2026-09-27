@@ -573,10 +573,11 @@ function TaskDialog({
   const [parsedFor, setParsedFor] = useState("")
   const [parsing, setParsing] = useState(false)
 
-  // Sync form when dialog opens.
-  const [lastTask, setLastTask] = useState<ScheduledTask | null>(null)
-  if (open && task !== lastTask) {
-    setLastTask(task)
+  // Re-seed the form on every open transition — covers "new after edit"
+  // (task is null both times) and "different task" alike.
+  const [wasOpen, setWasOpen] = useState(false)
+  if (open && !wasOpen) {
+    setWasOpen(true)
     setName(task?.name ?? "")
     setPrompt(task?.prompt ?? "")
     setSchedule(task?.cron_expression ?? "")
@@ -593,9 +594,10 @@ function TaskDialog({
         ? { description: task.schedule_description, next_runs: task.next_runs }
         : null
     )
+    setParsedFor(task?.cron_expression ?? "")
   }
-  if (!open && lastTask !== null) {
-    setLastTask(null)
+  if (!open && wasOpen) {
+    setWasOpen(false)
   }
 
   const parsedSchedule = useMemo(() => {

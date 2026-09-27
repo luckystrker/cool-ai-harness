@@ -34,6 +34,7 @@ export function RunCard({ run, onViewOutput }: { run: SubagentRun; onViewOutput?
   const deleteMutation = useMutation({
     mutationFn: () => subagentsApi.deleteRun(run.id),
     onSuccess: () => {
+      setConfirmingDelete(false)
       queryClient.invalidateQueries({ queryKey: ["subagent-runs"] })
     },
   })

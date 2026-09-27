@@ -171,12 +171,14 @@ export function ComposerSheet({
           </section>
 
           {/* --- Agent profile --- */}
-          <section>
-            <SheetLabel>Agent profile</SheetLabel>
-            <div className="rounded-lg border px-3 py-1">
-              <ProfileSwitcher conversation={conversation} />
-            </div>
-          </section>
+          {conversation && (
+            <section>
+              <SheetLabel>Agent profile</SheetLabel>
+              <div className="rounded-lg border px-3 py-1">
+                <ProfileSwitcher conversation={conversation} />
+              </div>
+            </section>
+          )}
 
           {/* --- Agent mode (permissions) --- */}
           <section>
