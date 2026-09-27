@@ -75,10 +75,11 @@ replaced file — they are not merged back. Keep the replaced `harness.db`
 ## Release policy
 
 - Rollback to the Python runtime is supported **only on the last
-  Python-containing release tag**; once ADR-0003 executes and the Python
-  server is deleted, shape-B rollback to Python is no longer possible from
-  that release onward — the supported path forward is a new `cool` release.
-- The runtime-default cutover and the legacy-code removal are separate
-  releases by plan rule (§13): this document covers only the cutover rollback.
+  Python-containing release tag**; ADR-0003 was executed on 2026-09-27 and the
+  Python server is deleted, so shape-B rollback to Python is no longer possible
+  from this release onward — the supported path forward is a new `cool` release.
+- The runtime-default cutover and the legacy-code removal were planned as
+  separate releases (§13); the maintainer waived the two-release wait, so this
+  document covers only the cutover rollback.
 - Adoption is never a startup side effect — `cool serve` cannot strand an
   operator on a Rust-owned store by accident.

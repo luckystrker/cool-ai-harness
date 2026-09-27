@@ -5,9 +5,10 @@ subagents, long-term + working memory, personalities, planning mode, recurring
 tasks (cron), RSS aggregation, webhooks, wiki, cost budgets, analytics, an
 inspector/replay console, and durable agent runs. Control via the web UI.
 
-> Status: **Фазы 0–4 shipped**. Phase 4 delivers Deep Research, Code/Git/GitHub,
-> multimodal chat and OCR, browser automation, and Agent Constructor ✅ —
-> see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap.
+> Status: **Фазы 0–4 shipped** on the Rust core. Phase 4 delivers Deep
+> Research, Code/Git, multimodal attachments, and Agent Constructor ✅ —
+> browser automation and provider-native vision/OCR are deferred gaps
+> (see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap).
 <img width="1718" height="1273" alt="image" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
 
 ## Stack
@@ -132,8 +133,8 @@ authenticated server profile and Telegram identity adapter remain later phases.
 Each agent turn is a **durable run** (Фаза 1.5): an `agent_runs` row tracks its
 status (`running` → `completed`/`failed`/`cancelled`), cumulative token/cost
 usage, iterations, and outcome; an append-only `run_events` log records every
-event for replay/inspection. Interactive runs (SSE/WebSocket) are cancellable
-via the registry and the cancel endpoint.
+event for replay/inspection. Interactive runs (SSE via `GET /api/events`) are
+cancellable via the registry and the cancel endpoint.
 
 On the default runtime these are canonical App Protocol commands
 (`session.runs`, `run.events`, `run.cancel`) over `POST /api/rpc` — for
@@ -202,26 +203,29 @@ Beyond the core agent loop, these subsystems are implemented:
   (`agent_profiles`).
 - **Analytics** (Фаза 3a) — aggregating dashboards (spend, tool usage, runs,
   latency), unified LLM-call log, and optional OpenTelemetry export.
-- **Inspector** — live `/ws/inspect/{run_id}` tail of in-progress runs, plus
+- **Inspector** — live tail of in-progress runs over `GET /api/events`, plus
   timeline reconstruction, two-run comparison, and replay over the event log.
-- **Recurring tasks** (Фаза 3b) — APScheduler-backed cron/interval/date agent
-  tasks persisted in the DB; scheduled runs are durable with delivery templates
-  (reminders, reports, summaries).
+- **Recurring tasks** (Фаза 3b) — in-process cron/interval/date agent
+  tasks persisted in the DB (`cool-app-server` scheduler); scheduled runs are
+  durable with delivery templates (reminders, reports, summaries).
 - **RSS** (Фаза 3b) — feed subscriptions with filters, scheduled aggregation,
   and LLM summarization into a digest/inbox.
 - **Webhooks** (Фаза 3b) — HTTP webhook router that triggers agent runs/tasks
   from external services (signed, idempotent).
 - **Wiki** — markdown article store (`wiki_articles`) with agent search/write
   tools and a browsing UI.
-- **Code & Git tools** (Фаза 4) — sandboxed `bash`/Python
-  execution, git status/diff/log/commit/push via the local CLI, and GitHub
-  integration (issues/PRs/actions).
+- **Code & Git tools** (Фаза 4) — policy-gated `shell` process execution
+  (fails closed without a configured launcher) and a `git` tool; GitHub
+  integration goes through attached MCP servers or the `gh` CLI.
 - **Deep Research** (Фаза 4) — durable research runs with parallel subagents,
-  source citations, browser activity, and Markdown/HTML/PDF/DOCX export.
-- **Multimodal chat** (Фаза 4) — image/document attachments, provider-native
-  vision payloads, OCR/PDF extraction, thumbnails, and analysis tools.
-- **Browser automation** (Фаза 4) — isolated Playwright sessions with SSRF
-  protection, navigation, interaction, extraction, and screenshot artifacts.
+  source citations, and Markdown/HTML export (PDF/DOCX export is a delegated
+  worker stub — see `docs/backlog/python-workers.md`).
+- **Multimodal chat** (Фаза 4) — image/document attachments with blob
+  storage and thumbnails; provider-native vision payloads and OCR are a
+  recorded M12 deferred gap (attachments are acknowledged, not yet sent to
+  the model).
+- **Browser automation** (Фаза 4, planned) — isolated Playwright sessions were
+  a Python-era feature; no implementation exists on the Rust core yet.
 - **Agent Constructor** (Фаза 4) — reusable blueprints, per-agent limits,
   tool/skill selection, playground runs, sharing/cloning, and macro-tools.
 

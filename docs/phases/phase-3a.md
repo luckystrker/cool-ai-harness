@@ -1,5 +1,10 @@
 # Фаза 3a: Memory + Personalities + Observability + Knowledge Management
 
+> **Историческая спецификация.** Документ описывает архитектуру на Python (FastAPI);
+> runtime переписан на Rust, а `backend/` удалён по ADR-0003 (M12). Текущий стек —
+> см. [README](../../README.md) и [AGENTS](../../AGENTS.md).
+
+
 > **Статус:** ✅ Завершено
 > **Длительность:** 2 недели
 

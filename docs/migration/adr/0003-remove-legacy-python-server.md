@@ -97,8 +97,9 @@ release.
 ## Consequences
 
 - Positive: one server, one schema owner, one security model; CI drops the
-  `backend` job once evals are re-pointed; `frontend/src/api/types.ts` and the
-  Python schema mirrors are deleted with it.
+  `backend` job once evals are re-pointed. (`frontend/src/api/types.ts` was
+  kept — it is still imported by the SPA — with its header rewritten to point
+  at the Rust protocol surface instead of the Python schema mirrors.)
 - Negative: the reference implementation is gone — bugs can no longer be
   answered by reading the Python side. Mitigation: this ADR only proceeds once
   the parity matrix in `M12.md` is complete and two Rust-default releases have

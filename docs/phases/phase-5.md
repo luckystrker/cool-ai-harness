@@ -1,5 +1,10 @@
 # Фаза 5: Telegram (Bot + Web App) + Voice Interface
 
+> **Историческая спецификация.** Документ описывает архитектуру на Python (FastAPI);
+> runtime переписан на Rust, а `backend/` удалён по ADR-0003 (M12). Текущий стек —
+> см. [README](../../README.md) и [AGENTS](../../AGENTS.md).
+
+
 > **Статус:** ⏳ Ожидает
 > **Длительность:** 1.5 недели
 

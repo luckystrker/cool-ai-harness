@@ -102,7 +102,7 @@ export type PermissionMode = "ask" | "allow" | "allow_edits"
 export const MODE_PRESETS: Record<PermissionMode, ToolPermissions> = {
   ask: { "*": "ask" },
   allow: { "*": "allow" },
-  allow_edits: { "*": "allow", shell: "ask" },
+  allow_edits: { "*": "allow", shell: "ask", git: "ask" },
 }
 
 export const MODE_LABELS: { mode: PermissionMode; label: string; hint: string }[] = [

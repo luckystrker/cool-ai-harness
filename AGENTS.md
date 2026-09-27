@@ -133,7 +133,7 @@ frontend/src/
 │                           #    mcp, memory, plans, skills, subagents, inspector, budgets,
 │                           #    artifacts, workspace, profiles, analytics, tasks, rss,
 │                           #    webhooks, wiki)
-├── hooks/                  # useConversationStream.ts (SSE/WS)
+├── hooks/                  # useConversationStream.ts (SSE)
 ├── components/
 │   ├── chat/               # MessageBubble, ToolCallBlock, ApprovalCard (write diffs),
 │   │                       #   PlanCard, ArtifactPanel, BudgetIndicator, ThinkingBlock,
@@ -231,7 +231,7 @@ Required root commands:
   docker compose config --quiet
   docker build --tag cool-ai-harness:local .
   ```
-  Then start the image and smoke `/`, `/api/health`, SSE, and WebSocket. If a local Docker daemon is
+  Then start the image and smoke `/`, `/api/health`, and SSE. If a local Docker daemon is
   unavailable, record that the image build remains CI-only evidence; do not report a local image
   build as passed.
 - Touched the **API contract** (protocol schema/commands/events)? Update the

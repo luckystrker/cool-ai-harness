@@ -206,7 +206,7 @@ export interface ModelsPreviewRequest {
   api_key: string
 }
 
-// --- agent events (streamed from SSE / WebSocket) ---
+// --- agent events (streamed from SSE) ---
 
 export type AgentEventKind =
   | "start"
