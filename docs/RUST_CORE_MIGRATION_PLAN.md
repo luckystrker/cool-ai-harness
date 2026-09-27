@@ -1012,15 +1012,10 @@ Model text/token deltas не сравниваются побайтово для 
 
 ### 12.3. Phase gates
 
-Пока существует Python runtime:
-
-```bash
-cd backend
-ruff check .
-mypy app
-pytest
-python -m evals
-```
+~~Пока существует Python runtime: `cd backend && ruff check . && mypy app &&
+pytest && python -m evals`~~ — Python runtime удалён (M12/ADR-0003); этот блок
+оставлен только как историческая запись о том, что было обязательным gate до
+удаления.
 
 Для React/TypeScript:
 
@@ -1052,7 +1047,8 @@ cargo build --workspace --all-targets
 незавершённым deliverable, а не пропускается.
 
 До первого Rust commit baseline CI должен реально исполнять те же обязательные Python checks,
-включая `mypy app` и `python -m evals`, а не только перечислять их в документации. Начиная с M1 CI
+включая `mypy app` и `python -m evals`, а не только перечислять их в документации (историческое
+требование — Python CI lanes удалены в M12). Начиная с M1 CI
 добавляет Rust gates на Linux, Windows и macOS; platform-specific transport/path tests не могут быть
 заменены одной Linux job.
 

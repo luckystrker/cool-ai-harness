@@ -151,8 +151,8 @@ open read-only and `cool store adopt` is the explicit ownership transfer.
 
 ## Agent evals (CI quality gate)
 
-Deterministic, scripted-driver scenarios verify the agent loop's tool
-selection, safety policy enforcement, and cost/iteration limits — no API keys
+Deterministic, scripted-driver scenarios verify the agent loop's capability
+allow/deny policy, approval flow, and partial-failure handling — no API keys
 needed. They run as part of the Rust test suite:
 
 ```bash

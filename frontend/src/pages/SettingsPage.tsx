@@ -1463,8 +1463,8 @@ function MCPServersSection() {
           </div>
         )}
         <p className="text-xs text-muted-foreground">
-          Configure servers via the UI or <code className="rounded bg-muted px-1">config.yaml</code> at
-          the project root. Tools from connected servers are automatically available to the agent.
+          Configure servers via the UI or <code className="rounded bg-muted px-1">mcp-servers.json</code> on
+          the data root. Tools from connected servers are automatically available to the agent.
         </p>
       </CardContent>
     </Card>

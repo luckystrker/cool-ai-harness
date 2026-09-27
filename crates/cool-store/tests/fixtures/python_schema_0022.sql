@@ -1,6 +1,7 @@
 -- Baseline schema snapshot for the Rust legacy store (crates/cool-store).
 -- Generated from the real Alembic migration chain; do not edit by hand.
--- Regenerate: backend $ python -m tests.schema_snapshot --update <this file>
+-- Frozen baseline: the generator (`backend/tests/schema_snapshot.py`) was
+-- removed with `backend/` under ADR-0003; revision 0022 is the final snapshot.
 -- Alembic revision: 0022
 -- Excludes the sqlite-vec `memory_vec` table and FTS5 shadow tables:
 -- SQLite rebuilds the FTS shadow tables from the virtual table DDL, and
