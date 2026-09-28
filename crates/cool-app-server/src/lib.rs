@@ -5712,7 +5712,7 @@ pub fn task_templates() -> Vec<TaskTemplateRecord> {
              missing error handling and style violations. Report the findings \
              grouped by file, most important first, with concrete suggestions.",
             "0 18 * * 1-5",
-            &["read_file", "list_files"],
+            &["read_file", "list_files", "search_files", "find_files"],
             15,
         ),
         template(

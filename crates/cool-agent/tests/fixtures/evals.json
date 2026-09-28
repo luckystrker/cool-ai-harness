@@ -65,5 +65,25 @@
     "approval": "approved",
     "expectedEvents": ["tool.failed", "tool.failed", "run.completed"],
     "expectedFile": false
+  },
+  {
+    "id": "search_and_find_empty_workspace",
+    "calls": [
+      {
+        "callId": "search-none",
+        "name": "search_files",
+        "arguments": {"pattern": "needle"}
+      },
+      {
+        "callId": "find-none",
+        "name": "find_files",
+        "arguments": {"glob": "**/*.txt"}
+      }
+    ],
+    "capability": "read",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.completed", "tool.completed", "run.completed"],
+    "expectedFile": false
   }
 ]
