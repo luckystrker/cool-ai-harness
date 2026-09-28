@@ -1,15 +1,53 @@
+<div align="center">
+
 # Cool
 
-Personal AI agent harness with provider abstraction, tools, skills, MCP,
+**Personal AI agent harness** — provider abstraction, tools, skills, MCP,
 subagents, long-term + working memory, personalities, planning mode, recurring
 tasks (cron), RSS aggregation, webhooks, wiki, cost budgets, analytics, an
 inspector/replay console, and durable agent runs. Control via the web UI.
+
+[![CI](https://github.com/luckystrker/cool-ai-harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luckystrker/cool-ai-harness/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/luckystrker/cool-ai-harness?sort=semver&label=release)](https://github.com/luckystrker/cool-ai-harness/releases/latest)
+[![Nightly build](https://img.shields.io/badge/nightly-rolling%20prerelease-blueviolet)](https://github.com/luckystrker/cool-ai-harness/releases/tag/nightly)
+[![Rust 1.98](https://img.shields.io/badge/rust-1.98-orange?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+</div>
 
 > Status: **Фазы 0–4 shipped** on the Rust core. Phase 4 delivers Deep
 > Research, Code/Git, multimodal attachments, and Agent Constructor ✅ —
 > browser automation and provider-native vision/OCR are deferred gaps
 > (see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap).
-<img width="1718" height="1273" alt="image" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
+
+<img width="1718" height="1273" alt="Cool chat UI" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
+
+## Download
+
+Prebuilt packages — the `cool` binary plus the bundled web UI — are published to
+[GitHub Releases](https://github.com/luckystrker/cool-ai-harness/releases) on
+every `v*` tag. No Rust/Node/Python toolchain needed; unpack and run
+`cool serve --assets ./assets` (see the included `INSTALL.md`).
+
+| Platform | Stable | Nightly |
+|---|---|---|
+| Linux x86_64 | [cool-linux-x86_64.tar.gz](https://github.com/luckystrker/cool-ai-harness/releases/latest/download/cool-linux-x86_64.tar.gz) | [nightly](https://github.com/luckystrker/cool-ai-harness/releases/download/nightly/cool-linux-x86_64.tar.gz) |
+| Windows x86_64 | [cool-windows-x86_64.zip](https://github.com/luckystrker/cool-ai-harness/releases/latest/download/cool-windows-x86_64.zip) | [nightly](https://github.com/luckystrker/cool-ai-harness/releases/download/nightly/cool-windows-x86_64.zip) |
+| macOS Apple Silicon | [cool-macos-aarch64.tar.gz](https://github.com/luckystrker/cool-ai-harness/releases/latest/download/cool-macos-aarch64.tar.gz) | [nightly](https://github.com/luckystrker/cool-ai-harness/releases/download/nightly/cool-macos-aarch64.tar.gz) |
+| macOS Intel | [cool-macos-x86_64.tar.gz](https://github.com/luckystrker/cool-ai-harness/releases/latest/download/cool-macos-x86_64.tar.gz) | [nightly](https://github.com/luckystrker/cool-ai-harness/releases/download/nightly/cool-macos-x86_64.tar.gz) |
+
+The **nightly** prerelease is rebuilt on every push to `main` — grab it for the
+bleeding-edge build. Cutting a release: run the **Release** workflow manually
+with a version, or `node scripts/bump-version.mjs X.Y.Z && git tag vX.Y.Z &&
+git push origin main --tags`.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Chat](docs/screenshots/chat.png) | ![Memory](docs/screenshots/memory.png) |
+| ![Analytics](docs/screenshots/analytics.png) | ![Run inspector](docs/screenshots/inspector.png) |
+| ![Subagents](docs/screenshots/subagents.png) | ![Settings](docs/screenshots/settings.png) |
 
 ## Stack
 
@@ -256,11 +294,13 @@ cool-ai-harness/
 ├── sdk/typescript/              # generated typed App Protocol client
 ├── schemas/                     # protocol JSON schemas (acp-v1, cool-protocol-v1)
 ├── skills/                      # bundled SKILL.md skills
+├── packaging/                   # release archive docs (INSTALL.md)
 ├── docs/
 │   ├── PLAN.md                  # full roadmap
 │   ├── phases/                  # per-phase specs (phase-0 .. phase-7)
 │   ├── migration/               # Rust-core migration checkpoints/ADRs (evidence)
-│   └── backlog/                 # parked workstreams (optional workers, Telegram)
+│   ├── backlog/                 # parked workstreams (optional workers, Telegram)
+│   └── screenshots/             # README imagery
 ├── LICENSE                      # MIT
 └── .env.example
 ```

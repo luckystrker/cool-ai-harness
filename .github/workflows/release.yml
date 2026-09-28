@@ -1,0 +1,254 @@
+name: Release
+
+# Three ways to ship binaries:
+#   - push a `v*` tag (its version must match workspace.package.version in
+#     Cargo.toml — run `node scripts/bump-version.mjs <ver>` first)
+#   - run the workflow manually with a version input: bumps the version on
+#     main, then builds and publishes `v<version>` off that commit
+#   - every push to main refreshes the rolling `nightly` prerelease
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0 (creates tag v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Releases and the rolling nightly tag are global state — serialize runs.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.98.0"
+
+jobs:
+  prepare:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Stamp and push a version bump (manual release)
+        id: stamp
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "$tag" >/dev/null; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          fi
+          node scripts/bump-version.mjs "$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release $tag"
+          git push origin HEAD:main
+          echo "committed_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute metadata
+        id: meta
+        env:
+          COMMITTED_TAG: ${{ steps.stamp.outputs.committed_tag }}
+          STAMPED_SHA: ${{ steps.stamp.outputs.sha }}
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            push)
+              if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+                tag="${{ github.ref_name }}"
+                version="${tag#v}"
+                declared="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+                # Allow prerelease tags like v0.1.0-rc1 on the declared version.
+                if [[ "$declared" != "$version" && "$version" != "$declared"-* ]]; then
+                  echo "::error::tag $tag does not match workspace.package.version ($declared) — run scripts/bump-version.mjs first"
+                  exit 1
+                fi
+                echo "tag=$tag" >> "$GITHUB_OUTPUT"
+                echo "version=$version" >> "$GITHUB_OUTPUT"
+                echo "release_name=Cool $tag" >> "$GITHUB_OUTPUT"
+                echo "prerelease=false" >> "$GITHUB_OUTPUT"
+              else
+                short="$(git rev-parse --short HEAD)"
+                echo "tag=nightly" >> "$GITHUB_OUTPUT"
+                echo "version=nightly" >> "$GITHUB_OUTPUT"
+                echo "release_name=Nightly build ($short)" >> "$GITHUB_OUTPUT"
+                echo "prerelease=true" >> "$GITHUB_OUTPUT"
+              fi
+              echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              echo "tag=$COMMITTED_TAG" >> "$GITHUB_OUTPUT"
+              echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+              echo "release_name=Cool $COMMITTED_TAG" >> "$GITHUB_OUTPUT"
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+              echo "target_sha=$STAMPED_SHA" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+  frontend:
+    name: Build frontend bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build SPA
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  build:
+    name: cool ${{ matrix.platform }}
+    needs: [prepare, frontend]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: macos-aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+
+      - name: Set up Rust ${{ env.RUST_VERSION }}
+        run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          shared-key: release-${{ matrix.platform }}
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Build cool
+        run: cargo +${{ env.RUST_VERSION }} build --release --locked -p cool-cli
+
+      - name: Check binary version (tagged releases only)
+        if: needs.prepare.outputs.tag != 'nightly'
+        shell: bash
+        run: |
+          bin="target/release/cool"
+          [[ "${{ matrix.os }}" == windows-* ]] && bin="target/release/cool.exe"
+          reported="$(./$bin --version)"
+          echo "$reported"
+          # Prerelease tags (v0.1.0-rc1) still build the declared base version.
+          version="${{ needs.prepare.outputs.version }}"
+          [[ "$reported" == "cool $version" || "$reported" == "cool ${version%%-*}" ]]
+
+      - name: Stage package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="cool-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}"
+          mkdir -p "$pkg"
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            cp target/release/cool.exe "$pkg/"
+          else
+            cp target/release/cool "$pkg/"
+          fi
+          cp -r frontend/dist "$pkg/assets"
+          cp .env.example "$pkg/.env.example"
+          cp packaging/INSTALL.md "$pkg/INSTALL.md"
+
+      - name: Archive package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "cool-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}"
+          Compress-Archive -Path $pkg -DestinationPath "cool-${{ matrix.platform }}.zip"
+
+      - name: Archive package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czf "cool-${{ matrix.platform }}.tar.gz" "cool-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          # Stable asset names keep `releases/latest/download/...` links working.
+          name: cool-${{ matrix.platform }}
+          path: |
+            cool-${{ matrix.platform }}.zip
+            cool-${{ matrix.platform }}.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cool-*
+          path: dist
+          merge-multiple: true
+
+      - name: Retarget the nightly tag
+        if: needs.prepare.outputs.tag == 'nightly'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          git tag --force nightly
+          git push --force origin nightly
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.release_name }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          target_commitish: ${{ needs.prepare.outputs.target_sha }}
+          generate_release_notes: ${{ needs.prepare.outputs.prerelease == 'false' }}
+          files: dist/*
