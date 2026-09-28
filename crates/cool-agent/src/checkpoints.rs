@@ -116,15 +116,19 @@ pub async fn snapshot_before_tool(
 /// `read-tree`/`checkout-index` against a private index under
 /// `.cool/checkpoints/` — the user's index and refs are never touched, so
 /// staged changes survive a rewind; the working tree itself is overwritten
-/// by design and files created after the checkpoint are removed (`git clean`
-/// on the private index, keeping `.cool` and gitignored paths). Manifest
-/// restores rewrite the recorded files; a non-restorable manifest
-/// (pre-`shell`/`git` snapshot) is a hard error.
+/// by design. `tool_paths` names the files the discarded file tools touched
+/// — a scoped `git clean` removes exactly those so a rewind deletes the
+/// tool's own debris without touching unrelated untracked files the user
+/// created after the checkpoint. Shell/git mutations carry no path args and
+/// stay non-restorable as documented. Manifest restores rewrite the
+/// recorded files; a non-restorable manifest (pre-`shell`/`git` snapshot)
+/// is a hard error.
 pub async fn restore_checkpoint(
     workspace: &Workspace,
     launcher: &Arc<dyn ProcessLauncher>,
     environment: &HashMap<String, String>,
     checkpoint_ref: &str,
+    tool_paths: &[String],
 ) -> Result<(), String> {
     if let Some(manifest_path) = checkpoint_ref.strip_prefix(MANIFEST_PREFIX) {
         return restore_manifest(workspace, manifest_path);
@@ -159,17 +163,14 @@ pub async fn restore_checkpoint(
         &index_env,
     )
     .await?;
-    // Files created after the checkpoint are untracked relative to the
-    // restored index — remove them so the tree matches the checkpoint,
-    // but keep gitignored content (build outputs) and our own .cool state.
-    run_plumbing(
-        workspace,
-        launcher,
-        environment,
-        &["clean", "-fd", "-e", ".cool"],
-        &index_env,
-    )
-    .await?;
+    // Delete only the paths the discarded file tools named — a blanket
+    // `git clean` would also remove unrelated files the user created after
+    // the checkpoint.
+    if !tool_paths.is_empty() {
+        let mut args = vec!["clean", "-fd", "-e", ".cool", "--"];
+        args.extend(tool_paths.iter().map(String::as_str));
+        run_plumbing(workspace, launcher, environment, &args, &index_env).await?;
+    }
     Ok(())
 }
 

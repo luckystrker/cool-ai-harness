@@ -164,19 +164,60 @@ pub fn flow_ready(flow: &OAuthFlow) -> Result<(), OAuthError> {
 
 /// A caller-supplied `redirect_uri` is accepted only when it is the flow's
 /// own manual callback or an HTTP loopback URI — anything else would let a
-/// client send the authorization code to an arbitrary destination.
+/// client send the authorization code to an arbitrary destination. The URL
+/// is parsed, not prefix-matched: `http://localhost:@evil.example/` starts
+/// with a loopback-looking string but its host is evil.example.
 pub fn redirect_uri_allowed(flow: &OAuthFlow, uri: &str) -> bool {
     if Some(uri) == flow.manual_redirect {
         return true;
     }
-    for prefix in ["http://localhost", "http://127.0.0.1"] {
-        if let Some(rest) = uri.strip_prefix(prefix)
-            && rest.starts_with([':', '/'])
-        {
-            return true;
-        }
+    let Ok(parsed) = reqwest::Url::parse(uri) else {
+        return false;
+    };
+    if parsed.scheme() != "http" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
     }
-    false
+    match parsed.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
+    }
+}
+
+/// Token/device endpoints are remote-controlled input: a runaway body would
+/// exhaust memory mid-login, so reads cap at 4 MiB.
+const MAX_OAUTH_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+async fn bounded_body(
+    mut response: reqwest::Response,
+    error_code: &'static str,
+) -> Result<Vec<u8>, OAuthError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length as usize > MAX_OAUTH_BODY_BYTES)
+    {
+        return Err(OAuthError::new(
+            error_code,
+            "response exceeds the 4 MiB limit",
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| OAuthError::new(error_code, error.to_string()))?
+    {
+        if body.len() + chunk.len() > MAX_OAUTH_BODY_BYTES {
+            return Err(OAuthError::new(
+                error_code,
+                "response exceeds the 4 MiB limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// All supported logins. Unknown names return `None` → the caller reports
@@ -390,10 +431,7 @@ async fn token_post(
         .await
         .map_err(|error| OAuthError::new("oauth_token_request_failed", error.to_string()))?;
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| OAuthError::new("oauth_token_request_failed", error.to_string()))?;
+    let body = bounded_body(response, "oauth_token_request_failed").await?;
     if !status.is_success() {
         return Err(OAuthError::new(
             "oauth_token_rejected",
@@ -469,10 +507,7 @@ pub async fn device_user_code(
         .await
         .map_err(|error| OAuthError::new("oauth_device_request_failed", error.to_string()))?;
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| OAuthError::new("oauth_device_request_failed", error.to_string()))?;
+    let body = bounded_body(response, "oauth_device_request_failed").await?;
     if !status.is_success() {
         return Err(OAuthError::new(
             "oauth_device_rejected",
@@ -523,10 +558,7 @@ pub async fn device_poll_once(
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| OAuthError::new("oauth_device_request_failed", error.to_string()))?;
+    let body = bounded_body(response, "oauth_device_request_failed").await?;
     if !status.is_success() {
         return Err(OAuthError::new(
             "oauth_device_rejected",

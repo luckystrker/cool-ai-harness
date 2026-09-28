@@ -1550,9 +1550,12 @@ impl AppServer {
                 // Workspace restore happens after the durable rewind commits:
                 // the event log already carries the rewound marker, so a failed
                 // restore is reported on the result, not rolled back (P2.18).
+                // `!outcome.created` is an idempotent replay of an earlier
+                // rewind — restoring again would overwrite workspace work
+                // done since the first response.
                 let mut workspace_restored = false;
                 let mut restore_error = None;
-                if params.restore_workspace.unwrap_or(false) {
+                if params.restore_workspace.unwrap_or(false) && outcome.created {
                     match outcome.value.checkpoint_ref.clone() {
                         Some(checkpoint_ref) => {
                             let workspace = self.run_workspace_for_session(&params.session_id);
@@ -1561,6 +1564,7 @@ impl AppServer {
                                 &self.inner.config.host.launcher,
                                 &self.inner.config.host.environment,
                                 &checkpoint_ref,
+                                &outcome.value.discarded_paths,
                             )
                             .await
                             {
@@ -5306,26 +5310,40 @@ impl AppServerEventSink {
         };
         use base64::Engine as _;
         let actor = local_actor();
+        // Same conversation boundary as `view_image`/prompt attachments — a
+        // steer must not smuggle another conversation's artifact to the model.
+        let conversation_id = self
+            .server
+            .inner
+            .store
+            .conversation_id_for_session(&actor.id, &envelope.session_id)
+            .ok()
+            .flatten();
         parts
             .iter()
-            .filter_map(|part| match part {
-                ContentPart::Image {
-                    artifact_id,
-                    media_type,
-                } => {
-                    let id = artifact_id.parse::<i64>().ok()?;
-                    match blobs.read_artifact(&actor.id, id) {
-                        Ok((_, bytes)) if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES => {
-                            Some(ModelContentPart::Image {
-                                media_type: media_type.clone(),
-                                data_base64: base64::engine::general_purpose::STANDARD
-                                    .encode(bytes),
-                            })
-                        }
-                        _ => None,
-                    }
+            .filter_map(|part| {
+                let (artifact_id, declared_media_type) = match part {
+                    ContentPart::Image {
+                        artifact_id,
+                        media_type,
+                    } => (artifact_id, Some(media_type.clone())),
+                    ContentPart::Artifact { artifact_id } => (artifact_id, None),
+                    _ => return None,
+                };
+                let id = artifact_id.parse::<i64>().ok()?;
+                let (artifact, bytes) = blobs.read_artifact(&actor.id, id).ok()?;
+                if Some(artifact.conversation_id) != conversation_id {
+                    return None;
                 }
-                _ => None,
+                let media_type = declared_media_type.unwrap_or(artifact.media_type);
+                if !media_type.starts_with("image/") || (bytes.len() as u64) > MAX_IMAGE_PART_BYTES
+                {
+                    return None;
+                }
+                Some(ModelContentPart::Image {
+                    media_type,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
             })
             .collect()
     }
@@ -7275,6 +7293,12 @@ impl AppServer {
         if let Err(store_error) = store.set_provider_oauth_tokens(&actor, provider.id, &encrypted) {
             return failure(id, legacy::store_error(store_error));
         }
+        // Refetch — the row fetched before `set_provider_oauth_tokens` still
+        // shows hasOauthTokens:false.
+        let provider = match store.get_provider(&actor, provider.id) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
         let record = match legacy::provider_record(provider, Some(secrets)) {
             Ok(record) => record,
             Err(protocol_error) => return failure(id, protocol_error),

@@ -425,7 +425,7 @@ async fn build_server(
         host,
         ..ServerConfig::default()
     };
-    let (provider, model) = configured_provider(config.event_delay, true)?;
+    let (provider, model) = configured_provider(config.event_delay, true, data_dir)?;
     let extraction_provider = provider.clone();
     let extraction_model = model.clone();
     let workspace = current_workspace()?;
@@ -1807,7 +1807,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
     let (provider, model): (Arc<dyn ModelDriver>, String) = if scripted {
         (Arc::new(ScriptedDriver::echo()), "scripted-echo".to_owned())
     } else {
-        configured_provider(std::time::Duration::ZERO, false)?
+        configured_provider(std::time::Duration::ZERO, false, &default_data_dir())?
     };
     let store = DurableStore::in_memory()
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
@@ -1881,11 +1881,14 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
 fn configured_provider(
     echo_delay: std::time::Duration,
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let provider_kind = env::var("COOL_PROVIDER").unwrap_or_default().to_lowercase();
     match provider_kind.as_str() {
-        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback),
-        "gemini" | "google" => return configured_gemini_provider(allow_scripted_fallback),
+        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback, data_dir),
+        "gemini" | "google" => {
+            return configured_gemini_provider(allow_scripted_fallback, data_dir);
+        }
         // `chatgpt`/`codex` alias the OpenAI-compatible path; stored OAuth
         // tokens get a clear unsupported-wire error below rather than a
         // silent fallback.
@@ -1904,14 +1907,14 @@ fn configured_provider(
     if provider_kind.is_empty()
         && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty())
     {
-        return configured_anthropic_provider(allow_scripted_fallback);
+        return configured_anthropic_provider(allow_scripted_fallback, data_dir);
     }
     let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let configured_base_url = env::var("OPENAI_BASE_URL")
         .ok()
         .filter(|value| !value.is_empty());
     if api_key.is_empty() && configured_base_url.is_none() {
-        if stored_oauth_source(&["openai", "chatgpt", "codex"], "chatgpt").is_some() {
+        if stored_oauth_source(&["openai", "chatgpt", "codex"], "chatgpt", data_dir).is_some() {
             return Err(runtime(
                 "oauth_wire_not_supported",
                 "stored ChatGPT OAuth tokens authenticate OpenAI's Codex backend (Responses API), which the OpenAI-compatible chat/completions driver does not implement — set OPENAI_API_KEY",
@@ -1957,10 +1960,11 @@ fn configured_provider(
 /// `ANTHROPIC_MODEL`/`COOL_MODEL` or the current Claude default.
 fn configured_anthropic_provider(
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     let oauth_source = if api_key.is_empty() {
-        stored_oauth_source(&["anthropic", "claude"], "claude")
+        stored_oauth_source(&["anthropic", "claude"], "claude", data_dir)
     } else {
         None
     };
@@ -2013,9 +2017,15 @@ fn configured_anthropic_provider(
 /// Stored OAuth credentials for a CLI provider fallback (P2.11): the first
 /// provider row matching `names` with `auth_kind=oauth` and stored tokens,
 /// wrapped as an `AccessTokenSource` that refreshes through the keyring.
-fn stored_oauth_source(names: &[&str], flow_name: &str) -> Option<Arc<oauth::ProviderTokenSource>> {
+/// `data_dir` must match where `cool auth` stored the login — a custom
+/// `--data-dir` makes the default path see no tokens.
+fn stored_oauth_source(
+    names: &[&str],
+    flow_name: &str,
+    data_dir: &std::path::Path,
+) -> Option<Arc<oauth::ProviderTokenSource>> {
     let flow = oauth::oauth_flow(flow_name)?;
-    let store = Arc::new(open_legacy_store(&default_data_dir().join("harness.db")).ok()?);
+    let store = Arc::new(open_legacy_store(&data_dir.join("harness.db")).ok()?);
     let secrets = configured_secrets()?;
     let actor = "local-user";
     let provider = store
@@ -2043,12 +2053,13 @@ fn stored_oauth_source(names: &[&str], flow_name: &str) -> Option<Arc<oauth::Pro
 /// key is set. Model from `GEMINI_MODEL`/`COOL_MODEL`.
 fn configured_gemini_provider(
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let api_key = env::var("GEMINI_API_KEY")
         .or_else(|_| env::var("GOOGLE_API_KEY"))
         .unwrap_or_default();
     let oauth_source = if api_key.is_empty() {
-        stored_oauth_source(&["gemini", "google"], "gemini")
+        stored_oauth_source(&["gemini", "google"], "gemini", data_dir)
     } else {
         None
     };

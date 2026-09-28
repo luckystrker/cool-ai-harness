@@ -113,15 +113,17 @@ async fn git_snapshot_and_restore_roundtrip() {
     .unwrap()
     .expect("checkpoint ref");
 
-    // The tool mutates the workspace.
+    // The tool mutates the workspace; the user also makes an unrelated file.
     std::fs::write(dir.path().join("a.txt"), "v2").unwrap();
     std::fs::write(dir.path().join("created.txt"), "new").unwrap();
+    std::fs::write(dir.path().join("user-notes.txt"), "keep me").unwrap();
 
     restore_checkpoint(
         &context.workspace,
         &context.launcher,
         &context.environment,
         &reference,
+        &["created.txt".to_owned()],
     )
     .await
     .unwrap();
@@ -129,9 +131,13 @@ async fn git_snapshot_and_restore_roundtrip() {
         std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "v1"
     );
-    // Files created after the checkpoint are removed — the tree matches
-    // the checkpoint exactly (gitignored paths and .cool are kept).
+    // The discarded tool's file is removed; an unrelated untracked file the
+    // tool never named survives the restore.
     assert!(!dir.path().join("created.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("user-notes.txt")).unwrap(),
+        "keep me"
+    );
 }
 
 #[tokio::test]
@@ -161,6 +167,7 @@ async fn manifest_fallback_restores_tool_known_files() {
         &context.launcher,
         &context.environment,
         &reference,
+        &[],
     )
     .await
     .unwrap();
@@ -189,6 +196,7 @@ async fn manifest_fallback_restores_tool_known_files() {
         &context.launcher,
         &context.environment,
         &reference,
+        &[],
     )
     .await
     .unwrap();
@@ -217,6 +225,7 @@ async fn shell_manifest_is_recorded_but_not_restorable() {
         &context.launcher,
         &context.environment,
         &reference,
+        &[],
     )
     .await
     .unwrap_err();

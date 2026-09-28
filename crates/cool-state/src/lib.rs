@@ -175,6 +175,12 @@ pub struct SessionRewindOutcome {
     pub run_id: String,
     pub rewound_run_ids: Vec<String>,
     pub checkpoint_ref: Option<String>,
+    /// Workspace paths the discarded file tools named (`write_file`/
+    /// `edit_file` `path` args) — the set a scoped `git clean` removes on
+    /// restore so unrelated untracked files survive. Shell/git mutations
+    /// carry no path and stay non-restorable as documented.
+    #[serde(default)]
+    pub discarded_paths: Vec<String>,
 }
 
 /// Result of binding a legacy conversation to a durable Rust session.
@@ -633,7 +639,7 @@ impl DurableStore {
             // `up_to_cursor` bounds the event rowid — the same cursor space
             // `session.history` exposes — while `up_to_event_seq` bounds seq.
             let mut statement = transaction.prepare(
-                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
                  WHERE r.session_id = ?1 AND r.status != 'rewound' \
                  AND (?2 IS NULL OR e.rowid <= ?2) AND (?3 IS NULL OR e.seq <= ?3) \
                  ORDER BY r.rowid, e.seq",
@@ -644,10 +650,11 @@ impl DurableStore {
                     up_to_cursor.map(|value| value.min(i64::MAX as u64) as i64),
                     up_to_event_seq.map(|value| value.min(i64::MAX as u64) as i64)
                 ],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )?;
             for row in rows {
-                let mut source: EventEnvelope = serde_json::from_str(&row?)?;
+                let (source_rowid, json) = row?;
+                let mut source: EventEnvelope = serde_json::from_str(&json)?;
                 if !is_history_event(&source.event) {
                     continue;
                 }
@@ -657,24 +664,24 @@ impl DurableStore {
                 // working tree; on the fork they either don't resolve or
                 // would restore the wrong tree — strip them.
                 source.extensions.remove("checkpoint_ref");
-                copied.push(source);
+                copied.push((source_rowid, source));
             }
         }
-        for source in copied {
+        for (_, source) in &copied {
             fork_events.push(EventEnvelope {
                 event_id: format!("event-{}", Uuid::new_v4()),
                 schema_version: V1Version::VALUE,
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                item_id: source.item_id,
+                item_id: source.item_id.clone(),
                 seq: 0,
-                occurred_at: source.occurred_at,
-                actor: source.actor,
+                occurred_at: source.occurred_at.clone(),
+                actor: source.actor.clone(),
                 source: "cool-state-fork".to_owned(),
-                causation_id: Some(source.event_id),
-                correlation_id: source.correlation_id,
-                event: source.event,
-                extensions: source.extensions,
+                causation_id: Some(source.event_id.clone()),
+                correlation_id: source.correlation_id.clone(),
+                event: source.event.clone(),
+                extensions: source.extensions.clone(),
             });
         }
         fork_events.push(EventEnvelope {
@@ -698,10 +705,36 @@ impl DurableStore {
             }),
             extensions: Default::default(),
         });
-        for event in &mut fork_events {
+        // Copied `session.compacted` markers carry `compact_up_to_cursor`
+        // in the SOURCE rowid space; remap it to the rowid the covering
+        // prefix got here or the transcript re-shows compacted messages.
+        let mut boundary_rowid = 0_i64;
+        let mut inserted_rowids: Vec<(i64, i64)> = Vec::new();
+        for (index, event) in fork_events.iter_mut().enumerate() {
             next_seq += 1;
             event.seq = next_seq;
+            if index > 0
+                && let CanonicalEvent::SessionCompacted(compacted) = &mut event.event
+                && let Some(covered) = compacted.compact_up_to_cursor
+            {
+                let covered = covered.min(i64::MAX as u64) as i64;
+                compacted.compact_up_to_cursor = Some(
+                    inserted_rowids
+                        .iter()
+                        .rev()
+                        .find(|(source_rowid, _)| *source_rowid <= covered)
+                        .map(|(_, new_rowid)| *new_rowid)
+                        .unwrap_or(boundary_rowid)
+                        .max(0) as u64,
+                );
+            }
             append_event_tx(&transaction, actor_id, event)?;
+            let new_rowid = transaction.last_insert_rowid();
+            if index == 0 {
+                boundary_rowid = new_rowid;
+            } else if index <= copied.len() {
+                inserted_rowids.push((copied[index - 1].0, new_rowid));
+            }
         }
         insert_idempotency(
             &transaction,
@@ -809,20 +842,22 @@ impl DurableStore {
         // mutation when the cursor sits before it.
         let mut copied = Vec::new();
         let mut checkpoint_ref: Option<String> = None;
+        let mut discarded_paths: Vec<String> = Vec::new();
         {
             let mut statement = transaction.prepare(
-                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
                  WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid <= ?2 ORDER BY r.rowid, e.seq",
             )?;
             let rows = statement.query_map(params![session_id, cursor_i64], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             for row in rows {
-                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                let (source_rowid, json) = row?;
+                let source: EventEnvelope = serde_json::from_str(&json)?;
                 if !is_history_event(&source.event) {
                     continue;
                 }
-                copied.push(source);
+                copied.push((source_rowid, source));
             }
         }
         {
@@ -835,13 +870,26 @@ impl DurableStore {
             })?;
             for row in rows {
                 let source: EventEnvelope = serde_json::from_str(&row?)?;
-                if let Some(value) = source.extensions.get("checkpoint_ref")
+                // Path arguments of the discarded file tools — the scoped
+                // clean a restore runs so unrelated untracked files survive.
+                if let CanonicalEvent::ToolRequested(request) = &source.event
+                    && matches!(request.name.as_str(), "write_file" | "edit_file")
+                    && let Some(path) = request
+                        .arguments
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    discarded_paths.push(path.to_owned());
+                }
+                if checkpoint_ref.is_none()
+                    && let Some(value) = source.extensions.get("checkpoint_ref")
                     && let Some(value) = value.as_str()
                 {
                     checkpoint_ref = Some(value.to_owned());
-                    break;
                 }
             }
+            discarded_paths.sort();
+            discarded_paths.dedup();
         }
         let rewound_run_ids: Vec<String> = runs.iter().map(|(id, _)| id.clone()).collect();
         for (existing_id, _) in &runs {
@@ -882,21 +930,21 @@ impl DurableStore {
             }),
             extensions: Default::default(),
         }];
-        for source in copied {
+        for (_, source) in &copied {
             rewind_events.push(EventEnvelope {
                 event_id: format!("event-{}", Uuid::new_v4()),
                 schema_version: V1Version::VALUE,
                 session_id: session_id.to_owned(),
                 run_id: run_id.clone(),
-                item_id: source.item_id,
+                item_id: source.item_id.clone(),
                 seq: 0,
-                occurred_at: source.occurred_at,
-                actor: source.actor,
+                occurred_at: source.occurred_at.clone(),
+                actor: source.actor.clone(),
                 source: "cool-state-rewind".to_owned(),
-                causation_id: Some(source.event_id),
-                correlation_id: source.correlation_id,
-                event: source.event,
-                extensions: source.extensions,
+                causation_id: Some(source.event_id.clone()),
+                correlation_id: source.correlation_id.clone(),
+                event: source.event.clone(),
+                extensions: source.extensions.clone(),
             });
         }
         rewind_events.push(EventEnvelope {
@@ -935,15 +983,41 @@ impl DurableStore {
             }),
             extensions: Default::default(),
         });
-        for event in &mut rewind_events {
+        // Same `compact_up_to_cursor` remap as the fork path: source-space
+        // cursors would cover nothing once the copies get fresh rowids.
+        let mut boundary_rowid = 0_i64;
+        let mut inserted_rowids: Vec<(i64, i64)> = Vec::new();
+        for (index, event) in rewind_events.iter_mut().enumerate() {
             next_seq += 1;
             event.seq = next_seq;
+            if index > 0
+                && let CanonicalEvent::SessionCompacted(compacted) = &mut event.event
+                && let Some(covered) = compacted.compact_up_to_cursor
+            {
+                let covered = covered.min(i64::MAX as u64) as i64;
+                compacted.compact_up_to_cursor = Some(
+                    inserted_rowids
+                        .iter()
+                        .rev()
+                        .find(|(source_rowid, _)| *source_rowid <= covered)
+                        .map(|(_, new_rowid)| *new_rowid)
+                        .unwrap_or(boundary_rowid)
+                        .max(0) as u64,
+                );
+            }
             append_event_tx(&transaction, actor_id, event)?;
+            let new_rowid = transaction.last_insert_rowid();
+            if index == 0 {
+                boundary_rowid = new_rowid;
+            } else if index <= copied.len() {
+                inserted_rowids.push((copied[index - 1].0, new_rowid));
+            }
         }
         let outcome = SessionRewindOutcome {
             run_id: run_id.clone(),
             rewound_run_ids,
             checkpoint_ref,
+            discarded_paths,
         };
         insert_idempotency(
             &transaction,
