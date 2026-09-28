@@ -13236,6 +13236,11 @@
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
         },
+        "longTaskMode": {
+          "description": "Long-running task mode: the run is marked `long_task` and the existing\ntask progress file (`.cool/task/progress.md`, maintained by the bundled\nlong-running-task skill) is injected into the system prompt so the\nagent resumes from tracked state. Ignored in planning mode.",
+          "type": "boolean",
+          "default": false
+        },
         "model": {
           "type": [
             "string",

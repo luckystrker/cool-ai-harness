@@ -28,7 +28,7 @@ use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
     ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_event_rows,
-    mask_canonical_event, planning_system_prompt,
+    load_task_progress, mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -444,6 +444,7 @@ struct PromptRequest {
     model: Option<String>,
     system_prompt: Option<String>,
     plan_mode: bool,
+    long_task_mode: bool,
 }
 
 struct ConnectionState {
@@ -1414,6 +1415,7 @@ impl AppServer {
                                     model: params.model,
                                     system_prompt: params.system_prompt,
                                     plan_mode: params.plan_mode,
+                                    long_task_mode: params.long_task_mode,
                                 },
                                 cancel,
                                 outbound,
@@ -2790,7 +2792,10 @@ impl AppServer {
                     Some(system_prompt) => Some(system_prompt),
                     None => default_system_prompt(&server).await,
                 };
-                (system_prompt, None)
+                // Long-task mode keeps the normal system prompt; the loop
+                // itself injects the progress file and marks the run.
+                let mode = prompt.long_task_mode.then(|| "long_task".to_owned());
+                (system_prompt, mode)
             };
             let request = AgentRequest {
                 model: prompt
@@ -3162,12 +3167,24 @@ impl AppServer {
         Ok(items)
     }
 
-    /// One provider call producing the rolling summary (masked).
+    /// One provider call producing the rolling summary (masked). When the
+    /// workspace carries a task progress file (`.cool/task/progress.md`, the
+    /// long-running-task skill convention), its content is prepended so the
+    /// summary preserves tracked task state across compaction.
     async fn summarize_conversation(&self, transcript: &str, model: &str) -> Option<String> {
+        let mut input = String::new();
+        if let Ok(Some(progress)) = load_task_progress(&self.inner.workspace) {
+            input.push_str(
+                "[Task progress file — preserve this tracked state verbatim in the summary]\n",
+            );
+            input.push_str(&progress);
+            input.push_str("\n\n");
+        }
+        input.push_str(transcript);
         let request = AgentRequest {
             model: model.to_owned(),
             history: Vec::new(),
-            user_input: transcript.to_owned(),
+            user_input: input,
             system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
             mode: Some("compact".to_owned()),
             temperature: 0.0,

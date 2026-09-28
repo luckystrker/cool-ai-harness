@@ -339,13 +339,14 @@ impl AppClient {
             }],
             model,
             false,
+            false,
             None,
         )
         .await
     }
 
-    /// Prompt with explicit canonical inputs (content parts, planning mode and
-    /// an optional caller system prompt).
+    /// Prompt with explicit canonical inputs (content parts, planning mode,
+    /// long-task mode and an optional caller system prompt).
     pub async fn prompt_with(
         &self,
         key: &str,
@@ -353,6 +354,7 @@ impl AppClient {
         content: Vec<ContentPart>,
         model: Option<&str>,
         plan_mode: bool,
+        long_task_mode: bool,
         system_prompt: Option<&str>,
     ) -> Result<PromptAcceptedResult, ClientError> {
         let response = self
@@ -362,6 +364,7 @@ impl AppClient {
                 content,
                 model: model.map(str::to_owned),
                 plan_mode,
+                long_task_mode,
                 system_prompt: system_prompt.map(str::to_owned),
             }))
             .await?;

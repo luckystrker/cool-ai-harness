@@ -1307,3 +1307,90 @@ fn replay_rehydrates_the_summary_and_skips_covered_events() {
     assert_eq!(contents, ["[Summary of earlier work]\ndigest", "a1", "u2"]);
     assert_eq!(history[0].role, cool_agent::MessageRole::System);
 }
+
+#[tokio::test]
+async fn long_task_mode_injects_the_progress_file_into_the_system_prompt() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join(".cool/task")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/task/progress.md"),
+        "## Done\n- scaffolded\n## Next\n- wire the api\n## Acceptance criteria\n- ci green\n",
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("resumed".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut long_request = request(directory.path());
+    long_request.mode = Some("long_task".to_owned());
+    let outcome = runtime
+        .run(
+            long_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed { .. }));
+
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .expect("system prompt is always present");
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.starts_with("be precise"));
+    assert!(content.contains("[TASK PROGRESS"));
+    assert!(content.contains("- wire the api"));
+
+    let run_started_mode = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            CanonicalEvent::RunStarted(started) => started.mode.clone(),
+            _ => None,
+        });
+    assert_eq!(run_started_mode.as_deref(), Some("long_task"));
+
+    // Without a progress file the prompt is left alone — a fresh task.
+    let empty = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("fresh".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let (_, cancel) = CancelSignal::channel();
+    let mut fresh_request = request(empty.path());
+    fresh_request.mode = Some("long_task".to_owned());
+    runtime
+        .run(
+            fresh_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .unwrap();
+    assert_eq!(system.content.as_deref(), Some("be precise"));
+}

@@ -33,6 +33,7 @@ export async function* streamConversationMessage(
     content,
     model: body.model ?? null,
     planMode: body.plan_mode ?? false,
+    longTaskMode: body.long_task_mode ?? false,
     systemPrompt: body.system_prompt ?? null,
   })
   yield* streamRunEvents(accepted.runId, {

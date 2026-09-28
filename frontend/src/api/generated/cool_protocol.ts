@@ -24,6 +24,13 @@ export type SessionPromptParams = { idempotencyKey: string, sessionId: string, c
  */
 planMode: boolean, 
 /**
+ * Long-running task mode: the run is marked `long_task` and the existing
+ * task progress file (`.cool/task/progress.md`, maintained by the bundled
+ * long-running-task skill) is injected into the system prompt so the
+ * agent resumes from tracked state. Ignored in planning mode.
+ */
+longTaskMode: boolean, 
+/**
  * Caller-supplied system prompt. Ignored in planning mode, where the
  * runtime owns the system prompt so a caller cannot steer the plan.
  */

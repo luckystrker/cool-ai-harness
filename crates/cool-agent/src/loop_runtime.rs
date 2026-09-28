@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::context::{
     Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
-    load_project_instructions, summary_drop_candidates,
+    load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
@@ -306,6 +306,26 @@ impl AgentRuntime {
                 content.push_str(&instructions);
             } else {
                 history.insert(0, Message::text(MessageRole::System, instructions));
+            }
+        }
+        // Long-task mode resumes from the progress file the bundled
+        // long-running-task skill maintains; an absent file means a fresh task.
+        if request.mode.as_deref() == Some("long_task")
+            && let Ok(Some(progress)) = load_task_progress(&request.tool_context.workspace)
+        {
+            let section = format!(
+                "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
+                 state and keep the file updated as work proceeds.\n\n{progress}"
+            );
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System)
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(&section);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, section));
             }
         }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {

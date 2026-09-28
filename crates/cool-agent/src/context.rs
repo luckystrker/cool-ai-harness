@@ -47,6 +47,12 @@ const INSTRUCTION_CANDIDATES: &[&str] = &[
     ".agents/agents.md",
 ];
 
+/// Task progress file the bundled `long-running-task` skill maintains;
+/// `long_task` runs inject it into the system prompt and the compaction
+/// summarizer preserves its state.
+pub const TASK_PROGRESS_PATH: &str = ".cool/task/progress.md";
+const MAX_TASK_PROGRESS_BYTES: usize = 16_384;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -211,7 +217,7 @@ pub fn compact_history(
             MessageRole::System,
             format!("[Summary of earlier work]\n{summary}"),
         );
-        let mut retained_tokens = estimate_history_tokens(&[summary_message.clone()])
+        let mut retained_tokens = estimate_history_tokens(std::slice::from_ref(&summary_message))
             + retained
                 .iter()
                 .map(|group| estimate_history_tokens(group))
@@ -290,4 +296,33 @@ pub fn load_project_instructions(workspace: &Workspace) -> std::io::Result<Optio
         )));
     }
     Ok(None)
+}
+
+/// Bounded read of [`TASK_PROGRESS_PATH`]; `None` when the workspace has no
+/// progress file yet (a fresh long task).
+pub fn load_task_progress(workspace: &Workspace) -> std::io::Result<Option<String>> {
+    let path = workspace.root().join(TASK_PROGRESS_PATH);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let path = workspace
+        .confine_existing(TASK_PROGRESS_PATH)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_TASK_PROGRESS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > MAX_TASK_PROGRESS_BYTES;
+    let end = bytes.len().min(MAX_TASK_PROGRESS_BYTES);
+    let mut content = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    if truncated {
+        if let Some(last_newline) = content.rfind('\n') {
+            content.truncate(last_newline);
+        }
+        content.push_str("\n\n… (truncated — file exceeds 16 KB limit)");
+    }
+    Ok(Some(content))
 }
