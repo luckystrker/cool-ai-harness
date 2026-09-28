@@ -137,16 +137,34 @@
     "expectedFile": false
   },
   {
-    "id": "rule_allow_beats_capability_deny",
+    "id": "capability_deny_is_an_outer_bound_over_rule_allow",
     "calls": [
       {
-        "callId": "write-rule-allowed",
+        "callId": "write-deny-outer-bound",
         "name": "write_file",
-        "arguments": {"path": "eval.txt", "content": "rule wins"}
+        "arguments": {"path": "eval.txt", "content": "rule cannot lift deny"}
       }
     ],
     "capability": "write",
     "decision": "deny",
+    "rules": [
+      {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "rule_allow_relaxes_ask_to_allow",
+    "calls": [
+      {
+        "callId": "write-rule-relaxed",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "rule relaxes ask"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
     "rules": [
       {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
     ],

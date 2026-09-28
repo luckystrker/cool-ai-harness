@@ -165,12 +165,20 @@ impl SandboxBackend {
         }
     }
 
-    /// Whether the backend binary exists and can run on this host.
+    /// Whether the backend can actually run on this host — a present-but-
+    /// unusable binary is probed with a cheap spawn so selection never
+    /// picks a launcher that fails at runtime.
     pub fn available(self) -> bool {
         match self {
-            Self::Bwrap => cfg!(target_os = "linux") && which_exists("bwrap"),
+            Self::Bwrap => cfg!(target_os = "linux") && probe_runs(&["bwrap", "--version"]),
             Self::Seatbelt => {
-                cfg!(target_os = "macos") && std::path::Path::new("/usr/bin/sandbox-exec").exists()
+                cfg!(target_os = "macos")
+                    && probe_runs(&[
+                        "/usr/bin/sandbox-exec",
+                        "-p",
+                        "(version 1)(allow default)",
+                        "/usr/bin/true",
+                    ])
             }
             // Job Objects are a kernel feature — always available on Windows.
             Self::JobObject => cfg!(windows),
@@ -185,17 +193,19 @@ impl SandboxBackend {
     }
 }
 
-fn which_exists(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                #[cfg(windows)]
-                let candidate = dir.join(format!("{program}.exe"));
-                #[cfg(not(windows))]
-                let candidate = dir.join(program);
-                candidate.is_file()
-            })
-        })
+/// Runs `argv` once and reports whether it executed successfully — used to
+/// probe that a sandbox backend binary is actually usable, not just present.
+fn probe_runs(argv: &[&str]) -> bool {
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -270,7 +280,7 @@ impl ProcessLauncher for SandboxedLauncher {
         }
         let argv = match self.backend {
             SandboxBackend::Bwrap => bwrap_argv(program, args, spec),
-            SandboxBackend::Seatbelt => seatbelt_argv(program, args, spec),
+            SandboxBackend::Seatbelt => seatbelt_argv(program, args, spec)?,
             SandboxBackend::JobObject => {
                 // v1: Job Object containment only (no FS/Net isolation);
                 // HostLauncher still rejects NetAccess below Full.
@@ -326,13 +336,33 @@ pub fn bwrap_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<Stri
     argv
 }
 
+/// Escapes a path for a double-quoted seatbelt string literal — `\"` and
+/// `\\` are escaped so a crafted workspace path cannot inject profile
+/// clauses; control characters (which can break the string outright) are
+/// rejected with a security error.
+fn seatbelt_escape(path: &std::path::Path) -> Result<String, ToolError> {
+    let text = path.to_string_lossy();
+    if text.chars().any(|ch| ch.is_control()) {
+        return Err(ToolError::Security(format!(
+            "workspace path is not representable in a sandbox profile: {}",
+            path.display()
+        )));
+    }
+    Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// `sandbox-exec` seatbelt argv: deny-by-default profile — reads confined to
 /// system/toolchain subtrees and the workspace (home directories and
-/// credentials stay unreadable), writes confined to the workspace plus
-/// /private/tmp for toolchain scratch, process exec/fork allowed, and a
-/// network clause only when the spec allows network access.
-pub fn seatbelt_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<String> {
-    let workspace = spec.cwd.to_string_lossy().replace('\\', "/");
+/// credentials stay unreadable; `/private` is narrowed to the resolver config
+/// and temp trees, not the whole host-private store), writes confined to the
+/// workspace plus temp dirs, process exec/fork allowed, and a network clause
+/// only when the spec allows network access.
+pub fn seatbelt_argv(
+    program: &str,
+    args: &[String],
+    spec: &LaunchSpec,
+) -> Result<Vec<String>, ToolError> {
+    let workspace = seatbelt_escape(&spec.cwd)?;
     let network = match spec.net {
         NetAccess::None | NetAccess::Pinned(_) => "",
         NetAccess::Full => "(allow network*)",
@@ -342,17 +372,18 @@ pub fn seatbelt_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<S
          (allow file-read*\
            (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\")\
            (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/opt\")\
-           (subpath \"/private\") (subpath \"/dev\") (subpath \"/Applications\")\
+           (subpath \"/dev\") (subpath \"/Applications\")\
+           (subpath \"/private/etc\") (subpath \"/private/tmp\")\
            (subpath \"{workspace}\"))\
          (allow file-write* (subpath \"{workspace}\") (subpath \"/private/tmp\"))\
          (allow process-exec)(allow process-fork)(allow signal (target self))\
          {network}"
     );
-    ["sandbox-exec", "-p", profile.as_str(), program]
+    Ok(["sandbox-exec", "-p", profile.as_str(), program]
         .into_iter()
         .map(str::to_owned)
         .chain(args.iter().cloned())
-        .collect()
+        .collect())
 }
 
 /// Shared spawn path: `env_clear` + sanitized env, piped stdio, killable
@@ -574,14 +605,31 @@ mod tests {
 
     #[test]
     fn seatbelt_argv_denies_by_default_and_confines_writes() {
-        let argv = seatbelt_argv("tsc", &["--noEmit".to_owned()], &spec(NetAccess::None));
+        let argv = seatbelt_argv("tsc", &["--noEmit".to_owned()], &spec(NetAccess::None))
+            .expect("seatbelt argv");
         assert_eq!(argv.first().map(String::as_str), Some("sandbox-exec"));
         let profile = argv.get(2).expect("profile");
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("/ws/project"));
         assert!(!profile.contains("network"));
-        let argv = seatbelt_argv("tsc", &[], &spec(NetAccess::Full));
+        let argv = seatbelt_argv("tsc", &[], &spec(NetAccess::Full)).expect("seatbelt argv");
         assert!(argv.get(2).unwrap().contains("(allow network*)"));
+    }
+
+    #[test]
+    fn seatbelt_argv_escapes_workspace_and_rejects_control_chars() {
+        let mut spec = spec(NetAccess::None);
+        spec.cwd = std::path::PathBuf::from("/ws/qu\"ote");
+        let argv = seatbelt_argv("tsc", &[], &spec).expect("seatbelt argv");
+        let profile = argv.get(2).expect("profile");
+        // The quote is escaped — it cannot break out of the string literal.
+        assert!(profile.contains("\"/ws/qu\\\"ote\""));
+        assert!(!profile.contains("\"/ws/qu\"ote\""));
+        spec.cwd = std::path::PathBuf::from("/ws/con\ntrol");
+        assert!(matches!(
+            seatbelt_argv("tsc", &[], &spec),
+            Err(ToolError::Security(_))
+        ));
     }
 
     #[test]

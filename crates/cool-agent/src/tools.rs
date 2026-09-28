@@ -504,6 +504,41 @@ fn confinement_io(error: std::io::Error) -> ToolError {
     }
 }
 
+/// `.cool/policy.json` (capability rules) and `.cool/config.json`
+/// (diagnostics commands) are security configuration: an agent that could
+/// rewrite them through the file tools could grant itself tool access or
+/// arbitrary per-write commands. Writes to them go through the policy
+/// commands / manual edits only — never through `write_file`/`edit_file`.
+fn reject_protected_write(path: &std::path::Path) -> Result<(), ToolError> {
+    // Lexically collapse `.`/`..` the way the capability dir resolves them
+    // at open time — `sub/../.cool/policy.json` must not slip the check.
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().into_owned());
+            }
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            _ => {}
+        }
+    }
+    if parts.len() == 2
+        && parts[0].eq_ignore_ascii_case(".cool")
+        && matches!(
+            parts[1].to_lowercase().as_str(),
+            "policy.json" | "config.json"
+        )
+    {
+        return Err(ToolError::Security(format!(
+            "{} is managed by policy commands, not writable by the agent",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl ToolHandler for ReadFile {
     async fn execute(
@@ -1062,6 +1097,7 @@ impl ToolHandler for WriteFile {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let path = workspace_path(context, requested)?;
+        reject_protected_write(&path)?;
         if let Some(parent) = path.parent()
             && parent.components().next().is_some()
         {
@@ -1218,6 +1254,9 @@ impl ToolHandler for EditFile {
                 "symlink chain exceeds 8 hops".to_owned(),
             ));
         }
+        // Checked AFTER symlink resolution so a link cannot smuggle a write
+        // into `.cool/policy.json` / `.cool/config.json`.
+        reject_protected_write(&path)?;
 
         let mut original_permissions = None;
         let before = match context.workspace.dir().metadata(&path) {
@@ -2046,21 +2085,24 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
             text.push_str(&String::from_utf8_lossy(&capture.body()));
         }
     }
-    if text.len() > DIAGNOSTICS_LIMIT {
-        let mut end = DIAGNOSTICS_LIMIT;
+    // A nonzero exit is a checker FAILURE — surface it as a warning even
+    // when the checker printed output (bare output reads like a success).
+    // The cap covers the final returned string, marker included.
+    let warning =
+        (!status.success()).then(|| format!("warning: diagnostics exited with {status}\n"));
+    let headroom = DIAGNOSTICS_LIMIT - warning.as_deref().map_or(0, str::len);
+    if text.len() > headroom {
+        const MARKER: &str = "\n... [diagnostics truncated at 4 KiB] ...";
+        let mut end = headroom.saturating_sub(MARKER.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
         text.truncate(end);
-        text.push_str("\n... [diagnostics truncated at 4 KiB] ...");
+        text.push_str(MARKER);
     }
     for secret in &secret_values {
         text = text.replace(secret, "[REDACTED]");
     }
     let text = mask_secrets(&text);
-    Some(if status.success() || !text.is_empty() {
-        text
-    } else {
-        format!("warning: diagnostics exited with {status}")
-    })
+    Some(format!("{}{}", warning.unwrap_or_default(), text))
 }

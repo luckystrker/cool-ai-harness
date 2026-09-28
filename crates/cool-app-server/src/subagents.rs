@@ -500,9 +500,7 @@ impl SubagentExecutor {
             .with_environment(self.host.environment.clone())
             .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
             .with_rule_source(crate::rule_source_for(
-                self.host.rules.clone(),
                 Some(self.store.clone()),
-                self.workspace.clone(),
                 workspace.clone(),
             )),
         };
@@ -546,6 +544,9 @@ impl SubagentExecutor {
                 },
             )
             .await;
+        // The run is settled — drop its session-rule set so finished runs
+        // don't accumulate per-run state forever.
+        self.host.rules.remove_session(&context.run_id.to_string());
         let (status, summary, error, usage_json) = match &outcome {
             Ok(RunOutcome::Completed { history, usage }) => (
                 "completed",

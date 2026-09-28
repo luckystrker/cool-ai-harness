@@ -646,7 +646,10 @@ impl AgentRuntime {
             // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
             // session rules first (most local wins), then the live
             // project+user source, then rules embedded in the policy itself.
-            // First match wins.
+            // First match wins — BUT a capability deny is the outer bound:
+            // a rule's `allow` may relax `ask`→`allow`, it may never lift a
+            // capability `deny` (a scheduled task/subagent could otherwise
+            // self-authorize denied tools via its own policy.json).
             let subject = rule_subject(&call);
             let matched_rule = context
                 .session_rules
@@ -662,21 +665,26 @@ impl AgentRuntime {
                     })
                 })
                 .or_else(|| context.policy.match_rule(&call.name, &subject).cloned());
-            let decision = match matched_rule.as_ref() {
-                Some(rule) => rule.decision,
-                None => {
-                    context
-                        .policy
-                        .evaluate(tool.capabilities.iter().copied(), tool.default_decision)
-                        .effective
+            let capability = context
+                .policy
+                .evaluate(tool.capabilities.iter().copied(), tool.default_decision)
+                .effective;
+            let decision = if capability == Decision::Deny {
+                Decision::Deny
+            } else {
+                match matched_rule.as_ref() {
+                    Some(rule) => rule.decision,
+                    None => capability,
                 }
             };
             if decision == Decision::Deny {
                 let result = ToolResult::error(
                     "capability_denied",
                     match matched_rule.as_ref() {
-                        Some(rule) => format!("denied by policy rule: {}", rule.describe()),
-                        None => "tool capability was denied".to_owned(),
+                        Some(rule) if rule.decision == Decision::Deny => {
+                            format!("denied by policy rule: {}", rule.describe())
+                        }
+                        _ => "tool capability was denied".to_owned(),
                     },
                 );
                 emit_tool_result(sink, &call, &result).await?;

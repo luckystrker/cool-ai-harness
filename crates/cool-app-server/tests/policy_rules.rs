@@ -498,3 +498,230 @@ async fn malformed_policy_json_loads_a_deny_all_rule() {
     drop(client);
     task.await.expect("server task").expect("clean disconnect");
 }
+
+/// Project rule ids are monotonic across restarts: after a fresh server is
+/// opened over the same workspace, `next_id` resumes from the persisted
+/// counter — a deleted id is never recycled onto a different rule (SEC: a
+/// stale client id must never delete the wrong rule).
+#[tokio::test]
+async fn project_rule_ids_survive_restart() {
+    let directory = tempdir().unwrap();
+    let app = server(directory.path(), false);
+    let (client, task) = connected_client(app.clone()).await;
+    for pattern in ["cargo *", "npm *"] {
+        let mut rule = shell_rule("project");
+        rule.pattern = pattern.to_owned();
+        client
+            .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+                rule,
+                run_id: None,
+            }))
+            .await
+            .unwrap();
+    }
+    client
+        .request(Command::PolicyRuleDelete(PolicyRuleDeleteParams {
+            idempotency_key: key("rule-delete-pre-restart"),
+            rule_id: "project:1".to_owned(),
+            run_id: None,
+        }))
+        .await
+        .unwrap();
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+
+    // "Restart": a brand-new server over the same workspace.
+    let restarted = server(directory.path(), false);
+    let (client, task) = connected_client(restarted.clone()).await;
+    let mut rule = shell_rule("project");
+    rule.pattern = "pip *".to_owned();
+    match client
+        .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+            rule,
+            run_id: None,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PolicyRuleAdded(rule) => {
+            // project:1 was deleted pre-restart — the counter must NOT
+            // hand it out again for the unrelated pip rule.
+            assert_eq!(rule.id.as_deref(), Some("project:2"));
+        }
+        payload => panic!("unexpected rule_add payload: {payload:?}"),
+    }
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+/// Edits to `.cool/policy.json` made after startup (out-of-band, e.g. a
+/// user hand-edit or another server) are picked up live — the file, not the
+/// startup snapshot, is the source of truth.
+#[tokio::test]
+async fn project_policy_file_edits_are_read_live() {
+    let directory = tempdir().unwrap();
+    let app = server(directory.path(), false);
+    let (client, task) = connected_client(app.clone()).await;
+    assert!(rules_list(&client, Some("project"), None).await.is_empty());
+
+    std::fs::create_dir_all(directory.path().join(".cool")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/policy.json"),
+        serde_json::json!({
+            "version": 1,
+            "next_id": 7,
+            "rules": [{
+                "id": "project:3",
+                "tool": "shell",
+                "kind": "command",
+                "pattern": "cargo *",
+                "decision": "allow",
+                "scope": "project",
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let listed = rules_list(&client, Some("project"), None).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id.as_deref(), Some("project:3"));
+    assert_eq!(listed[0].pattern, "cargo *");
+
+    // The persisted counter is honored too — a new (non-identical) rule
+    // gets project:7.
+    let mut added = shell_rule("project");
+    added.pattern = "npm *".to_owned();
+    match client
+        .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+            rule: added,
+            run_id: None,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PolicyRuleAdded(rule) => {
+            assert_eq!(rule.id.as_deref(), Some("project:7"));
+        }
+        payload => panic!("unexpected rule_add payload: {payload:?}"),
+    }
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+/// A `remember`ed project rule lands in the RUN's workspace — the
+/// conversation's `working_directory` — not the server's (a run in another
+/// cwd would otherwise never see its own exemption).
+#[tokio::test]
+async fn approval_remember_persists_into_the_run_workspace() {
+    let server_dir = tempdir().unwrap();
+    let run_dir = tempdir().unwrap();
+    let app = server_with_driver(
+        server_dir.path(),
+        true,
+        Arc::new(ScriptedDriver::echo_with_delay(
+            std::time::Duration::from_secs(10),
+        )),
+    );
+    let (client, task) = connected_client(app.clone()).await;
+
+    let created = client
+        .request(Command::ConversationsCreate(
+            cool_protocol::ConversationCreateParams {
+                idempotency_key: key("conv"),
+                title: Some("run ws".to_owned()),
+                provider: None,
+                model: Some("scripted".to_owned()),
+                working_directory: Some(run_dir.path().to_string_lossy().into_owned()),
+                permissions: None,
+                capability_policy: None,
+                profile_id: None,
+                tags: None,
+                folder: None,
+                metadata: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let ResponsePayload::ConversationsCreated(conversation) = created else {
+        panic!("unexpected conversation payload: {created:?}");
+    };
+    let session_id = match client
+        .request(Command::SessionForConversation(
+            cool_protocol::SessionForConversationParams {
+                idempotency_key: key("link"),
+                conversation_id: conversation.id,
+            },
+        ))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::SessionForConversation(link) => link.session_id,
+        payload => panic!("unexpected link payload: {payload:?}"),
+    };
+    let run_id = match client
+        .request(Command::SessionPrompt(cool_protocol::SessionPromptParams {
+            idempotency_key: key("prompt"),
+            session_id: session_id.clone(),
+            content: vec![cool_protocol::ContentPart::Text {
+                text: "hi".to_owned(),
+            }],
+            model: None,
+            plan_mode: false,
+            system_prompt: None,
+            long_task_mode: false,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PromptAccepted(result) => result.run_id,
+        payload => panic!("unexpected prompt payload: {payload:?}"),
+    };
+    let ticket = app
+        .create_approval(
+            &session_id,
+            &run_id,
+            "call-1",
+            "shell",
+            &std::collections::BTreeMap::from([
+                ("program".to_owned(), json!("cargo")),
+                ("args".to_owned(), json!(["run"])),
+            ]),
+            "run cargo",
+        )
+        .unwrap();
+    client
+        .request(Command::ApprovalResolve(ApprovalResolveParams {
+            idempotency_key: key("resolve"),
+            approval_id: ticket.approval_id.clone(),
+            expected_revision: ticket.revision,
+            decision: cool_protocol::ApprovalDecision::Approved,
+            remember: Some("project".to_owned()),
+            rule: None,
+        }))
+        .await
+        .unwrap();
+
+    // The rule file exists in the RUN workspace, not the server's.
+    let run_policy = run_dir.path().join(".cool/policy.json");
+    assert!(
+        run_policy.exists(),
+        "policy.json written under run workspace"
+    );
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&run_policy).unwrap()).unwrap();
+    let rules = file["rules"].as_array().expect("rules array");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["scope"], "project");
+    let server_policy = server_dir.path().join(".cool/policy.json");
+    assert!(
+        !server_policy.exists()
+            || std::fs::read_to_string(&server_policy)
+                .unwrap_or_default()
+                .contains("\"rules\":[]"),
+        "server workspace must not gain the run's rule"
+    );
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}

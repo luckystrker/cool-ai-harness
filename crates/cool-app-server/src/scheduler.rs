@@ -432,9 +432,7 @@ impl TaskExecutor {
                 .with_launcher(self.host.launcher.clone())
                 .with_environment(self.host.environment.clone())
                 .with_rule_source(crate::rule_source_for(
-                    self.host.rules.clone(),
                     Some(self.store.clone()),
-                    self.workspace.clone(),
                     workspace.clone(),
                 )),
         };
