@@ -578,6 +578,8 @@ impl ToolHandler for ListFiles {
 
 /// Largest file `search_files` will scan; bigger files are counted and skipped.
 const MAX_SEARCH_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Bound on `context` so a huge request cannot multiply every match's body.
+const MAX_SEARCH_CONTEXT_LINES: u64 = 10;
 
 /// Directory inside the workspace receiving over-cap tool output bodies.
 const SPILL_DIR: &str = ".cool/spill";
@@ -785,7 +787,8 @@ impl ToolHandler for SearchFiles {
         let context_lines = arguments
             .get("context")
             .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
+            .unwrap_or(0)
+            .min(MAX_SEARCH_CONTEXT_LINES) as usize;
         let relative = workspace_path(
             context,
             arguments.get("path").and_then(Value::as_str).unwrap_or("."),
@@ -796,6 +799,7 @@ impl ToolHandler for SearchFiles {
             let mut matches = Vec::new();
             let mut total = 0_u64;
             let mut skipped_large = 0_u64;
+            let mut stored_bytes = 0_usize;
             for (rel, display, size) in
                 collect_workspace_files(&workspace, &relative, glob.as_ref())
             {
@@ -815,21 +819,31 @@ impl ToolHandler for SearchFiles {
                         continue;
                     };
                     total += 1;
-                    if matches.len() >= max_results {
+                    // Keep counting every match but stop storing once the
+                    // result is past the spill bound — the spilled body and
+                    // its head/tail view are built from what was retained.
+                    if matches.len() >= max_results || stored_bytes > SPILL_FILE_MAX_BYTES {
                         continue;
                     }
                     let column = line[..hit.start()].chars().count() + 1;
                     let mut context_lines_json = Vec::new();
                     let before = index.saturating_sub(context_lines);
                     for (offset, text_line) in lines[before..index].iter().enumerate() {
-                        context_lines_json
-                            .push(json!({"line": before + offset + 1, "text": text_line}));
+                        context_lines_json.push(
+                            json!({"line": before + offset + 1, "text": mask_secrets(text_line)}),
+                        );
                     }
                     let after_end = (index + 1 + context_lines).min(lines.len());
                     for (offset, text_line) in lines[index + 1..after_end].iter().enumerate() {
-                        context_lines_json
-                            .push(json!({"line": index + 2 + offset, "text": text_line}));
+                        context_lines_json.push(
+                            json!({"line": index + 2 + offset, "text": mask_secrets(text_line)}),
+                        );
                     }
+                    stored_bytes += line.len()
+                        + context_lines_json
+                            .iter()
+                            .map(|entry| entry["text"].as_str().map_or(0, str::len))
+                            .sum::<usize>();
                     matches.push(json!({
                         "path": display,
                         "line": index + 1,
@@ -839,10 +853,11 @@ impl ToolHandler for SearchFiles {
                     }));
                 }
             }
+            let truncated = total as usize > matches.len();
             Ok(json!({
                 "matches": matches,
                 "totalMatches": total,
-                "truncated": total as usize > max_results,
+                "truncated": truncated,
                 "skippedLargeFiles": skipped_large,
             }))
         })
@@ -1150,12 +1165,13 @@ async fn run_bounded_process(
         .stderr()
         .take()
         .ok_or_else(|| ToolError::Io(std::io::Error::other("missing stderr")))?;
-    // Drain each stream fully so the child never blocks on a full pipe, but
-    // only retain up to the spill-file cap in memory.
+    // Drain each stream fully so the child never blocks on a full pipe,
+    // retaining head + true tail within the spill-file cap.
+    let head_cap = SPILL_FILE_MAX_BYTES - SPILL_TAIL_BYTES - 256;
     let stdout_task =
-        tokio::spawn(async move { drain_stream(stdout, SPILL_FILE_MAX_BYTES as u64).await });
+        tokio::spawn(async move { drain_stream(stdout, head_cap, SPILL_TAIL_BYTES).await });
     let stderr_task =
-        tokio::spawn(async move { drain_stream(stderr, SPILL_FILE_MAX_BYTES as u64).await });
+        tokio::spawn(async move { drain_stream(stderr, head_cap, SPILL_TAIL_BYTES).await });
     let status = if let Some(mut cancel) = context.cancel.clone() {
         tokio::select! {
             waited = timeout(context.timeout, child.wait()) => match waited {
@@ -1188,15 +1204,14 @@ async fn run_bounded_process(
     let stderr = stderr_task
         .await
         .map_err(|error| ToolError::Io(std::io::Error::other(error)))??;
-    let mut stdout = String::from_utf8_lossy(&stdout).into_owned();
-    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    let mut stdout = String::from_utf8_lossy(&stdout.body()).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr.body()).into_owned();
     for secret in secret_values {
         stdout = stdout.replace(&secret, "[REDACTED]");
         stderr = stderr.replace(&secret, "[REDACTED]");
     }
     let stdout = mask_secrets(&stdout);
     let stderr = mask_secrets(&stderr);
-    let cap = context.max_output_bytes;
     let stem = spill_stem(context);
     let mut output = json!({
         "exitCode": status.code(),
@@ -1204,16 +1219,28 @@ async fn run_bounded_process(
         "truncated": false,
     });
     let mut truncated = false;
+    // stdout and stderr share the output budget — each stream spills to
+    // `.cool/spill/` when it would push the combined body over the cap.
+    let mut budget = context.max_output_bytes;
     for (stream, body) in [("stdout", &stdout), ("stderr", &stderr)] {
-        if body.len() <= cap {
+        if body.len() <= budget {
+            budget -= body.len();
             output[stream] = json!(body);
             continue;
         }
-        // Spill the full masked body and return head/tail only.
         let spill_path = spill_output(context, &stem, stream, body.as_bytes())?;
-        let tail = SPILL_TAIL_BYTES.min(cap / 4);
-        let head = SPILL_HEAD_BYTES.min(cap.saturating_sub(tail));
-        output[stream] = json!(head_tail_view(body, head, tail, &spill_path));
+        // Reserve room for the truncation marker itself.
+        let inner = budget.saturating_sub(160);
+        if inner == 0 {
+            output[stream] = json!("");
+        } else {
+            let tail = SPILL_TAIL_BYTES.min(inner / 4);
+            let head = SPILL_HEAD_BYTES.min(inner.saturating_sub(tail));
+            let view = head_tail_view(body, head, tail, &spill_path);
+            budget = budget.saturating_sub(view.len());
+            output[stream] = json!(view);
+        }
+        budget = budget.saturating_sub(spill_path.len());
         output[format!("{stream}SpillPath")] = json!(spill_path);
         truncated = true;
     }
@@ -1226,24 +1253,70 @@ async fn run_bounded_process(
     })
 }
 
-/// Drain `reader` to EOF so the child never blocks on a full pipe, retaining at
-/// most `keep` leading bytes.
-async fn drain_stream<R>(mut reader: R, keep: u64) -> std::io::Result<Vec<u8>>
+/// Bounded capture of one process stream: the leading bytes plus a ring of the
+/// trailing bytes, so the spill file and returned tail keep the command's real
+/// ending even when the stream overflows the spill cap.
+struct StreamCapture {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    total: u64,
+}
+
+impl StreamCapture {
+    fn truncated(&self) -> bool {
+        self.head.len() as u64 != self.total
+    }
+
+    /// Reassemble the retained body: head + omission marker + true tail.
+    fn body(&self) -> Vec<u8> {
+        if !self.truncated() {
+            return self.head.clone();
+        }
+        let covered = self.head.len() as u64;
+        let tail_kept = self.tail.len() as u64;
+        let beyond = (self.total - covered).min(tail_kept);
+        let omitted = self.total - covered - beyond;
+        let mut body = self.head.clone();
+        if omitted > 0 {
+            body.extend_from_slice(
+                format!("\n... [{omitted} bytes omitted mid-stream] ...\n").as_bytes(),
+            );
+        }
+        body.extend_from_slice(&self.tail[self.tail.len() - beyond as usize..]);
+        body
+    }
+}
+
+/// Drain `reader` to EOF so the child never blocks on a full pipe, retaining
+/// the leading `head_cap` bytes and the trailing `tail_cap` bytes.
+async fn drain_stream<R>(
+    mut reader: R,
+    head_cap: usize,
+    tail_cap: usize,
+) -> std::io::Result<StreamCapture>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt as _;
-    let mut output = Vec::new();
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    let mut total = 0_u64;
     let mut chunk = [0_u8; 8192];
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
-        let room = (keep as usize).saturating_sub(output.len());
+        total += read as u64;
+        let room = head_cap.saturating_sub(head.len());
         if room > 0 {
-            output.extend_from_slice(&chunk[..read.min(room)]);
+            head.extend_from_slice(&chunk[..read.min(room)]);
+        }
+        tail.extend_from_slice(&chunk[..read]);
+        let excess = tail.len().saturating_sub(tail_cap);
+        if excess > 0 {
+            tail.drain(..excess);
         }
     }
-    Ok(output)
+    Ok(StreamCapture { head, tail, total })
 }

@@ -60,6 +60,34 @@ async fn search_files_finds_regex_matches_with_context() {
     assert_eq!(context_lines[1]["text"], "fn omega() {}");
 }
 
+/// Secrets on lines adjacent to a match must be masked like everything else,
+/// and a huge `context` request is bounded instead of exploding output size.
+#[tokio::test]
+async fn search_files_context_lines_are_masked_and_bounded() {
+    let directory = tempdir().unwrap();
+    let mut content = String::new();
+    for index in 0..30 {
+        content.push_str(&format!("filler {index}\n"));
+    }
+    content.push_str("password=hunter2hunter2\nneedle\n");
+    write(directory.path(), "app.rs", content.as_bytes());
+    let registry = builtin_registry();
+    let context = context(directory.path());
+    let search = registry.get("search_files").unwrap();
+    let result = search
+        .execute(&context, json!({"pattern": "needle", "context": 999}))
+        .await
+        .unwrap();
+    let matches = result.output["matches"].as_array().unwrap();
+    let context_lines = matches[0]["context"].as_array().unwrap();
+    // context is capped at 10 lines before/after.
+    assert_eq!(context_lines.len(), 10);
+    let last = context_lines.last().unwrap();
+    assert_eq!(last["line"], 31);
+    assert!(last["text"].as_str().unwrap().contains("[REDACTED]"));
+    assert!(!result.output.to_string().contains("hunter2hunter2"));
+}
+
 #[tokio::test]
 async fn search_files_glob_narrows_results() {
     let directory = tempdir().unwrap();
@@ -232,6 +260,76 @@ async fn oversized_process_output_spills_to_workspace_file() {
     let spill = std::fs::read_to_string(directory.path().join(spill_path)).unwrap();
     assert!(spill.len() > stdout.len());
     assert!(spill.contains("3999"));
+}
+
+/// stdout and stderr share the output cap: when stdout consumes the budget,
+/// stderr spills even though it is individually under the limit.
+#[tokio::test]
+async fn combined_process_output_respects_the_shared_cap() {
+    let directory = tempdir().unwrap();
+    let registry = builtin_registry();
+    let mut context = context(directory.path());
+    context.allow_trusted_host_processes = true;
+    context.max_output_bytes = 4096;
+    let shell = registry.get("shell").unwrap();
+    #[cfg(windows)]
+    let arguments = json!({
+        "program": "cmd.exe",
+        "args": ["/D", "/C", "for /l %i in (1,1,700) do @echo oooo%i & for /l %i in (1,1,700) do @echo eeee%i 1>&2"]
+    });
+    #[cfg(not(windows))]
+    let arguments = json!({
+        "program": "/bin/sh",
+        "args": ["-c", "i=0; while [ $i -lt 700 ]; do echo oooo$i; i=$((i+1)); done; i=0; while [ $i -lt 700 ]; do echo eeee$i 1>&2; i=$((i+1)); done"]
+    });
+    let result = shell.execute(&context, arguments).await.unwrap();
+    assert!(result.truncated);
+    let stdout = result.output["stdout"].as_str().unwrap();
+    let stderr = result.output["stderr"].as_str().unwrap();
+    assert!(
+        stdout.len() + stderr.len() <= 4096,
+        "combined output exceeds cap: {} + {}",
+        stdout.len(),
+        stderr.len()
+    );
+    // stderr was pushed over the remaining budget and spilled.
+    let spill_path = result.output["stderrSpillPath"].as_str().unwrap();
+    let spill = std::fs::read_to_string(directory.path().join(spill_path)).unwrap();
+    assert!(spill.contains("eeee699"));
+}
+
+/// A stream larger than the 10MB spill cap still keeps its true ending: the
+/// spill file and the returned tail both carry the final bytes.
+#[tokio::test]
+async fn overspill_process_output_keeps_the_true_tail() {
+    let directory = tempdir().unwrap();
+    let mut big = vec![b'x'; 12 * 1024 * 1024];
+    big.extend_from_slice(b"TAIL_END_MARKER");
+    write(directory.path(), "big.txt", &big);
+    let registry = builtin_registry();
+    let mut context = context(directory.path());
+    context.allow_trusted_host_processes = true;
+    let shell = registry.get("shell").unwrap();
+    #[cfg(windows)]
+    let arguments = json!({
+        "program": "cmd.exe",
+        "args": ["/D", "/C", "type big.txt"]
+    });
+    #[cfg(not(windows))]
+    let arguments = json!({
+        "program": "/bin/sh",
+        "args": ["-c", "cat big.txt"]
+    });
+    let result = shell.execute(&context, arguments).await.unwrap();
+    assert!(result.truncated);
+    let stdout = result.output["stdout"].as_str().unwrap();
+    assert!(stdout.contains("TAIL_END_MARKER"), "true tail lost");
+    let spill_path = result.output["stdoutSpillPath"].as_str().unwrap();
+    let spill = std::fs::read(directory.path().join(spill_path)).unwrap();
+    assert!(spill.len() <= 10 * 1024 * 1024, "spill exceeded cap");
+    let spill = String::from_utf8_lossy(&spill);
+    assert!(spill.contains("TAIL_END_MARKER"), "spill lost the tail");
+    assert!(spill.contains("bytes omitted mid-stream"));
 }
 
 /// The new tools are read-scoped and allowed by default.
