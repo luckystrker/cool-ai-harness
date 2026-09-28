@@ -387,6 +387,10 @@
     "ApprovalResolveParams": {
       "type": "object",
       "properties": {
+        "answer": {
+          "description": "Free-form answer for `breakpointType: \"question\"` asks (the `ask_user`\ntool): an option id/string or arbitrary JSON. Ignored for plain\nallow/deny approvals.",
+          "default": null
+        },
         "approvalId": {
           "type": "string"
         },

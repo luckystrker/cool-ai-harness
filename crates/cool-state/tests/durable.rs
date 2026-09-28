@@ -299,6 +299,7 @@ fn one_approval_resolution_wins_the_race_and_is_audited_with_an_event() {
                     &approval_id,
                     1,
                     decision,
+                    None,
                 )
             })
         })
@@ -317,7 +318,7 @@ fn one_approval_resolution_wins_the_race_and_is_audited_with_an_event() {
         store
             .approval_outcome("local-user", &ticket.approval_id)
             .unwrap(),
-        Some(winner.outcome.clone())
+        Some((winner.outcome.clone(), None))
     );
     assert_eq!(store.all_events(&run, "local-user").unwrap().len(), 2);
     store.replay_run(&run, "local-user").unwrap();

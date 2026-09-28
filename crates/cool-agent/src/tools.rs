@@ -5,6 +5,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cool_protocol::{
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, V1Version,
+};
 use cool_security::{
     Capability, CapabilityPolicy, Decision, PolicyRule, Workspace, mask_json, mask_secrets,
     sanitize_environment,
@@ -15,10 +18,13 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::context::ToolCall;
 use crate::launcher::{
     DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
 };
-use crate::loop_runtime::CancelSignal;
+use crate::loop_runtime::{
+    ApprovalGate, ApprovalRequest, CancelSignal, EventSink, RuntimeError,
+};
 
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
@@ -158,6 +164,10 @@ pub struct ToolContext {
     /// so artifacts like `.cool/spill/{call_id}-stdout.txt` correlate with the
     /// call in the event log.
     pub call_id: Option<String>,
+    /// Interactive question gate for `ask_user` (P1.8): set only on runs that
+    /// can reach a human — CLI one-shots, subagents and scheduled runs leave
+    /// it `None` so the tool fails `user_unavailable` instead of hanging.
+    pub question_gate: Option<Arc<dyn ApprovalGate>>,
 }
 
 impl ToolContext {
@@ -176,6 +186,7 @@ impl ToolContext {
             actor_id: "local-user".to_owned(),
             conversation_id: None,
             call_id: None,
+            question_gate: None,
         }
     }
 
@@ -215,6 +226,13 @@ impl ToolContext {
     /// passed through `env_clear` + `sanitize_environment`).
     pub fn with_environment(mut self, environment: HashMap<String, String>) -> Self {
         self.environment = environment;
+        self
+    }
+
+    /// Installs the interactive gate `ask_user` raises questions through
+    /// (P1.8). Callers without a human on the other end leave it unset.
+    pub fn with_question_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.question_gate = Some(gate);
         self
     }
 }
@@ -425,6 +443,12 @@ pub fn builtin_registry() -> ToolRegistry {
             [],
             Decision::Allow,
             PlanTool,
+        ),
+        Tool::new(
+            definition("ask_user", "Ask the human driving this run a question (P1.8). On interactive runs the question renders as an approval-style card with option buttons and optional free text; the resolved answer is the tool result. Fails `user_unavailable` when no human is attached (subagents, one-shot CLI, scheduled runs) and `question_timeout` when `timeout_secs` elapses without an answer.", json!({"type":"object","properties":{"question":{"type":"string","description":"The question text shown to the user"},"options":{"type":"array","items":{"type":"string"},"description":"Clickable answer options"},"allow_free_text":{"type":"boolean","default":true,"description":"Whether a free-form answer box is offered"},"timeout_secs":{"type":"number","exclusiveMinimum":0,"description":"Optional answer timeout; expiry fails `question_timeout`"}},"required":["question"],"additionalProperties":false})),
+            [],
+            Decision::Allow,
+            AskUser,
         ),
     ])
     .expect("builtin tool names are valid")
@@ -1708,6 +1732,123 @@ impl ToolHandler for PlanTool {
             "title": arguments.get("title").cloned().unwrap_or(Value::Null),
             "steps": steps,
         })))
+    }
+}
+
+/// `ask_user` (P1.8): a capability-free meta-tool that routes a question to
+/// the human driving the run through the approval machinery. The gate request
+/// rides `breakpointType: "question"`, so interactive surfaces render the
+/// question card (option buttons + optional free text) instead of the plain
+/// allow/deny card; the resolved `answer` is the tool result.
+struct AskUser;
+
+/// Discards gate events emitted by self-contained gates (e.g.
+/// `AutoApprovalGate`) when a tool drives the approval machinery on behalf of
+/// the loop. The app-server gate ignores the passed sink and publishes through
+/// its own outbound channel, so nothing interactive is lost.
+struct BlackholeSink;
+
+#[async_trait]
+impl EventSink for BlackholeSink {
+    async fn emit(&self, _event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        Ok(EventEnvelope {
+            event_id: "blackhole".to_owned(),
+            schema_version: V1Version::VALUE,
+            session_id: "blackhole".to_owned(),
+            run_id: "blackhole".to_owned(),
+            item_id: None,
+            seq: 0,
+            occurred_at: String::new(),
+            actor: ActorRef {
+                id: "cool-agent".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-agent".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::ItemCompleted(ItemEvent {
+                role: None,
+                content: None,
+                tool_calls: Vec::new(),
+            }),
+            extensions: Default::default(),
+        })
+    }
+}
+
+#[async_trait]
+impl ToolHandler for AskUser {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &["question", "options", "allow_free_text", "timeout_secs"],
+        )?;
+        let question = required_text(&arguments, "question")?.to_owned();
+        if let Some(options) = arguments.get("options") {
+            string_array(&json!({ "options": options.clone() }), "options")?;
+        }
+        let timeout_secs = arguments
+            .get("timeout_secs")
+            .and_then(Value::as_f64)
+            .filter(|value| *value > 0.0);
+        // Runs that cannot reach a human (CLI one-shot, subagent, scheduler)
+        // never install a question gate — fail closed instead of blocking.
+        let Some(gate) = &context.question_gate else {
+            return Ok(ToolResult::error(
+                "user_unavailable",
+                "no interactive user is attached to this run",
+            ));
+        };
+        let call_arguments = arguments.as_object().cloned().unwrap_or_default();
+        let request = ApprovalRequest {
+            approval_id: format!("approval-{}", Uuid::new_v4()),
+            call: ToolCall {
+                call_id: context
+                    .call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("call-{}", Uuid::new_v4())),
+                name: "ask_user".to_owned(),
+                arguments: call_arguments,
+            },
+            reason: question,
+            matched_rule: None,
+            suggested_rule: None,
+            breakpoint_type: Some("question".to_owned()),
+        };
+        let mut cancel = context
+            .cancel
+            .clone()
+            .unwrap_or_else(|| CancelSignal::channel().1);
+        let sink = BlackholeSink;
+        let pending = gate.request(request, &sink, &mut cancel);
+        let outcome = match timeout_secs {
+            Some(secs) => match timeout(Duration::from_secs_f64(secs), pending).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    return Ok(ToolResult::error(
+                        "question_timeout",
+                        "the question timed out without an answer",
+                    ));
+                }
+            },
+            None => pending.await,
+        };
+        match outcome {
+            Ok(outcome) if outcome.decision == ApprovalOutcome::Approved => {
+                Ok(ToolResult::ok(json!({
+                    "answer": outcome.answer.unwrap_or(Value::Null),
+                })))
+            }
+            Ok(_) => Ok(ToolResult::error(
+                "user_unavailable",
+                "the user did not provide an answer",
+            )),
+            Err(error) => Ok(ToolResult::error("user_unavailable", error.to_string())),
+        }
     }
 }
 

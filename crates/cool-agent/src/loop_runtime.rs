@@ -93,6 +93,26 @@ pub struct ApprovalRequest {
     /// A suggested persistent rule derived from the call, so the approval UI
     /// can offer "remember this" (P1.6).
     pub suggested_rule: Option<PolicyRule>,
+    /// Breakpoint classification on the wire (`"question"` for `ask_user`);
+    /// `None` renders the generic approval card (P1.8).
+    pub breakpoint_type: Option<String>,
+}
+
+/// What the gate resolved for one ask: the allow/deny decision plus an
+/// optional free-form payload for question breakpoints (P1.8 `ask_user`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateOutcome {
+    pub decision: ApprovalOutcome,
+    pub answer: Option<Value>,
+}
+
+impl GateOutcome {
+    pub fn decided(decision: ApprovalOutcome) -> Self {
+        Self {
+            decision,
+            answer: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -189,7 +209,7 @@ pub trait ApprovalGate: Send + Sync {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError>;
+    ) -> Result<GateOutcome, RuntimeError>;
 }
 
 #[derive(Clone)]
@@ -204,7 +224,7 @@ impl ApprovalGate for AutoApprovalGate {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         _cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError> {
+    ) -> Result<GateOutcome, RuntimeError> {
         sink.emit(CanonicalEvent::ToolApprovalRequired(Box::new(
             ToolApprovalRequired {
                 call_id: request.call.call_id.clone(),
@@ -213,7 +233,7 @@ impl ApprovalGate for AutoApprovalGate {
                 reason: request.reason,
                 approval_id: request.approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: request.breakpoint_type,
                 result_preview: None,
                 current_content: None,
                 matched_rule: request.matched_rule,
@@ -228,7 +248,7 @@ impl ApprovalGate for AutoApprovalGate {
             decision: self.outcome.clone(),
         }))
         .await?;
-        Ok(self.outcome.clone())
+        Ok(GateOutcome::decided(self.outcome.clone()))
     }
 }
 
@@ -700,12 +720,13 @@ impl AgentRuntime {
                             reason: "tool requires approval".to_owned(),
                             matched_rule: matched_rule.as_ref().map(PolicyRule::describe),
                             suggested_rule: suggest_policy_rule(&call),
+                            breakpoint_type: None,
                         },
                         sink,
                         cancel,
                     )
                     .await?;
-                if outcome != ApprovalOutcome::Approved {
+                if outcome.decision != ApprovalOutcome::Approved {
                     let result = ToolResult::error("approval_denied", "tool approval was denied");
                     emit_tool_result(sink, &call, &result).await?;
                     immediate.insert(index, (call, result));

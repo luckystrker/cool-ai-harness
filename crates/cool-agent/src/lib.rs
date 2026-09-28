@@ -27,9 +27,9 @@ pub use launcher::{
 };
 pub use loop_runtime::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
-    CancelSignal, EventSink, RunOutcome, RuntimeError, StoreEventSink, SubagentRequest,
-    history_from_event_rows, history_from_events, mask_canonical_event, policy_rule_from_record,
-    policy_rule_record, rule_subject, suggest_policy_rule,
+    CancelSignal, EventSink, GateOutcome, RunOutcome, RuntimeError, StoreEventSink,
+    SubagentRequest, history_from_event_rows, history_from_events, mask_canonical_event,
+    policy_rule_from_record, policy_rule_record, rule_subject, suggest_policy_rule,
 };
 pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{

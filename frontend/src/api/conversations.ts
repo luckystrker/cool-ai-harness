@@ -1,4 +1,5 @@
 import { idempotencyKey, sdk } from "./sdk"
+import type { JsonValue } from "./generated/cool_protocol"
 import {
   toApprovalAudit,
   toCompactResponse,
@@ -135,14 +136,16 @@ export const conversationsApi = {
     toCompactResponse(await sdk.conversationsCompact({ idempotencyKey: idempotencyKey(), id: convId })),
 
   /** Resolve a pending tool-call approval (gated behind an "ask" permission).
-   * `remember` persists a policy rule for the approved call (P1.6). */
+   * `remember` persists a policy rule for the approved call (P1.6).
+   * `answer` is the question-card payload for `breakpointType "question"` (P1.8). */
   approveToolCall: async (
     _convId: number,
     approvalId: string,
     approved: boolean,
     expectedRevision: number,
     _runId: number,
-    remember?: "session" | "project" | "user"
+    remember?: "session" | "project" | "user",
+    answer?: JsonValue
   ): Promise<{ resolved: boolean; approved: boolean }> => {
     await sdk.approvalResolve({
       idempotencyKey: idempotencyKey(),
@@ -151,6 +154,7 @@ export const conversationsApi = {
       decision: approved ? "approved" : "denied",
       remember: remember ?? null,
       rule: null,
+      answer: answer ?? null,
     })
     return { resolved: true, approved }
   },

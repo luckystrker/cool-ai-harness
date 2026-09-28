@@ -272,6 +272,9 @@ pub struct ApprovalResolution {
     pub call_id: String,
     pub revision: u64,
     pub outcome: ApprovalOutcome,
+    /// Question-ask payload resolved alongside the decision (`ask_user`,
+    /// `breakpointType: "question"`); `None` for plain allow/deny approvals.
+    pub answer: Option<serde_json::Value>,
     pub created: bool,
     pub event: EventEnvelope,
 }
@@ -1375,6 +1378,7 @@ impl DurableStore {
             reason,
             None,
             None,
+            None,
         )
     }
 
@@ -1390,6 +1394,7 @@ impl DurableStore {
         reason: &str,
         matched_rule: Option<&str>,
         suggested_rule: Option<&cool_protocol::PolicyRuleRecord>,
+        breakpoint_type: Option<&str>,
     ) -> Result<ApprovalTicket, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1446,7 +1451,7 @@ impl DurableStore {
                 reason: reason.to_owned(),
                 approval_id: approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: breakpoint_type.map(str::to_owned),
                 result_preview: None,
                 current_content: None,
                 matched_rule: matched_rule.map(str::to_owned),
@@ -1463,27 +1468,40 @@ impl DurableStore {
         })
     }
 
+    /// The committed outcome plus any question answer payload (`ask_user`).
+    /// `None` while the approval is still pending.
     pub fn approval_outcome(
         &self,
         actor_id: &str,
         approval_id: &str,
-    ) -> Result<Option<ApprovalOutcome>, StoreError> {
+    ) -> Result<Option<(ApprovalOutcome, Option<serde_json::Value>)>, StoreError> {
         let connection = self.connection()?;
-        let (owner, state) = connection
+        let (owner, state, answer_json) = connection
             .query_row(
-                "SELECT actor_id, state FROM rust_approvals WHERE id = ?1",
+                "SELECT actor_id, state, answer_json FROM rust_approvals WHERE id = ?1",
                 [approval_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or(StoreError::NotFound("approval"))?;
         if owner != actor_id {
             return Err(StoreError::ActorMismatch);
         }
+        let answer = answer_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(format!("approval answer: {error}")))?;
         match state.as_str() {
             "pending" => Ok(None),
-            "approved" => Ok(Some(ApprovalOutcome::Approved)),
-            "denied" => Ok(Some(ApprovalOutcome::Denied)),
+            "approved" => Ok(Some((ApprovalOutcome::Approved, answer))),
+            "denied" => Ok(Some((ApprovalOutcome::Denied, answer))),
             _ => Err(StoreError::Corrupt(format!(
                 "unknown approval state {state}"
             ))),
@@ -1533,6 +1551,7 @@ impl DurableStore {
         approval_id: &str,
         expected_revision: u64,
         decision: ApprovalDecision,
+        answer: Option<&serde_json::Value>,
     ) -> Result<ApprovalResolution, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1580,10 +1599,18 @@ impl DurableStore {
             ApprovalDecision::Approved => "approved",
             ApprovalDecision::Denied => "denied",
         };
+        let answer_json = answer.map(serde_json::to_string).transpose()?;
         let changed = transaction.execute(
-            "UPDATE rust_approvals SET state = ?1, revision = revision + 1, decided_by = ?2, decision_source = 'user', decided_at = ?3 \
+            "UPDATE rust_approvals SET state = ?1, revision = revision + 1, decided_by = ?2, decision_source = 'user', decided_at = ?3, answer_json = ?6 \
              WHERE id = ?4 AND actor_id = ?2 AND revision = ?5 AND state = 'pending'",
-            params![state, actor_id, timestamp(), approval_id, expected_revision as i64],
+            params![
+                state,
+                actor_id,
+                timestamp(),
+                approval_id,
+                expected_revision as i64,
+                answer_json
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::RevisionConflict);
@@ -1624,6 +1651,7 @@ impl DurableStore {
             call_id: approval.2,
             revision: expected_revision + 1,
             outcome,
+            answer: answer.cloned(),
             event,
         };
         insert_idempotency(
@@ -1833,6 +1861,8 @@ struct StoredApprovalResolution {
     call_id: String,
     revision: u64,
     outcome: ApprovalOutcome,
+    #[serde(default)]
+    answer: Option<serde_json::Value>,
     event: EventEnvelope,
 }
 
@@ -1845,6 +1875,7 @@ impl StoredApprovalResolution {
             call_id: self.call_id,
             revision: self.revision,
             outcome: self.outcome,
+            answer: self.answer,
             created,
             event: self.event,
         }
@@ -1895,6 +1926,7 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
            call_id TEXT NOT NULL, tool_name TEXT NOT NULL, reason TEXT NOT NULL, actor_id TEXT NOT NULL,
            revision INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','timed_out')),
            decided_by TEXT, decision_source TEXT, created_at TEXT NOT NULL, decided_at TEXT,
+           answer_json TEXT,
            UNIQUE(run_id, call_id)
          );
          CREATE TABLE IF NOT EXISTS rust_audit(
@@ -1930,6 +1962,17 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
          UPDATE rust_schema_meta SET version = 2 WHERE version < 2;
          COMMIT;",
     )?;
+    // Question-ask answers (P1.8): nullable JSON column appended to
+    // databases created before the DDL above carried it.
+    if connection
+        .prepare("SELECT answer_json FROM rust_approvals LIMIT 0")
+        .is_err()
+    {
+        connection.execute(
+            "ALTER TABLE rust_approvals ADD COLUMN answer_json TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 

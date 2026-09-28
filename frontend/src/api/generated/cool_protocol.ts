@@ -73,7 +73,13 @@ remember: string | null,
  * Rule payload for `remember`; when absent the server derives one from
  * the tool call (same shape as `ToolApprovalRequired.suggestedRule`).
  */
-rule: PolicyRuleRecord | null, };
+rule: PolicyRuleRecord | null, 
+/**
+ * Free-form answer for `breakpointType: "question"` asks (the `ask_user`
+ * tool): an option id/string or arbitrary JSON. Ignored for plain
+ * allow/deny approvals.
+ */
+answer: JsonValue | null, };
 
 export type StatusGetParams = Record<symbol, never>;
 

@@ -467,6 +467,7 @@ impl AppClient {
                     decision,
                     remember: None,
                     rule: None,
+                    answer: None,
                 },
             ))
             .await?;
