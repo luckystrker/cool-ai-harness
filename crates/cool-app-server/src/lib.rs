@@ -5308,15 +5308,16 @@ impl ApprovalGate for AppServerApprovalGate {
     /// `ask_user` timeout path (P1.8): the tool-side timer won, so expire the
     /// durable ticket — `timed_out` + `ToolApprovalResolved` flips the run
     /// back to `running` and clears the pending question card — then fan the
-    /// resolution out to subscribers exactly like a user decision.
-    async fn expire(&self, approval_id: &str) -> Result<(), RuntimeError> {
+    /// resolution out to subscribers exactly like a user decision. `false`
+    /// means a user answer committed first and wins the race.
+    async fn expire(&self, approval_id: &str) -> Result<bool, RuntimeError> {
         if !self
             .server
             .inner
             .store
             .expire_approval(&local_actor().id, approval_id)?
         {
-            return Ok(());
+            return Ok(false);
         }
         if let Some(event) = self
             .server
@@ -5329,7 +5330,7 @@ impl ApprovalGate for AppServerApprovalGate {
             self.server.publish_to_subscribers(&event).await;
             let _ = self.server.send(&self.outbound, notification(event)).await;
         }
-        Ok(())
+        Ok(true)
     }
 }
 

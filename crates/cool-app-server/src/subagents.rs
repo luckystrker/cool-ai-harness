@@ -745,23 +745,35 @@ impl SubagentExecutor {
         // Worktree children edit an isolated checkout — preserve their work
         // instead of deleting it: commit any dirty state onto `cool/sub/{id}`,
         // remove only the checkout, and surface the branch name in the run
-        // summary so the parent can merge or cherry-pick (P1.7).
-        let worktree_branch = if spec.isolation == SubagentIsolation::Worktree {
-            commit_worktree_changes(
+        // summary so the parent can merge or cherry-pick (P1.7). When the
+        // commit fails and the checkout is still dirty, keep it — deleting it
+        // would erase the child's work.
+        let worktree_note = if spec.isolation == SubagentIsolation::Worktree {
+            let clean = commit_worktree_changes(
                 launcher.as_ref(),
                 &parent_workspace,
                 &self.host.environment,
                 context.run_id,
             )
             .await;
-            remove_worktree(
-                launcher.as_ref(),
-                &parent_workspace,
-                &self.host.environment,
-                context.run_id,
-            )
-            .await;
-            Some(format!("cool/sub/{}", context.run_id))
+            if clean {
+                remove_worktree(
+                    launcher.as_ref(),
+                    &parent_workspace,
+                    &self.host.environment,
+                    context.run_id,
+                )
+                .await;
+                Some(format!(
+                    "edits preserved on branch `cool/sub/{}` — merge or cherry-pick into the parent checkout",
+                    context.run_id
+                ))
+            } else {
+                Some(format!(
+                    "edits could not be committed — checkout kept at `.cool/worktrees/{0}` (branch `cool/sub/{0}` may be incomplete)",
+                    context.run_id
+                ))
+            }
         } else {
             None
         };
@@ -776,9 +788,9 @@ impl SubagentExecutor {
             Ok(RunOutcome::Failed { code, .. }) => ("failed", None, Some(mask_secrets(code)), None),
             Err(error) => ("failed", None, Some(mask_secrets(&error.to_string())), None),
         };
-        let summary = match (&summary, &worktree_branch) {
-            (text, Some(branch)) => Some(format!(
-                "{}\n\n[edits preserved on branch `{branch}` — merge or cherry-pick into the parent checkout]",
+        let summary = match (&summary, &worktree_note) {
+            (text, Some(note)) => Some(format!(
+                "{}\n\n[{note}]",
                 text.as_deref().unwrap_or_default()
             )),
             (text, None) => text.clone(),
@@ -1263,22 +1275,22 @@ async fn create_worktree(
 
 /// `isolation=worktree` handoff: commits the child's dirty state onto its
 /// `cool/sub/{id}` branch so teardown deletes only the checkout, not the
-/// work. Best-effort — a failed commit still keeps whatever the child
-/// committed itself. `--no-verify` skips repo hooks for the same reason the
-/// environment is sanitized.
+/// work. `--no-verify` skips repo hooks for the same reason the environment
+/// is sanitized. Returns whether the checkout ended up clean — the caller
+/// keeps the checkout instead of deleting it when `false`.
 async fn commit_worktree_changes(
     launcher: &dyn cool_agent::ProcessLauncher,
     workspace: &Workspace,
     environment: &HashMap<String, String>,
     run_id: i64,
-) {
+) -> bool {
     let directory = workspace
         .root()
         .join(".cool")
         .join("worktrees")
         .join(run_id.to_string());
     if !directory.exists() {
-        return;
+        return true;
     }
     let env: Vec<(String, String)> = sanitize_environment(
         environment
@@ -1288,42 +1300,82 @@ async fn commit_worktree_changes(
     )
     .into_iter()
     .collect();
-    for args in [
-        vec!["add".to_owned(), "-A".to_owned()],
-        vec![
-            "-c".to_owned(),
-            "user.name=cool-subagent".to_owned(),
-            "-c".to_owned(),
-            "user.email=cool-subagent@local".to_owned(),
-            "commit".to_owned(),
-            "--no-verify".to_owned(),
-            "-m".to_owned(),
-            format!("cool subagent {run_id} edits"),
-        ],
-    ] {
-        let spec = LaunchSpec {
-            cwd: directory.clone(),
-            env: env.clone(),
-            stdin: None,
-            net: NetAccess::Full,
-            limits: ResourceLimits {
-                timeout: Duration::from_secs(60),
-                max_output_bytes: 1 << 20,
-            },
-        };
-        if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
-            use tokio::io::AsyncReadExt as _;
-            if let Some(mut stderr) = child.stderr().take() {
-                let mut bytes = Vec::new();
-                let _ = stderr.read_to_end(&mut bytes).await;
-            }
-            if let Some(mut stdout) = child.stdout().take() {
-                let mut bytes = Vec::new();
-                let _ = stdout.read_to_end(&mut bytes).await;
-            }
-            let _ = child.wait().await;
-        }
+    let staged = run_git(
+        launcher,
+        &directory,
+        &env,
+        &["add".to_owned(), "-A".to_owned()],
+    )
+    .await;
+    if matches!(staged, Some((true, _))) {
+        let _ = run_git(
+            launcher,
+            &directory,
+            &env,
+            &[
+                "-c".to_owned(),
+                "user.name=cool-subagent".to_owned(),
+                "-c".to_owned(),
+                "user.email=cool-subagent@local".to_owned(),
+                "commit".to_owned(),
+                "--no-verify".to_owned(),
+                "-m".to_owned(),
+                format!("cool subagent {run_id} edits"),
+            ],
+        )
+        .await;
     }
+    // `status --porcelain` is the source of truth: it reports a clean tree
+    // whether the child committed everything itself, our commit succeeded,
+    // or there was nothing to commit — and reports leftovers whenever any
+    // of those steps failed.
+    match run_git(
+        launcher,
+        &directory,
+        &env,
+        &["status".to_owned(), "--porcelain".to_owned()],
+    )
+    .await
+    {
+        Some((true, stdout)) => stdout.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Runs `git <args>` in `cwd` through the launcher with both pipes drained
+/// (a child that fills an unclaimed pipe buffer would deadlock on `wait`).
+/// Returns `(success, stdout)`; spawn/wait failures return `None`.
+async fn run_git(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    cwd: &std::path::Path,
+    env: &[(String, String)],
+    args: &[String],
+) -> Option<(bool, String)> {
+    let spec = LaunchSpec {
+        cwd: cwd.to_path_buf(),
+        env: env.to_vec(),
+        stdin: None,
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1 << 20,
+        },
+    };
+    let mut child = launcher.spawn("git", args, &spec).ok()?;
+    use tokio::io::AsyncReadExt as _;
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout().take() {
+        let _ = stdout.read_to_end(&mut stdout_bytes).await;
+    }
+    if let Some(mut stderr) = child.stderr().take() {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes).await;
+    }
+    let status = child.wait().await.ok()?;
+    Some((
+        status.success(),
+        String::from_utf8_lossy(&stdout_bytes).into_owned(),
+    ))
 }
 
 /// Best-effort teardown of a worktree-isolated child: delete the checkout

@@ -915,8 +915,7 @@ async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
         .output()
         .expect("git branch --list");
     assert!(
-        String::from_utf8_lossy(&branches.stdout)
-            .contains(&format!("cool/sub/{}", run.id)),
+        String::from_utf8_lossy(&branches.stdout).contains(&format!("cool/sub/{}", run.id)),
         "child edits kept on cool/sub/*: {branches:?}"
     );
     assert!(
@@ -993,6 +992,24 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
                 arguments: serde_json::Map::from_iter([(
                     "args".to_owned(),
                     json!(["diff", "--no-index", "--output=target", "a", "b"]),
+                )]),
+            }),
+            // `--ext-diff`/`--textconv` spawn external diff commands — a
+            // read-only profile must not gain process execution through them.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "ext-diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "--ext-diff"]),
+                )]),
+            }),
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "textconv-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["log", "-p", "--textconv"]),
                 )]),
             }),
             // A registered but unlisted tool must fail at execution — the
@@ -1103,6 +1120,22 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
         output_diff_result.contains("denied by policy rule"),
         "git diff --output mid-args denied by the reviewer exec rules: {output_diff_result}"
     );
+    for call_id in ["ext-diff-call", "textconv-call"] {
+        let result = requests[1]
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Tool
+                    && message.tool_call_id.as_deref() == Some(call_id)
+            })
+            .map(|message| serde_json::to_string(message).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            result.contains("denied by policy rule"),
+            "external-command flags denied by the reviewer exec rules ({call_id}): {result}"
+        );
+    }
     let write_result = requests[1]
         .messages
         .iter()

@@ -242,7 +242,7 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
             "git",
         ]),
         extra_settings: Some(
-            r#"{"capability_policy":{"write":"deny","execute":"ask"},"exec_rules":[{"tool":"git","kind":"command","pattern":"git difftool*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*--output*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git log*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git *","decision":"deny"},{"tool":"shell","kind":"command","pattern":"*","decision":"deny"}]}"#,
+            r#"{"capability_policy":{"write":"deny","execute":"ask"},"exec_rules":[{"tool":"git","kind":"command","pattern":"git -c *","decision":"deny"},{"tool":"git","kind":"command","pattern":"git difftool*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--ext-diff*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--textconv*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--exec*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*--output*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git log*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git *","decision":"deny"},{"tool":"shell","kind":"command","pattern":"*","decision":"deny"}]}"#,
         ),
     },
 ];

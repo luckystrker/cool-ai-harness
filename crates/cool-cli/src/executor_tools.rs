@@ -642,10 +642,23 @@ impl ToolHandler for SendToSubagent {
                 },
             )
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+        // Re-check after the append: the child may have run its last
+        // drain_steers and reached a terminal state between the status check
+        // above and this write — the message then sits on the transcript
+        // without entering its model context. Report it honestly as queued.
+        let status = executor
+            .get_run(&context.actor_id, run_id)
+            .map(|run| run.status)
+            .unwrap_or_else(|_| run.status.clone());
+        let delivered = if matches!(status.as_str(), "queued" | "running") {
+            "steer"
+        } else {
+            "queued_unseen"
+        };
         Ok(ToolResult::ok(json!({
             "subagentRunId": run.id,
-            "status": run.status,
-            "delivered": "steer",
+            "status": status,
+            "delivered": delivered,
         }))
         .masked())
     }

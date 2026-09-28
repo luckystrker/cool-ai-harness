@@ -214,9 +214,11 @@ pub trait ApprovalGate: Send + Sync {
     /// Expires a pending approval system-side. Called when the tool-side
     /// timeout wins the race first (P1.8 `question_timeout`): without it the
     /// durable ticket stays `pending` and the run remains `awaiting_approval`
-    /// forever. Gates without durable tickets keep the no-op.
-    async fn expire(&self, _approval_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
+    /// forever. Returns `true` when this call performed the transition —
+    /// `false` means the ticket was already resolved (a user answer won the
+    /// race) or the gate keeps no durable ticket.
+    async fn expire(&self, _approval_id: &str) -> Result<bool, RuntimeError> {
+        Ok(false)
     }
 }
 

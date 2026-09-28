@@ -1991,19 +1991,33 @@ impl ToolHandler for AskUser {
             .unwrap_or_else(|| CancelSignal::channel().1);
         let sink = BlackholeSink;
         let approval_id = request.approval_id.clone();
-        let pending = gate.request(request, &sink, &mut cancel);
+        let mut pending = std::pin::pin!(gate.request(request, &sink, &mut cancel));
         let outcome = match timeout_secs {
-            Some(secs) => match timeout(Duration::from_secs_f64(secs), pending).await {
+            Some(secs) => match timeout(Duration::from_secs_f64(secs), pending.as_mut()).await {
                 Ok(outcome) => outcome,
                 Err(_) => {
                     // The durable ticket is still `pending`; without expiring
                     // it the run would sit in `awaiting_approval` forever and
                     // `run.completed` would fail its transition.
-                    let _ = gate.expire(&approval_id).await;
-                    return Ok(ToolResult::error(
-                        "question_timeout",
-                        "the question timed out without an answer",
-                    ));
+                    let expired = gate.expire(&approval_id).await.unwrap_or(false);
+                    if expired {
+                        return Ok(ToolResult::error(
+                            "question_timeout",
+                            "the question timed out without an answer",
+                        ));
+                    }
+                    // `expire` was a no-op: an answer committed first but its
+                    // notification has not reached this waiter yet — give it a
+                    // short grace window instead of discarding the answer.
+                    match timeout(Duration::from_secs(2), pending.as_mut()).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return Ok(ToolResult::error(
+                                "question_timeout",
+                                "the question timed out without an answer",
+                            ));
+                        }
+                    }
                 }
             },
             None => pending.await,
