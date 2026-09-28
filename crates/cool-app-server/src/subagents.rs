@@ -152,6 +152,10 @@ struct ChildContext {
     child_run_id: i64,
     child_conversation_id: i64,
     parent_conversation_id: i64,
+    /// Row id of the persisted launch prompt; steer drain baselines here so a
+    /// `send_to_subagent` accepted while the run is still `queued` lands
+    /// above the cursor instead of being dropped (P1.7).
+    prompt_message_id: i64,
 }
 
 /// Runs launched subagents through the Rust agent runtime.
@@ -373,7 +377,7 @@ impl SubagentExecutor {
         )?;
         // Persist the prompt as the child's first message so the transcript is
         // visible while the run is queued/running (Python `create_subagent_run`).
-        self.store.add_message(
+        let prompt_message = self.store.add_message(
             actor_id,
             child.id,
             &NewMessage {
@@ -404,6 +408,7 @@ impl SubagentExecutor {
             child_run_id: child_run.id,
             child_conversation_id: child.id,
             parent_conversation_id: spec.parent_conversation_id,
+            prompt_message_id: prompt_message.id,
         };
         let spec = spec.clone();
         tokio::spawn(async move {
@@ -579,7 +584,27 @@ impl SubagentExecutor {
         // transcript; `summary` folds a model-written digest of it into the
         // child's system prompt.
         let (history, system_prompt) = match spec.fork_context {
-            ForkContext::Full => (spec.parent_history.clone(), resolved.system_prompt.clone()),
+            ForkContext::Full => {
+                let mut history = spec.parent_history.clone();
+                if let Some(prompt) = &resolved.system_prompt {
+                    // The forked transcript carries the parent's system
+                    // message, so the runtime's "history already has System"
+                    // guard would silently drop the child's own persona.
+                    // Fold it into the seeded history instead: the child's
+                    // system prompt takes the lead slot, the parent's stays
+                    // as context right behind it.
+                    let insert_at = usize::from(
+                        history
+                            .first()
+                            .is_some_and(|message| message.role == MessageRole::System),
+                    );
+                    history.insert(
+                        insert_at,
+                        Message::text(MessageRole::System, prompt.clone()),
+                    );
+                }
+                (history, None)
+            }
             ForkContext::Summary => {
                 let summary = self
                     .summarize_parent(&workspace, &spec.parent_history, &resolved.model)
@@ -624,7 +649,7 @@ impl SubagentExecutor {
                 subagent_policy(&self.merged_policy(), resolved.capability_policy.as_ref()),
             )
             .with_actor(crate::local_actor().id)
-            .with_launcher(launcher)
+            .with_launcher(launcher.clone())
             .with_environment(self.host.environment.clone())
             .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
             .with_spawn_depth(spec.spawn_depth.saturating_add(1))
@@ -642,15 +667,11 @@ impl SubagentExecutor {
             reasoning: StdMutex::new(String::new()),
             usage: StdMutex::new(None),
             // Steers (`send_to_subagent`) are user messages appended after
-            // launch; baseline the cursor so the launch prompt itself is not
+            // launch; baseline at the persisted launch prompt so a steer
+            // queued before this task ran is still drained — it carries an id
+            // above the prompt's — while the prompt itself is never
             // re-delivered as a steer.
-            steer_cursor: AtomicI64::new(
-                self.store
-                    .recent_messages(&actor.id, context.child_conversation_id, 1)
-                    .ok()
-                    .and_then(|page| page.messages.first().map(|message| message.id))
-                    .unwrap_or(0),
-            ),
+            steer_cursor: AtomicI64::new(context.prompt_message_id),
         };
         // The parent session is projected best-effort: a conversation that was
         // never linked to a canonical session has no run to append to.
@@ -695,6 +716,24 @@ impl SubagentExecutor {
         // The run is settled — drop its session-rule set so finished runs
         // don't accumulate per-run state forever.
         self.host.rules.remove_session(&context.run_id.to_string());
+        // The worktree Workspace's `cap_std::fs::Dir` is an open handle on
+        // `.cool/worktrees/{id}` — while it lives the directory cannot be
+        // deleted on Windows (os error 32). The clones held by ToolContext
+        // and the rule source were consumed by `run`; drop this one before
+        // teardown.
+        drop(workspace);
+        // Worktree-isolated children leave `.cool/worktrees/{id}` plus a
+        // `cool/sub/{id}` branch behind — remove both best-effort now that
+        // the run is done (P1.7).
+        if spec.isolation == SubagentIsolation::Worktree {
+            remove_worktree(
+                launcher.as_ref(),
+                &self.workspace,
+                &self.host.environment,
+                context.run_id,
+            )
+            .await;
+        }
         let (status, summary, error, usage_json) = match &outcome {
             Ok(RunOutcome::Completed { history, usage }) => (
                 "completed",
@@ -1152,10 +1191,17 @@ async fn create_worktree(
     let mut child = launcher
         .spawn("git", &args, &spec)
         .map_err(|error| format!("cannot launch git worktree add: {error}"))?;
+    // Both pipes are drained before `wait`: a child that fills an unclaimed
+    // pipe buffer would deadlock otherwise.
     let mut stderr_bytes = Vec::new();
     if let Some(mut stderr) = child.stderr().take() {
         use tokio::io::AsyncReadExt as _;
         let _ = stderr.read_to_end(&mut stderr_bytes).await;
+    }
+    if let Some(mut stdout) = child.stdout().take() {
+        use tokio::io::AsyncReadExt as _;
+        let mut stdout_bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut stdout_bytes).await;
     }
     let status = child
         .wait()
@@ -1168,6 +1214,67 @@ async fn create_worktree(
             "git worktree add exited with {status}: {}",
             String::from_utf8_lossy(&stderr_bytes).trim()
         ))
+    }
+}
+
+/// Best-effort teardown of a worktree-isolated child: delete the checkout
+/// (`git worktree remove` is skipped — it path-matches the registration and
+/// 8.3/verbatim spellings of the same directory never match on Windows),
+/// then `git worktree prune` + `git branch -D` for the bookkeeping. Cleanup
+/// failures only leave litter under `.cool/worktrees/` — never fail the run.
+async fn remove_worktree(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    workspace: &Workspace,
+    environment: &HashMap<String, String>,
+    run_id: i64,
+) {
+    let root = workspace.root();
+    let directory = root
+        .join(".cool")
+        .join("worktrees")
+        .join(run_id.to_string());
+    // The caller drops the child's `Workspace` (a `cap_std` handle on this
+    // directory) before teardown; a short retry still covers handles that
+    // release asynchronously elsewhere on Windows.
+    for _ in 0..50 {
+        match std::fs::remove_dir_all(&directory) {
+            Ok(_) => break,
+            Err(_) if !directory.exists() => break,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let branch = format!("cool/sub/{run_id}");
+    for args in [
+        vec!["worktree".to_owned(), "prune".to_owned()],
+        vec!["branch".to_owned(), "-D".to_owned(), branch.clone()],
+    ] {
+        let spec = LaunchSpec {
+            cwd: root.to_path_buf(),
+            env: environment
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            stdin: None,
+            net: NetAccess::Full,
+            limits: ResourceLimits {
+                timeout: Duration::from_secs(60),
+                max_output_bytes: 1 << 20,
+            },
+        };
+        if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
+            use tokio::io::AsyncReadExt as _;
+            // Drain both pipes before `wait` so a chatty git cannot deadlock
+            // on a full buffer.
+            if let Some(mut stderr) = child.stderr().take() {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes).await;
+            }
+            if let Some(mut stdout) = child.stdout().take() {
+                let mut bytes = Vec::new();
+                let _ = stdout.read_to_end(&mut bytes).await;
+            }
+            let _ = child.wait().await;
+        }
     }
 }
 

@@ -887,15 +887,35 @@ async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
     let row = executor.get_run("local-user", run.id).expect("row");
     assert_eq!(status, "completed", "run failed: {:?}", row.error);
 
+    // Teardown (P1.7): the finished run's worktree and its `cool/sub/*`
+    // branch are reclaimed — `.cool/worktrees/` must not accumulate litter.
     let worktree = directory
         .path()
         .join(".cool")
         .join("worktrees")
         .join(run.id.to_string());
     assert!(
-        worktree.join(".git").exists(),
-        "git worktree materialized at {}",
+        !worktree.exists(),
+        "worktree removed after the run: {}",
         worktree.display()
+    );
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(directory.path())
+        .output()
+        .expect("git worktree list");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("worktrees"),
+        "no worktree entries left: {listed:?}"
+    );
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", "cool/sub/*"])
+        .current_dir(directory.path())
+        .output()
+        .expect("git branch --list");
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+        "cool/sub/* branches cleaned up: {branches:?}"
     );
 }
 
@@ -953,6 +973,13 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
                     "args".to_owned(),
                     json!(["diff", "HEAD"]),
                 )]),
+            }),
+            // A registered but unlisted tool must fail at execution — the
+            // profile allowlist gates calls, not just advertised definitions.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "write-call".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: serde_json::Map::from_iter([("path".to_owned(), json!("owned.md"))]),
             }),
             ModelEvent::Finish {
                 reason: Some("stop".to_owned()),
@@ -1040,5 +1067,19 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
     assert!(
         !diff_result.contains("denied"),
         "git diff passed the exec rules: {diff_result}"
+    );
+    let write_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("write-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        write_result.contains("allowlist"),
+        "unlisted write_file rejected by the tool_names gate: {write_result}"
     );
 }

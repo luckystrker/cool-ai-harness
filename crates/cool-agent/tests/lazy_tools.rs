@@ -342,3 +342,95 @@ fn mcp_tools_defer_only_above_the_eager_limit() {
         .collect();
     assert!(visible.contains(&"mcp_demo_lookup".to_owned()));
 }
+
+/// Deferred is not just an advertising filter: a tool the model guesses by
+/// name fails before policy evaluation until `activate_tools` names it.
+#[tokio::test]
+async fn unactivated_deferred_tool_call_fails_tool_not_active() {
+    let directory = tempdir().unwrap();
+    let registry = builtin_registry();
+    registry
+        .register(deferred_tool("demo_hidden", "hidden demo", Decision::Allow))
+        .unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        tool_call("call-1", "demo_hidden", json!({})),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = AgentRuntime::new(provider.clone(), registry);
+    let sink = RecordingSink {
+        events: Mutex::new(Vec::new()),
+    };
+    let (_, cancel) = CancelSignal::channel();
+    runtime
+        .run(
+            request(directory.path()),
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+
+    let tool_result = provider
+        .requests()
+        .await
+        .iter()
+        .flat_map(|request| request.messages.iter())
+        .find(|message| message.role == cool_agent::MessageRole::Tool)
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .unwrap_or_default();
+    assert!(
+        tool_result.contains("activate_tools"),
+        "deferred call rejected with an activation hint: {tool_result}"
+    );
+}
+
+/// A profile's `tool_names` allowlist gates execution, not just visibility:
+/// a registered but unlisted tool cannot be invoked by name (P2.15's
+/// read-only guarantee).
+#[tokio::test]
+async fn tool_names_allowlist_blocks_unlisted_tool_calls() {
+    let directory = tempdir().unwrap();
+    let registry = builtin_registry();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        tool_call("call-1", "list_files", json!({})),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = AgentRuntime::new(provider.clone(), registry);
+    let sink = RecordingSink {
+        events: Mutex::new(Vec::new()),
+    };
+    let mut request = request(directory.path());
+    request.tool_names = Some(["read_file".to_owned()].into_iter().collect());
+    let (_, cancel) = CancelSignal::channel();
+    runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+
+    let tool_result = provider
+        .requests()
+        .await
+        .iter()
+        .flat_map(|request| request.messages.iter())
+        .find(|message| message.role == cool_agent::MessageRole::Tool)
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .unwrap_or_default();
+    assert!(
+        tool_result.contains("allowlist"),
+        "unlisted tool call rejected: {tool_result}"
+    );
+}

@@ -5284,7 +5284,15 @@ impl ApprovalGate for AppServerApprovalGate {
                 answer,
             });
         }
-        let result: Result<GateOutcome, RuntimeError> = tokio::select! {
+        // The waiter entry must go on every exit — including a caller-side
+        // timeout (P1.8 `question_timeout`) dropping this pending future,
+        // which an `is_err`-only cleanup could not observe. `WaiterCleanup`
+        // removes it from `Drop`.
+        let _waiter_cleanup = WaiterCleanup {
+            inner: Arc::clone(&self.server.inner),
+            approval_id: ticket.approval_id.clone(),
+        };
+        tokio::select! {
             outcome = async {
                 loop {
                     receiver.changed().await.map_err(|_| RuntimeError::Sink("approval channel closed".to_owned()))?;
@@ -5294,16 +5302,34 @@ impl ApprovalGate for AppServerApprovalGate {
                 }
             } => outcome,
             reason = cancel.wait() => Err(RuntimeError::Sink(format!("approval cancelled: {reason}"))),
-        };
-        if result.is_err() {
-            self.server
-                .inner
-                .approval_waiters
-                .lock()
-                .await
-                .remove(&ticket.approval_id);
         }
-        result
+    }
+}
+
+/// Removes a `approval_waiters` entry when the gate request future exits —
+/// normally or by being dropped (a `tokio::time::timeout` in the tool loses
+/// the future mid-`select!`, skipping every statement after the select).
+struct WaiterCleanup {
+    inner: Arc<Inner>,
+    approval_id: String,
+}
+
+impl Drop for WaiterCleanup {
+    fn drop(&mut self) {
+        match self.inner.approval_waiters.try_lock() {
+            Ok(mut waiters) => {
+                waiters.remove(&self.approval_id);
+            }
+            Err(_) => {
+                // Contended at drop time — a spawned task still removes the
+                // entry; the receiver is dead either way.
+                let inner = Arc::clone(&self.inner);
+                let approval_id = self.approval_id.clone();
+                tokio::spawn(async move {
+                    inner.approval_waiters.lock().await.remove(&approval_id);
+                });
+            }
+        }
     }
 }
 

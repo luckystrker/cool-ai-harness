@@ -517,6 +517,20 @@ impl ToolHandler for CollectSubagent {
                 rx
             }
         };
+        // An actor owns runs spawned from many conversations — collecting
+        // (or steering) is scoped to runs THIS conversation launched (P1.7).
+        let run = match executor.get_run(&context.actor_id, run_id) {
+            Ok(run) => run,
+            Err(error) => return Ok(ToolResult::error("unknown_run", error.to_string())),
+        };
+        if let Some(parent) = context.conversation_id
+            && parent != run.parent_conversation_id
+        {
+            return Ok(ToolResult::error(
+                "unknown_run",
+                "subagent run is not visible to this conversation",
+            ));
+        }
         let row = if wait {
             match tokio::time::timeout(
                 std::time::Duration::from_secs_f64(timeout_secs),
@@ -542,9 +556,7 @@ impl ToolHandler for CollectSubagent {
                 }
             }
         } else {
-            executor
-                .get_run(&context.actor_id, run_id)
-                .map_err(|error| ToolError::InvalidArguments(error.to_string()))?
+            run
         };
         Ok(match row.status.as_str() {
             "completed" => ToolResult::ok(json!({
@@ -595,9 +607,18 @@ impl ToolHandler for SendToSubagent {
                 "message must not be empty",
             ));
         }
-        let run = executor
-            .get_run(&context.actor_id, run_id)
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+        let run = match executor.get_run(&context.actor_id, run_id) {
+            Ok(run) => run,
+            Err(error) => return Ok(ToolResult::error("unknown_run", error.to_string())),
+        };
+        if let Some(parent) = context.conversation_id
+            && parent != run.parent_conversation_id
+        {
+            return Ok(ToolResult::error(
+                "unknown_run",
+                "subagent run is not visible to this conversation",
+            ));
+        }
         if !matches!(run.status.as_str(), "queued" | "running") {
             return Ok(ToolResult::error(
                 "subagent_finished",

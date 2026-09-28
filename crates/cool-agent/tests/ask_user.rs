@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use cool_agent::{
     ApprovalGate, ApprovalRequest, CancelSignal, EventSink, GateOutcome, RuntimeError, ToolContext,
-    builtin_registry,
+    ToolError, builtin_registry,
 };
 use cool_protocol::ApprovalOutcome;
 use cool_security::{CapabilityPolicy, Decision, Workspace};
@@ -105,7 +105,7 @@ async fn ask_user_returns_the_resolved_answer() {
 }
 
 #[tokio::test]
-async fn ask_user_denied_fails_user_unavailable() {
+async fn ask_user_denied_fails_question_denied() {
     let gate = Arc::new(ScriptedGate::new(GateOutcome::decided(
         ApprovalOutcome::Denied,
     )));
@@ -117,7 +117,18 @@ async fn ask_user_denied_fails_user_unavailable() {
         .unwrap();
 
     assert!(result.is_error);
-    assert_eq!(result.error_code.as_deref(), Some("user_unavailable"));
+    assert_eq!(result.error_code.as_deref(), Some("question_denied"));
+}
+
+#[tokio::test]
+async fn ask_user_rejects_a_non_positive_timeout() {
+    let context = context();
+
+    let result = ask_user()
+        .execute(&context, json!({"question": "Q", "timeout_secs": -5}))
+        .await;
+
+    assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
 }
 
 /// Subagents, one-shot CLI runs and scheduled runs install no question gate —

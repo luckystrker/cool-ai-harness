@@ -386,8 +386,13 @@ impl AgentRuntime {
         }
         // P1.10: when deferred tools exist, tell the model how to surface
         // them — the catalog line sits on the system message like project
-        // instructions do.
-        if self.tools.has_deferred_tools() {
+        // instructions do. Runs whose tool_names allowlist hides the
+        // meta-tools get no hint: it would advertise tools they cannot call.
+        let meta_tools_visible = request
+            .tool_names
+            .as_ref()
+            .is_none_or(|names| names.contains("search_tools") && names.contains("activate_tools"));
+        if self.tools.has_deferred_tools() && meta_tools_visible {
             let line = "Some tools are hidden. Use search_tools(query) to discover and \
                         activate_tools(names) to enable them.";
             if let Some(system) = history
@@ -635,7 +640,14 @@ impl AgentRuntime {
             // with the transcript as the model itself just saw it (P1.7).
             request.tool_context.history_snapshot = Some(history.clone());
             let batch = self
-                .execute_tool_batch(calls, &request.tool_context, sink, approvals, &mut cancel)
+                .execute_tool_batch(
+                    calls,
+                    &request.tool_context,
+                    request.tool_names.as_ref(),
+                    sink,
+                    approvals,
+                    &mut cancel,
+                )
                 .await?;
             for (call, result) in batch.results {
                 // The model sees the same payload the event log does —
@@ -672,6 +684,7 @@ impl AgentRuntime {
         &self,
         calls: Vec<ToolCall>,
         context: &ToolContext,
+        tool_names: Option<&BTreeSet<String>>,
         sink: &dyn EventSink,
         approvals: &dyn ApprovalGate,
         cancel: &mut CancelSignal,
@@ -691,6 +704,37 @@ impl AgentRuntime {
                 immediate.insert(index, (call, result));
                 continue;
             };
+            // Visibility gates execution too (P1.10/P2.15): a `tool_names`
+            // allowlist is not just an advertising filter — a profile that
+            // hides a tool must not be callable by name — and a deferred
+            // tool runs only once activated. Both fail before policy.
+            if let Some(names) = tool_names
+                && !names.contains(&call.name)
+            {
+                let result = ToolResult::error(
+                    "tool_not_allowed",
+                    "tool is outside this run's tool allowlist",
+                );
+                emit_tool_result(sink, &call, &result).await?;
+                immediate.insert(index, (call, result));
+                continue;
+            }
+            if self.tools.is_tool_deferred(&call.name) {
+                let activated = context
+                    .active_tools
+                    .read()
+                    .map(|set| set.contains(&call.name))
+                    .unwrap_or(false);
+                if !activated {
+                    let result = ToolResult::error(
+                        "tool_not_active",
+                        "tool is deferred; call activate_tools to enable it",
+                    );
+                    emit_tool_result(sink, &call, &result).await?;
+                    immediate.insert(index, (call, result));
+                    continue;
+                }
+            }
             // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
             // session rules first (most local wins), then the live
             // project+user source, then rules embedded in the policy itself.

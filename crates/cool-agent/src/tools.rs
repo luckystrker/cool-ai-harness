@@ -386,11 +386,13 @@ impl ToolRegistry {
     }
 
     /// Whether a tool is hidden from the model right now: explicitly deferred
-    /// tools, plus every `mcp_*` tool once the catalog outgrows
-    /// `eager_tool_limit()` (P1.10).
+    /// tools, plus every `mcp_*`/`mcpx_*` (hashed long-name) tool once the
+    /// catalog outgrows `eager_tool_limit()` (P1.10).
     fn is_deferred(tool: &Tool, catalog_size: usize) -> bool {
         tool.activation == ToolActivation::Deferred
-            || (catalog_size > eager_tool_limit() && tool.definition.name.starts_with("mcp_"))
+            || (catalog_size > eager_tool_limit()
+                && (tool.definition.name.starts_with("mcp_")
+                    || tool.definition.name.starts_with("mcpx_")))
     }
 
     /// Definitions the model sees: eager tools plus deferred tools the run
@@ -1923,10 +1925,17 @@ impl ToolHandler for AskUser {
         if let Some(options) = arguments.get("options") {
             string_array(&json!({ "options": options.clone() }), "options")?;
         }
-        let timeout_secs = arguments
-            .get("timeout_secs")
-            .and_then(Value::as_f64)
-            .filter(|value| *value > 0.0);
+        let timeout_secs = match arguments.get("timeout_secs") {
+            Some(value) => match value.as_f64().filter(|value| *value > 0.0) {
+                Some(secs) => Some(secs),
+                None => {
+                    return Err(ToolError::InvalidArguments(
+                        "timeout_secs must be a positive number".to_owned(),
+                    ));
+                }
+            },
+            None => None,
+        };
         // Runs that cannot reach a human (CLI one-shot, subagent, scheduler)
         // never install a question gate — fail closed instead of blocking.
         let Some(gate) = &context.question_gate else {
@@ -1976,8 +1985,8 @@ impl ToolHandler for AskUser {
                 })))
             }
             Ok(_) => Ok(ToolResult::error(
-                "user_unavailable",
-                "the user did not provide an answer",
+                "question_denied",
+                "the user declined to answer",
             )),
             Err(error) => Ok(ToolResult::error("user_unavailable", error.to_string())),
         }
