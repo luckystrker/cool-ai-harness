@@ -214,6 +214,27 @@ Beyond the core agent loop, these subsystems are implemented:
   `read`/`write`/`execute`/`network`/`git`/`send_external`; file tools are
   workspace-confined, network tools use an SSRF-protected allowlist, code
   execution is sandboxed, and secrets are masked in messages/traces/logs.
+- **Process launcher** — every host-process spawn goes through a
+  `ProcessLauncher`: `disabled` (fail-closed default), `host` (JobObject /
+  process-group containment, cleared environment, secret redaction), or
+  `sandboxed` (Linux `bwrap`, macOS `sandbox-exec` seatbelt, Windows
+  JobObject). Selection order: `COOL_PROCESS_LAUNCHER` env →
+  `AgentProfile.settings["process_launcher"]` → `cool serve/run` flags
+  (`--allow-shell`, `--sandbox=bwrap|seatbelt|jobobject|none`);
+  `cool doctor` reports which sandbox backends are available.
+- **Policy rules** — exec rules (`tool` + glob on `program args`, or
+  `path_glob`/`domain` patterns) are evaluated *before* the capability
+  policy, first match wins, strictest on ties. Scopes: `session`
+  (in-memory, per run), `project` (`<workspace>/.cool/policy.json`), `user`
+  (durable `policy_rules` table). Approval cards carry a `suggested_rule`
+  and a "don't ask again" checkbox; `approval.resolve {remember: "session"
+  |"project"|"user"}` persists it; managed via `policy.rules_list` /
+  `policy.rule_add` / `policy.rule_delete`.
+- **Write diagnostics** — after `write_file`/`edit_file`, a per-extension
+  command from `.cool/config.json` (`diagnostics` map, e.g. `rs` →
+  `cargo check --message-format=short`) runs through the launcher; output
+  is masked, capped at 4 KiB, and reported as `ToolResult.diagnostics`
+  (`"skipped"` when the launcher is disabled; failures are warnings).
 - **Context management** — token-aware history budgeting/truncation, project
   instructions loading (AGENTS.md from the working directory), and working
   context compaction with collapsible chat history.
