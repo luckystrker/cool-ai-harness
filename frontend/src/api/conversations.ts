@@ -43,6 +43,7 @@ async function sessionFor(convId: number): Promise<string> {
   const link = await sdk.sessionForConversation({
     idempotencyKey: `session-for-conversation-${convId}`,
     conversationId: convId,
+    sessionId: null,
   })
   return link.sessionId
 }

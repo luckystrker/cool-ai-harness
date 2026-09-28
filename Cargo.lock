@@ -379,6 +379,7 @@ dependencies = [
  "cool-store",
  "futures-util",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

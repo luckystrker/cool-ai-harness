@@ -6,6 +6,7 @@
 mod anthropic;
 mod checkpoints;
 mod context;
+mod gemini;
 mod launcher;
 mod loop_runtime;
 mod pricing;
@@ -24,6 +25,7 @@ pub use context::{
     default_agent_system_prompt, estimate_history_tokens, is_summary_message,
     load_project_instructions, load_task_progress, planning_system_prompt, summary_drop_candidates,
 };
+pub use gemini::GeminiDriver;
 pub use launcher::{
     DisabledLauncher, HostContext, HostLauncher, LaunchSpec, LauncherKind, NetAccess,
     ProcessLauncher, ResourceLimits, SandboxBackend, SandboxedLauncher, bwrap_argv,
@@ -38,8 +40,8 @@ pub use loop_runtime::{
 };
 pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{
-    ModelDriver, ModelEvent, ModelRequest, ModelStream, OpenAiCompatibleDriver, ProviderError,
-    ScriptedDriver, Usage,
+    AccessTokenSource, ModelDriver, ModelEvent, ModelRequest, ModelStream, OpenAiCompatibleDriver,
+    ProviderError, ScriptedDriver, Usage,
 };
 pub use tools::{
     ArtifactReader, DEFAULT_EAGER_TOOL_LIMIT, MAX_SPAWN_DEPTH, PythonFallbackTool, RuleSource,

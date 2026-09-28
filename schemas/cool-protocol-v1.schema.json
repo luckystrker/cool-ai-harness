@@ -2853,6 +2853,40 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "providers.oauth_start"
+            },
+            "params": {
+              "$ref": "#/$defs/ProvidersOauthStartParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "providers.oauth_complete"
+            },
+            "params": {
+              "$ref": "#/$defs/ProvidersOauthCompleteParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "memory.list"
             },
             "params": {
@@ -8747,6 +8781,14 @@
             "null"
           ]
         },
+        "authKind": {
+          "description": "`api_key` (default) or `oauth`; OAuth rows carry tokens set by\n`providers.oauth_complete`, never by this field.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "baseUrl": {
           "type": [
             "string",
@@ -8817,6 +8859,11 @@
           ],
           "default": null
         },
+        "authKind": {
+          "description": "`api_key` or `oauth` (P2.11); absent on older stores → `api_key`.",
+          "type": "string",
+          "default": "api_key"
+        },
         "baseUrl": {
           "type": [
             "string",
@@ -8829,6 +8876,11 @@
             "string",
             "null"
           ]
+        },
+        "hasOauthTokens": {
+          "description": "Whether Fernet-encrypted OAuth tokens are stored. Never the tokens.",
+          "type": "boolean",
+          "default": false
         },
         "id": {
           "type": "integer",
@@ -8873,6 +8925,13 @@
             "string",
             "null"
           ]
+        },
+        "authKind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "baseUrl": {
           "type": [
@@ -8923,6 +8982,101 @@
       "required": [
         "idempotencyKey",
         "id"
+      ]
+    },
+    "ProvidersOauthCompleteParams": {
+      "description": "Finish a login started by `providers.oauth_start`. Anthropic's manual\ncallback page renders `code#state` — pass it through verbatim.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Authorization code, or the verbatim `code#state` the callback shows.",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "code"
+      ]
+    },
+    "ProvidersOauthCompleteResult": {
+      "type": "object",
+      "properties": {
+        "expiresAt": {
+          "description": "Unix seconds the access token expires at, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "provider": {
+          "description": "The provider row the tokens were attached to (created when absent).",
+          "$ref": "#/$defs/ProviderRecord"
+        }
+      },
+      "required": [
+        "provider"
+      ]
+    },
+    "ProvidersOauthStartParams": {
+      "description": "Start a provider OAuth login (P2.11): `claude`, `chatgpt` or `gemini`.\nReturns the authorization URL plus the `state` binding the handshake;\nfinish with `providers.oauth_complete`.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "CLI login name: `claude`, `chatgpt` or `gemini`.",
+          "type": "string"
+        },
+        "redirectUri": {
+          "description": "Redirect URI the caller will complete on (e.g. its bound loopback\naddress). Defaults to the provider's registered loopback or, for\nClaude, the manual paste-the-code callback.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider"
+      ]
+    },
+    "ProvidersOauthStartResult": {
+      "type": "object",
+      "properties": {
+        "authUrl": {
+          "description": "The provider's authorization URL to open in a browser.",
+          "type": "string"
+        },
+        "completion": {
+          "description": "`manual` = show the URL and wait for a pasted code; `loopback` = a\nlocal callback listener must be bound on the returned redirect URI.",
+          "type": "string"
+        },
+        "notice": {
+          "description": "Claude-style caveat text for subscriptions, when relevant.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "redirectUri": {
+          "description": "Redirect the browser will land on (manual flow shows `code#state`).",
+          "type": "string"
+        },
+        "state": {
+          "description": "Opaque handshake handle for `providers.oauth_complete` (10 min TTL).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authUrl",
+        "state",
+        "completion",
+        "redirectUri"
       ]
     },
     "ProvidersPreviewModelsParams": {
@@ -10430,6 +10584,40 @@
               "items": {
                 "$ref": "#/$defs/ModelInfoRecord"
               }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_oauth_started"
+            },
+            "value": {
+              "$ref": "#/$defs/ProvidersOauthStartResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_oauth_completed"
+            },
+            "value": {
+              "$ref": "#/$defs/ProvidersOauthCompleteResult"
             }
           },
           "additionalProperties": false,

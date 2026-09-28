@@ -183,10 +183,30 @@ impl ModelDriver for ScriptedDriver {
     }
 }
 
+/// OAuth bearer-token source for a `ModelDriver` (P2.11): returns the
+/// current access token and can mint a fresh one via the provider's token
+/// endpoint. Implemented by the app-server/CLI over the Fernet SecretKeyring;
+/// drivers only ever see the opaque token string.
+#[async_trait]
+pub trait AccessTokenSource: fmt::Debug + Send + Sync {
+    /// The current access token — already refreshed when the source knows it
+    /// expired.
+    async fn access_token(&self) -> Result<String, ProviderError>;
+    /// Force a refresh (e.g. after a 401); returns the NEW access token.
+    async fn refresh(&self) -> Result<String, ProviderError>;
+}
+
+/// `true` when the error is a provider-side 401, the only status that ever
+/// justifies an OAuth refresh-and-retry.
+pub(crate) fn is_unauthorized(error: &ProviderError) -> bool {
+    error.code == "provider_unauthorized"
+}
+
 #[derive(Clone)]
 pub struct OpenAiCompatibleDriver {
     base_url: Url,
     api_key: Option<String>,
+    token_source: Option<Arc<dyn AccessTokenSource>>,
     network_policy: NetworkPolicy,
 }
 
@@ -206,14 +226,54 @@ impl OpenAiCompatibleDriver {
         Ok(Self {
             base_url,
             api_key: Some(api_key.into()).filter(|value| !value.is_empty()),
+            token_source: None,
             network_policy,
         })
+    }
+
+    /// OAuth-backed driver (P2.11): the bearer comes from the token source,
+    /// and a 401 triggers one refresh + retry.
+    pub fn for_oauth(
+        base_url: &str,
+        token_source: Arc<dyn AccessTokenSource>,
+        network_policy: NetworkPolicy,
+    ) -> Result<Self, ProviderError> {
+        let mut driver = Self::new(base_url, "", network_policy)?;
+        driver.token_source = Some(token_source);
+        Ok(driver)
+    }
+
+    /// The credential for one attempt: the OAuth source wins over a static
+    /// api key so refresh-on-401 works for both.
+    async fn credential(&self) -> Result<Option<String>, ProviderError> {
+        match &self.token_source {
+            Some(source) => source.access_token().await.map(Some),
+            None => Ok(self.api_key.clone()),
+        }
     }
 }
 
 #[async_trait]
 impl ModelDriver for OpenAiCompatibleDriver {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        let credential = self.credential().await?;
+        match self.stream_once(request.clone(), credential).await {
+            Err(error) if is_unauthorized(&error) && self.token_source.is_some() => {
+                let source = self.token_source.as_ref().expect("checked above");
+                let refreshed = source.refresh().await?;
+                self.stream_once(request, Some(refreshed)).await
+            }
+            result => result,
+        }
+    }
+}
+
+impl OpenAiCompatibleDriver {
+    async fn stream_once(
+        &self,
+        request: ModelRequest,
+        credential: Option<String>,
+    ) -> Result<ModelStream, ProviderError> {
         let url = self.base_url.join("chat/completions").map_err(|error| {
             ProviderError::new("invalid_provider_url", error.to_string(), false)
         })?;
@@ -246,8 +306,8 @@ impl ModelDriver for OpenAiCompatibleDriver {
             .map_err(|error| ProviderError::new("provider_client", error.to_string(), false))?;
         let payload = openai_payload(&request);
         let mut request_builder = client.post(url).json(&payload);
-        if let Some(api_key) = &self.api_key {
-            request_builder = request_builder.bearer_auth(api_key);
+        if let Some(token) = &credential {
+            request_builder = request_builder.bearer_auth(token);
         }
         let response = request_builder
             .send()
@@ -264,7 +324,11 @@ impl ModelDriver for OpenAiCompatibleDriver {
             let status = response.status();
             let retryable = status.as_u16() == 429 || status.is_server_error();
             return Err(ProviderError::new(
-                "provider_http",
+                if status.as_u16() == 401 {
+                    "provider_unauthorized"
+                } else {
+                    "provider_http"
+                },
                 format!("provider returned {status}"),
                 retryable,
             ));

@@ -53,6 +53,7 @@ pub(super) async fn dispatch(
                 is_subscription: params.is_subscription,
                 is_fallback: params.is_fallback,
                 chat_models: params.chat_models.clone(),
+                auth_kind: params.auth_kind.clone(),
             };
             let created = idempotent(
                 store,
@@ -91,6 +92,9 @@ pub(super) async fn dispatch(
                 is_fallback: params.is_fallback,
                 chat_models: params.chat_models.clone(),
                 is_default: params.is_default,
+                auth_kind: params.auth_kind.clone(),
+                // OAuth tokens rotate only through providers.oauth_complete.
+                oauth_tokens_encrypted: None,
             };
             let provider_id = params.id;
             let updated = idempotent(
@@ -699,7 +703,7 @@ pub(super) async fn dispatch(
 }
 
 /// Convert a provider row and attach the masked key hint (never the key).
-fn provider_record(
+pub(crate) fn provider_record(
     provider: Provider,
     secrets: Option<&SecretKeyring>,
 ) -> Result<ProviderRecord, ProtocolError> {
@@ -709,8 +713,10 @@ fn provider_record(
             None => "<undecryptable>".to_owned(),
         }
     });
+    let has_oauth_tokens = provider.oauth_tokens_encrypted.is_some();
     let mut record: ProviderRecord = convert(provider)?;
     record.api_key_hint = hint;
+    record.has_oauth_tokens = has_oauth_tokens;
     Ok(record)
 }
 

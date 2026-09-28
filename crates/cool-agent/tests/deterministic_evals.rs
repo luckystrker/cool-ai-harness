@@ -99,6 +99,7 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                         "search_files".to_owned(),
                         "find_files".to_owned(),
                         "shell".to_owned(),
+                        "view_image".to_owned(),
                     ])),
                     tool_context: ToolContext::new(
                         Workspace::new(directory.path()).unwrap(),

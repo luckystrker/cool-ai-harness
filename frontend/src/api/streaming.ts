@@ -22,6 +22,7 @@ export async function* streamConversationMessage(
   const link = await sdk.sessionForConversation({
     idempotencyKey: `session-for-conversation-${conversationId}`,
     conversationId,
+    sessionId: null,
   })
   const content: ContentPart[] = [{ type: "text", text: body.content }]
   for (const artifactId of body.artifact_ids ?? []) {

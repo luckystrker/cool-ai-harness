@@ -289,6 +289,10 @@ pub enum Command {
     ProvidersListModels(LegacyIdParams),
     #[serde(rename = "providers.preview_models")]
     ProvidersPreviewModels(ProvidersPreviewModelsParams),
+    #[serde(rename = "providers.oauth_start")]
+    ProvidersOauthStart(ProvidersOauthStartParams),
+    #[serde(rename = "providers.oauth_complete")]
+    ProvidersOauthComplete(ProvidersOauthCompleteParams),
     #[serde(rename = "memory.list")]
     MemoryList(MemoryListParams),
     #[serde(rename = "memory.get")]
@@ -1930,6 +1934,8 @@ pub enum ResponsePayload {
     ProvidersModels(Vec<ModelInfoRecord>),
     ProvidersModelsLive(Vec<ModelInfoRecord>),
     ProvidersModelsPreview(Vec<ModelInfoRecord>),
+    ProvidersOauthStarted(ProvidersOauthStartResult),
+    ProvidersOauthCompleted(ProvidersOauthCompleteResult),
     MemoryListed(Vec<MemoryRecord>),
     MemoryGot(MemoryRecord),
     MemoryCreated(MemoryRecord),

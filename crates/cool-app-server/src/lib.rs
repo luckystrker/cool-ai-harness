@@ -6,6 +6,7 @@
 pub mod blobs;
 pub mod client;
 mod legacy;
+pub mod oauth;
 mod research;
 mod scheduler;
 mod subagents;
@@ -39,15 +40,16 @@ use cool_protocol::{
     McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
     McpUpdateServerParams, MemoryExtractResult, ModelInfoRecord, PlanCreated, PlanExecuteResult,
     PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
-    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
-    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
-    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRewindResult, SessionRunSummary, SessionRunsResult, SessionSummary,
-    SkillCreateParams, SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame,
-    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
-    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
-    V1Version,
+    PromptAcceptedResult, ProtocolError, ProvidersOauthCompleteParams,
+    ProvidersOauthCompleteResult, ProvidersOauthStartParams, ProvidersOauthStartResult,
+    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess, RssFetchResult,
+    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
+    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRewindResult,
+    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
+    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{
     CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, RuleState, SecretKeyring,
@@ -194,6 +196,8 @@ struct Inner {
     /// Durable plan id persisted for each run's first `plan.created`, so one
     /// run's repeated `update_plan` calls do not create duplicate drafts.
     planned_runs: std::sync::Mutex<HashMap<String, i64>>,
+    /// In-flight `providers.oauth_start` handshakes keyed by `state` (P2.11).
+    pending_oauth: std::sync::Mutex<HashMap<String, oauth::PendingOAuth>>,
 }
 
 #[async_trait]
@@ -678,6 +682,7 @@ impl AppServer {
                 research_executor,
                 blob_store,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
+                pending_oauth: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -2645,6 +2650,14 @@ impl AppServer {
                     },
                     None => failure(id, error(-32025, "provider_probe_unavailable", false)),
                 };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersOauthStart(params) => {
+                let frame = self.handle_oauth_start(id, params).await;
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersOauthComplete(params) => {
+                let frame = self.handle_oauth_complete(id, params).await;
                 let _ = self.send(&outbound, frame).await;
             }
             Command::RssFetchNow(params) => {
@@ -7025,6 +7038,168 @@ fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month as u32, day as u32)
+}
+
+/// `providers.oauth_start` / `providers.oauth_complete` handlers (P2.11).
+/// The pending map is connection-independent: any connection may finish a
+/// login any connection started (same as the CLI's `cool auth`, which uses
+/// its own loopback listener instead of these commands).
+impl AppServer {
+    async fn handle_oauth_start(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthStartParams,
+    ) -> ServerFrame {
+        let Some(flow) = oauth::oauth_flow(&params.provider) else {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32030,
+                    "oauth_provider_unsupported",
+                    "no verified OAuth flow for this provider (supported: claude, chatgpt, gemini)",
+                ),
+            );
+        };
+        if let Err(oauth_error) = oauth::flow_ready(&flow) {
+            return failure(
+                id,
+                masked_detail_error(-32036, oauth_error.code, &oauth_error.message),
+            );
+        }
+        let pkce = oauth::pkce_pair();
+        let state = flow.state(&pkce);
+        // Claude defaults to Anthropic's manual paste-the-code callback — the
+        // only redirect verified against the console app. Callers that bound
+        // their own listener pass `redirect_uri` explicitly.
+        let manual = flow.manual_redirect.is_some() && params.redirect_uri.is_none();
+        let redirect_uri = match &params.redirect_uri {
+            Some(uri) => uri.clone(),
+            None if manual => flow.manual_redirect.map(str::to_owned).unwrap_or_default(),
+            None => oauth::redirect_uri(flow.clone(), None),
+        };
+        let notice = match flow.name {
+            "claude" => Some(
+                "Anthropic subscription OAuth is off-label use; an API key remains the supported credential."
+                    .to_owned(),
+            ),
+            "chatgpt" => Some(
+                "Codex OAuth tokens authenticate OpenAI's Codex backend; the chat/completions driver reports `oauth_wire_not_supported`."
+                    .to_owned(),
+            ),
+            _ => None,
+        };
+        let auth_url = oauth::authorize_url(flow.clone(), &redirect_uri, &pkce.challenge, &state);
+        let pending = oauth::PendingOAuth {
+            flow,
+            verifier: pkce.verifier.clone(),
+            redirect_uri: redirect_uri.clone(),
+            created: Instant::now(),
+        };
+        if let Ok(mut map) = self.inner.pending_oauth.lock() {
+            map.retain(|_, entry| !entry.is_expired());
+            map.insert(state.clone(), pending);
+        }
+        success(
+            id,
+            ResponsePayload::ProvidersOauthStarted(ProvidersOauthStartResult {
+                auth_url,
+                state,
+                completion: if manual {
+                    "manual".to_owned()
+                } else {
+                    "loopback".to_owned()
+                },
+                redirect_uri,
+                notice,
+            }),
+        )
+    }
+
+    async fn handle_oauth_complete(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthCompleteParams,
+    ) -> ServerFrame {
+        let pending = match self.inner.pending_oauth.lock() {
+            Ok(mut map) => map.remove(&params.state),
+            Err(_) => None,
+        };
+        let Some(pending) = pending else {
+            return failure(id, error(-32032, "oauth_state_unknown", false));
+        };
+        if pending.is_expired() {
+            return failure(id, error(-32033, "oauth_state_expired", false));
+        }
+        let Some(secrets) = self.inner.config.secrets.as_deref() else {
+            return failure(id, error(-32034, "oauth_secrets_unavailable", false));
+        };
+        let Some(store) = self.inner.config.legacy_store.as_deref() else {
+            return failure(id, error(-32010, "legacy_store_unavailable", false));
+        };
+        // Anthropic's manual callback renders `code#state` — the code is the
+        // first half; whitespace defensiveness for pasted input.
+        let code = params
+            .code
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if code.is_empty() {
+            return failure(id, error(-32035, "oauth_code_missing", false));
+        }
+        let http = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(build_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, "oauth_http_client", &build_error.to_string()),
+                );
+            }
+        };
+        let tokens = match oauth::exchange_code(&http, pending.flow.clone(), &pending, &code).await
+        {
+            Ok(tokens) => tokens,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        let actor = local_actor().id;
+        let provider = match oauth::oauth_provider_row(store, &actor, pending.flow) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
+        let encrypted = match oauth::encrypt_tokens(secrets, &tokens) {
+            Ok(encrypted) => encrypted,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        if let Err(store_error) = store.set_provider_oauth_tokens(&actor, provider.id, &encrypted) {
+            return failure(id, legacy::store_error(store_error));
+        }
+        let record = match legacy::provider_record(provider, Some(secrets)) {
+            Ok(record) => record,
+            Err(protocol_error) => return failure(id, protocol_error),
+        };
+        success(
+            id,
+            ResponsePayload::ProvidersOauthCompleted(ProvidersOauthCompleteResult {
+                provider: record,
+                expires_at: tokens.expires_at,
+            }),
+        )
+    }
 }
 
 #[cfg(test)]

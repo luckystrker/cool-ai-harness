@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cool_security::NetworkPolicy;
@@ -39,7 +40,11 @@ const API_VERSION: &str = "2023-06-01";
 #[derive(Clone)]
 pub struct AnthropicDriver {
     base_url: Url,
-    api_key: String,
+    api_key: Option<String>,
+    /// OAuth bearer source (P2.11): set for Claude subscription logins, where
+    /// the credential rides `Authorization: Bearer` + `anthropic-beta:
+    /// oauth-2025-04-20` instead of `x-api-key`.
+    token_source: Option<Arc<dyn crate::provider::AccessTokenSource>>,
     network_policy: NetworkPolicy,
 }
 
@@ -66,15 +71,65 @@ impl AnthropicDriver {
         }
         Ok(Self {
             base_url,
-            api_key,
+            api_key: Some(api_key),
+            token_source: None,
             network_policy,
         })
+    }
+
+    /// OAuth-backed driver (P2.11): bearer token from the source; a 401
+    /// triggers one refresh + retry.
+    pub fn for_oauth(
+        base_url: &str,
+        token_source: Arc<dyn crate::provider::AccessTokenSource>,
+        network_policy: NetworkPolicy,
+    ) -> Result<Self, ProviderError> {
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/")
+        };
+        let base_url = Url::parse(&normalized)
+            .map_err(|error| ProviderError::new("invalid_base_url", error.to_string(), false))?;
+        Ok(Self {
+            base_url,
+            api_key: None,
+            token_source: Some(token_source),
+            network_policy,
+        })
+    }
+
+    async fn credential(&self) -> Result<String, ProviderError> {
+        match &self.token_source {
+            Some(source) => source.access_token().await,
+            None => Ok(self.api_key.clone().unwrap_or_default()),
+        }
     }
 }
 
 #[async_trait]
 impl ModelDriver for AnthropicDriver {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        let credential = self.credential().await?;
+        match self.stream_once(request.clone(), credential).await {
+            Err(error)
+                if crate::provider::is_unauthorized(&error) && self.token_source.is_some() =>
+            {
+                let source = self.token_source.as_ref().expect("checked above");
+                let refreshed = source.refresh().await?;
+                self.stream_once(request, refreshed).await
+            }
+            result => result,
+        }
+    }
+}
+
+impl AnthropicDriver {
+    async fn stream_once(
+        &self,
+        request: ModelRequest,
+        credential: String,
+    ) -> Result<ModelStream, ProviderError> {
         let url = self.base_url.join("v1/messages").map_err(|error| {
             ProviderError::new("invalid_provider_url", error.to_string(), false)
         })?;
@@ -107,10 +162,17 @@ impl ModelDriver for AnthropicDriver {
             .map_err(|error| ProviderError::new("provider_client", error.to_string(), false))?;
         let model = request.model.clone();
         let payload = anthropic_payload(&request);
-        let response = client
-            .post(url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
+        let mut request_builder = client.post(url).header("anthropic-version", API_VERSION);
+        if self.token_source.is_some() {
+            // OAuth access tokens ride Bearer + the oauth beta flag (Claude
+            // Code's subscription flow); API keys keep x-api-key.
+            request_builder = request_builder
+                .bearer_auth(&credential)
+                .header("anthropic-beta", "oauth-2025-04-20");
+        } else {
+            request_builder = request_builder.header("x-api-key", &credential);
+        }
+        let response = request_builder
             .json(&payload)
             .send()
             .await
@@ -126,7 +188,11 @@ impl ModelDriver for AnthropicDriver {
             let status = response.status();
             let retryable = status.as_u16() == 429 || status.is_server_error();
             return Err(ProviderError::new(
-                "provider_http",
+                if status.as_u16() == 401 {
+                    "provider_unauthorized"
+                } else {
+                    "provider_http"
+                },
                 format!("provider returned {status}"),
                 retryable,
             ));
