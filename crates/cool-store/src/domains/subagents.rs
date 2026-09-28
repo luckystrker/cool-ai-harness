@@ -557,6 +557,8 @@ impl crate::LegacyStore {
                     "image_analyze",
                     "read_file",
                     "list_files",
+                    "search_files",
+                    "find_files",
                 ],
                 &[
                     ("read", "allow"),
@@ -574,7 +576,7 @@ impl crate::LegacyStore {
                 "You are a senior code reviewer. Analyze the provided code carefully, \
                  identifying bugs, security issues, performance problems, and style \
                  violations. Provide specific, actionable feedback with code examples.",
-                &["read_file", "list_files"],
+                &["read_file", "list_files", "search_files", "find_files"],
                 &[
                     ("read", "allow"),
                     ("write", "deny"),
@@ -589,7 +591,7 @@ impl crate::LegacyStore {
                 "You are a summarization expert. Read the provided content and produce \
                  a clear, concise summary that captures all key points. Structure your \
                  summary with headings and bullet points for readability.",
-                &["read_file", "list_files"],
+                &["read_file", "list_files", "search_files", "find_files"],
                 &[
                     ("read", "allow"),
                     ("write", "deny"),

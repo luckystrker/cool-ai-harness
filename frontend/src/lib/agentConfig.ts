@@ -23,6 +23,8 @@ export const TOOL_NAMES = [
   "read_file",
   "write_file",
   "list_files",
+  "search_files",
+  "find_files",
   // Execution
   "shell",
   "git",

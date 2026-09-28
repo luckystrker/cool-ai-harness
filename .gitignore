@@ -55,6 +55,9 @@ config.yaml
 logs/
 *.log
 
+# Tool output spill (agent overflow artifacts)
+.cool/spill/
+
 # --- Node / Frontend ---
 node_modules/
 sdk/typescript/dist/

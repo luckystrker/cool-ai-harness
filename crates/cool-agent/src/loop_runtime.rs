@@ -577,6 +577,7 @@ impl AgentRuntime {
             .await?;
             let mut context = context.clone();
             context.cancel = Some(cancel.clone());
+            context.call_id = Some(call.call_id.clone());
             join_set.spawn(async move {
                 let arguments = Value::Object(call.arguments.clone());
                 let result = std::panic::AssertUnwindSafe(tool.execute(&context, arguments))
