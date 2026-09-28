@@ -22,6 +22,7 @@ export const TOOL_NAMES = [
   // File tools
   "read_file",
   "write_file",
+  "edit_file",
   "list_files",
   "search_files",
   "find_files",

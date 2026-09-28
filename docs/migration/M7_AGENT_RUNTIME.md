@@ -43,7 +43,9 @@ Rust-specific `OPENAI_MODEL` override.
 
 ## Trusted tools and fallback
 
-The built-in registry contains confined `read_file`, `list_files`, `write_file`, argument-vector
+The built-in registry contains confined `read_file`, `list_files`, `write_file`, `edit_file`
+(anchor-based `{old,new}` edits applied atomically, unified diff in the response), `search_files`,
+`find_files`, argument-vector
 `shell`, argument-vector `git`, and `update_plan`. Capability and per-tool decisions are combined as
 `deny > ask > allow` before any process or filesystem side effect. Writes revalidate the existing
 parent/target, process execution uses the workspace cwd, cleared and explicitly sanitized
