@@ -318,6 +318,7 @@ async fn lifecycle_events_reach_the_linked_parent_session() {
             SessionForConversationParams {
                 idempotency_key: key("link"),
                 conversation_id: parent,
+                session_id: None,
             },
         ))
         .await

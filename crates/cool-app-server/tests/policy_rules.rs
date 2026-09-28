@@ -716,6 +716,7 @@ async fn approval_remember_persists_into_the_run_workspace() {
             cool_protocol::SessionForConversationParams {
                 idempotency_key: key("link"),
                 conversation_id: conversation.id,
+                session_id: None,
             },
         ))
         .await

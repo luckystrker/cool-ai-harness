@@ -179,6 +179,8 @@ pub enum Command {
     SessionHistory(SessionHistoryParams),
     #[serde(rename = "session.fork")]
     SessionFork(SessionForkParams),
+    #[serde(rename = "session.rewind")]
+    SessionRewind(SessionRewindParams),
     #[serde(rename = "session.for_conversation")]
     SessionForConversation(SessionForConversationParams),
     #[serde(rename = "session.runs")]
@@ -627,6 +629,42 @@ pub struct SessionForkParams {
     pub idempotency_key: IdempotencyKey,
     pub session_id: String,
     pub title: Option<String>,
+    /// Fork point: only events at or below this cursor are copied. The cursor
+    /// is the `HistoryItem.cursor` space (`rust_events.rowid`), the same
+    /// durable cursor `session.history` returns and renders in the UI.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub up_to_cursor: Option<u64>,
+    /// Alternate bound in the events' own `seq` space (`e.seq` <= N). An alias
+    /// for `up_to_cursor` for callers that page `run.events` by seq; when both
+    /// bounds are set, both apply.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub up_to_event_seq: Option<u64>,
+}
+
+/// Rewind a session to an earlier point: the previous runs are superseded
+/// (`rewound` status, append-only — their events stay durable) and a fresh
+/// seed run carries the retained history prefix up to `to_cursor`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRewindParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub session_id: String,
+    /// Durable cursor the session rewinds to (`HistoryItem.cursor`, the
+    /// `rust_events.rowid`). History visible after the rewind is exactly the
+    /// prefix of history events at or below this cursor.
+    #[ts(type = "number")]
+    pub to_cursor: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Restore the workspace to the filesystem checkpoint recorded nearest
+    /// to `to_cursor` (P2.18). Without a recorded checkpoint ref the rewind
+    /// still lands and the result reports `workspaceRestored: false`.
+    #[serde(default)]
+    pub restore_workspace: Option<bool>,
 }
 
 /// Binds one legacy conversation to a durable Rust session, importing the
@@ -638,6 +676,11 @@ pub struct SessionForConversationParams {
     #[ts(type = "string")]
     pub idempotency_key: IdempotencyKey,
     pub conversation_id: i64,
+    /// Bind an existing actor-owned session instead of creating one (fork
+    /// flows): the conversation links to that session and no transcript is
+    /// imported. The session must not already be linked to a conversation.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// List durable runs of one session, newest first.
@@ -880,6 +923,11 @@ pub enum CanonicalEvent {
     RunFailed(RunTerminal),
     #[serde(rename = "run.cancelled")]
     RunCancelled(RunTerminal),
+    /// Marker event appended to the seed run a `session.rewind` creates: the
+    /// session's visible history was reset to the prefix ending at `cursor`.
+    /// It does not change run status — the superseded runs carry `rewound`.
+    #[serde(rename = "run.rewound")]
+    RunRewound(RunRewound),
     #[serde(rename = "item.started")]
     ItemStarted(ItemEvent),
     #[serde(rename = "item.updated")]
@@ -991,6 +1039,17 @@ pub struct RunStarted {
 pub struct RunTerminal {
     pub reason: String,
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct RunRewound {
+    /// Durable cursor (`rust_events.rowid`) the session rewound to.
+    #[ts(type = "number")]
+    pub cursor: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1698,6 +1757,30 @@ pub struct SessionForkedResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct SessionRewindResult {
+    pub session_id: String,
+    /// The seed run carrying the retained history (mode `rewind`).
+    pub run_id: String,
+    /// Runs superseded by the rewind (now `rewound` status).
+    #[serde(default)]
+    pub rewound_run_ids: Vec<String>,
+    #[ts(type = "number")]
+    pub to_cursor: u64,
+    /// Checkpoint ref the workspace was restored to, when one applied.
+    #[serde(default)]
+    pub checkpoint_ref: Option<String>,
+    #[serde(default)]
+    pub workspace_restored: bool,
+    /// Why workspace restore did not apply (no checkpoint, not a restorable
+    /// snapshot, launcher disabled, restore failed). Present only when
+    /// `restoreWorkspace` was requested and `workspace_restored` is false.
+    #[serde(default)]
+    pub restore_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct SessionConversationResult {
     pub session_id: String,
     pub conversation_id: i64,
@@ -1793,6 +1876,7 @@ pub enum ResponsePayload {
     SessionListed(SessionListResult),
     SessionHistory(SessionHistoryResult),
     SessionForked(SessionForkedResult),
+    SessionRewound(SessionRewindResult),
     SessionForConversation(SessionConversationResult),
     SessionRuns(SessionRunsResult),
     PromptAccepted(PromptAcceptedResult),

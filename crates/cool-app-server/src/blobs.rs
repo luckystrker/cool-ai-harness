@@ -220,6 +220,23 @@ impl BlobStore {
         Ok(ArtifactFile { artifact, path })
     }
 
+    /// Resolve an artifact id to `(media_type, bytes)` for in-process
+    /// consumers — the tool `artifact_reader` (P2.12 `view_image`) and
+    /// multimodal prompt expansion. Actor-scoped; the HTTP route's
+    /// conversation check stays on `open_artifact`.
+    pub fn read_artifact(
+        &self,
+        actor_id: &str,
+        artifact_id: i64,
+    ) -> Result<(Artifact, Vec<u8>), BlobError> {
+        let artifact = self.legacy.get_artifact(actor_id, artifact_id)?;
+        let path = self.artifact_file(&artifact).ok_or_else(|| {
+            BlobError::Io(io::Error::new(io::ErrorKind::NotFound, "blob file missing"))
+        })?;
+        let body = fs::read(&path)?;
+        Ok((artifact, body))
+    }
+
     /// `GET /api/memory/export` — JSON or Markdown snapshot of all memories.
     /// Returns `(body, media_type, attachment_filename)`.
     pub fn export_memories(

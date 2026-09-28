@@ -42,10 +42,11 @@ use cool_protocol::{
     RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
     RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
     SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
-    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
-    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    SessionLoadedResult, SessionRewindResult, SessionRunSummary, SessionRunsResult, SessionSummary,
+    SkillCreateParams, SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame,
+    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
+    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
+    V1Version,
 };
 use cool_security::{
     CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, RuleState, SecretKeyring,
@@ -1488,6 +1489,8 @@ impl AppServer {
                     &fingerprint,
                     &params.session_id,
                     params.title.as_deref(),
+                    params.up_to_cursor,
+                    params.up_to_event_seq,
                 ) {
                     Ok(forked) => success(
                         id,
@@ -1499,6 +1502,70 @@ impl AppServer {
                     Err(store) => failure(id, store_error(store)),
                 };
                 let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionRewind(params) => {
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let outcome = match self.inner.store.rewind_session(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.session_id,
+                    params.to_cursor,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                // Workspace restore happens after the durable rewind commits:
+                // the event log already carries the rewound marker, so a failed
+                // restore is reported on the result, not rolled back (P2.18).
+                let mut workspace_restored = false;
+                let mut restore_error = None;
+                if params.restore_workspace.unwrap_or(false) {
+                    match outcome.value.checkpoint_ref.clone() {
+                        Some(checkpoint_ref) => {
+                            let workspace = self.run_workspace_for_session(&params.session_id);
+                            match cool_agent::restore_checkpoint(
+                                &workspace,
+                                &self.inner.config.host.launcher,
+                                &self.inner.config.host.environment,
+                                &checkpoint_ref,
+                            )
+                            .await
+                            {
+                                Ok(()) => workspace_restored = true,
+                                Err(error) => restore_error = Some(error),
+                            }
+                        }
+                        None => {
+                            restore_error = Some(
+                                "no filesystem checkpoint recorded at or before the cursor"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(
+                            id,
+                            ResponsePayload::SessionRewound(SessionRewindResult {
+                                session_id: params.session_id,
+                                run_id: outcome.value.run_id,
+                                rewound_run_ids: outcome.value.rewound_run_ids,
+                                to_cursor: params.to_cursor,
+                                checkpoint_ref: outcome.value.checkpoint_ref,
+                                workspace_restored,
+                                restore_error,
+                            }),
+                        ),
+                    )
+                    .await;
             }
             Command::SessionForConversation(params) => {
                 let actor = local_actor();
@@ -1524,6 +1591,23 @@ impl AppServer {
                         let _ = self.send(&outbound, failure(id, store_error(error))).await;
                         return;
                     }
+                }
+                // Fork flow: bind an existing actor-owned session to the
+                // conversation instead of creating one and importing the
+                // legacy transcript.
+                if let Some(session_id) = params.session_id.as_deref() {
+                    let frame = match self.inner.store.bind_session_to_conversation(
+                        &actor.id,
+                        params.idempotency_key.as_str(),
+                        &fingerprint,
+                        params.conversation_id,
+                        session_id,
+                    ) {
+                        Ok(link) => success(id, session_conversation_payload(link)),
+                        Err(error) => failure(id, store_error(error)),
+                    };
+                    let _ = self.send(&outbound, frame).await;
+                    return;
                 }
                 let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
                     let _ = self
@@ -3374,6 +3458,10 @@ impl AppServer {
                     .with_environment(server.inner.config.host.environment.clone())
                     .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
                     .with_rule_source(server.rule_source(&workspace))
+                    .with_session_id(run.session_id.clone())
+                    .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                        server: server.clone(),
+                    }))
                     .with_conversation(
                         server
                             .inner
@@ -4536,6 +4624,7 @@ impl AppServer {
         run_id: &str,
         event: CanonicalEvent,
         terminal: bool,
+        extensions: cool_protocol::Extensions,
     ) -> Option<EventEnvelope> {
         let durable_run = self.inner.store.run(run_id, &local_actor().id).ok()?;
         if durable_run.status.is_terminal() {
@@ -4560,7 +4649,7 @@ impl AppServer {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         let envelope = self
             .inner
@@ -4857,6 +4946,34 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
     }
 }
 
+/// P2.12: resolves artifact ids to `(media_type, bytes)` for multimodal
+/// tools and prompt expansion — `BlobStore`-backed, actor-scoped.
+#[derive(Clone)]
+struct ServerArtifactReader {
+    server: AppServer,
+}
+
+impl std::fmt::Debug for ServerArtifactReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ServerArtifactReader")
+    }
+}
+
+impl cool_agent::ArtifactReader for ServerArtifactReader {
+    fn read_artifact(&self, artifact_id: &str) -> Result<(String, Vec<u8>), String> {
+        let artifact_id: i64 = artifact_id
+            .parse()
+            .map_err(|_| format!("invalid artifact id '{artifact_id}'"))?;
+        let Some(blobs) = self.server.blob_store() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let (artifact, body) = blobs
+            .read_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        Ok((artifact.media_type, body))
+    }
+}
+
 #[async_trait]
 impl EventSink for AppServerEventSink {
     async fn emit(&self, mut event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
@@ -4869,16 +4986,28 @@ impl EventSink for AppServerEventSink {
                 compacted.compact_up_to_cursor = Some(cursor);
             }
         }
-        let envelope = self.emit_once(event).await?;
-        if matches!(
-            &envelope.event,
-            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
-        ) {
-            self.own_user_items
-                .lock()
-                .await
-                .insert(envelope.event_id.clone());
+        let envelope = self.emit_once(event, Default::default()).await?;
+        self.track_user_item(&envelope).await;
+        Ok(envelope)
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let mut event = event;
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
         }
+        let envelope = self.emit_once(event, extensions).await?;
+        self.track_user_item(&envelope).await;
         Ok(envelope)
     }
 
@@ -5033,7 +5162,25 @@ impl EventSink for AppServerEventSink {
 }
 
 impl AppServerEventSink {
-    async fn emit_once(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+    /// User items this loop emitted itself are already in its history —
+    /// `drain_steers` must not deliver them a second time.
+    async fn track_user_item(&self, envelope: &EventEnvelope) {
+        if matches!(
+            &envelope.event,
+            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
+        ) {
+            self.own_user_items
+                .lock()
+                .await
+                .insert(envelope.event_id.clone());
+        }
+    }
+
+    async fn emit_once(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let mut event = mask_canonical_event(event)?;
         self.persist_plan_created(&mut event);
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
@@ -5100,7 +5247,7 @@ impl AppServerEventSink {
         );
         let envelope = self
             .server
-            .append_event(&self.run_id, event, terminal)
+            .append_event(&self.run_id, event, terminal, extensions)
             .await
             .ok_or_else(|| RuntimeError::Sink("run no longer accepts events".to_owned()))?;
         // Fan out to subscribers before the owner send: the event is already
@@ -6277,6 +6424,10 @@ fn store_error(value: StoreError) -> ProtocolError {
         StoreError::InvalidTransition { .. } => error(-32007, "session_run_active", true),
         StoreError::BudgetExceeded(_) => error(-32014, "budget_exceeded", false),
         StoreError::NotFound(_) => error(-32004, "resource_not_found", false),
+        StoreError::RewindRejected(reason) => match reason {
+            "session_has_live_run" => error(-32007, "session_run_active", true),
+            _ => error(-32602, "rewind_rejected", false),
+        },
         StoreError::Sqlite(_)
         | StoreError::Json(_)
         | StoreError::Io(_)
@@ -6883,6 +7034,7 @@ mod tests {
                     }],
                 }),
                 false,
+                Default::default(),
             )
             .await
             .unwrap();

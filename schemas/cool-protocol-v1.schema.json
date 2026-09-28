@@ -1063,6 +1063,24 @@
           ]
         },
         {
+          "description": "Marker event appended to the seed run a `session.rewind` creates: the\nsession's visible history was reset to the prefix ending at `cursor`.\nIt does not change run status — the superseded runs carry `rewound`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.rewound"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunRewound"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "kind": {
@@ -1887,6 +1905,23 @@
             },
             "params": {
               "$ref": "#/$defs/SessionForkParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.rewind"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionRewindParams"
             }
           },
           "additionalProperties": false,
@@ -9457,6 +9492,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "session_rewound"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionRewindResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "session_for_conversation"
             },
             "value": {
@@ -13039,6 +13091,28 @@
         "limit"
       ]
     },
+    "RunRewound": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "description": "Durable cursor (`rust_events.rowid`) the session rewound to.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cursor"
+      ]
+    },
     "RunStarted": {
       "type": "object",
       "properties": {
@@ -13330,6 +13404,14 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "sessionId": {
+          "description": "Bind an existing actor-owned session instead of creating one (fork\nflows): the conversation links to that session and no transcript is\nimported. The session must not already be linked to a conversation.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -13352,6 +13434,26 @@
             "string",
             "null"
           ]
+        },
+        "upToCursor": {
+          "description": "Fork point: only events at or below this cursor are copied. The cursor\nis the `HistoryItem.cursor` space (`rust_events.rowid`), the same\ndurable cursor `session.history` returns and renders in the UI.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "upToEventSeq": {
+          "description": "Alternate bound in the events' own `seq` space (`e.seq` <= N). An alias\nfor `up_to_cursor` for callers that page `run.events` by seq; when both\nbounds are set, both apply.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -13548,6 +13650,96 @@
         "idempotencyKey",
         "sessionId",
         "content"
+      ]
+    },
+    "SessionRewindParams": {
+      "description": "Rewind a session to an earlier point: the previous runs are superseded\n(`rewound` status, append-only — their events stay durable) and a fresh\nseed run carries the retained history prefix up to `to_cursor`.",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "restoreWorkspace": {
+          "description": "Restore the workspace to the filesystem checkpoint recorded nearest\nto `to_cursor` (P2.18). Without a recorded checkpoint ref the rewind\nstill lands and the result reports `workspaceRestored: false`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toCursor": {
+          "description": "Durable cursor the session rewinds to (`HistoryItem.cursor`, the\n`rust_events.rowid`). History visible after the rewind is exactly the\nprefix of history events at or below this cursor.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "sessionId",
+        "toCursor"
+      ]
+    },
+    "SessionRewindResult": {
+      "type": "object",
+      "properties": {
+        "checkpointRef": {
+          "description": "Checkpoint ref the workspace was restored to, when one applied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "restoreError": {
+          "description": "Why workspace restore did not apply (no checkpoint, not a restorable\nsnapshot, launcher disabled, restore failed). Present only when\n`restoreWorkspace` was requested and `workspace_restored` is false.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rewoundRunIds": {
+          "description": "Runs superseded by the rewind (now `rewound` status).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runId": {
+          "description": "The seed run carrying the retained history (mode `rewind`).",
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toCursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "workspaceRestored": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "runId",
+        "toCursor"
       ]
     },
     "SessionRunSummary": {

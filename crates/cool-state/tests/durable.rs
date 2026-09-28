@@ -868,7 +868,15 @@ fn fork_copies_history_into_a_new_session_without_mutating_the_source() {
     }
 
     let forked = store
-        .fork_session("local-user", "fork-key", "fork-a", &session, Some("branch"))
+        .fork_session(
+            "local-user",
+            "fork-key",
+            "fork-a",
+            &session,
+            Some("branch"),
+            None,
+            None,
+        )
         .unwrap();
     assert!(forked.created);
     assert_ne!(forked.value, session);
@@ -909,16 +917,40 @@ fn fork_copies_history_into_a_new_session_without_mutating_the_source() {
     )));
 
     let replay = store
-        .fork_session("local-user", "fork-key", "fork-a", &session, Some("branch"))
+        .fork_session(
+            "local-user",
+            "fork-key",
+            "fork-a",
+            &session,
+            Some("branch"),
+            None,
+            None,
+        )
         .unwrap();
     assert!(!replay.created);
     assert_eq!(replay.value, forked.value);
     assert!(matches!(
-        store.fork_session("local-user", "fork-key", "different", &session, None),
+        store.fork_session(
+            "local-user",
+            "fork-key",
+            "different",
+            &session,
+            None,
+            None,
+            None,
+        ),
         Err(StoreError::IdempotencyConflict)
     ));
     assert!(matches!(
-        store.fork_session("another-user", "fork-other", "x", &session, None),
+        store.fork_session(
+            "another-user",
+            "fork-other",
+            "x",
+            &session,
+            None,
+            None,
+            None,
+        ),
         Err(StoreError::ActorMismatch)
     ));
 
@@ -1006,7 +1038,15 @@ fn fork_preserves_multi_run_history_order_not_per_run_sequences() {
     }
 
     let forked = store
-        .fork_session("local-user", "multi-fork", "multi-fork", &session, None)
+        .fork_session(
+            "local-user",
+            "multi-fork",
+            "multi-fork",
+            &session,
+            None,
+            None,
+            None,
+        )
         .unwrap()
         .value;
     let contents = store
@@ -1098,5 +1138,415 @@ fn steer_appends_a_durable_user_item_only_to_active_runs() {
     assert!(matches!(
         store.steer_run("local-user", "late", "late", &run, "too late"),
         Err(StoreError::RunNotActive)
+    ));
+}
+
+#[test]
+fn fork_filters_history_at_cursor() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    for (seq, canonical) in [
+        (
+            1,
+            CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: None,
+            }),
+        ),
+        (
+            2,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some("prompt-0".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            3,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("answer-1".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            4,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some("prompt-1".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            5,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("answer-2".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            6,
+            CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "stop".to_owned(),
+                error_code: None,
+            }),
+        ),
+    ] {
+        store
+            .append_event("local-user", &event(&session, &run, seq, canonical))
+            .unwrap();
+    }
+
+    // The cursor is `rust_events.rowid`, projected by the history window —
+    // the same value the UI holds on each message.
+    let answer_cursor = store
+        .session_event_window(&session, "local-user", None, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|(_, envelope)| {
+            matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item) if item.content.as_deref() == Some("answer-1")
+            )
+        })
+        .map(|(cursor, _)| cursor)
+        .unwrap();
+
+    let forked = store
+        .fork_session(
+            "local-user",
+            "fork-cursor",
+            "fork-cursor",
+            &session,
+            None,
+            Some(answer_cursor),
+            None,
+        )
+        .unwrap()
+        .value;
+    let contents = store
+        .session_events(&forked, "local-user")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contents, ["prompt-0", "answer-1"]);
+
+    // `up_to_event_seq` bounds the per-run seq space instead — seq <= 3 keeps
+    // the same prefix here, but only when the cursor bound is absent.
+    let seq_bounded = store
+        .fork_session(
+            "local-user",
+            "fork-seq",
+            "fork-seq",
+            &session,
+            None,
+            None,
+            Some(3),
+        )
+        .unwrap()
+        .value;
+    let seq_contents = store
+        .session_events(&seq_bounded, "local-user")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(seq_contents, ["prompt-0", "answer-1"]);
+
+    // A cursor inside the run drops everything past it — even the run's own
+    // terminal marker — but the source session is untouched.
+    let prompt_cursor = store
+        .session_event_window(&session, "local-user", None, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|(_, envelope)| {
+            matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item) if item.content.as_deref() == Some("prompt-0")
+            )
+        })
+        .map(|(cursor, _)| cursor)
+        .unwrap();
+    let shallow = store
+        .fork_session(
+            "local-user",
+            "fork-shallow",
+            "fork-shallow",
+            &session,
+            None,
+            Some(prompt_cursor),
+            None,
+        )
+        .unwrap()
+        .value;
+    let shallow_contents = store
+        .session_events(&shallow, "local-user")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(shallow_contents, ["prompt-0"]);
+    assert_eq!(
+        store.session_events(&session, "local-user").unwrap().len(),
+        6
+    );
+}
+
+#[test]
+fn rewind_marks_runs_and_replays_prefix() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    let mut checkpoint = event(
+        &session,
+        &run,
+        4,
+        CanonicalEvent::ToolStarted(cool_protocol::ToolLifecycle {
+            call_id: "call-write".to_owned(),
+            name: "write_file".to_owned(),
+        }),
+    );
+    checkpoint.extensions.insert(
+        "checkpoint_ref".to_owned(),
+        serde_json::Value::String("refs/cool/checkpoints/s/9".to_owned()),
+    );
+    for (seq, canonical) in [
+        (
+            1,
+            CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: None,
+            }),
+        ),
+        (
+            2,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some("prompt-0".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            3,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("answer-1".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+    ] {
+        store
+            .append_event("local-user", &event(&session, &run, seq, canonical))
+            .unwrap();
+    }
+    store.append_event("local-user", &checkpoint).unwrap();
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                5,
+                CanonicalEvent::ItemCompleted(ItemEvent {
+                    role: Some("assistant".to_owned()),
+                    content: Some("answer-2".to_owned()),
+                    tool_calls: Vec::new(),
+                }),
+            ),
+        )
+        .unwrap();
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                6,
+                CanonicalEvent::RunCompleted(RunTerminal {
+                    reason: "stop".to_owned(),
+                    error_code: None,
+                }),
+            ),
+        )
+        .unwrap();
+
+    // Rewind to just after "answer-1" (cursor of that event).
+    let answer_cursor = store
+        .session_event_window(&session, "local-user", None, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|(_, envelope)| {
+            matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item) if item.content.as_deref() == Some("answer-1")
+            )
+        })
+        .map(|(cursor, _)| cursor)
+        .unwrap();
+
+    let outcome = store
+        .rewind_session(
+            "local-user",
+            "rewind-key",
+            "rewind-fp",
+            &session,
+            answer_cursor,
+            Some("bad turn"),
+        )
+        .unwrap();
+    assert!(outcome.created);
+    assert_eq!(outcome.value.rewound_run_ids, [run.clone()]);
+    // The checkpoint lives past the cursor (seq 4 > cursor of seq 3) — it is
+    // NOT picked up: refs are collected only inside the retained prefix.
+    assert_eq!(outcome.value.checkpoint_ref, None);
+    assert_eq!(
+        store.run(&run, "local-user").unwrap().status,
+        RunStatus::Rewound
+    );
+
+    // The seed run carries mode=rewind RunStarted + the retained prefix +
+    // run.rewound + RunCompleted — and the session has no active run.
+    let seed_events = store
+        .all_events(&outcome.value.run_id, "local-user")
+        .unwrap();
+    assert!(matches!(
+        &seed_events[0].event,
+        CanonicalEvent::RunStarted(started) if started.mode.as_deref() == Some("rewind")
+    ));
+    let copied = seed_events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            CanonicalEvent::ItemCompleted(item) => item.content.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied, ["prompt-0", "answer-1"]);
+    assert!(seed_events.iter().any(|envelope| matches!(
+        &envelope.event,
+        CanonicalEvent::RunRewound(rewound)
+            if rewound.cursor == answer_cursor && rewound.reason.as_deref() == Some("bad turn")
+    )));
+    assert!(matches!(
+        seed_events.last().unwrap().event,
+        CanonicalEvent::RunCompleted(_)
+    ));
+    let snapshot = store.load_session(&session, "local-user").unwrap();
+    assert_eq!(snapshot.active_run_id, None);
+
+    // Append-only: the superseded run's events stay durable at run scope and
+    // in the raw `session_events` log, while the history window only sees the
+    // retained prefix replayed by the seed run.
+    assert_eq!(store.all_events(&run, "local-user").unwrap().len(), 6);
+    assert_eq!(
+        store
+            .session_events(&session, "local-user")
+            .unwrap()
+            .iter()
+            .filter(|envelope| envelope.run_id == run)
+            .count(),
+        6
+    );
+    let visible = store
+        .session_event_window(&session, "local-user", None, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter_map(|(_, envelope)| match envelope.event {
+            CanonicalEvent::ItemCompleted(item) => item.content,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(visible, ["prompt-0", "answer-1"]);
+
+    // Idempotent replay returns the same outcome; a foreign actor cannot rewind.
+    let replay = store
+        .rewind_session(
+            "local-user",
+            "rewind-key",
+            "rewind-fp",
+            &session,
+            answer_cursor,
+            Some("bad turn"),
+        )
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.value.run_id, outcome.value.run_id);
+    assert!(matches!(
+        store.rewind_session(
+            "another-user",
+            "other",
+            "other",
+            &session,
+            answer_cursor,
+            None,
+        ),
+        Err(StoreError::ActorMismatch)
+    ));
+}
+
+#[test]
+fn rewind_rejects_live_run_and_nothing_beyond_cursor() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                1,
+                CanonicalEvent::RunStarted(RunStarted {
+                    model: None,
+                    mode: None,
+                }),
+            ),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.rewind_session("local-user", "k1", "k1", &session, 0, None),
+        Err(StoreError::RewindRejected("session_has_live_run"))
+    ));
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                2,
+                CanonicalEvent::ItemCompleted(ItemEvent {
+                    role: Some("user".to_owned()),
+                    content: Some("only".to_owned()),
+                    tool_calls: Vec::new(),
+                }),
+            ),
+        )
+        .unwrap();
+    store
+        .append_event(
+            "local-user",
+            &event(
+                &session,
+                &run,
+                3,
+                CanonicalEvent::RunCompleted(RunTerminal {
+                    reason: "stop".to_owned(),
+                    error_code: None,
+                }),
+            ),
+        )
+        .unwrap();
+    // Cursor at/past the last event: nothing is beyond it to rewind.
+    assert!(matches!(
+        store.rewind_session("local-user", "k2", "k2", &session, u64::MAX, None),
+        Err(StoreError::RewindRejected("nothing_to_rewind"))
     ));
 }

@@ -19,14 +19,17 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     Io(std::io::Error),
-    InvalidTransition { from: RunStatus, to: RunStatus },
+    InvalidTransition {
+        from: RunStatus,
+        to: RunStatus,
+    },
     IdempotencyConflict,
     NotFound(&'static str),
     ActorMismatch,
@@ -34,6 +37,9 @@ pub enum StoreError {
     AlreadyResolved,
     RunNotActive,
     BudgetExceeded(BudgetSnapshot),
+    /// `session.rewind` rejected the target state (live run or nothing to
+    /// rewind). The message is a stable machine-readable reason.
+    RewindRejected(&'static str),
     Corrupt(String),
 }
 
@@ -52,6 +58,7 @@ impl fmt::Display for StoreError {
             Self::RevisionConflict => formatter.write_str("revision conflict"),
             Self::AlreadyResolved => formatter.write_str("approval is already resolved"),
             Self::RunNotActive => formatter.write_str("run is not active"),
+            Self::RewindRejected(reason) => write!(formatter, "rewind rejected: {reason}"),
             Self::BudgetExceeded(snapshot) => write!(
                 formatter,
                 "budget exceeded at {} tokens / {} micro-USD",
@@ -96,11 +103,17 @@ pub enum RunStatus {
     Completed,
     Failed,
     Cancelled,
+    /// The run was superseded by a `session.rewind`: its events stay durable
+    /// in the append-only log but leave the session's visible history.
+    Rewound,
 }
 
 impl RunStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Rewound
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -111,6 +124,7 @@ impl RunStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Rewound => "rewound",
         }
     }
 
@@ -122,6 +136,7 @@ impl RunStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "rewound" => Ok(Self::Rewound),
             other => Err(StoreError::Corrupt(format!("unknown run status {other}"))),
         }
     }
@@ -151,6 +166,15 @@ pub struct SessionListEntry {
     pub active_run_id: Option<String>,
     pub last_seq: Option<u64>,
     pub created_at: String,
+}
+
+/// What `session.rewind` left behind: the seed run, the superseded runs and
+/// the newest filesystem checkpoint ref found in the retained history (P2.18).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionRewindOutcome {
+    pub run_id: String,
+    pub rewound_run_ids: Vec<String>,
+    pub checkpoint_ref: Option<String>,
 }
 
 /// Result of binding a legacy conversation to a durable Rust session.
@@ -466,9 +490,12 @@ impl DurableStore {
         if before_cursor.is_some_and(|value| value > i64::MAX as u64) {
             return Ok(Vec::new());
         }
+        // Runs superseded by a `session.rewind` keep their durable events
+        // but leave the session's visible history window.
         let mut statement = connection.prepare(
             "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-             WHERE r.session_id = ?1 AND (?2 IS NULL OR e.rowid < ?2) \
+             WHERE r.session_id = ?1 AND r.status != 'rewound' \
+             AND (?2 IS NULL OR e.rowid < ?2) \
              ORDER BY e.rowid DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(
@@ -515,6 +542,13 @@ impl DurableStore {
         rows.map(|row| Ok(row?)).collect()
     }
 
+    /// Fork a session, optionally bounded to a history prefix.
+    ///
+    /// `up_to_cursor` bounds on the durable event cursor (`HistoryItem.cursor`
+    /// = `rust_events.rowid`); `up_to_event_seq` bounds on each event's own
+    /// `seq`. Both bounds apply when both are set. Events of runs superseded
+    /// by a rewind (`rewound` status) are never copied.
+    #[allow(clippy::too_many_arguments)]
     pub fn fork_session(
         &self,
         actor_id: &str,
@@ -522,6 +556,8 @@ impl DurableStore {
         fingerprint: &str,
         source_session_id: &str,
         title: Option<&str>,
+        up_to_cursor: Option<u64>,
+        up_to_event_seq: Option<u64>,
     ) -> Result<IdempotentOutcome<String>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -594,13 +630,22 @@ impl DurableStore {
         {
             // `seq` is per run, so the merged history must keep the durable
             // (run rowid, seq) order and must never be re-sorted by seq alone.
+            // `up_to_cursor` bounds the event rowid — the same cursor space
+            // `session.history` exposes — while `up_to_event_seq` bounds seq.
             let mut statement = transaction.prepare(
                 "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-                 WHERE r.session_id = ?1 AND r.id != ?2 ORDER BY r.rowid, e.seq",
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' \
+                 AND (?2 IS NULL OR e.rowid <= ?2) AND (?3 IS NULL OR e.seq <= ?3) \
+                 ORDER BY r.rowid, e.seq",
             )?;
-            let rows = statement.query_map(params![source_session_id, run_id], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = statement.query_map(
+                params![
+                    source_session_id,
+                    up_to_cursor.map(|value| value.min(i64::MAX as u64) as i64),
+                    up_to_event_seq.map(|value| value.min(i64::MAX as u64) as i64)
+                ],
+                |row| row.get::<_, String>(0),
+            )?;
             for row in rows {
                 let source: EventEnvelope = serde_json::from_str(&row?)?;
                 if !is_history_event(&source.event) {
@@ -665,6 +710,316 @@ impl DurableStore {
             value: session_id,
             created: true,
         })
+    }
+
+    /// Rewind a session to `to_cursor`, append-only.
+    ///
+    /// Every existing run is superseded — marked `rewound`, a terminal status
+    /// that removes its events from the session's visible history while the
+    /// append-only log keeps them durable — and a fresh seed run records the
+    /// retained history prefix: `RunStarted(mode="rewind")`, copies of the
+    /// history events at or below the cursor, a `run.rewound` marker and
+    /// `RunCompleted(reason="rewind")`. The session ends with no active run,
+    /// so the next prompt builds history from exactly the retained prefix.
+    ///
+    /// Rejects with `RewindRejected` when any run is still live or nothing
+    /// sits beyond the cursor. The returned `checkpoint_ref` is the newest
+    /// filesystem checkpoint recorded in the retained events (P2.18).
+    pub fn rewind_session(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        session_id: &str,
+        to_cursor: u64,
+        reason: Option<&str>,
+    ) -> Result<IdempotentOutcome<SessionRewindOutcome>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<SessionRewindOutcome>(
+            &transaction,
+            actor_id,
+            "session.rewind",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(IdempotentOutcome {
+                value: existing,
+                created: false,
+            });
+        }
+        let owner: String = transaction
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let mut runs_statement = transaction
+            .prepare("SELECT id, status FROM rust_runs WHERE session_id = ?1 ORDER BY rowid")?;
+        let runs = runs_statement
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    RunStatus::parse(&row.get::<_, String>(1)?).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(runs_statement);
+        if runs.iter().any(|(_, status)| !status.is_terminal()) {
+            return Err(StoreError::RewindRejected("session_has_live_run"));
+        }
+        let cursor_i64 = to_cursor.min(i64::MAX as u64) as i64;
+        let beyond: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+             WHERE r.session_id = ?1 AND e.rowid > ?2",
+            params![session_id, cursor_i64],
+            |row| row.get(0),
+        )?;
+        if beyond == 0 {
+            return Err(StoreError::RewindRejected("nothing_to_rewind"));
+        }
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let now = timestamp();
+        // Collect the retained history prefix and the newest checkpoint ref
+        // inside it before superseding the source runs.
+        let mut copied = Vec::new();
+        let mut checkpoint_ref: Option<String> = None;
+        {
+            let mut statement = transaction.prepare(
+                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND e.rowid <= ?2 ORDER BY r.rowid, e.seq",
+            )?;
+            let rows = statement.query_map(params![session_id, cursor_i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                if let Some(value) = source.extensions.get("checkpoint_ref")
+                    && let Some(value) = value.as_str()
+                {
+                    checkpoint_ref = Some(value.to_owned());
+                }
+                if !is_history_event(&source.event) {
+                    continue;
+                }
+                copied.push(source);
+            }
+        }
+        let rewound_run_ids: Vec<String> = runs.iter().map(|(id, _)| id.clone()).collect();
+        for (existing_id, _) in &runs {
+            transaction.execute(
+                "UPDATE rust_runs SET status = 'rewound', updated_at = ?1 WHERE id = ?2",
+                params![now, existing_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
+            params![run_id, session_id, actor_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE rust_sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run_id, session_id],
+        )?;
+
+        let mut next_seq = 0_u64;
+        let system_actor = || ActorRef {
+            id: "cool-core".to_owned(),
+            kind: ActorKind::System,
+        };
+        let mut rewind_events = vec![EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: now.clone(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: Some("rewind".to_owned()),
+            }),
+            extensions: Default::default(),
+        }];
+        for source in copied {
+            rewind_events.push(EventEnvelope {
+                event_id: format!("event-{}", Uuid::new_v4()),
+                schema_version: V1Version::VALUE,
+                session_id: session_id.to_owned(),
+                run_id: run_id.clone(),
+                item_id: source.item_id,
+                seq: 0,
+                occurred_at: source.occurred_at,
+                actor: source.actor,
+                source: "cool-state-rewind".to_owned(),
+                causation_id: Some(source.event_id),
+                correlation_id: source.correlation_id,
+                event: source.event,
+                extensions: source.extensions,
+            });
+        }
+        rewind_events.push(EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: timestamp(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunRewound(cool_protocol::RunRewound {
+                cursor: to_cursor,
+                reason: reason.map(str::to_owned),
+            }),
+            extensions: Default::default(),
+        });
+        rewind_events.push(EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: timestamp(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "rewind".to_owned(),
+                error_code: None,
+            }),
+            extensions: Default::default(),
+        });
+        for event in &mut rewind_events {
+            next_seq += 1;
+            event.seq = next_seq;
+            append_event_tx(&transaction, actor_id, event)?;
+        }
+        let outcome = SessionRewindOutcome {
+            run_id: run_id.clone(),
+            rewound_run_ids,
+            checkpoint_ref,
+        };
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.rewind",
+            key,
+            fingerprint,
+            &outcome,
+        )?;
+        transaction.commit()?;
+        Ok(IdempotentOutcome {
+            value: outcome,
+            created: true,
+        })
+    }
+
+    /// Bind an existing actor-owned session to a legacy conversation (fork
+    /// flow): inserts only the link row — no session or transcript import.
+    pub fn bind_session_to_conversation(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        conversation_id: i64,
+        session_id: &str,
+    ) -> Result<ConversationLink, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<ConversationLink>(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        if let Some((owner, linked)) = transaction
+            .query_row(
+                "SELECT actor_id, session_id FROM rust_conversation_links WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if owner != actor_id {
+                return Err(StoreError::ActorMismatch);
+            }
+            if linked == session_id {
+                let link = ConversationLink {
+                    conversation_id,
+                    session_id: linked,
+                    created: false,
+                    imported_events: 0,
+                    truncated: false,
+                };
+                insert_idempotency(
+                    &transaction,
+                    actor_id,
+                    "session.for_conversation",
+                    key,
+                    fingerprint,
+                    &link,
+                )?;
+                transaction.commit()?;
+                return Ok(link);
+            }
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let (owner, already_linked): (String, Option<i64>) = transaction
+            .query_row(
+                "SELECT s.actor_id, (SELECT l.conversation_id FROM rust_conversation_links l \
+                 WHERE l.session_id = s.id) FROM rust_sessions s WHERE s.id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        if already_linked.is_some() {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let link = ConversationLink {
+            conversation_id,
+            session_id: session_id.to_owned(),
+            created: true,
+            imported_events: 0,
+            truncated: false,
+        };
+        transaction.execute(
+            "INSERT INTO rust_conversation_links(conversation_id, actor_id, session_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, actor_id, session_id, timestamp()],
+        )?;
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+            &link,
+        )?;
+        transaction.commit()?;
+        Ok(link)
     }
 
     /// Find or create the durable session bound to a legacy conversation.
@@ -2000,7 +2355,7 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS rust_runs(
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES rust_sessions(id), actor_id TEXT NOT NULL,
-           status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled')),
+           status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled','rewound')),
            last_seq INTEGER NOT NULL DEFAULT 0, checkpoint_json TEXT, usage_json TEXT,
            iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL
          );
@@ -2066,6 +2421,35 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
     {
         connection.execute("ALTER TABLE rust_approvals ADD COLUMN answer_json TEXT", [])?;
     }
+    // Run status 'rewound' (P2.13): SQLite cannot ALTER a CHECK constraint,
+    // so databases created before the DDL above carried it get rust_runs
+    // rebuilt in place — contents preserved, references updated by the rename.
+    let runs_ddl: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rust_runs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !runs_ddl.contains("'rewound'") {
+        connection.execute_batch("PRAGMA foreign_keys = OFF")?;
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE rust_runs_v3(
+               id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES rust_sessions(id), actor_id TEXT NOT NULL,
+               status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled','rewound')),
+               last_seq INTEGER NOT NULL DEFAULT 0, checkpoint_json TEXT, usage_json TEXT,
+               iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL
+             );
+             INSERT INTO rust_runs_v3 SELECT * FROM rust_runs;
+             DROP TABLE rust_runs;
+             ALTER TABLE rust_runs_v3 RENAME TO rust_runs;
+             COMMIT;",
+        )?;
+        connection.execute_batch("PRAGMA foreign_keys = ON")?;
+    }
+    connection.execute(
+        "UPDATE rust_schema_meta SET version = 3 WHERE version < 3",
+        [],
+    )?;
     Ok(())
 }
 
