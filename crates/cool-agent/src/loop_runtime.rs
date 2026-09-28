@@ -26,6 +26,21 @@ use crate::context::{
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
 
+/// Injected for `long_task` runs with no progress file yet — mirrors the
+/// bundled `long-running-task` skill convention so a fresh long task starts
+/// tracking itself on disk.
+const LONG_TASK_BOOTSTRAP_SECTION: &str = "\
+[LONG-RUNNING TASK MODE]
+Track this task on disk so progress survives context compaction and fresh \
+runs. Maintain two files in the workspace:
+- `.cool/task/progress.md` — journal with **Done**, **Next** and \
+**Acceptance criteria** sections.
+- `.cool/task/features.json` — machine-readable checklist: \
+{\"features\": [{\"id\", \"title\", \"status\": \"pending|in_progress|done\", \"notes\"}]}.
+Create them now: break the request into a feature checklist. Keep the files \
+consistent and update them before every reply — a fresh run must resume \
+from them alone.";
+
 #[derive(Clone, Debug)]
 pub struct AgentLimits {
     pub max_iterations: u32,
@@ -309,14 +324,17 @@ impl AgentRuntime {
             }
         }
         // Long-task mode resumes from the progress file the bundled
-        // long-running-task skill maintains; an absent file means a fresh task.
-        if request.mode.as_deref() == Some("long_task")
-            && let Ok(Some(progress)) = load_task_progress(&request.tool_context.workspace)
-        {
-            let section = format!(
-                "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
-                 state and keep the file updated as work proceeds.\n\n{progress}"
-            );
+        // long-running-task skill maintains; without one the run is a fresh
+        // task and gets the tracking convention so the agent creates the
+        // files itself.
+        if request.mode.as_deref() == Some("long_task") {
+            let section = match load_task_progress(&request.tool_context.workspace) {
+                Ok(Some(progress)) => format!(
+                    "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
+                     state and keep the file updated as work proceeds.\n\n{progress}"
+                ),
+                _ => LONG_TASK_BOOTSTRAP_SECTION.to_owned(),
+            };
             if let Some(system) = history
                 .iter_mut()
                 .find(|message| message.role == MessageRole::System)
@@ -365,7 +383,7 @@ impl AgentRuntime {
             let compaction_trigger = request.limits.context_tokens.saturating_mul(85) / 100;
             let summary = if estimate_history_tokens(&history) > compaction_trigger {
                 sink.before_compaction(&history).await?;
-                let dropped = summary_drop_candidates(&history);
+                let dropped = summary_drop_candidates(&history, request.limits.context_tokens);
                 if dropped.is_empty() {
                     None
                 } else {

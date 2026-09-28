@@ -119,6 +119,56 @@ pub struct Compaction {
 /// case compaction falls back to plain drop-oldest instead.
 pub const COMPACTION_KEEP_LAST_GROUPS: usize = 4;
 
+/// Marker prefix of the synthetic system message a summarized compaction
+/// inserts. `summary_drop_candidates` feeds these back into the next
+/// summarization pass so earlier summaries are folded in, not lost.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "[Summary of earlier work]";
+
+/// Token budget reserved for the injected summary message when the loop
+/// decides which groups a compaction drops: the retained set is chosen
+/// before the summary exists, so the budget must leave room for it. Capped
+/// at a quarter of the available budget so small contexts still retain
+/// useful groups.
+pub const COMPACTION_SUMMARY_RESERVE: u64 = 1_200;
+
+fn summary_reserve(available: u64) -> u64 {
+    COMPACTION_SUMMARY_RESERVE.min(available / 4)
+}
+
+/// A prior synthetic summary system message (see
+/// [`COMPACTION_SUMMARY_PREFIX`]).
+pub fn is_summary_message(message: &Message) -> bool {
+    message.role == MessageRole::System
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with(COMPACTION_SUMMARY_PREFIX))
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars().take(max_chars).collect::<String>() + "\u{2026}"
+}
+
+/// How many trailing groups stay verbatim under `budget`: the newest that
+/// fit, capped at [`COMPACTION_KEEP_LAST_GROUPS`]; at least one group always
+/// survives so the freshest turn is never dropped.
+fn retained_group_count(groups: &[Vec<Message>], budget: u64) -> usize {
+    let mut tokens = 0_u64;
+    let mut count = 0_usize;
+    for group in groups.iter().rev().take(COMPACTION_KEEP_LAST_GROUPS) {
+        let cost = estimate_history_tokens(group);
+        if count > 0 && tokens + cost > budget {
+            break;
+        }
+        tokens += cost;
+        count += 1;
+    }
+    count.max(1).min(groups.len())
+}
+
 pub fn estimate_history_tokens(history: &[Message]) -> u64 {
     history.iter().map(estimate_message_tokens).sum()
 }
@@ -169,19 +219,29 @@ fn history_groups(history: &[Message]) -> (Option<Message>, Vec<Vec<Message>>) {
     (system, groups)
 }
 
-/// The non-system messages older than the last
-/// [`COMPACTION_KEEP_LAST_GROUPS`] groups — exactly the prefix an in-loop
-/// summarization pass would cover with a summary.
-pub fn summary_drop_candidates(history: &[Message]) -> Vec<Message> {
-    let (_, groups) = history_groups(history);
-    if groups.len() <= COMPACTION_KEEP_LAST_GROUPS {
+/// The messages an in-loop summarization pass should cover: prior
+/// synthetic summaries (folded into the new summary instead of vanishing)
+/// plus every message before the trailing groups that stay verbatim — the
+/// newest groups fitting `max_tokens` minus the system prompt and
+/// [`COMPACTION_SUMMARY_RESERVE`] for the summary message itself.
+pub fn summary_drop_candidates(history: &[Message], max_tokens: u64) -> Vec<Message> {
+    let (system, groups) = history_groups(history);
+    let system_tokens = system.as_ref().map_or(0, |message| {
+        estimate_history_tokens(std::slice::from_ref(message))
+    });
+    let available = max_tokens.saturating_sub(system_tokens);
+    let budget = available.saturating_sub(summary_reserve(available));
+    let keep = retained_group_count(&groups, budget);
+    if groups.len() <= keep {
         return Vec::new();
     }
-    groups[..groups.len() - COMPACTION_KEEP_LAST_GROUPS]
+    let mut dropped: Vec<Message> = history
         .iter()
-        .flatten()
+        .filter(|message| is_summary_message(message))
         .cloned()
-        .collect()
+        .collect();
+    dropped.extend(groups[..groups.len() - keep].iter().flatten().cloned());
+    dropped
 }
 
 /// Drops oldest complete exchanges. Assistant tool calls and their following
@@ -211,21 +271,22 @@ pub fn compact_history(
     let available = max_tokens.saturating_sub(system_tokens);
 
     if let Some(summary) = summary.filter(|_| groups.len() > COMPACTION_KEEP_LAST_GROUPS) {
-        let mut retained: Vec<Vec<Message>> =
-            groups[groups.len() - COMPACTION_KEEP_LAST_GROUPS..].to_vec();
+        // Bound the injected summary inside the same reserve the candidate
+        // selection used, so the retained set `summary_drop_candidates`
+        // chose stays accurate (the 8-token slack covers estimate overhead).
+        let summary = truncate_chars(
+            &summary,
+            (summary_reserve(available) as usize)
+                .saturating_sub(8)
+                .saturating_mul(CHARS_PER_TOKEN),
+        );
         let summary_message = Message::text(
             MessageRole::System,
-            format!("[Summary of earlier work]\n{summary}"),
+            format!("{COMPACTION_SUMMARY_PREFIX}\n{summary}"),
         );
-        let mut retained_tokens = estimate_history_tokens(std::slice::from_ref(&summary_message))
-            + retained
-                .iter()
-                .map(|group| estimate_history_tokens(group))
-                .sum::<u64>();
-        while retained_tokens > available && retained.len() > 1 {
-            retained_tokens -= estimate_history_tokens(&retained[0]);
-            retained.remove(0);
-        }
+        let summary_tokens = estimate_history_tokens(std::slice::from_ref(&summary_message));
+        let keep = retained_group_count(&groups, available.saturating_sub(summary_tokens));
+        let retained: Vec<Vec<Message>> = groups[groups.len() - keep..].to_vec();
         let retained_count: usize = retained.iter().map(Vec::len).sum();
         let has_system = system.is_some();
         let mut messages = Vec::new();

@@ -1032,7 +1032,7 @@ fn compact_history_with_summary_keeps_last_groups_and_reports_counts() {
         Message::text(cool_agent::MessageRole::User, "u6"),
     ];
     // Everything older than the last four groups is what a summarizer covers.
-    let dropped = cool_agent::summary_drop_candidates(&history);
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
     assert_eq!(dropped.len(), 2);
     assert_eq!(dropped[0].content.as_deref(), Some("u1"));
 
@@ -1363,7 +1363,8 @@ async fn long_task_mode_injects_the_progress_file_into_the_system_prompt() {
         });
     assert_eq!(run_started_mode.as_deref(), Some("long_task"));
 
-    // Without a progress file the prompt is left alone — a fresh task.
+    // Without a progress file the run still gets the tracking convention so
+    // the agent creates .cool/task/progress.md + features.json itself.
     let empty = tempdir().unwrap();
     let provider = Arc::new(ScriptedDriver::new([Ok(vec![
         ModelEvent::Content("fresh".to_owned()),
@@ -1392,5 +1393,54 @@ async fn long_task_mode_injects_the_progress_file_into_the_system_prompt() {
         .iter()
         .find(|message| message.role == cool_agent::MessageRole::System)
         .unwrap();
-    assert_eq!(system.content.as_deref(), Some("be precise"));
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.starts_with("be precise"));
+    assert!(content.contains("[LONG-RUNNING TASK MODE]"));
+    assert!(content.contains(".cool/task/progress.md"));
+    assert!(content.contains(".cool/task/features.json"));
+}
+
+#[test]
+fn summary_candidates_fold_prior_summary_into_the_next_pass() {
+    let mut history = vec![
+        Message::text(cool_agent::MessageRole::System, "system"),
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nprior digest",
+        ),
+    ];
+    history.extend(
+        (0..6).map(|index| Message::text(cool_agent::MessageRole::User, format!("u{index}"))),
+    );
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
+    assert_eq!(dropped.len(), 3);
+    assert_eq!(
+        dropped[0].content.as_deref(),
+        Some("[Summary of earlier work]\nprior digest"),
+        "the prior summary must be folded into the next summarization"
+    );
+    assert_eq!(dropped[1].content.as_deref(), Some("u0"));
+}
+
+#[test]
+fn summary_candidates_cover_groups_that_overflow_the_retained_budget() {
+    let big = "x".repeat(8_000);
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "sys"),
+        Message::text(cool_agent::MessageRole::User, "old"),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+    ];
+    // Only the newest ~2000-token group fits the budget (4_000 minus the
+    // system message and the summary reserve), so the three oversized groups
+    // in the middle are dropped — and must be summarized, not silently lost.
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
+    assert_eq!(dropped.len(), 4);
+    assert_eq!(dropped[0].content.as_deref(), Some("old"));
+    let compacted = cool_agent::compact_history(&history, 4_000, Some("digest".to_owned()));
+    assert_eq!(compacted.dropped_messages, dropped.len());
+    assert_eq!(compacted.messages.len(), 3);
+    assert_eq!(compacted.messages[2].content.as_deref(), Some(big.as_str()));
 }

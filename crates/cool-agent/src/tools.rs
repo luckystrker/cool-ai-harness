@@ -1207,16 +1207,35 @@ impl ToolHandler for EditFile {
                 .create_dir_all(parent)
                 .map_err(confinement_io)?;
         }
+        // Write the new content to a sibling temp file and rename it over the
+        // target so a write failure cannot leave a truncated original.
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ToolError::InvalidArguments("path must name a file".to_owned()))?;
+        let tmp_path =
+            path.with_file_name(format!(".{file_name}.cool-edit-{}", std::process::id()));
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         use std::io::Write as _;
-        let mut file = context
-            .workspace
-            .dir()
-            .open_with(&path, &options)
-            .map_err(confinement_io)?;
-        file.write_all(after.as_bytes()).map_err(ToolError::Io)?;
-        file.flush().map_err(ToolError::Io)?;
+        let write_result = (|| {
+            let mut file = context
+                .workspace
+                .dir()
+                .open_with(&tmp_path, &options)
+                .map_err(confinement_io)?;
+            file.write_all(after.as_bytes()).map_err(ToolError::Io)?;
+            file.flush().map_err(ToolError::Io)?;
+            context
+                .workspace
+                .dir()
+                .rename(&tmp_path, context.workspace.dir(), &path)
+                .map_err(confinement_io)
+        })();
+        if let Err(error) = write_result {
+            let _ = context.workspace.dir().remove_file(&tmp_path);
+            return Err(error);
+        }
 
         const DIFF_LIMIT: usize = 4096;
         let diff = unified_diff(requested, before.as_deref().unwrap_or(""), &after);

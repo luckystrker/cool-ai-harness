@@ -13,9 +13,10 @@ mod web_tools;
 
 pub use anthropic::AnthropicDriver;
 pub use context::{
-    COMPACTION_KEEP_LAST_GROUPS, Compaction, Message, MessageRole, PLANNING_SYSTEM_PROMPT,
-    ToolCall, compact_history, default_agent_system_prompt, estimate_history_tokens,
-    load_project_instructions, load_task_progress, planning_system_prompt, summary_drop_candidates,
+    COMPACTION_KEEP_LAST_GROUPS, COMPACTION_SUMMARY_PREFIX, Compaction, Message, MessageRole,
+    PLANNING_SYSTEM_PROMPT, ToolCall, compact_history, default_agent_system_prompt,
+    estimate_history_tokens, is_summary_message, load_project_instructions, load_task_progress,
+    planning_system_prompt, summary_drop_candidates,
 };
 pub use loop_runtime::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,

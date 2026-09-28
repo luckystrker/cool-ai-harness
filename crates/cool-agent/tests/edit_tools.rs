@@ -242,3 +242,37 @@ async fn edit_file_sequential_edits_and_diff_rendering() {
     assert!(diff.contains("+3"));
     assert_eq!(diff.matches("@@ -").count(), 1);
 }
+
+#[tokio::test]
+async fn edit_file_writes_atomically_and_leaves_no_temp_files() {
+    let directory = tempdir().unwrap();
+    write(
+        directory.path(),
+        "main.rs",
+        "fn main() {\n    old_call();\n}\n",
+    );
+    let registry = builtin_registry();
+    let edit = registry.get("edit_file").unwrap();
+    let result = edit
+        .execute(
+            &context(directory.path()),
+            edit_args(
+                "main.rs",
+                json!([{"old": "old_call()", "new": "new_call()"}]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("main.rs")).unwrap(),
+        "fn main() {\n    new_call();\n}\n"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".cool-edit-"))
+        .collect();
+    assert!(leftovers.is_empty(), "atomic write littered: {leftovers:?}");
+}
