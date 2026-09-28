@@ -13,14 +13,15 @@ mod web_tools;
 
 pub use anthropic::AnthropicDriver;
 pub use context::{
-    Compaction, Message, MessageRole, PLANNING_SYSTEM_PROMPT, ToolCall, compact_history,
-    default_agent_system_prompt, estimate_history_tokens, load_project_instructions,
-    planning_system_prompt,
+    COMPACTION_KEEP_LAST_GROUPS, COMPACTION_SUMMARY_PREFIX, Compaction, Message, MessageRole,
+    PLANNING_SYSTEM_PROMPT, ToolCall, compact_history, default_agent_system_prompt,
+    estimate_history_tokens, is_summary_message, load_project_instructions, load_task_progress,
+    planning_system_prompt, summary_drop_candidates,
 };
 pub use loop_runtime::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, RunOutcome, RuntimeError, StoreEventSink, SubagentRequest,
-    history_from_events, mask_canonical_event,
+    history_from_event_rows, history_from_events, mask_canonical_event,
 };
 pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{

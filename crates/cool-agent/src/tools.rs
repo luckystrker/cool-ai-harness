@@ -356,6 +356,12 @@ pub fn builtin_registry() -> ToolRegistry {
             WriteFile,
         ),
         Tool::new(
+            definition("edit_file", "Apply anchor-based edits to a UTF-8 workspace file: each edit replaces the exact `old` text with `new` (set replace_all for every occurrence). All edits apply atomically — one bad anchor rejects the whole call. With create_if_missing and a single `{\"old\":\"\",\"new\":\"<content>\"}` edit it creates the file. Prefer this over write_file for targeted changes.", json!({"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["old","new"],"additionalProperties":false}},"create_if_missing":{"type":"boolean","default":false}},"required":["path","edits"],"additionalProperties":false})),
+            [Capability::Write],
+            Decision::Ask,
+            EditFile,
+        ),
+        Tool::new(
             definition("shell", "Run an argument-vector process through the configured isolated launcher; fails closed by default. Output over the byte cap is spilled to .cool/spill/ in the workspace (add it to .gitignore) and the result carries head/tail.", process_schema()),
             [Capability::Execute],
             Decision::Ask,
@@ -1036,6 +1042,477 @@ impl ToolHandler for WriteFile {
             "append": append,
         })))
     }
+}
+
+struct EditFile;
+
+/// One `{old,new,replace_all}` anchor edit as validated from the arguments.
+struct AnchorEdit {
+    old: String,
+    new: String,
+    replace_all: bool,
+}
+
+fn parse_edits(arguments: &Value) -> Result<Vec<AnchorEdit>, ToolError> {
+    let edits = arguments
+        .get("edits")
+        .and_then(Value::as_array)
+        .filter(|edits| !edits.is_empty())
+        .ok_or_else(|| ToolError::InvalidArguments("edits must be a non-empty array".to_owned()))?;
+    edits
+        .iter()
+        .enumerate()
+        .map(|(index, edit)| {
+            let object = edit.as_object().ok_or_else(|| {
+                ToolError::InvalidArguments(format!("edits[{index}] must be an object"))
+            })?;
+            if let Some(key) = object
+                .keys()
+                .find(|key| !matches!(key.as_str(), "old" | "new" | "replace_all"))
+            {
+                return Err(ToolError::InvalidArguments(format!(
+                    "edits[{index}]: unknown field {key}"
+                )));
+            }
+            let old = object.get("old").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::InvalidArguments(format!("edits[{index}].old must be a string"))
+            })?;
+            let new = object.get("new").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::InvalidArguments(format!("edits[{index}].new must be a string"))
+            })?;
+            let replace_all = match object.get("replace_all") {
+                Some(value) => value.as_bool().ok_or_else(|| {
+                    ToolError::InvalidArguments(format!(
+                        "edits[{index}].replace_all must be a boolean"
+                    ))
+                })?,
+                None => false,
+            };
+            Ok(AnchorEdit {
+                old: old.to_owned(),
+                new: new.to_owned(),
+                replace_all,
+            })
+        })
+        .collect()
+}
+
+fn edit_error(code: &str, message: impl Into<String>, extra: Value) -> ToolResult {
+    let mut output = extra;
+    output["error"] = json!(message.into());
+    output["errorCode"] = json!(code);
+    ToolResult {
+        output,
+        is_error: true,
+        error_code: Some(code.to_owned()),
+        truncated: false,
+    }
+}
+
+#[async_trait]
+impl ToolHandler for EditFile {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["path", "edits", "create_if_missing"])?;
+        let requested = required_string(&arguments, "path")?;
+        let create_if_missing = match arguments.get("create_if_missing") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                ToolError::InvalidArguments("create_if_missing must be a boolean".to_owned())
+            })?,
+            None => false,
+        };
+        let edits = parse_edits(&arguments)?;
+        let mut path = workspace_path(context, requested)?;
+
+        // Follow a symlink to its in-workspace target: writing through a
+        // temp file + rename would replace the link itself and leave the
+        // linked file untouched. `read_link` rejects absolute targets.
+        // Chained links resolve fully, capped at 8 hops.
+        for _ in 0..8 {
+            let Ok(link_metadata) = context.workspace.dir().symlink_metadata(&path) else {
+                break;
+            };
+            if !link_metadata.file_type().is_symlink() {
+                break;
+            }
+            let target = context
+                .workspace
+                .dir()
+                .read_link(&path)
+                .map_err(confinement_io)?;
+            let resolved = match path.parent() {
+                Some(parent) => parent.join(target),
+                None => target,
+            };
+            path = workspace_path(
+                context,
+                resolved.to_str().ok_or_else(|| {
+                    ToolError::InvalidArguments("symlink target is not a valid path".to_owned())
+                })?,
+            )?;
+        }
+        if context
+            .workspace
+            .dir()
+            .symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(ToolError::InvalidArguments(
+                "symlink chain exceeds 8 hops".to_owned(),
+            ));
+        }
+
+        let mut original_permissions = None;
+        let before = match context.workspace.dir().metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                original_permissions = Some(metadata.permissions());
+                let mut text = String::new();
+                use std::io::Read as _;
+                context
+                    .workspace
+                    .dir()
+                    .open(&path)
+                    .map_err(confinement_io)?
+                    .read_to_string(&mut text)
+                    .map_err(ToolError::Io)?;
+                Some(text)
+            }
+            Ok(_) => return Ok(ToolResult::error("file_not_found", "path is not a file")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(confinement_io(error)),
+        };
+
+        let mut created = false;
+        let after = match &before {
+            None => {
+                if !create_if_missing {
+                    return Ok(ToolResult::error("file_not_found", "path is not a file"));
+                }
+                if edits.len() != 1 || !edits[0].old.is_empty() {
+                    return Ok(edit_error(
+                        "edit_invalid_create",
+                        "creating a missing file requires exactly one edit with an empty old",
+                        json!({"edits": edits.len()}),
+                    ));
+                }
+                created = true;
+                edits[0].new.clone()
+            }
+            Some(before) => {
+                let mut current = before.clone();
+                for (index, edit) in edits.iter().enumerate() {
+                    if edit.old.is_empty() {
+                        return Ok(edit_error(
+                            "edit_empty_anchor",
+                            format!("edits[{index}].old must be non-empty for an existing file"),
+                            json!({"editIndex": index}),
+                        ));
+                    }
+                    let occurrences = current.matches(&edit.old).count();
+                    if occurrences == 0 {
+                        return Ok(edit_error(
+                            "edit_not_found",
+                            format!("edits[{index}].old not found in {requested}"),
+                            json!({"editIndex": index}),
+                        ));
+                    }
+                    if occurrences > 1 && !edit.replace_all {
+                        return Ok(edit_error(
+                            "edit_not_unique",
+                            format!(
+                                "edits[{index}].old matches {occurrences} locations in {requested}; pass replace_all to change all"
+                            ),
+                            json!({"editIndex": index, "occurrences": occurrences}),
+                        ));
+                    }
+                    current = if edit.replace_all {
+                        current.replace(&edit.old, &edit.new)
+                    } else {
+                        current.replacen(&edit.old, &edit.new, 1)
+                    };
+                }
+                current
+            }
+        };
+
+        if let Some(parent) = path.parent()
+            && parent.components().next().is_some()
+        {
+            context
+                .workspace
+                .dir()
+                .create_dir_all(parent)
+                .map_err(confinement_io)?;
+        }
+        // Write the new content to a sibling temp file and rename it over the
+        // target so a write failure cannot leave a truncated original.
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ToolError::InvalidArguments("path must name a file".to_owned()))?;
+        let tmp_path = path.with_file_name(format!(".{file_name}.cool-edit-{}", Uuid::new_v4()));
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        use std::io::Write as _;
+        let write_result = (|| {
+            let mut file = context
+                .workspace
+                .dir()
+                .open_with(&tmp_path, &options)
+                .map_err(confinement_io)?;
+            // The temp file's fresh inode carries default permissions —
+            // apply the original mode before content is written so a private
+            // file never sits world-readable on disk.
+            if let Some(permissions) = original_permissions {
+                file.set_permissions(permissions).map_err(ToolError::Io)?;
+            }
+            file.write_all(after.as_bytes()).map_err(ToolError::Io)?;
+            file.flush().map_err(ToolError::Io)?;
+            context
+                .workspace
+                .dir()
+                .rename(&tmp_path, context.workspace.dir(), &path)
+                .map_err(confinement_io)
+        })();
+        if let Err(error) = write_result {
+            let _ = context.workspace.dir().remove_file(&tmp_path);
+            return Err(error);
+        }
+
+        const DIFF_LIMIT: usize = 4096;
+        let (diff, diff_truncated) = unified_diff(
+            requested,
+            before.as_deref().unwrap_or(""),
+            &after,
+            DIFF_LIMIT,
+        );
+        let mut output = json!({
+            "path": requested,
+            "editsApplied": edits.len(),
+            "bytesBefore": before.as_deref().unwrap_or("").len(),
+            "bytesAfter": after.len(),
+            "diff": mask_secrets(&diff),
+        });
+        if created {
+            output["created"] = json!(true);
+        }
+        if diff_truncated {
+            output["diffTruncated"] = json!(true);
+        }
+        Ok(ToolResult::ok(output))
+    }
+}
+
+/// Myers O(ND) line diff producing one op byte per input line (` ` keep,
+/// `-` delete, `+` insert). Returns None when the edit distance is too
+/// large to trace within a sane memory bound — the caller then emits a
+/// single coarse hunk instead.
+fn line_ops(a: &[&str], b: &[&str]) -> Option<Vec<u8>> {
+    const MAX_D: usize = 1024;
+    let (n, m) = (a.len() as i64, b.len() as i64);
+    if n + m > 20_000 {
+        return None;
+    }
+    let off = n + m;
+    let mut v = vec![0i64; (2 * (n + m) + 1) as usize];
+    // trace[d][(k + d) / 2] = furthest x on diagonal k after step d.
+    let mut trace: Vec<Vec<i64>> = Vec::new();
+    let mut reached = false;
+    'outer: for d in 0..=MAX_D as i64 {
+        let mut vd = vec![0i64; d as usize + 1];
+        let mut k = -d;
+        while k <= d {
+            let ki = (k + off) as usize;
+            let mut x = if k == -d || (k != d && v[ki - 1] < v[ki + 1]) {
+                v[ki + 1]
+            } else {
+                v[ki - 1] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[ki] = x;
+            vd[((k + d) / 2) as usize] = x;
+            if x >= n && y >= m {
+                reached = true;
+                break 'outer;
+            }
+            k += 2;
+        }
+        trace.push(vd);
+    }
+    if !reached {
+        return None;
+    }
+    let mut ops = Vec::with_capacity((n + m) as usize);
+    let (mut x, mut y) = (n, m);
+    for d in (1..=trace.len() as i64).rev() {
+        let k = x - y;
+        let prev = &trace[(d - 1) as usize];
+        let index = |kk: i64| ((kk + d - 1) / 2) as usize;
+        let prev_k = if k == -d || (k != d && prev[index(k - 1)] < prev[index(k + 1)]) {
+            k + 1
+        } else {
+            k - 1
+        };
+        let prev_x = prev[index(prev_k)];
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            ops.push(b' ');
+            x -= 1;
+            y -= 1;
+        }
+        if x == prev_x {
+            ops.push(b'+');
+            y -= 1;
+        } else {
+            ops.push(b'-');
+            x -= 1;
+        }
+    }
+    while x > 0 && y > 0 {
+        ops.push(b' ');
+        x -= 1;
+        y -= 1;
+    }
+    ops.reverse();
+    Some(ops)
+}
+
+/// ~60-line unified diff renderer: `--- a/ +++ b/` headers and `@@` hunks
+/// with 3 context lines, neighbouring hunks merged when their context
+/// windows touch.
+fn unified_diff(path: &str, before: &str, after: &str, max_len: usize) -> (String, bool) {
+    const CONTEXT: usize = 3;
+    if before == after {
+        return (String::new(), false);
+    }
+    // Emission stops once the output passes `max_len` — large-file edits
+    // cannot allocate an unbounded diff string.
+    fn finish(mut out: String, truncated: bool) -> (String, bool) {
+        if truncated {
+            out.push_str("… diff truncated\n");
+        }
+        (out, truncated)
+    }
+    let a: Vec<&str> = if before.is_empty() {
+        Vec::new()
+    } else {
+        before.split('\n').collect()
+    };
+    let b: Vec<&str> = if after.is_empty() {
+        Vec::new()
+    } else {
+        after.split('\n').collect()
+    };
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    let Some(ops) = line_ops(&a, &b) else {
+        out.push_str(&format!("@@ -1,{} +1,{} @@\n", a.len(), b.len()));
+        for line in &a {
+            out.push('-');
+            out.push_str(line);
+            out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
+        }
+        for line in &b {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
+        }
+        return finish(out, false);
+    };
+    let mut entries: Vec<(u8, &str)> = Vec::with_capacity(ops.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    for op in &ops {
+        match op {
+            b' ' => {
+                entries.push((b' ', a[i]));
+                i += 1;
+                j += 1;
+            }
+            b'-' => {
+                entries.push((b'-', a[i]));
+                i += 1;
+            }
+            _ => {
+                entries.push((b'+', b[j]));
+                j += 1;
+            }
+        }
+    }
+    // a/b line index each entry starts at (0-based).
+    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(entries.len());
+    let (mut ai, mut bi) = (0usize, 0usize);
+    for (op, _) in &entries {
+        positions.push((ai, bi));
+        match op {
+            b' ' => {
+                ai += 1;
+                bi += 1;
+            }
+            b'-' => ai += 1,
+            _ => bi += 1,
+        }
+    }
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for (index, (op, _)) in entries.iter().enumerate() {
+        if *op == b' ' {
+            continue;
+        }
+        let lo = index.saturating_sub(CONTEXT);
+        let hi = (index + CONTEXT + 1).min(entries.len());
+        match hunks.last_mut() {
+            Some((_, last_hi)) if lo <= *last_hi => *last_hi = (*last_hi).max(hi),
+            _ => hunks.push((lo, hi)),
+        }
+    }
+    for (lo, hi) in hunks {
+        let mut old_len = 0usize;
+        let mut new_len = 0usize;
+        for (op, _) in &entries[lo..hi] {
+            match op {
+                b' ' => {
+                    old_len += 1;
+                    new_len += 1;
+                }
+                b'-' => old_len += 1,
+                _ => new_len += 1,
+            }
+        }
+        let old_start = if old_len == 0 {
+            positions[lo].0
+        } else {
+            positions[lo].0 + 1
+        };
+        let new_start = if new_len == 0 {
+            positions[lo].1
+        } else {
+            positions[lo].1 + 1
+        };
+        out.push_str(&format!(
+            "@@ -{old_start},{old_len} +{new_start},{new_len} @@\n"
+        ));
+        for (op, text) in &entries[lo..hi] {
+            out.push(*op as char);
+            out.push_str(text);
+            out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
+        }
+    }
+    finish(out, false)
 }
 
 struct ProcessTool {

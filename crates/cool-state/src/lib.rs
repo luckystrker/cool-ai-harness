@@ -1977,7 +1977,7 @@ fn is_history_event(event: &CanonicalEvent) -> bool {
     ) || matches!(
         event,
         CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
-    )
+    ) || matches!(event, CanonicalEvent::SessionCompacted(_))
 }
 
 fn event_status(event: &CanonicalEvent) -> Option<RunStatus> {

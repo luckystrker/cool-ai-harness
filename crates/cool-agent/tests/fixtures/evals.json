@@ -85,5 +85,37 @@
     "approval": "approved",
     "expectedEvents": ["tool.completed", "tool.completed", "run.completed"],
     "expectedFile": false
+  },
+  {
+    "id": "edit_file_create_and_anchor",
+    "calls": [
+      {
+        "callId": "edit-create",
+        "name": "edit_file",
+        "arguments": {
+          "path": "eval.txt",
+          "edits": [{"old": "", "new": "seed"}],
+          "create_if_missing": true
+        }
+      },
+      {
+        "callId": "edit-anchor",
+        "name": "edit_file",
+        "arguments": {"path": "eval.txt", "edits": [{"old": "seed", "new": "grown"}]}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": [
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.completed",
+      "tool.completed",
+      "run.completed"
+    ],
+    "expectedFile": true
   }
 ]

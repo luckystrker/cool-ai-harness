@@ -124,15 +124,20 @@ export function ChatPage() {
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [planMode, setPlanMode] = useState(false)
+  const [longTaskMode, setLongTaskMode] = useState(false)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [recorderOpen, setRecorderOpen] = useState(false)
   const isMobile = useIsMobile()
   const { openDrawer } = useMobileNav()
 
-  // When a different conversation is selected, drop any pending bubbles.
+  // When a different conversation is selected, drop any pending bubbles and
+  // per-conversation run modes — a foreign progress file must not leak into
+  // the next chat.
   useEffect(() => {
     clearPending()
     setRecorderOpen(false)
+    setPlanMode(false)
+    setLongTaskMode(false)
   }, [convId, clearPending])
 
   // Compaction: messages covered by the working-memory rolling summary are
@@ -298,9 +303,11 @@ export function ChatPage() {
       detail?.model || undefined,
       planMode,
       systemPrompt,
-      artifactIds
+      artifactIds,
+      longTaskMode
     )
-    // Reset plan mode after sending (one-shot toggle).
+    // Reset plan mode after sending (one-shot toggle); long-task mode
+    // persists — a tracked task spans many turns.
     const wasPlanMode = planMode
     setPlanMode(false)
     // Persisted history is now the source of truth — refetch and drop pending
@@ -696,6 +703,8 @@ export function ChatPage() {
                     modelPending={updateMutation.isPending}
                     planMode={planMode}
                     onPlanModeChange={setPlanMode}
+                    longTaskMode={longTaskMode}
+                    onLongTaskModeChange={setLongTaskMode}
                   />
                 )
               }
@@ -715,6 +724,8 @@ export function ChatPage() {
                 onModelChange={handleModelChange}
                 planMode={planMode}
                 onPlanModeChange={setPlanMode}
+                longTaskMode={longTaskMode}
+                onLongTaskModeChange={setLongTaskMode}
                 pendingFiles={pendingFiles}
                 onAttach={handleAttach}
                 onRemoveFile={handleRemoveFile}

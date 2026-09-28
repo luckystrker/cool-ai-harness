@@ -460,7 +460,8 @@ export function useConversationStream() {
       model?: string,
       planMode?: boolean,
       systemPrompt?: string,
-      artifactIds?: number[]
+      artifactIds?: number[],
+      longTaskMode?: boolean
     ) => {
       setIsStreaming(true)
       const controller = new AbortController()
@@ -487,6 +488,7 @@ export function useConversationStream() {
             content,
             ...(model ? { model } : {}),
             ...(planMode ? { plan_mode: true } : {}),
+            ...(longTaskMode ? { long_task_mode: true } : {}),
             ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
             ...(artifactIds?.length ? { artifact_ids: artifactIds } : {}),
           },

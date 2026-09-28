@@ -559,6 +559,12 @@ pub struct SessionPromptParams {
     /// plan through the trusted `update_plan` tool instead of executing.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Long-running task mode: the run is marked `long_task` and the existing
+    /// task progress file (`.cool/task/progress.md`, maintained by the bundled
+    /// long-running-task skill) is injected into the system prompt so the
+    /// agent resumes from tracked state. Ignored in planning mode.
+    #[serde(default)]
+    pub long_task_mode: bool,
     /// Caller-supplied system prompt. Ignored in planning mode, where the
     /// runtime owns the system prompt so a caller cannot steer the plan.
     pub system_prompt: Option<String>,

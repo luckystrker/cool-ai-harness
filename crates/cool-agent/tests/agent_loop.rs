@@ -870,7 +870,7 @@ fn project_instructions_and_compaction_keep_security_and_tool_groups() {
         },
         Message::tool_result(&call, "result"),
     ];
-    let compacted = cool_agent::compact_history(&history, 35);
+    let compacted = cool_agent::compact_history(&history, 35, None);
     assert!(compacted.dropped_messages > 0);
     assert_eq!(compacted.messages[0].role, cool_agent::MessageRole::System);
     assert_eq!(
@@ -1018,4 +1018,577 @@ async fn steers_are_drained_between_iterations_and_not_repeated() {
         "a steer is delivered exactly once"
     );
     assert!(second.contains(&"second steer".to_owned()));
+}
+
+#[test]
+fn compact_history_with_summary_keeps_last_groups_and_reports_counts() {
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "system"),
+        Message::text(cool_agent::MessageRole::User, "u1"),
+        Message::text(cool_agent::MessageRole::User, "u2"),
+        Message::text(cool_agent::MessageRole::User, "u3"),
+        Message::text(cool_agent::MessageRole::User, "u4"),
+        Message::text(cool_agent::MessageRole::User, "u5"),
+        Message::text(cool_agent::MessageRole::User, "u6"),
+    ];
+    // Everything older than the last four groups is what a summarizer covers.
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
+    assert_eq!(dropped.len(), 2);
+    assert_eq!(dropped[0].content.as_deref(), Some("u1"));
+
+    let compacted = cool_agent::compact_history(&history, 4_000, Some("digest so far".to_owned()));
+    assert_eq!(compacted.summary.as_deref(), Some("digest so far"));
+    assert_eq!(compacted.dropped_messages, 2);
+    assert_eq!(compacted.messages.len(), 1 + 1 + 4);
+    let synthetic = &compacted.messages[1];
+    assert_eq!(synthetic.role, cool_agent::MessageRole::System);
+    assert_eq!(
+        synthetic.content.as_deref(),
+        Some("[Summary of earlier work]\ndigest so far")
+    );
+    assert_eq!(compacted.messages[2].content.as_deref(), Some("u3"));
+}
+
+#[test]
+fn compact_history_drop_fallback_preserves_prior_summary() {
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "system"),
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nold digest",
+        ),
+        Message::text(cool_agent::MessageRole::User, "x".repeat(200)),
+        Message::text(cool_agent::MessageRole::User, "y".repeat(200)),
+        Message::text(cool_agent::MessageRole::User, "z".repeat(200)),
+    ];
+    // Summarization fails — the drop-only fallback must keep the prior
+    // synthetic summary instead of silently dropping it with old groups.
+    let compacted = cool_agent::compact_history(&history, 40, None);
+    assert!(compacted.dropped_messages > 0);
+    assert_eq!(
+        compacted.messages[1].content.as_deref(),
+        Some("[Summary of earlier work]\nold digest"),
+        "the earlier summary survives a drop-only compaction"
+    );
+    assert!(
+        compacted
+            .messages
+            .iter()
+            .any(cool_agent::is_summary_message)
+    );
+}
+
+struct SummarizingSink {
+    inner: RecordingSink,
+    fail: bool,
+    calls: Mutex<usize>,
+    dropped_lens: Mutex<Vec<usize>>,
+}
+
+impl Default for SummarizingSink {
+    fn default() -> Self {
+        Self {
+            inner: RecordingSink::default(),
+            fail: false,
+            calls: Mutex::new(0),
+            dropped_lens: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl EventSink for SummarizingSink {
+    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, cool_agent::RuntimeError> {
+        self.inner.emit(event).await
+    }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+        _retained: usize,
+    ) -> Result<Option<String>, cool_agent::RuntimeError> {
+        *self.calls.lock().unwrap() += 1;
+        self.dropped_lens.lock().unwrap().push(dropped.len());
+        if self.fail {
+            return Err(cool_agent::RuntimeError::Sink(
+                "summarizer unavailable".to_owned(),
+            ));
+        }
+        Ok(Some("compact digest".to_owned()))
+    }
+}
+
+fn scripted_answer(provider: &Arc<ScriptedDriver>) -> AgentRuntime {
+    let driver: Arc<dyn cool_agent::ModelDriver> = provider.clone();
+    AgentRuntime::new(driver, builtin_registry())
+}
+
+#[tokio::test]
+async fn in_loop_compaction_replaces_the_dropped_prefix_with_a_summary() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("answer".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = SummarizingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut request = request(directory.path());
+    request.limits.context_tokens = 1_000;
+    request.history = (0..6)
+        .map(|index| {
+            Message::text(
+                cool_agent::MessageRole::User,
+                format!("user-{index}: {}", "x".repeat(600)),
+            )
+        })
+        .collect();
+    let outcome = runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed { .. }));
+
+    // Seven groups (six history users + the input) keep the last four: the
+    // summarizer is asked for exactly the three oldest messages.
+    assert_eq!(*sink.calls.lock().unwrap(), 1);
+    assert_eq!(sink.dropped_lens.lock().unwrap().as_slice(), &[3]);
+
+    let compacted = sink
+        .inner
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            CanonicalEvent::SessionCompacted(compacted) => Some(compacted.clone()),
+            _ => None,
+        })
+        .expect("session.compacted must be emitted");
+    assert_eq!(compacted.summary.as_deref(), Some("compact digest"));
+    // system + synthetic summary + four retained user messages.
+    assert_eq!(compacted.retained_items, 6);
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    assert_eq!(messages[0].role, cool_agent::MessageRole::System);
+    assert_eq!(messages[0].content.as_deref(), Some("be precise"));
+    assert_eq!(messages[1].role, cool_agent::MessageRole::System);
+    assert_eq!(
+        messages[1].content.as_deref(),
+        Some("[Summary of earlier work]\ncompact digest")
+    );
+    let retained = messages[2..]
+        .iter()
+        .map(|message| message.content.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 4);
+    assert!(retained[0].starts_with("user-3:"));
+    assert_eq!(retained.last().unwrap(), "hello");
+}
+
+#[tokio::test]
+async fn summarizer_failure_falls_back_to_drop_oldest_without_blocking() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("answer".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = SummarizingSink {
+        fail: true,
+        ..Default::default()
+    };
+    let (_, cancel) = CancelSignal::channel();
+    let mut request = request(directory.path());
+    request.limits.context_tokens = 1_000;
+    request.history = (0..7)
+        .map(|index| {
+            Message::text(
+                cool_agent::MessageRole::User,
+                format!("user-{index}: {}", "x".repeat(600)),
+            )
+        })
+        .collect();
+    let outcome = runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    // A failing summarizer never blocks the loop: the run completes and the
+    // overflow is handled by plain drop-oldest (no summary on the event).
+    assert!(matches!(outcome, RunOutcome::Completed { .. }));
+    assert_eq!(*sink.calls.lock().unwrap(), 1);
+    assert_eq!(sink.dropped_lens.lock().unwrap().as_slice(), &[4]);
+    let compacted = sink
+        .inner
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            CanonicalEvent::SessionCompacted(compacted) => Some(compacted.clone()),
+            _ => None,
+        })
+        .expect("session.compacted must be emitted");
+    assert_eq!(compacted.summary, None);
+    let requests = provider.requests().await;
+    let contents = requests[0]
+        .messages
+        .iter()
+        .filter_map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        contents
+            .iter()
+            .all(|content| !content.contains("[Summary of earlier work]")),
+        "failed summarization must not leave a synthetic summary: {contents:?}"
+    );
+}
+
+fn row(cursor: u64, event: CanonicalEvent) -> (u64, EventEnvelope) {
+    (
+        cursor,
+        EventEnvelope {
+            event_id: format!("event-{cursor}"),
+            schema_version: V1Version::VALUE,
+            session_id: "session".to_owned(),
+            run_id: "run".to_owned(),
+            item_id: None,
+            seq: cursor,
+            occurred_at: "test".to_owned(),
+            actor: ActorRef {
+                id: "cool-agent".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "test".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event,
+            extensions: BTreeMap::new(),
+        },
+    )
+}
+
+fn user_item(text: &str) -> CanonicalEvent {
+    CanonicalEvent::ItemCompleted(cool_protocol::ItemEvent {
+        role: Some("user".to_owned()),
+        content: Some(text.to_owned()),
+        tool_calls: Vec::new(),
+    })
+}
+
+#[test]
+fn replay_rehydrates_the_summary_and_skips_covered_events() {
+    let rows = vec![
+        row(1, user_item("u1")),
+        row(
+            2,
+            CanonicalEvent::ToolCompleted(cool_protocol::ToolCompleted {
+                call_id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                result: json!("result"),
+            }),
+        ),
+        row(
+            3,
+            CanonicalEvent::ItemCompleted(cool_protocol::ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("a1".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        row(
+            4,
+            CanonicalEvent::SessionCompacted(cool_protocol::SessionCompacted {
+                retained_items: 2,
+                summary_item_id: None,
+                summary: Some("digest".to_owned()),
+                compact_up_to_cursor: Some(2),
+            }),
+        ),
+        row(5, user_item("u2")),
+    ];
+    let history = cool_agent::history_from_event_rows(&rows).unwrap();
+    // Cursors 1-2 are covered by the summary; "a1" and "u2" survive, with the
+    // synthetic summary first (there is no leading system message here).
+    let contents = history
+        .iter()
+        .map(|message| message.content.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(contents, ["[Summary of earlier work]\ndigest", "a1", "u2"]);
+    assert_eq!(history[0].role, cool_agent::MessageRole::System);
+}
+
+#[tokio::test]
+async fn long_task_mode_injects_the_progress_file_into_the_system_prompt() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join(".cool/task")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/task/progress.md"),
+        "## Done\n- scaffolded\n## Next\n- wire the api\n## Acceptance criteria\n- ci green\n",
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("resumed".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut long_request = request(directory.path());
+    long_request.mode = Some("long_task".to_owned());
+    let outcome = runtime
+        .run(
+            long_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed { .. }));
+
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .expect("system prompt is always present");
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.starts_with("be precise"));
+    assert!(content.contains("[TASK PROGRESS"));
+    assert!(content.contains("- wire the api"));
+
+    let run_started_mode = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            CanonicalEvent::RunStarted(started) => started.mode.clone(),
+            _ => None,
+        });
+    assert_eq!(run_started_mode.as_deref(), Some("long_task"));
+
+    // Without a progress file the run still gets the tracking convention so
+    // the agent creates .cool/task/progress.md + features.json itself.
+    let empty = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("fresh".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let (_, cancel) = CancelSignal::channel();
+    let mut fresh_request = request(empty.path());
+    fresh_request.mode = Some("long_task".to_owned());
+    runtime
+        .run(
+            fresh_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .unwrap();
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.starts_with("be precise"));
+    assert!(content.contains("[LONG-RUNNING TASK MODE]"));
+    assert!(content.contains(".cool/task/progress.md"));
+    assert!(content.contains(".cool/task/features.json"));
+}
+
+#[test]
+fn summary_candidates_fold_prior_summary_into_the_next_pass() {
+    let mut history = vec![
+        Message::text(cool_agent::MessageRole::System, "system"),
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nprior digest",
+        ),
+    ];
+    history.extend(
+        (0..6).map(|index| Message::text(cool_agent::MessageRole::User, format!("u{index}"))),
+    );
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
+    assert_eq!(dropped.len(), 3);
+    assert_eq!(
+        dropped[0].content.as_deref(),
+        Some("[Summary of earlier work]\nprior digest"),
+        "the prior summary must be folded into the next summarization"
+    );
+    assert_eq!(dropped[1].content.as_deref(), Some("u0"));
+}
+
+#[test]
+fn summary_candidates_cover_groups_that_overflow_the_retained_budget() {
+    let big = "x".repeat(8_000);
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "sys"),
+        Message::text(cool_agent::MessageRole::User, "old"),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+    ];
+    // Only the newest ~2000-token group fits the budget (4_000 minus the
+    // system message and the summary reserve), so the three oversized groups
+    // in the middle are dropped — and must be summarized, not silently lost.
+    let dropped = cool_agent::summary_drop_candidates(&history, 4_000);
+    assert_eq!(dropped.len(), 4);
+    assert_eq!(dropped[0].content.as_deref(), Some("old"));
+    let compacted = cool_agent::compact_history(&history, 4_000, Some("digest".to_owned()));
+    assert_eq!(compacted.dropped_messages, dropped.len());
+    assert_eq!(compacted.messages.len(), 3);
+    assert_eq!(compacted.messages[2].content.as_deref(), Some(big.as_str()));
+}
+
+#[test]
+fn compact_history_uses_summary_even_with_four_or_fewer_groups() {
+    let big = "x".repeat(8_000);
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "sys"),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+    ];
+    // Four ~2000-token groups do not all fit the retained budget, so the
+    // older ones are dropped — with the summary, not silently.
+    let compacted = cool_agent::compact_history(&history, 4_000, Some("digest".to_owned()));
+    assert_eq!(compacted.summary.as_deref(), Some("digest"));
+    assert_eq!(compacted.dropped_messages, 3);
+    assert!(
+        compacted
+            .messages
+            .iter()
+            .any(cool_agent::is_summary_message)
+    );
+}
+
+#[tokio::test]
+async fn synthetic_summary_does_not_suppress_the_system_prompt() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("answer".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    // A replayed history starts with the synthetic summary — the configured
+    // system prompt must still land first.
+    let mut request = request(directory.path());
+    request.history = vec![
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nprior digest",
+        ),
+        Message::text(cool_agent::MessageRole::User, "earlier turn"),
+    ];
+    runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let messages = &requests[0].messages;
+    assert_eq!(messages[0].role, cool_agent::MessageRole::System);
+    assert!(
+        messages[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with("be precise"),
+        "the configured system prompt must not be suppressed by the summary"
+    );
+    assert!(messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("[Summary of earlier work]"))
+    }));
+}
+
+#[tokio::test]
+async fn long_task_mode_masks_secrets_in_the_progress_file() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join(".cool/task")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/task/progress.md"),
+        "## Done\n- scaffolded\n## Next\n- deploy with password: hunter2hunter2\n## Acceptance criteria\n- ci green\n",
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("resumed".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut long_request = request(directory.path());
+    long_request.mode = Some("long_task".to_owned());
+    runtime
+        .run(
+            long_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .unwrap();
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.contains("[TASK PROGRESS"));
+    assert!(!content.contains("hunter2hunter2"));
+    assert!(content.contains("[REDACTED]"));
 }

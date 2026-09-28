@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
-    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_events,
-    mask_canonical_event, planning_system_prompt,
+    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_event_rows,
+    load_task_progress, mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -444,6 +444,7 @@ struct PromptRequest {
     model: Option<String>,
     system_prompt: Option<String>,
     plan_mode: bool,
+    long_task_mode: bool,
 }
 
 struct ConnectionState {
@@ -1414,6 +1415,7 @@ impl AppServer {
                                     model: params.model,
                                     system_prompt: params.system_prompt,
                                     plan_mode: params.plan_mode,
+                                    long_task_mode: params.long_task_mode,
                                 },
                                 cancel,
                                 outbound,
@@ -2758,12 +2760,38 @@ impl AppServer {
             let Some(run) = server.inner.store.run(&run_id, &local_actor().id).ok() else {
                 return;
             };
+            // The run works in the conversation's working directory when the
+            // linked conversation sets one (matching the plan executor);
+            // everything else falls back to the server workspace.
+            let workspace = server
+                .inner
+                .config
+                .legacy_store
+                .as_deref()
+                .and_then(|legacy| {
+                    server
+                        .inner
+                        .store
+                        .conversation_id_for_session(&local_actor().id, &run.session_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|conversation_id| {
+                            legacy
+                                .get_conversation(&local_actor().id, conversation_id)
+                                .ok()
+                        })
+                        .and_then(|conversation| conversation.working_directory)
+                })
+                .and_then(|path| Workspace::new(path).ok())
+                .unwrap_or_else(|| server.inner.workspace.clone());
             let sink = AppServerEventSink {
                 server: server.clone(),
                 run_id: run_id.clone(),
+                workspace: workspace.clone(),
                 outbound: outbound.clone(),
                 steer_cursor: Arc::new(AtomicU64::new(run.last_seq)),
                 own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                pending_compact_cursor: Arc::new(Mutex::new(None)),
             };
             let approvals = AppServerApprovalGate {
                 server: server.clone(),
@@ -2789,7 +2817,10 @@ impl AppServer {
                     Some(system_prompt) => Some(system_prompt),
                     None => default_system_prompt(&server).await,
                 };
-                (system_prompt, None)
+                // Long-task mode keeps the normal system prompt; the loop
+                // itself injects the progress file and marks the run.
+                let mode = prompt.long_task_mode.then(|| "long_task".to_owned());
+                (system_prompt, mode)
             };
             let request = AgentRequest {
                 model: prompt
@@ -2803,19 +2834,16 @@ impl AppServer {
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(
-                    server.inner.workspace.clone(),
-                    server.inner.policy.clone(),
-                )
-                .with_actor(local_actor().id)
-                .with_conversation(
-                    server
-                        .inner
-                        .store
-                        .conversation_id_for_session(&local_actor().id, &run.session_id)
-                        .ok()
-                        .flatten(),
-                ),
+                tool_context: ToolContext::new(workspace, server.inner.policy.clone())
+                    .with_actor(local_actor().id)
+                    .with_conversation(
+                        server
+                            .inner
+                            .store
+                            .conversation_id_for_session(&local_actor().id, &run.session_id)
+                            .ok()
+                            .flatten(),
+                    ),
             };
             let lifecycle_sink =
                 server
@@ -3089,17 +3117,24 @@ impl AppServer {
                 truncate_chars(&content, 300)
             ));
         }
-        let model = legacy
-            .get_conversation(&actor.id, conversation_id)
-            .ok()
-            .and_then(|conversation| conversation.model)
+        let conversation = legacy.get_conversation(&actor.id, conversation_id).ok();
+        let model = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.model.clone())
             .unwrap_or_else(|| self.inner.default_model.clone());
+        // The task progress file lives in the conversation's workspace, not
+        // the server root (same resolution as `run_plan`/`spawn_agent_run`).
+        let workspace = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.working_directory.as_deref())
+            .and_then(|path| Workspace::new(path).ok())
+            .unwrap_or_else(|| self.inner.workspace.clone());
         // Mask before truncating so a secret cannot be split across a cut and
         // survive the pattern matcher; a provider failure falls back to a
         // deterministic extractive summary so compaction never loses context.
         let fallback = truncate_chars(&mask_secrets(&transcript), 4000);
         let summary = self
-            .summarize_conversation(&transcript, &model)
+            .summarize_conversation(&workspace, &transcript, &model)
             .await
             .map(|text| truncate_chars(&text, 8000))
             .unwrap_or(fallback);
@@ -3161,12 +3196,30 @@ impl AppServer {
         Ok(items)
     }
 
-    /// One provider call producing the rolling summary (masked).
-    async fn summarize_conversation(&self, transcript: &str, model: &str) -> Option<String> {
+    /// One provider call producing the rolling summary (masked). When the
+    /// run's workspace carries a task progress file
+    /// (`.cool/task/progress.md`, the long-running-task skill convention),
+    /// its content is prepended so the summary preserves tracked task state
+    /// across compaction.
+    async fn summarize_conversation(
+        &self,
+        workspace: &Workspace,
+        transcript: &str,
+        model: &str,
+    ) -> Option<String> {
+        let mut input = String::new();
+        if let Ok(Some(progress)) = load_task_progress(workspace) {
+            input.push_str(
+                "[Task progress file — preserve this tracked state verbatim in the summary]\n",
+            );
+            input.push_str(&mask_secrets(&progress));
+            input.push_str("\n\n");
+        }
+        input.push_str(transcript);
         let request = AgentRequest {
             model: model.to_owned(),
             history: Vec::new(),
-            user_input: transcript.to_owned(),
+            user_input: input,
             system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
             mode: Some("compact".to_owned()),
             temperature: 0.0,
@@ -3176,7 +3229,7 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: Some(BTreeSet::new()),
-            tool_context: ToolContext::new(self.inner.workspace.clone(), self.inner.policy.clone())
+            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone())
                 .with_actor(local_actor().id),
         };
         let sink = PlanStepSink::default();
@@ -3258,15 +3311,41 @@ impl AppServer {
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return;
         };
-        let sink = AppServerEventSink {
+        let ordered = topological_order(&steps);
+        let total = ordered.len() as u32;
+        let make_sink = |workspace: Workspace| AppServerEventSink {
             server: self.clone(),
             run_id: run_id.clone(),
+            workspace,
             outbound: outbound.clone(),
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
-        let ordered = topological_order(&steps);
-        let total = ordered.len() as u32;
+        let conversation = legacy
+            .get_conversation(&actor.id, plan.conversation_id)
+            .ok();
+        let model = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.model.clone())
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        let workspace = match conversation
+            .as_ref()
+            .and_then(|conversation| conversation.working_directory.as_deref())
+        {
+            Some(path) => match Workspace::new(path) {
+                Ok(workspace) => workspace,
+                Err(_) => {
+                    let sink = make_sink(self.inner.workspace.clone());
+                    let _ = self
+                        .finish_plan(&sink, legacy, &actor, &plan, "failed", 0, total)
+                        .await;
+                    return;
+                }
+            },
+            None => self.inner.workspace.clone(),
+        };
+        let sink = make_sink(workspace.clone());
         let _ = sink
             .emit(CanonicalEvent::RunStarted(RunStarted {
                 model: None,
@@ -3294,28 +3373,6 @@ impl AppServer {
                 status: PlanProgressStatus::Executing,
             }))
             .await;
-        let conversation = legacy
-            .get_conversation(&actor.id, plan.conversation_id)
-            .ok();
-        let model = conversation
-            .as_ref()
-            .and_then(|conversation| conversation.model.clone())
-            .unwrap_or_else(|| self.inner.default_model.clone());
-        let workspace = match conversation
-            .as_ref()
-            .and_then(|conversation| conversation.working_directory.as_deref())
-        {
-            Some(path) => match Workspace::new(path) {
-                Ok(workspace) => workspace,
-                Err(_) => {
-                    let _ = self
-                        .finish_plan(&sink, legacy, &actor, &plan, "failed", 0, total)
-                        .await;
-                    return;
-                }
-            },
-            None => self.inner.workspace.clone(),
-        };
         let mut statuses = steps
             .iter()
             .map(|step| (step.position, step.status.clone()))
@@ -3683,9 +3740,11 @@ impl AppServer {
                 let sink = AppServerEventSink {
                     server: server.clone(),
                     run_id: spawned.clone(),
+                    workspace: server.inner.workspace.clone(),
                     outbound,
                     steer_cursor: Arc::new(AtomicU64::new(0)),
                     own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                    pending_compact_cursor: Arc::new(Mutex::new(None)),
                 };
                 let _ = sink
                     .emit(CanonicalEvent::RunFailed(RunTerminal {
@@ -3717,9 +3776,11 @@ impl AppServer {
         let sink = AppServerEventSink {
             server: self.clone(),
             run_id,
+            workspace: self.inner.workspace.clone(),
             outbound,
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
         let _ = executor.execute(research_run_id, &sink, cancel_rx).await;
     }
@@ -4070,9 +4131,17 @@ impl AppServer {
 struct AppServerEventSink {
     server: AppServer,
     run_id: String,
+    /// Workspace the run executes in — the conversation's working directory
+    /// when set, else the server workspace. `summarize_for_compaction` reads
+    /// the task progress file from here.
+    workspace: Workspace,
     outbound: Outbound,
     steer_cursor: Arc<AtomicU64>,
     own_user_items: Arc<Mutex<HashSet<String>>>,
+    /// Rust-events cursor up to which the in-progress compaction's summary
+    /// covers history; set by `summarize_for_compaction` and consumed by
+    /// `emit` when the `session.compacted` event passes through.
+    pending_compact_cursor: Arc<Mutex<Option<u64>>>,
 }
 
 struct LifecycleEventSink {
@@ -4161,6 +4230,14 @@ impl EventSink for LifecycleEventSink {
     async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
         self.inner.drain_steers().await
     }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+        retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.inner.summarize_for_compaction(dropped, retained).await
+    }
 }
 
 impl LifecycleEventSink {
@@ -4236,7 +4313,16 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
 
 #[async_trait]
 impl EventSink for AppServerEventSink {
-    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+    async fn emit(&self, mut event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
+        }
         let envelope = self.emit_once(event).await?;
         if matches!(
             &envelope.event,
@@ -4256,21 +4342,102 @@ impl EventSink for AppServerEventSink {
             .inner
             .store
             .run(&self.run_id, &local_actor().id)?;
-        let events = self
-            .server
-            .inner
-            .store
-            .session_events(&run.session_id, &local_actor().id)?;
-        let history = history_from_events(&events)?;
-        if let Some(last_seq) = events
+        let rows = self.server.inner.store.session_event_window(
+            &run.session_id,
+            &local_actor().id,
+            None,
+            i64::MAX as usize,
+        )?;
+        let history = history_from_event_rows(&rows)?;
+        if let Some(last_seq) = rows
             .iter()
-            .filter(|event| event.run_id == self.run_id)
-            .map(|event| event.seq)
+            .filter(|(_, event)| event.run_id == self.run_id)
+            .map(|(_, event)| event.seq)
             .max()
         {
             self.steer_cursor.fetch_max(last_seq, Ordering::SeqCst);
         }
         Ok(history)
+    }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+        retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        let actor = local_actor();
+        let store = &self.server.inner.store;
+        let run = store.run(&self.run_id, &actor.id)?;
+        let rows =
+            store.session_event_window(&run.session_id, &actor.id, None, i64::MAX as usize)?;
+        // `compact_up_to_cursor` lives in the rust_events.rowid space the
+        // history endpoint projects. History's non-system messages map
+        // one-to-one onto the LAST message-producing events — every
+        // compaction (summary or drop-only) keeps a suffix of the log — so
+        // the summary covers everything before `retained`'s tail.
+        let produces_message = |envelope: &EventEnvelope| {
+            matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item)
+                    if matches!(item.role.as_deref(), Some("user" | "assistant"))
+            ) || matches!(
+                &envelope.event,
+                CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
+            )
+        };
+        let message_cursors: Vec<u64> = rows
+            .iter()
+            .filter(|(_, envelope)| produces_message(envelope))
+            .map(|(cursor, _)| *cursor)
+            .collect();
+        let covered_cursor = message_cursors
+            .len()
+            .checked_sub(retained + 1)
+            .and_then(|index| message_cursors.get(index).copied());
+        let mut transcript = String::new();
+        for message in dropped {
+            let role = match message.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+            };
+            let mut line = message.content.clone().unwrap_or_default();
+            if !message.tool_calls.is_empty() {
+                let calls = message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        format!(
+                            "{} {}",
+                            call.name,
+                            truncate_chars(
+                                &serde_json::to_string(&call.arguments).unwrap_or_default(),
+                                100,
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&format!("[calls: {calls}]"));
+            }
+            transcript.push_str(&format!("{role}: {}\n", truncate_chars(&line, 300)));
+        }
+        let summary = self
+            .server
+            .summarize_conversation(
+                &self.workspace,
+                &transcript,
+                &self.server.inner.default_model.clone(),
+            )
+            .await;
+        if summary.is_some() {
+            *self.pending_compact_cursor.lock().await = covered_cursor;
+        }
+        Ok(summary)
     }
 
     async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {

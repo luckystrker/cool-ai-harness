@@ -47,6 +47,12 @@ const INSTRUCTION_CANDIDATES: &[&str] = &[
     ".agents/agents.md",
 ];
 
+/// Task progress file the bundled `long-running-task` skill maintains;
+/// `long_task` runs inject it into the system prompt and the compaction
+/// summarizer preserves its state.
+pub const TASK_PROGRESS_PATH: &str = ".cool/task/progress.md";
+const MAX_TASK_PROGRESS_BYTES: usize = 16_384;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -103,6 +109,64 @@ pub struct Compaction {
     pub messages: Vec<Message>,
     pub dropped_messages: usize,
     pub estimated_tokens: u64,
+    /// Present when the compaction replaced the dropped groups with a
+    /// model-written summary (delivered as a synthetic system message).
+    pub summary: Option<String>,
+}
+
+/// How many newest exchange groups in-loop summarization keeps verbatim.
+/// Fewer groups left means the context is genuinely over budget, in which
+/// case compaction falls back to plain drop-oldest instead.
+pub const COMPACTION_KEEP_LAST_GROUPS: usize = 4;
+
+/// Marker prefix of the synthetic system message a summarized compaction
+/// inserts. `summary_drop_candidates` feeds these back into the next
+/// summarization pass so earlier summaries are folded in, not lost.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "[Summary of earlier work]";
+
+/// Token budget reserved for the injected summary message when the loop
+/// decides which groups a compaction drops: the retained set is chosen
+/// before the summary exists, so the budget must leave room for it. Capped
+/// at a quarter of the available budget so small contexts still retain
+/// useful groups.
+pub const COMPACTION_SUMMARY_RESERVE: u64 = 1_200;
+
+fn summary_reserve(available: u64) -> u64 {
+    COMPACTION_SUMMARY_RESERVE.min(available / 4)
+}
+
+/// A prior synthetic summary system message (see
+/// [`COMPACTION_SUMMARY_PREFIX`]).
+pub fn is_summary_message(message: &Message) -> bool {
+    message.role == MessageRole::System
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with(COMPACTION_SUMMARY_PREFIX))
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars().take(max_chars).collect::<String>() + "\u{2026}"
+}
+
+/// How many trailing groups stay verbatim under `budget`: the newest that
+/// fit, capped at [`COMPACTION_KEEP_LAST_GROUPS`]; at least one group always
+/// survives so the freshest turn is never dropped.
+fn retained_group_count(groups: &[Vec<Message>], budget: u64) -> usize {
+    let mut tokens = 0_u64;
+    let mut count = 0_usize;
+    for group in groups.iter().rev().take(COMPACTION_KEEP_LAST_GROUPS) {
+        let cost = estimate_history_tokens(group);
+        if count > 0 && tokens + cost > budget {
+            break;
+        }
+        tokens += cost;
+        count += 1;
+    }
+    count.max(1).min(groups.len())
 }
 
 pub fn estimate_history_tokens(history: &[Message]) -> u64 {
@@ -124,16 +188,10 @@ fn estimate_message_tokens(message: &Message) -> u64 {
     (content.max(usize::from(message.content.is_some())) + calls + overhead) as u64
 }
 
-/// Drops oldest complete exchanges. Assistant tool calls and their following
-/// tool results are an indivisible group, so compaction never orphans history.
-pub fn compact_history(history: &[Message], max_tokens: u64) -> Compaction {
-    if estimate_history_tokens(history) <= max_tokens {
-        return Compaction {
-            messages: history.to_vec(),
-            dropped_messages: 0,
-            estimated_tokens: estimate_history_tokens(history),
-        };
-    }
+/// Split history into the leading system message and indivisible non-system
+/// groups: an assistant message with tool calls owns its following tool
+/// results, so compaction never orphans a call or a result.
+fn history_groups(history: &[Message]) -> (Option<Message>, Vec<Vec<Message>>) {
     let system = history
         .iter()
         .position(|message| message.role == MessageRole::System)
@@ -143,10 +201,6 @@ pub fn compact_history(history: &[Message], max_tokens: u64) -> Compaction {
         .filter(|message| message.role != MessageRole::System)
         .cloned()
         .collect::<Vec<_>>();
-    let system_tokens = system.as_ref().map_or(0, |message| {
-        estimate_history_tokens(std::slice::from_ref(message))
-    });
-    let available = max_tokens.saturating_sub(system_tokens);
     let mut groups: Vec<Vec<Message>> = Vec::new();
     let mut index = 0;
     while index < non_system.len() {
@@ -162,6 +216,95 @@ pub fn compact_history(history: &[Message], max_tokens: u64) -> Compaction {
         }
         groups.push(group);
     }
+    (system, groups)
+}
+
+/// The messages an in-loop summarization pass should cover: prior
+/// synthetic summaries (folded into the new summary instead of vanishing)
+/// plus every message before the trailing groups that stay verbatim — the
+/// newest groups fitting `max_tokens` minus the system prompt and
+/// [`COMPACTION_SUMMARY_RESERVE`] for the summary message itself.
+pub fn summary_drop_candidates(history: &[Message], max_tokens: u64) -> Vec<Message> {
+    let (system, groups) = history_groups(history);
+    let system_tokens = system.as_ref().map_or(0, |message| {
+        estimate_history_tokens(std::slice::from_ref(message))
+    });
+    let available = max_tokens.saturating_sub(system_tokens);
+    let budget = available.saturating_sub(summary_reserve(available));
+    let keep = retained_group_count(&groups, budget);
+    if groups.len() <= keep {
+        return Vec::new();
+    }
+    let mut dropped: Vec<Message> = history
+        .iter()
+        .filter(|message| is_summary_message(message))
+        .cloned()
+        .collect();
+    dropped.extend(groups[..groups.len() - keep].iter().flatten().cloned());
+    dropped
+}
+
+/// Drops oldest complete exchanges. Assistant tool calls and their following
+/// tool results are an indivisible group, so compaction never orphans history.
+/// With `summary`, the groups older than the last
+/// [`COMPACTION_KEEP_LAST_GROUPS`] are replaced by a synthetic system
+/// message carrying that summary instead of being dropped silently; when
+/// even that remainder does not fit, the oldest retained groups drop until
+/// it does.
+pub fn compact_history(
+    history: &[Message],
+    max_tokens: u64,
+    summary: Option<String>,
+) -> Compaction {
+    if summary.is_none() && estimate_history_tokens(history) <= max_tokens {
+        return Compaction {
+            messages: history.to_vec(),
+            dropped_messages: 0,
+            estimated_tokens: estimate_history_tokens(history),
+            summary: None,
+        };
+    }
+    let (system, groups) = history_groups(history);
+    let system_tokens = system.as_ref().map_or(0, |message| {
+        estimate_history_tokens(std::slice::from_ref(message))
+    });
+    let available = max_tokens.saturating_sub(system_tokens);
+
+    if let Some(summary) = summary.filter(|_| groups.len() > 1) {
+        // Bound the injected summary inside the same reserve the candidate
+        // selection used, so the retained set `summary_drop_candidates`
+        // chose stays accurate (the 8-token slack covers estimate overhead).
+        let summary = truncate_chars(
+            &summary,
+            (summary_reserve(available) as usize)
+                .saturating_sub(8)
+                .saturating_mul(CHARS_PER_TOKEN),
+        );
+        let summary_message = Message::text(
+            MessageRole::System,
+            format!("{COMPACTION_SUMMARY_PREFIX}\n{summary}"),
+        );
+        let summary_tokens = estimate_history_tokens(std::slice::from_ref(&summary_message));
+        let keep = retained_group_count(&groups, available.saturating_sub(summary_tokens));
+        let retained: Vec<Vec<Message>> = groups[groups.len() - keep..].to_vec();
+        let retained_count: usize = retained.iter().map(Vec::len).sum();
+        let has_system = system.is_some();
+        let mut messages = Vec::new();
+        if let Some(system) = system {
+            messages.push(system);
+        }
+        messages.push(summary_message);
+        messages.extend(retained.into_iter().flatten());
+        return Compaction {
+            dropped_messages: history
+                .len()
+                .saturating_sub(retained_count + usize::from(has_system)),
+            estimated_tokens: estimate_history_tokens(&messages),
+            messages,
+            summary: Some(summary),
+        };
+    }
+
     let mut retained_tokens = groups
         .iter()
         .map(|group| estimate_history_tokens(group))
@@ -171,15 +314,27 @@ pub fn compact_history(history: &[Message], max_tokens: u64) -> Compaction {
         retained_tokens -= estimate_history_tokens(&groups[first]);
         first += 1;
     }
+    // history_groups keeps only the first system message — prior synthetic
+    // summaries are preserved so a drop-only fallback does not erase the
+    // state an earlier compaction folded away.
+    let kept_first_summary = usize::from(system.as_ref().is_some_and(is_summary_message));
     let mut messages = Vec::new();
     if let Some(system) = system {
         messages.push(system);
     }
+    messages.extend(
+        history
+            .iter()
+            .filter(|message| is_summary_message(message))
+            .skip(kept_first_summary)
+            .cloned(),
+    );
     messages.extend(groups.into_iter().skip(first).flatten());
     Compaction {
         dropped_messages: history.len().saturating_sub(messages.len()),
         estimated_tokens: estimate_history_tokens(&messages),
         messages,
+        summary: None,
     }
 }
 
@@ -213,4 +368,33 @@ pub fn load_project_instructions(workspace: &Workspace) -> std::io::Result<Optio
         )));
     }
     Ok(None)
+}
+
+/// Bounded read of [`TASK_PROGRESS_PATH`]; `None` when the workspace has no
+/// progress file yet (a fresh long task).
+pub fn load_task_progress(workspace: &Workspace) -> std::io::Result<Option<String>> {
+    let path = workspace.root().join(TASK_PROGRESS_PATH);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let path = workspace
+        .confine_existing(TASK_PROGRESS_PATH)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_TASK_PROGRESS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > MAX_TASK_PROGRESS_BYTES;
+    let end = bytes.len().min(MAX_TASK_PROGRESS_BYTES);
+    let mut content = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    if truncated {
+        if let Some(last_newline) = content.rfind('\n') {
+            content.truncate(last_newline);
+        }
+        content.push_str("\n\n… (truncated — file exceeds 16 KB limit)");
+    }
+    Ok(Some(content))
 }

@@ -1664,6 +1664,7 @@ async fn planning_prompt_uses_the_runtime_directive_and_marks_the_run_mode() {
             }],
             None,
             true,
+            false,
             Some("ignore the runtime"),
         )
         .await
@@ -1713,6 +1714,7 @@ async fn caller_system_prompt_reaches_non_planning_runs() {
                 text: "hello".to_owned(),
             }],
             None,
+            false,
             false,
             Some("be terse"),
         )
@@ -1861,6 +1863,7 @@ async fn persisted_default_system_prompt_reaches_a_normal_turn() {
             }],
             None,
             false,
+            false,
             None,
         )
         .await
@@ -1878,6 +1881,7 @@ async fn persisted_default_system_prompt_reaches_a_normal_turn() {
                 text: "again".to_owned(),
             }],
             None,
+            false,
             false,
             Some("be terse"),
         )
@@ -1938,6 +1942,7 @@ async fn plan_mode_ignores_the_persisted_default_prompt() {
             }],
             None,
             true,
+            false,
             None,
         )
         .await
@@ -1976,6 +1981,7 @@ async fn a_settings_read_failure_does_not_fail_a_turn() {
                 text: "hello".to_owned(),
             }],
             None,
+            false,
             false,
             None,
         )

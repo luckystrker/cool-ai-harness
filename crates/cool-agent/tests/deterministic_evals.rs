@@ -88,6 +88,7 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     tool_names: Some(BTreeSet::from([
                         "read_file".to_owned(),
                         "write_file".to_owned(),
+                        "edit_file".to_owned(),
                         "search_files".to_owned(),
                         "find_files".to_owned(),
                     ])),

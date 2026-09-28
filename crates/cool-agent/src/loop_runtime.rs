@@ -10,7 +10,7 @@ use cool_protocol::{
     SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
     ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
-use cool_security::{Decision, mask_json};
+use cool_security::{Decision, mask_json, mask_secrets};
 use cool_state::{BudgetDelta, DurableStore, StoreError};
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -20,11 +20,26 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::context::{
-    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
-    load_project_instructions,
+    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens, is_summary_message,
+    load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
+
+/// Injected for `long_task` runs with no progress file yet — mirrors the
+/// bundled `long-running-task` skill convention so a fresh long task starts
+/// tracking itself on disk.
+const LONG_TASK_BOOTSTRAP_SECTION: &str = "\
+[LONG-RUNNING TASK MODE]
+Track this task on disk so progress survives context compaction and fresh \
+runs. Maintain two files in the workspace:
+- `.cool/task/progress.md` — journal with **Done**, **Next** and \
+**Acceptance criteria** sections.
+- `.cool/task/features.json` — machine-readable checklist: \
+{\"features\": [{\"id\", \"title\", \"status\": \"pending|in_progress|done\", \"notes\"}]}.
+Create them now: break the request into a feature checklist. Keep the files \
+consistent and update them before every reply — a fresh run must resume \
+from them alone.";
 
 #[derive(Clone, Debug)]
 pub struct AgentLimits {
@@ -143,6 +158,19 @@ pub trait EventSink: Send + Sync {
     /// them into history before building the next model request.
     async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
         Ok(Vec::new())
+    }
+    /// Summarize the history prefix compaction is about to drop. `Some`
+    /// replaces those groups with a synthetic system message; `None` keeps
+    /// the drop-oldest fallback. Implementations that have no model driver
+    /// leave the default — a summarizer failure must never block the loop.
+    /// `retained` is how many non-system history messages stay after the
+    /// dropped prefix — the coverage cursor anchors before that tail.
+    async fn summarize_for_compaction(
+        &self,
+        _dropped: &[Message],
+        _retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        Ok(None)
     }
 }
 
@@ -279,23 +307,49 @@ impl AgentRuntime {
         } else {
             request.history
         };
+        // A replayed synthetic compaction summary is also a system message:
+        // it must not suppress or absorb the configured system prompt.
         if let Some(system_prompt) = request.system_prompt.take()
             && !history
                 .iter()
-                .any(|message| message.role == MessageRole::System)
+                .any(|message| message.role == MessageRole::System && !is_summary_message(message))
         {
             history.insert(0, Message::text(MessageRole::System, system_prompt));
         }
         if let Ok(Some(instructions)) = load_project_instructions(&request.tool_context.workspace) {
             if let Some(system) = history
                 .iter_mut()
-                .find(|message| message.role == MessageRole::System)
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
             {
                 let content = system.content.get_or_insert_default();
                 content.push_str("\n\n");
                 content.push_str(&instructions);
             } else {
                 history.insert(0, Message::text(MessageRole::System, instructions));
+            }
+        }
+        // Long-task mode resumes from the progress file the bundled
+        // long-running-task skill maintains; without one the run is a fresh
+        // task and gets the tracking convention so the agent creates the
+        // files itself.
+        if request.mode.as_deref() == Some("long_task") {
+            let section = match load_task_progress(&request.tool_context.workspace) {
+                Ok(Some(progress)) => format!(
+                    "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
+                     state and keep the file updated as work proceeds.\n\n{}",
+                    mask_secrets(&progress)
+                ),
+                _ => LONG_TASK_BOOTSTRAP_SECTION.to_owned(),
+            };
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(&section);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, section));
             }
         }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {
@@ -329,19 +383,46 @@ impl AgentRuntime {
             for steer in sink.drain_steers().await? {
                 history.push(steer);
             }
-            if estimate_history_tokens(&history) > request.limits.context_tokens {
+            // Compaction engages at 85% of the window: early enough that a
+            // sink-provided summary can still replace the dropped prefix
+            // before the context genuinely overflows.
+            let compaction_trigger = request.limits.context_tokens.saturating_mul(85) / 100;
+            let summary = if estimate_history_tokens(&history) > compaction_trigger {
                 sink.before_compaction(&history).await?;
-            }
-            let compacted = compact_history(&history, request.limits.context_tokens);
+                let dropped = summary_drop_candidates(&history, request.limits.context_tokens);
+                if dropped.is_empty() {
+                    None
+                } else {
+                    let retained = history
+                        .iter()
+                        .filter(|message| message.role != MessageRole::System)
+                        .count()
+                        .saturating_sub(
+                            dropped
+                                .iter()
+                                .filter(|message| message.role != MessageRole::System)
+                                .count(),
+                        );
+                    sink.summarize_for_compaction(&dropped, retained)
+                        .await
+                        .unwrap_or_default()
+                }
+            } else {
+                None
+            };
+            let compacted = compact_history(&history, request.limits.context_tokens, summary);
             if compacted.dropped_messages > 0 {
                 sink.emit(CanonicalEvent::SessionCompacted(SessionCompacted {
                     retained_items: compacted.messages.len() as u32,
                     summary_item_id: None,
-                    summary: None,
+                    summary: compacted.summary.clone(),
                     compact_up_to_cursor: None,
                 }))
                 .await?;
             }
+            // Continue from the compacted history: the next compaction sees
+            // the synthetic summary instead of the messages it covered.
+            history = compacted.messages;
             let definitions = self
                 .tools
                 .definitions()
@@ -355,7 +436,7 @@ impl AgentRuntime {
                 .collect();
             let model_request = ModelRequest {
                 model: request.model.clone(),
-                messages: compacted.messages,
+                messages: history.clone(),
                 tools: definitions,
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
@@ -984,11 +1065,12 @@ impl EventSink for StoreEventSink {
     }
 
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
-        history_from_events(
-            &self
-                .store
-                .session_events(&self.session_id, &self.owner_actor_id)?,
-        )
+        history_from_event_rows(&self.store.session_event_window(
+            &self.session_id,
+            &self.owner_actor_id,
+            None,
+            i64::MAX as usize,
+        )?)
     }
 }
 
@@ -1000,9 +1082,32 @@ pub fn mask_canonical_event(event: CanonicalEvent) -> Result<CanonicalEvent, Run
         .map_err(|error| RuntimeError::Sink(format!("masked event is invalid: {error}")))
 }
 
+/// Rebuild model history from a session's canonical events. A
+/// `SessionCompacted` carrying a summary re-hydrates it as a synthetic
+/// system message — without this a restarted run loses its compaction
+/// context. This cursor-free form cannot compare `compact_up_to_cursor`,
+/// so covered events are not filtered out.
 pub fn history_from_events(events: &[EventEnvelope]) -> Result<Vec<Message>, RuntimeError> {
-    let mut history = Vec::new();
-    for envelope in events {
+    history_from_event_rows(
+        &events
+            .iter()
+            .map(|envelope| (u64::MAX, envelope.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// `history_from_events` on `(cursor, event)` rows — `cursor` is the
+/// `rust_events.rowid` projected by `session_event_window`/`session_history`.
+/// Message-producing events at or below `compact_up_to_cursor` are covered
+/// by that summary and skipped, so replay stays as compact as the live run
+/// was. Each summary lands right after the leading system message.
+pub fn history_from_event_rows(
+    rows: &[(u64, EventEnvelope)],
+) -> Result<Vec<Message>, RuntimeError> {
+    let mut covered_through = 0_u64;
+    let mut entries: Vec<(u64, Message)> = Vec::new();
+    let mut summaries: Vec<(u64, String)> = Vec::new();
+    for (cursor, envelope) in rows {
         match &envelope.event {
             CanonicalEvent::ItemCompleted(item)
                 if matches!(item.role.as_deref(), Some("user" | "assistant")) =>
@@ -1012,47 +1117,90 @@ pub fn history_from_events(events: &[EventEnvelope]) -> Result<Vec<Message>, Run
                 } else {
                     MessageRole::Assistant
                 };
-                history.push(Message {
-                    role,
-                    content: item.content.clone(),
-                    tool_calls: item
-                        .tool_calls
-                        .iter()
-                        .map(|call| ToolCall {
-                            call_id: call.call_id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone().into_iter().collect(),
-                        })
-                        .collect(),
-                    tool_call_id: None,
-                    name: None,
-                });
+                entries.push((
+                    *cursor,
+                    Message {
+                        role,
+                        content: item.content.clone(),
+                        tool_calls: item
+                            .tool_calls
+                            .iter()
+                            .map(|call| ToolCall {
+                                call_id: call.call_id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone().into_iter().collect(),
+                            })
+                            .collect(),
+                        tool_call_id: None,
+                        name: None,
+                    },
+                ));
             }
-            CanonicalEvent::ToolCompleted(tool) => history.push(Message {
-                role: MessageRole::Tool,
-                content: Some(
-                    serde_json::to_string(&tool.result)
+            CanonicalEvent::ToolCompleted(tool) => entries.push((
+                *cursor,
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some(
+                        serde_json::to_string(&tool.result)
+                            .map_err(|error| RuntimeError::Sink(error.to_string()))?,
+                    ),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(tool.call_id.clone()),
+                    name: Some(tool.name.clone()),
+                },
+            )),
+            CanonicalEvent::ToolFailed(tool) => entries.push((
+                *cursor,
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some(
+                        serde_json::to_string(&json!({
+                            "error": tool.message,
+                            "errorCode": tool.error_code,
+                        }))
                         .map_err(|error| RuntimeError::Sink(error.to_string()))?,
-                ),
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
-            CanonicalEvent::ToolFailed(tool) => history.push(Message {
-                role: MessageRole::Tool,
-                content: Some(
-                    serde_json::to_string(&json!({
-                        "error": tool.message,
-                        "errorCode": tool.error_code,
-                    }))
-                    .map_err(|error| RuntimeError::Sink(error.to_string()))?,
-                ),
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
+                    ),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(tool.call_id.clone()),
+                    name: Some(tool.name.clone()),
+                },
+            )),
+            CanonicalEvent::SessionCompacted(compacted) => {
+                let Some(summary) = compacted
+                    .summary
+                    .as_ref()
+                    .filter(|summary| !summary.is_empty())
+                else {
+                    continue;
+                };
+                covered_through = covered_through.max(compacted.compact_up_to_cursor.unwrap_or(0));
+                summaries.push((*cursor, summary.clone()));
+            }
             _ => {}
         }
+    }
+    let mut history: Vec<Message> = entries
+        .into_iter()
+        .filter(|(cursor, _)| *cursor > covered_through)
+        .map(|(_, message)| message)
+        .collect();
+    let insert_at = history
+        .iter()
+        .position(|message| message.role == MessageRole::System)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    for (offset, (_, summary)) in summaries
+        .iter()
+        .filter(|(cursor, _)| *cursor > covered_through)
+        .enumerate()
+    {
+        history.insert(
+            (insert_at + offset).min(history.len()),
+            Message::text(
+                MessageRole::System,
+                format!("[Summary of earlier work]\n{summary}"),
+            ),
+        );
     }
     Ok(history)
 }
