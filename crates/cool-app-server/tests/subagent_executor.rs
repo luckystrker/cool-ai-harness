@@ -567,3 +567,366 @@ async fn an_invalid_working_directory_fails_closed() {
     assert_eq!(finished.status, "failed");
     assert_eq!(finished.error.as_deref(), Some("invalid working directory"));
 }
+
+// ---------------------------------------------------------------------------
+// P1.7: background subagent execution — fork_context, isolation=worktree and
+// operator steers (send_to_subagent) draining into a running child.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+use async_trait::async_trait;
+use cool_agent::{
+    HostContext, HostLauncher, Message, MessageRole, ModelDriver, ModelStream, ProviderError,
+};
+use cool_app_server::{ForkContext, SubagentExecutor, SubagentIsolation, SubagentLaunchSpec};
+use cool_store::domains::conversations::NewMessage;
+use futures_util::stream;
+
+fn direct_executor(
+    driver: Arc<dyn ModelDriver>,
+) -> (Arc<SubagentExecutor>, Arc<LegacyStore>, tempfile::TempDir) {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let executor = Arc::new(SubagentExecutor::new(
+        store.clone(),
+        DurableStore::in_memory().expect("durable"),
+        AgentRuntime::new(driver, builtin_registry()),
+        Workspace::new(directory.path()).expect("workspace"),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted".to_owned(),
+        HostContext::default(),
+    ));
+    (executor, store, directory)
+}
+
+async fn executor_wait_terminal(executor: &SubagentExecutor, run_id: i64) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let row = executor.get_run("local-user", run_id).expect("run row");
+        if ["completed", "failed", "cancelled"].contains(&row.status.as_str()) {
+            return row.status;
+        }
+        assert!(std::time::Instant::now() < deadline, "run did not finish");
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn fork_context_full_seeds_the_child_history() {
+    let driver = Arc::new(ScriptedDriver::echo());
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "continue".to_owned(),
+                fork_context: ForkContext::Full,
+                parent_history: vec![
+                    Message::text(MessageRole::User, "earlier question"),
+                    Message::text(MessageRole::Assistant, "earlier answer"),
+                ],
+                ..SubagentLaunchSpec::default()
+            },
+            "fork-full-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    let texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect();
+    assert!(
+        texts.contains(&"earlier question") && texts.contains(&"earlier answer"),
+        "parent transcript seeded the child: {texts:?}"
+    );
+    assert_eq!(
+        messages
+            .last()
+            .and_then(|message| message.content.as_deref()),
+        Some("continue"),
+        "the spawn prompt rides last"
+    );
+}
+
+#[tokio::test]
+async fn fork_context_summary_folds_a_digest_into_the_system_prompt() {
+    // First stream call is the summarizer (digest of the parent transcript),
+    // second is the child run itself.
+    let driver = Arc::new(ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::Content("digest: parent picked green".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+    ]));
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "finish it".to_owned(),
+                fork_context: ForkContext::Summary,
+                parent_history: vec![Message::text(MessageRole::User, "pick a color")],
+                ..SubagentLaunchSpec::default()
+            },
+            "fork-summary-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 2, "summarizer + child run");
+    let system = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::System)
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(
+        system.contains("digest: parent picked green"),
+        "digest folded into the child system prompt: {system}"
+    );
+    assert!(
+        system.contains("Parent conversation summary"),
+        "forked-context marker present: {system}"
+    );
+}
+
+/// Driver whose turn-1 stream emits its tool call and then holds the finish
+/// event until the test's steer is written — the next iteration's
+/// `drain_steers` then picks the steer up deterministically.
+struct SteerGateDriver {
+    requests: tokio::sync::Mutex<Vec<cool_agent::ModelRequest>>,
+    calls: AtomicUsize,
+    released: Arc<AtomicBool>,
+}
+
+fn scripted_stream(events: Vec<ModelEvent>) -> ModelStream {
+    Box::pin(stream::iter(events.into_iter().map(Ok)))
+}
+
+#[async_trait]
+impl ModelDriver for SteerGateDriver {
+    async fn stream(
+        &self,
+        request: cool_agent::ModelRequest,
+    ) -> Result<ModelStream, ProviderError> {
+        self.requests.lock().await.push(request);
+        if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            let released = self.released.clone();
+            return Ok(Box::pin(stream::unfold(0_u8, move |step| {
+                let released = released.clone();
+                async move {
+                    match step {
+                        0 => Some((
+                            Ok(ModelEvent::ToolCall(ToolCall {
+                                call_id: "call-1".to_owned(),
+                                name: "list_files".to_owned(),
+                                arguments: serde_json::Map::from_iter([(
+                                    "path".to_owned(),
+                                    json!("."),
+                                )]),
+                            })),
+                            1_u8,
+                        )),
+                        1 => {
+                            for _ in 0..500 {
+                                if released.load(AtomicOrdering::SeqCst) {
+                                    break;
+                                }
+                                sleep(Duration::from_millis(10)).await;
+                            }
+                            Some((
+                                Ok(ModelEvent::Finish {
+                                    reason: Some("stop".to_owned()),
+                                }),
+                                2_u8,
+                            ))
+                        }
+                        _ => None,
+                    }
+                }
+            })));
+        }
+        Ok(scripted_stream(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]))
+    }
+}
+
+#[tokio::test]
+async fn send_to_subagent_steer_reaches_the_running_child() {
+    let driver = Arc::new(SteerGateDriver {
+        requests: tokio::sync::Mutex::new(Vec::new()),
+        calls: AtomicUsize::new(0),
+        released: Arc::new(AtomicBool::new(false)),
+    });
+    let runtime_driver: Arc<dyn ModelDriver> = driver.clone();
+    let (executor, store, _dir) = direct_executor(runtime_driver);
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "first step".to_owned(),
+                ..SubagentLaunchSpec::default()
+            },
+            "steer-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+
+    // Wait for the first provider call (turn 1 returned the tool call), then
+    // append the steer exactly like the send_to_subagent tool does.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !driver.requests.lock().await.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no provider request");
+        sleep(Duration::from_millis(10)).await;
+    }
+    store
+        .add_message(
+            "local-user",
+            run.conversation_id,
+            &NewMessage {
+                role: "user".to_owned(),
+                content: Some("steer: change of plan".to_owned()),
+                ..NewMessage::default()
+            },
+        )
+        .expect("steer message");
+    driver.released.store(true, AtomicOrdering::SeqCst);
+
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+    let requests = driver.requests.lock().await.clone();
+    assert_eq!(requests.len(), 2, "tool turn + follow-up turn");
+    let steered = requests[1].messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message.content.as_deref() == Some("steer: change of plan")
+    });
+    assert!(steered, "steer was drained into the child's history");
+}
+
+#[tokio::test]
+async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
+    let directory = tempdir().expect("tempdir");
+    // worktree add needs a commit to point the new branch at.
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "test"],
+        vec!["commit", "--allow-empty", "-m", "init"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(directory.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let driver = Arc::new(ScriptedDriver::echo());
+    let executor = Arc::new(SubagentExecutor::new(
+        store.clone(),
+        DurableStore::in_memory().expect("durable"),
+        AgentRuntime::new(driver, builtin_registry()),
+        Workspace::new(directory.path()).expect("workspace"),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted".to_owned(),
+        HostContext {
+            launcher: Arc::new(HostLauncher),
+            environment: std::env::vars().collect(),
+            ..HostContext::default()
+        },
+    ));
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "work in isolation".to_owned(),
+                isolation: SubagentIsolation::Worktree,
+                ..SubagentLaunchSpec::default()
+            },
+            "worktree-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    let status = executor_wait_terminal(&executor, run.id).await;
+    let row = executor.get_run("local-user", run.id).expect("row");
+    assert_eq!(status, "completed", "run failed: {:?}", row.error);
+
+    let worktree = directory
+        .path()
+        .join(".cool")
+        .join("worktrees")
+        .join(run.id.to_string());
+    assert!(
+        worktree.join(".git").exists(),
+        "git worktree materialized at {}",
+        worktree.display()
+    );
+}
+
+#[tokio::test]
+async fn isolation_worktree_fails_closed_when_no_launcher_is_configured() {
+    let driver = Arc::new(ScriptedDriver::echo());
+    let (executor, store, _dir) = direct_executor(driver); // DisabledLauncher
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "isolate me".to_owned(),
+                isolation: SubagentIsolation::Worktree,
+                ..SubagentLaunchSpec::default()
+            },
+            "worktree-no-launcher",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    let status = executor_wait_terminal(&executor, run.id).await;
+    assert_eq!(status, "failed");
+    let row = executor.get_run("local-user", run.id).expect("row");
+    assert!(
+        row.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("launcher"),
+        "launcher-disabled error is recorded: {:?}",
+        row.error
+    );
+}

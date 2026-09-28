@@ -1968,10 +1968,7 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
         .prepare("SELECT answer_json FROM rust_approvals LIMIT 0")
         .is_err()
     {
-        connection.execute(
-            "ALTER TABLE rust_approvals ADD COLUMN answer_json TEXT",
-            [],
-        )?;
+        connection.execute("ALTER TABLE rust_approvals ADD COLUMN answer_json TEXT", [])?;
     }
     Ok(())
 }

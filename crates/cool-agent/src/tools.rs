@@ -18,13 +18,11 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::context::ToolCall;
+use crate::context::{Message, ToolCall};
 use crate::launcher::{
     DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
 };
-use crate::loop_runtime::{
-    ApprovalGate, ApprovalRequest, CancelSignal, EventSink, RuntimeError,
-};
+use crate::loop_runtime::{ApprovalGate, ApprovalRequest, CancelSignal, EventSink, RuntimeError};
 
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
@@ -168,6 +166,14 @@ pub struct ToolContext {
     /// can reach a human — CLI one-shots, subagents and scheduled runs leave
     /// it `None` so the tool fails `user_unavailable` instead of hanging.
     pub question_gate: Option<Arc<dyn ApprovalGate>>,
+    /// How deep this run already sits in the `spawn_subagent` chain (P1.7):
+    /// root runs are `0`, children increment by one, and the tool rejects
+    /// spawns at `spawn_depth >= MAX_SPAWN_DEPTH`.
+    pub spawn_depth: u32,
+    /// The run's live transcript snapshot, refreshed by the runtime before
+    /// every tool batch — `spawn_subagent`'s `fork_context` seeds child
+    /// history/context from it. `None` outside the loop (tests, direct calls).
+    pub history_snapshot: Option<Vec<Message>>,
 }
 
 impl ToolContext {
@@ -187,6 +193,8 @@ impl ToolContext {
             conversation_id: None,
             call_id: None,
             question_gate: None,
+            spawn_depth: 0,
+            history_snapshot: None,
         }
     }
 
@@ -235,7 +243,16 @@ impl ToolContext {
         self.question_gate = Some(gate);
         self
     }
+
+    /// Marks how deep this run sits in the `spawn_subagent` chain (P1.7).
+    pub fn with_spawn_depth(mut self, depth: u32) -> Self {
+        self.spawn_depth = depth;
+        self
+    }
 }
+
+/// Maximum `spawn_subagent` nesting: a run at this depth cannot spawn (P1.7).
+pub const MAX_SPAWN_DEPTH: u32 = 3;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {

@@ -606,6 +606,9 @@ impl AgentRuntime {
                     usage: total_usage,
                 });
             }
+            // The snapshot lets `spawn_subagent(fork_context)` seed a child
+            // with the transcript as the model itself just saw it (P1.7).
+            request.tool_context.history_snapshot = Some(history.clone());
             let batch = self
                 .execute_tool_batch(calls, &request.tool_context, sink, approvals, &mut cancel)
                 .await?;

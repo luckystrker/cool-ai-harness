@@ -37,7 +37,8 @@ pub use provider::{
     ScriptedDriver, Usage,
 };
 pub use tools::{
-    PythonFallbackTool, RuleSource, Tool, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError,
-    ToolHandler, ToolRegistry, ToolResult, builtin_registry, capability_name,
+    MAX_SPAWN_DEPTH, PythonFallbackTool, RuleSource, Tool, ToolCatalogEntry, ToolContext,
+    ToolDefinition, ToolError, ToolHandler, ToolRegistry, ToolResult, builtin_registry,
+    capability_name,
 };
 pub use web_tools::{WebToolsConfig, web_tool_registry};

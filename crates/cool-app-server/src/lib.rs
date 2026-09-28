@@ -14,7 +14,7 @@ pub use blobs::{BlobError, BlobStore};
 pub use client::{AppClient, ClientError};
 pub use research::{ResearchExecutor, ResearchOutcome};
 pub use scheduler::TaskExecutor;
-pub use subagents::{SubagentExecutor, SubagentLaunchSpec};
+pub use subagents::{ForkContext, SubagentExecutor, SubagentIsolation, SubagentLaunchSpec};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -2659,6 +2659,7 @@ impl AppServer {
                             name: params.name.clone(),
                             prompt: params.prompt.clone(),
                             model: params.model.clone(),
+                            ..SubagentLaunchSpec::default()
                         };
                         let fingerprint = legacy::fingerprint(&params);
                         match executor
@@ -2698,6 +2699,7 @@ impl AppServer {
                                 name: item.name.clone(),
                                 prompt: item.prompt.clone(),
                                 model: item.model.clone(),
+                                ..SubagentLaunchSpec::default()
                             })
                             .collect::<Vec<_>>();
                         let fingerprint = legacy::fingerprint(&params);
@@ -4434,6 +4436,7 @@ impl AppServer {
             name: Some(format!("plan-step-{}:{role_name}", step.position)),
             prompt: prompt.to_owned(),
             model: None,
+            ..SubagentLaunchSpec::default()
         };
         let key = format!("plan-step:{}:{}", plan.id, step.position);
         let run = match executor.launch(&actor.id, spec, &key, &key).await {
@@ -5317,12 +5320,12 @@ impl Drop for SocketCleanup {
 /// Captures the concatenated content deltas of one plan step; a plan step does
 /// not project its own transcript.
 #[derive(Default)]
-struct PlanStepSink {
+pub(crate) struct PlanStepSink {
     text: std::sync::Mutex<String>,
 }
 
 impl PlanStepSink {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.text
             .lock()
             .map(|text| text.clone())
@@ -5588,7 +5591,7 @@ fn error_text(error: &cool_store::StoreError) -> String {
 const MAX_IMPORTED_MESSAGES: usize = 10_000;
 
 /// System directive for `conversations.compact` (rolling summary).
-const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
+pub(crate) const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
 
 fn session_conversation_payload(link: ConversationLink) -> ResponsePayload {
     ResponsePayload::SessionForConversation(SessionConversationResult {

@@ -524,6 +524,7 @@ impl ResearchExecutor {
                     name: Some(format!("research-sq-{}", index + 1)),
                     prompt,
                     model: Some(model.clone()),
+                    ..SubagentLaunchSpec::default()
                 };
                 let child = match executor.launch(&actor, spec, &key, &key).await {
                     Ok(child) => child,
