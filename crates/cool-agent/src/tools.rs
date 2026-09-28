@@ -462,7 +462,47 @@ impl ToolRegistry {
             .cloned()
             .collect::<Vec<_>>();
         combined.extend(tools);
-        Self::new(combined)
+        let registry = Self::new(combined)?;
+        // The cloned meta-tool handlers still point at this registry's map —
+        // rebind them to the extension so deferred tools the host added (MCP
+        // servers, executor tools) stay discoverable and activatable.
+        registry.install_meta_tools();
+        Ok(registry)
+    }
+
+    /// Rebinds `search_tools`/`activate_tools` to this registry. Needed after
+    /// `extend`: it builds a fresh backing map, and the handlers cloned out of
+    /// the old registry would keep searching the old catalog.
+    fn install_meta_tools(&self) {
+        let mut tools = write_tools(&self.tools);
+        for tool in [
+            Tool::new(
+                definition(
+                    "search_tools",
+                    "Search the full tool catalog — including hidden/deferred tools — by name and description. Returns the top 5 matches with their parameter schemas; use activate_tools(names) to make a hidden tool callable.",
+                    json!({"type":"object","properties":{"query":{"type":"string","description":"Free-text query matched against tool names and descriptions"}},"required":["query"],"additionalProperties":false}),
+                ),
+                [],
+                Decision::Allow,
+                SearchTools {
+                    registry: self.clone(),
+                },
+            ),
+            Tool::new(
+                definition(
+                    "activate_tools",
+                    "Enable hidden tools for the rest of this run: their schemas appear from the next model turn. Activation is not permission — policy evaluation still gates each call.",
+                    json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"},"description":"Catalog names from search_tools","minItems":1}},"required":["names"],"additionalProperties":false}),
+                ),
+                [],
+                Decision::Allow,
+                ActivateTools {
+                    registry: self.clone(),
+                },
+            ),
+        ] {
+            tools.insert(tool.definition.name.clone(), tool);
+        }
     }
 
     /// Insert a tool into the shared map at runtime. Fails on an empty name or
@@ -555,36 +595,9 @@ pub fn builtin_registry() -> ToolRegistry {
         ),
     ])
     .expect("builtin tool names are valid");
-    // P1.10 meta-tools: clones share the registry's backing map, so tools
-    // registered later (executor/MCP) are searchable the moment they land.
-    for tool in [
-        Tool::new(
-            definition(
-                "search_tools",
-                "Search the full tool catalog — including hidden/deferred tools — by name and description. Returns the top 5 matches with their parameter schemas; use activate_tools(names) to make a hidden tool callable.",
-                json!({"type":"object","properties":{"query":{"type":"string","description":"Free-text query matched against tool names and descriptions"}},"required":["query"],"additionalProperties":false}),
-            ),
-            [],
-            Decision::Allow,
-            SearchTools {
-                registry: registry.clone(),
-            },
-        ),
-        Tool::new(
-            definition(
-                "activate_tools",
-                "Enable hidden tools for the rest of this run: their schemas appear from the next model turn. Activation is not permission — policy evaluation still gates each call.",
-                json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"},"description":"Catalog names from search_tools","minItems":1}},"required":["names"],"additionalProperties":false}),
-            ),
-            [],
-            Decision::Allow,
-            ActivateTools {
-                registry: registry.clone(),
-            },
-        ),
-    ] {
-        registry.register(tool).expect("meta tool names are unique");
-    }
+    // P1.10 meta-tools: bound to the registry's own map, so tools registered
+    // later (executor/MCP) are searchable the moment they land.
+    registry.install_meta_tools();
     registry
 }
 
@@ -1965,11 +1978,16 @@ impl ToolHandler for AskUser {
             .clone()
             .unwrap_or_else(|| CancelSignal::channel().1);
         let sink = BlackholeSink;
+        let approval_id = request.approval_id.clone();
         let pending = gate.request(request, &sink, &mut cancel);
         let outcome = match timeout_secs {
             Some(secs) => match timeout(Duration::from_secs_f64(secs), pending).await {
                 Ok(outcome) => outcome,
                 Err(_) => {
+                    // The durable ticket is still `pending`; without expiring
+                    // it the run would sit in `awaiting_approval` forever and
+                    // `run.completed` would fail its transition.
+                    let _ = gate.expire(&approval_id).await;
                     return Ok(ToolResult::error(
                         "question_timeout",
                         "the question timed out without an answer",
@@ -1984,6 +2002,10 @@ impl ToolHandler for AskUser {
                     "answer": outcome.answer.unwrap_or(Value::Null),
                 })))
             }
+            Ok(outcome) if outcome.decision == ApprovalOutcome::TimedOut => Ok(ToolResult::error(
+                "question_timeout",
+                "the question timed out without an answer",
+            )),
             Ok(_) => Ok(ToolResult::error(
                 "question_denied",
                 "the user declined to answer",

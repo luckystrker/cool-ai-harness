@@ -241,6 +241,51 @@ async fn search_tools_finds_deferred_tools_by_description() {
     assert_eq!(entry.get("deferred").and_then(Value::as_bool), Some(true));
 }
 
+/// Review follow-up: `extend` builds a fresh backing map — the meta-tools
+/// must be rebound to it or deferred tools added by the host (MCP, executor
+/// tools) can never be discovered or activated.
+#[tokio::test]
+async fn extended_registry_keeps_deferred_tools_discoverable() {
+    let directory = tempdir().unwrap();
+    let registry = builtin_registry()
+        .extend([deferred_tool(
+            "mcp_weather_lookup",
+            "Weather lookup from an MCP server added after startup",
+            Decision::Allow,
+        )])
+        .expect("extend");
+    let context = ToolContext::new(
+        Workspace::new(directory.path()).unwrap(),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+    );
+    let search = registry.get("search_tools").expect("meta tool");
+    let result = search
+        .execute(&context, json!({"query": "weather"}))
+        .await
+        .expect("search executes");
+    let text = serde_json::to_string(&result.output).unwrap_or_default();
+    assert!(
+        text.contains("mcp_weather_lookup"),
+        "extension tool discoverable after extend: {text}"
+    );
+    let activate = registry.get("activate_tools").expect("meta tool");
+    let result = activate
+        .execute(&context, json!({"names": ["mcp_weather_lookup"]}))
+        .await
+        .expect("activate executes");
+    assert!(
+        result
+            .output
+            .get("activated")
+            .and_then(Value::as_array)
+            .is_some_and(|names| names
+                .iter()
+                .any(|name| name.as_str() == Some("mcp_weather_lookup"))),
+        "extension tool activatable after extend: {:?}",
+        result.output
+    );
+}
+
 #[tokio::test]
 async fn activated_tool_still_requires_approval() {
     let directory = tempdir().unwrap();

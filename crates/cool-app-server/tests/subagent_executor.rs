@@ -974,6 +974,17 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
                     json!(["diff", "HEAD"]),
                 )]),
             }),
+            // `git diff --no-index --output=target` writes files — the deny
+            // rule must match `--output` anywhere in the args, not only when
+            // it immediately follows `diff`.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "output-diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "--no-index", "--output=target", "a", "b"]),
+                )]),
+            }),
             // A registered but unlisted tool must fail at execution — the
             // profile allowlist gates calls, not just advertised definitions.
             ModelEvent::ToolCall(ToolCall {
@@ -1067,6 +1078,20 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
     assert!(
         !diff_result.contains("denied"),
         "git diff passed the exec rules: {diff_result}"
+    );
+    let output_diff_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("output-diff-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        output_diff_result.contains("denied by policy rule"),
+        "git diff --output mid-args denied by the reviewer exec rules: {output_diff_result}"
     );
     let write_result = requests[1]
         .messages

@@ -34,7 +34,9 @@ use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, RunTerminal,
     UsageUpdated, V1Version,
 };
-use cool_security::{CapabilityPolicy, PolicyRule, Workspace, mask_json, mask_secrets};
+use cool_security::{
+    CapabilityPolicy, PolicyRule, Workspace, mask_json, mask_secrets, sanitize_environment,
+};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::StoreError;
@@ -554,6 +556,10 @@ impl SubagentExecutor {
         };
         // isolation=worktree (P1.7): the child edits a git worktree of its own
         // so parallel siblings cannot collide on the shared checkout.
+        // Keep the pre-isolation workspace: it is the checkout the worktree
+        // was created from — possibly a conversation cwd, not the server's —
+        // and teardown needs it for `git worktree`/`branch -D` cleanup.
+        let parent_workspace = workspace.clone();
         if spec.isolation == SubagentIsolation::Worktree {
             match create_worktree(
                 launcher.as_ref(),
@@ -566,6 +572,13 @@ impl SubagentExecutor {
                 Ok(directory) => match Workspace::new(&directory) {
                     Ok(worktree) => workspace = worktree,
                     Err(_) => {
+                        remove_worktree(
+                            launcher.as_ref(),
+                            &workspace,
+                            &self.host.environment,
+                            context.run_id,
+                        )
+                        .await;
                         self.fail_run(
                             &actor,
                             context,
@@ -589,19 +602,19 @@ impl SubagentExecutor {
                 if let Some(prompt) = &resolved.system_prompt {
                     // The forked transcript carries the parent's system
                     // message, so the runtime's "history already has System"
-                    // guard would silently drop the child's own persona.
-                    // Fold it into the seeded history instead: the child's
-                    // system prompt takes the lead slot, the parent's stays
-                    // as context right behind it.
-                    let insert_at = usize::from(
-                        history
-                            .first()
-                            .is_some_and(|message| message.role == MessageRole::System),
-                    );
-                    history.insert(
-                        insert_at,
-                        Message::text(MessageRole::System, prompt.clone()),
-                    );
+                    // guard would silently drop the child's own persona —
+                    // and `compact_history` keeps only the FIRST system
+                    // message, so a second one would be lost on compaction
+                    // too. Fold the child's persona into the parent's first
+                    // system message so both survive.
+                    match history.first_mut() {
+                        Some(message) if message.role == MessageRole::System => {
+                            let parent = message.content.take().unwrap_or_default();
+                            message.content =
+                                Some(format!("{prompt}\n\n[Parent instructions]\n{parent}"));
+                        }
+                        _ => history.insert(0, Message::text(MessageRole::System, prompt.clone())),
+                    }
                 }
                 (history, None)
             }
@@ -728,7 +741,7 @@ impl SubagentExecutor {
         if spec.isolation == SubagentIsolation::Worktree {
             remove_worktree(
                 launcher.as_ref(),
-                &self.workspace,
+                &parent_workspace,
                 &self.host.environment,
                 context.run_id,
             )
@@ -1175,10 +1188,16 @@ async fn create_worktree(
     ];
     let spec = LaunchSpec {
         cwd: root.to_path_buf(),
-        env: environment
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect(),
+        // Same secret filtering the process tools apply — git hooks and
+        // credential helpers must not see host tokens.
+        env: sanitize_environment(
+            environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            &BTreeSet::new(),
+        )
+        .into_iter()
+        .collect(),
         stdin: None,
         // `git worktree` is local-only; `Full` is the level every launcher
         // backend accepts (HostLauncher fails closed below it).
@@ -1250,10 +1269,14 @@ async fn remove_worktree(
     ] {
         let spec = LaunchSpec {
             cwd: root.to_path_buf(),
-            env: environment
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect(),
+            env: sanitize_environment(
+                environment
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+                &BTreeSet::new(),
+            )
+            .into_iter()
+            .collect(),
             stdin: None,
             net: NetAccess::Full,
             limits: ResourceLimits {

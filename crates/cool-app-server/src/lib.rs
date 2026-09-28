@@ -5304,6 +5304,33 @@ impl ApprovalGate for AppServerApprovalGate {
             reason = cancel.wait() => Err(RuntimeError::Sink(format!("approval cancelled: {reason}"))),
         }
     }
+
+    /// `ask_user` timeout path (P1.8): the tool-side timer won, so expire the
+    /// durable ticket — `timed_out` + `ToolApprovalResolved` flips the run
+    /// back to `running` and clears the pending question card — then fan the
+    /// resolution out to subscribers exactly like a user decision.
+    async fn expire(&self, approval_id: &str) -> Result<(), RuntimeError> {
+        if !self
+            .server
+            .inner
+            .store
+            .expire_approval(&local_actor().id, approval_id)?
+        {
+            return Ok(());
+        }
+        if let Some(event) = self
+            .server
+            .inner
+            .store
+            .all_events(&self.run_id, &local_actor().id)?
+            .into_iter()
+            .last()
+        {
+            self.server.publish_to_subscribers(&event).await;
+            let _ = self.server.send(&self.outbound, notification(event)).await;
+        }
+        Ok(())
+    }
 }
 
 /// Removes a `approval_waiters` entry when the gate request future exits —

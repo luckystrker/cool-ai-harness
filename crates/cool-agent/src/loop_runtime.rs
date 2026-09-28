@@ -210,6 +210,14 @@ pub trait ApprovalGate: Send + Sync {
         sink: &dyn EventSink,
         cancel: &mut CancelSignal,
     ) -> Result<GateOutcome, RuntimeError>;
+
+    /// Expires a pending approval system-side. Called when the tool-side
+    /// timeout wins the race first (P1.8 `question_timeout`): without it the
+    /// durable ticket stays `pending` and the run remains `awaiting_approval`
+    /// forever. Gates without durable tickets keep the no-op.
+    async fn expire(&self, _approval_id: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -626,15 +634,24 @@ impl AgentRuntime {
             .await?;
             history.push(assistant_message);
             if calls.is_empty() {
-                sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
-                    reason: "stop".to_owned(),
-                    error_code: None,
-                }))
-                .await?;
-                return Ok(RunOutcome::Completed {
-                    history,
-                    usage: total_usage,
-                });
+                // A steer can land during the final (tool-free) turn — drain
+                // once more before completing or `send_to_subagent`/steer
+                // callers would see delivery reported while the message is
+                // never consumed by this run.
+                let steers = sink.drain_steers().await?;
+                if steers.is_empty() {
+                    sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "stop".to_owned(),
+                        error_code: None,
+                    }))
+                    .await?;
+                    return Ok(RunOutcome::Completed {
+                        history,
+                        usage: total_usage,
+                    });
+                }
+                history.extend(steers);
+                continue;
             }
             // The snapshot lets `spawn_subagent(fork_context)` seed a child
             // with the transcript as the model itself just saw it (P1.7).
