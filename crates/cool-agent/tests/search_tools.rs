@@ -1,6 +1,6 @@
 use cool_agent::{ToolContext, builtin_registry};
 use cool_security::{CapabilityPolicy, Decision, Workspace};
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn context(root: &std::path::Path) -> ToolContext {
@@ -86,6 +86,109 @@ async fn search_files_context_lines_are_masked_and_bounded() {
     assert_eq!(last["line"], 31);
     assert!(last["text"].as_str().unwrap().contains("[REDACTED]"));
     assert!(!result.output.to_string().contains("hunter2hunter2"));
+}
+
+/// Every hit on a line gets its own match entry with its own column.
+#[tokio::test]
+async fn search_files_reports_every_match_on_a_line() {
+    let directory = tempdir().unwrap();
+    write(
+        directory.path(),
+        "hits.txt",
+        b"aa marker bb marker\nplain line\n",
+    );
+    let registry = builtin_registry();
+    let context = context(directory.path());
+    let search = registry.get("search_files").unwrap();
+    let result = search
+        .execute(&context, json!({"pattern": "marker"}))
+        .await
+        .unwrap();
+    assert_eq!(result.output["totalMatches"], 2);
+    let matches = result.output["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0]["column"], 4);
+    assert_eq!(matches[1]["column"], 14);
+}
+
+/// A search root that is a link pointing outside the workspace must fail
+/// closed rather than enumerate external filenames.
+#[tokio::test]
+async fn symlinked_search_root_fails_closed() {
+    let directory = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::write(outside.path().join("external.txt"), "needle").unwrap();
+    let link = directory.path().join("link");
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd.exe")
+            .args([
+                "/D",
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &outside.path().to_string_lossy(),
+            ])
+            .status()
+            .expect("junction creation requires no special privilege");
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    }
+    #[cfg(not(any(windows, unix)))]
+    return;
+
+    let registry = builtin_registry();
+    let context = context(directory.path());
+    for tool in ["search_files", "find_files"] {
+        let handler = registry.get(tool).unwrap();
+        let arguments = if tool == "search_files" {
+            json!({"pattern": "needle", "path": "link"})
+        } else {
+            json!({"glob": "**/*.txt", "path": "link"})
+        };
+        let outcome = handler.execute(&context, arguments).await;
+        match outcome {
+            Err(_) => {}
+            Ok(result) => assert!(
+                result.is_error || !result.output.to_string().contains("external.txt"),
+                "{tool} must not enumerate a symlinked root outside the workspace: {:?}",
+                result.output
+            ),
+        }
+    }
+}
+
+/// When the serialized result exceeds the 10MB spill cap, the spilled file is
+/// trimmed to complete, parseable JSON rather than a cut-off blob.
+#[tokio::test]
+async fn oversized_search_results_spill_parseable_json() {
+    let directory = tempdir().unwrap();
+    let mut content = String::new();
+    for _ in 0..1990 {
+        content.push_str(&"m".repeat(2000));
+        content.push('\n');
+    }
+    write(directory.path(), "big.txt", content.as_bytes());
+    let registry = builtin_registry();
+    let context = context(directory.path());
+    let search = registry.get("search_files").unwrap();
+    let result = search
+        .execute(
+            &context,
+            json!({"pattern": "m+", "context": 10, "maxResults": 2000}),
+        )
+        .await
+        .unwrap();
+    assert!(result.truncated);
+    assert_eq!(result.output["totalMatches"], 1990);
+    let spill_path = result.output["spillPath"].as_str().unwrap();
+    let spill = std::fs::read(directory.path().join(spill_path)).unwrap();
+    assert!(spill.len() <= 10 * 1024 * 1024, "spill exceeded cap");
+    let parsed: Value = serde_json::from_slice(&spill).expect("spilled result must be valid JSON");
+    assert!(parsed["matches"].is_array());
 }
 
 #[tokio::test]
@@ -267,20 +370,23 @@ async fn oversized_process_output_spills_to_workspace_file() {
 #[tokio::test]
 async fn combined_process_output_respects_the_shared_cap() {
     let directory = tempdir().unwrap();
+    write(directory.path(), "out.txt", vec![b'o'; 4096].as_slice());
+    write(directory.path(), "err.txt", vec![b'e'; 4096].as_slice());
     let registry = builtin_registry();
     let mut context = context(directory.path());
     context.allow_trusted_host_processes = true;
     context.max_output_bytes = 4096;
+    context.timeout = std::time::Duration::from_secs(120);
     let shell = registry.get("shell").unwrap();
     #[cfg(windows)]
     let arguments = json!({
         "program": "cmd.exe",
-        "args": ["/D", "/C", "for /l %i in (1,1,700) do @echo oooo%i & for /l %i in (1,1,700) do @echo eeee%i 1>&2"]
+        "args": ["/D", "/C", "type out.txt & type err.txt 1>&2"]
     });
     #[cfg(not(windows))]
     let arguments = json!({
         "program": "/bin/sh",
-        "args": ["-c", "i=0; while [ $i -lt 700 ]; do echo oooo$i; i=$((i+1)); done; i=0; while [ $i -lt 700 ]; do echo eeee$i 1>&2; i=$((i+1)); done"]
+        "args": ["-c", "cat out.txt; cat err.txt 1>&2"]
     });
     let result = shell.execute(&context, arguments).await.unwrap();
     assert!(result.truncated);
@@ -292,10 +398,10 @@ async fn combined_process_output_respects_the_shared_cap() {
         stdout.len(),
         stderr.len()
     );
-    // stderr was pushed over the remaining budget and spilled.
+    // stderr was pushed over the remaining budget and spilled in full.
     let spill_path = result.output["stderrSpillPath"].as_str().unwrap();
-    let spill = std::fs::read_to_string(directory.path().join(spill_path)).unwrap();
-    assert!(spill.contains("eeee699"));
+    let spill = std::fs::read(directory.path().join(spill_path)).unwrap();
+    assert_eq!(spill.len(), 4096);
 }
 
 /// A stream larger than the 10MB spill cap still keeps its true ending: the

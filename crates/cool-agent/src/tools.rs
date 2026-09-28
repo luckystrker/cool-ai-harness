@@ -602,10 +602,18 @@ fn collect_workspace_files(
     workspace: &Workspace,
     relative: &Path,
     glob: Option<&GlobMatcher>,
-) -> Vec<(PathBuf, String, u64)> {
+) -> Result<Vec<(PathBuf, String, u64)>, ToolError> {
     let root = workspace.root();
+    let absolute = root.join(relative);
+    if absolute.exists() {
+        // Canonicalize + reject_links on every component: a symlinked search
+        // root (or ancestor) pointing outside fails closed.
+        workspace
+            .confine_existing(&absolute)
+            .map_err(|error| ToolError::Security(error.to_string()))?;
+    }
     let mut files = Vec::new();
-    for entry in ignore::WalkBuilder::new(root.join(relative))
+    for entry in ignore::WalkBuilder::new(absolute)
         .follow_links(false)
         .build()
         .flatten()
@@ -629,7 +637,7 @@ fn collect_workspace_files(
         files.push((rel.to_path_buf(), display, size));
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    files
+    Ok(files)
 }
 
 /// Spill path stem derived from the provider tool-call id when known.
@@ -713,32 +721,58 @@ fn head_tail_view(text: &str, head: usize, tail: usize, spill_path: &str) -> Str
     )
 }
 
-/// Shrink a search/find result until its JSON fits the output cap; the full
-/// serialized body is spilled to `.cool/spill/` first.
+/// Shrink a search/find result until its JSON fits the output cap; the
+/// serialized body is spilled to `.cool/spill/` first, trimmed to the spill
+/// cap so the file stays complete, parseable JSON (`totalMatches`/`paths`
+/// trims still report every hit the collector saw via `truncated`).
 fn bound_result(
     context: &ToolContext,
     stem: &str,
     mut output: Value,
 ) -> Result<(Value, bool), ToolError> {
-    let serialized =
-        serde_json::to_vec(&output).map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
-    if serialized.len() <= context.max_output_bytes {
+    let serialize = |value: &Value| -> Result<usize, ToolError> {
+        serde_json::to_vec(value)
+            .map(|bytes| bytes.len())
+            .map_err(|error| ToolError::Io(std::io::Error::other(error)))
+    };
+    let mut serialized = serialize(&output)?;
+    if serialized <= context.max_output_bytes {
         return Ok((output, false));
     }
-    let spill_path = spill_output(context, stem, "results", &serialized)?;
     output["truncated"] = json!(true);
+    for key in ["matches", "paths"] {
+        if output.get(key).and_then(Value::as_array).is_none() {
+            continue;
+        }
+        while serialized > SPILL_FILE_MAX_BYTES
+            && output[key].as_array().is_some_and(|list| !list.is_empty())
+        {
+            let list = output[key].as_array_mut().unwrap();
+            let drop =
+                (serialized - SPILL_FILE_MAX_BYTES) / (serialized / list.len().max(1)).max(1) + 1;
+            list.truncate(list.len().saturating_sub(drop));
+            serialized = serialize(&output)?;
+        }
+        break;
+    }
+    let bytes =
+        serde_json::to_vec(&output).map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
+    let spill_path = spill_output(context, stem, "results", &bytes)?;
     output["spillPath"] = json!(spill_path);
     for key in ["matches", "paths"] {
         if output.get(key).and_then(Value::as_array).is_none() {
             continue;
         }
-        while serde_json::to_vec(&output)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX)
-            > context.max_output_bytes
+        let mut serialized = serialize(&output)?;
+        while serialized > context.max_output_bytes
             && output[key].as_array().is_some_and(|list| !list.is_empty())
         {
-            output[key].as_array_mut().unwrap().pop();
+            let list = output[key].as_array_mut().unwrap();
+            let drop = (serialized - context.max_output_bytes)
+                / (serialized / list.len().max(1)).max(1)
+                + 1;
+            list.truncate(list.len().saturating_sub(drop));
+            serialized = serialize(&output)?;
         }
         break;
     }
@@ -801,7 +835,7 @@ impl ToolHandler for SearchFiles {
             let mut skipped_large = 0_u64;
             let mut stored_bytes = 0_usize;
             for (rel, display, size) in
-                collect_workspace_files(&workspace, &relative, glob.as_ref())
+                collect_workspace_files(&workspace, &relative, glob.as_ref())?
             {
                 if size > MAX_SEARCH_FILE_BYTES {
                     skipped_large += 1;
@@ -815,42 +849,44 @@ impl ToolHandler for SearchFiles {
                 };
                 let lines: Vec<&str> = text.lines().collect();
                 for (index, line) in lines.iter().enumerate() {
-                    let Some(hit) = regex.find(line) else {
-                        continue;
-                    };
-                    total += 1;
-                    // Keep counting every match but stop storing once the
-                    // result is past the spill bound — the spilled body and
-                    // its head/tail view are built from what was retained.
-                    if matches.len() >= max_results || stored_bytes > SPILL_FILE_MAX_BYTES {
-                        continue;
+                    for hit in regex.find_iter(line) {
+                        total += 1;
+                        // Keep counting every match but stop storing once the
+                        // result is past the spill bound — the spilled body
+                        // and its head/tail view are built from what was
+                        // retained.
+                        if matches.len() >= max_results || stored_bytes > SPILL_FILE_MAX_BYTES {
+                            continue;
+                        }
+                        let column = line[..hit.start()].chars().count() + 1;
+                        let mut context_lines_json = Vec::new();
+                        let before = index.saturating_sub(context_lines);
+                        for (offset, text_line) in lines[before..index].iter().enumerate() {
+                            context_lines_json.push(json!({
+                                "line": before + offset + 1,
+                                "text": mask_secrets(text_line),
+                            }));
+                        }
+                        let after_end = (index + 1 + context_lines).min(lines.len());
+                        for (offset, text_line) in lines[index + 1..after_end].iter().enumerate() {
+                            context_lines_json.push(json!({
+                                "line": index + 2 + offset,
+                                "text": mask_secrets(text_line),
+                            }));
+                        }
+                        stored_bytes += line.len()
+                            + context_lines_json
+                                .iter()
+                                .map(|entry| entry["text"].as_str().map_or(0, str::len))
+                                .sum::<usize>();
+                        matches.push(json!({
+                            "path": display,
+                            "line": index + 1,
+                            "column": column,
+                            "text": mask_secrets(line),
+                            "context": context_lines_json,
+                        }));
                     }
-                    let column = line[..hit.start()].chars().count() + 1;
-                    let mut context_lines_json = Vec::new();
-                    let before = index.saturating_sub(context_lines);
-                    for (offset, text_line) in lines[before..index].iter().enumerate() {
-                        context_lines_json.push(
-                            json!({"line": before + offset + 1, "text": mask_secrets(text_line)}),
-                        );
-                    }
-                    let after_end = (index + 1 + context_lines).min(lines.len());
-                    for (offset, text_line) in lines[index + 1..after_end].iter().enumerate() {
-                        context_lines_json.push(
-                            json!({"line": index + 2 + offset, "text": mask_secrets(text_line)}),
-                        );
-                    }
-                    stored_bytes += line.len()
-                        + context_lines_json
-                            .iter()
-                            .map(|entry| entry["text"].as_str().map_or(0, str::len))
-                            .sum::<usize>();
-                    matches.push(json!({
-                        "path": display,
-                        "line": index + 1,
-                        "column": column,
-                        "text": mask_secrets(line),
-                        "context": context_lines_json,
-                    }));
                 }
             }
             let truncated = total as usize > matches.len();
@@ -912,19 +948,19 @@ impl ToolHandler for FindFiles {
         )?;
         let workspace = context.workspace.clone();
         let stem = spill_stem(context);
-        let output = tokio::task::spawn_blocking(move || {
-            let paths: Vec<String> = collect_workspace_files(&workspace, &relative, Some(&glob))
+        let output = tokio::task::spawn_blocking(move || -> Result<Value, ToolError> {
+            let paths: Vec<String> = collect_workspace_files(&workspace, &relative, Some(&glob))?
                 .into_iter()
                 .take(max_results + 1)
                 .map(|(_, display, _)| display)
                 .collect();
-            json!({
+            Ok(json!({
                 "paths": paths.iter().take(max_results).cloned().collect::<Vec<_>>(),
                 "truncated": paths.len() > max_results,
-            })
+            }))
         })
         .await
-        .map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
+        .map_err(|error| ToolError::Io(std::io::Error::other(error)))??;
         let (output, spilled) = bound_result(context, &stem, output)?;
         let truncated = spilled || output["truncated"].as_bool().unwrap_or(false);
         Ok(ToolResult {
