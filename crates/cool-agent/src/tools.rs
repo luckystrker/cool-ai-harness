@@ -1222,9 +1222,7 @@ impl ToolHandler for EditFile {
         let diff = unified_diff(requested, before.as_deref().unwrap_or(""), &after);
         let diff_truncated = diff.len() > DIFF_LIMIT;
         let diff = if diff_truncated {
-            let cut = diff[..DIFF_LIMIT]
-                .rfind('\n')
-                .unwrap_or(DIFF_LIMIT);
+            let cut = diff[..DIFF_LIMIT].rfind('\n').unwrap_or(DIFF_LIMIT);
             format!("{}\n… diff truncated", &diff[..cut])
         } else {
             diff

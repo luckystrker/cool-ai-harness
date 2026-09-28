@@ -75,7 +75,14 @@ disabled.
 `update_plan` results become canonical plan events. Subagents run in a distinct durable child run
 and report start/completion/failure to the parent; they never append a second terminal event to the
 parent run. Context compaction preserves the system prompt, most recent exchange and complete
-assistant-tool-result groups. Bounded `AGENTS.md` project instructions are injected as guidance and
+assistant-tool-result groups. Once the estimated history crosses 85% of the context window the
+loop asks the event sink to summarize the prefix older than the last four groups
+(`EventSink::summarize_for_compaction`); a returned summary replaces that prefix with a synthetic
+system message and is persisted on `session.compacted` together with `compactUpToCursor`, the
+`rust_events.rowid` of the newest covered event. Replay re-hydrates the summary as a leading
+system message and skips covered events, so a restarted run stays compact. A missing or failing
+summarizer falls back to drop-oldest and never blocks the loop. Bounded `AGENTS.md` project
+instructions are injected as guidance and
 cannot modify capability policy. Instruction reads use workspace confinement checks and consume at
 most 16 KiB plus the truncation sentinel.
 

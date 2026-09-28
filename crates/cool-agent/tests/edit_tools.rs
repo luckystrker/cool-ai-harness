@@ -25,7 +25,11 @@ fn edit_args(path: &str, edits: Value) -> Value {
 #[tokio::test]
 async fn edit_file_replaces_a_unique_anchor() {
     let directory = tempdir().unwrap();
-    write(directory.path(), "main.rs", "fn main() {\n    old_call();\n}\n");
+    write(
+        directory.path(),
+        "main.rs",
+        "fn main() {\n    old_call();\n}\n",
+    );
     let registry = builtin_registry();
     let edit = registry.get("edit_file").unwrap();
     let result = edit
@@ -55,7 +59,11 @@ async fn edit_file_replaces_a_unique_anchor() {
 #[tokio::test]
 async fn edit_file_rejects_a_non_unique_anchor_with_count() {
     let directory = tempdir().unwrap();
-    write(directory.path(), "app.txt", "marker one\nmarker two\nmarker three\n");
+    write(
+        directory.path(),
+        "app.txt",
+        "marker one\nmarker two\nmarker three\n",
+    );
     let registry = builtin_registry();
     let edit = registry.get("edit_file").unwrap();
     let result = edit
@@ -138,7 +146,10 @@ async fn edit_file_create_if_missing_writes_new_file() {
         json!([{"old": "", "new": "fresh content\n"}]),
     );
     args["create_if_missing"] = json!(true);
-    let result = edit.execute(&context(directory.path()), args).await.unwrap();
+    let result = edit
+        .execute(&context(directory.path()), args)
+        .await
+        .unwrap();
     assert!(!result.is_error);
     assert_eq!(result.output["created"], true);
     assert_eq!(result.output["editsApplied"], 1);
@@ -163,7 +174,10 @@ async fn edit_file_create_if_missing_writes_new_file() {
     // A missing file with the flag but a non-empty anchor is rejected, not created.
     let mut args = edit_args("bad.txt", json!([{"old": "seed", "new": "x"}]));
     args["create_if_missing"] = json!(true);
-    let result = edit.execute(&context(directory.path()), args).await.unwrap();
+    let result = edit
+        .execute(&context(directory.path()), args)
+        .await
+        .unwrap();
     assert!(result.is_error);
     assert_eq!(result.error_code.as_deref(), Some("edit_invalid_create"));
     assert!(!directory.path().join("bad.txt").exists());
@@ -191,20 +205,13 @@ async fn edit_file_rejects_empty_anchor_and_paths_outside_workspace() {
             edit_args("../outside.txt", json!([{"old": "a", "new": "b"}])),
         )
         .await;
-    assert!(matches!(
-        error,
-        Err(cool_agent::ToolError::Security(_))
-    ));
+    assert!(matches!(error, Err(cool_agent::ToolError::Security(_))));
 }
 
 #[tokio::test]
 async fn edit_file_sequential_edits_and_diff_rendering() {
     let directory = tempdir().unwrap();
-    write(
-        directory.path(),
-        "seq.txt",
-        "one\ntwo\nthree\nfour\nfive\n",
-    );
+    write(directory.path(), "seq.txt", "one\ntwo\nthree\nfour\nfive\n");
     let registry = builtin_registry();
     let edit = registry.get("edit_file").unwrap();
     let result = edit

@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
-    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_events,
+    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_event_rows,
     mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
@@ -2764,6 +2764,7 @@ impl AppServer {
                 outbound: outbound.clone(),
                 steer_cursor: Arc::new(AtomicU64::new(run.last_seq)),
                 own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                pending_compact_cursor: Arc::new(Mutex::new(None)),
             };
             let approvals = AppServerApprovalGate {
                 server: server.clone(),
@@ -3264,6 +3265,7 @@ impl AppServer {
             outbound: outbound.clone(),
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
         let ordered = topological_order(&steps);
         let total = ordered.len() as u32;
@@ -3686,6 +3688,7 @@ impl AppServer {
                     outbound,
                     steer_cursor: Arc::new(AtomicU64::new(0)),
                     own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                    pending_compact_cursor: Arc::new(Mutex::new(None)),
                 };
                 let _ = sink
                     .emit(CanonicalEvent::RunFailed(RunTerminal {
@@ -3720,6 +3723,7 @@ impl AppServer {
             outbound,
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
         let _ = executor.execute(research_run_id, &sink, cancel_rx).await;
     }
@@ -4073,6 +4077,10 @@ struct AppServerEventSink {
     outbound: Outbound,
     steer_cursor: Arc<AtomicU64>,
     own_user_items: Arc<Mutex<HashSet<String>>>,
+    /// Rust-events cursor up to which the in-progress compaction's summary
+    /// covers history; set by `summarize_for_compaction` and consumed by
+    /// `emit` when the `session.compacted` event passes through.
+    pending_compact_cursor: Arc<Mutex<Option<u64>>>,
 }
 
 struct LifecycleEventSink {
@@ -4161,6 +4169,13 @@ impl EventSink for LifecycleEventSink {
     async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
         self.inner.drain_steers().await
     }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+    ) -> Result<Option<String>, RuntimeError> {
+        self.inner.summarize_for_compaction(dropped).await
+    }
 }
 
 impl LifecycleEventSink {
@@ -4236,7 +4251,16 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
 
 #[async_trait]
 impl EventSink for AppServerEventSink {
-    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+    async fn emit(&self, mut event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
+        }
         let envelope = self.emit_once(event).await?;
         if matches!(
             &envelope.event,
@@ -4256,21 +4280,106 @@ impl EventSink for AppServerEventSink {
             .inner
             .store
             .run(&self.run_id, &local_actor().id)?;
-        let events = self
-            .server
-            .inner
-            .store
-            .session_events(&run.session_id, &local_actor().id)?;
-        let history = history_from_events(&events)?;
-        if let Some(last_seq) = events
+        let rows = self.server.inner.store.session_event_window(
+            &run.session_id,
+            &local_actor().id,
+            None,
+            i64::MAX as usize,
+        )?;
+        let history = history_from_event_rows(&rows)?;
+        if let Some(last_seq) = rows
             .iter()
-            .filter(|event| event.run_id == self.run_id)
-            .map(|event| event.seq)
+            .filter(|(_, event)| event.run_id == self.run_id)
+            .map(|(_, event)| event.seq)
             .max()
         {
             self.steer_cursor.fetch_max(last_seq, Ordering::SeqCst);
         }
         Ok(history)
+    }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+    ) -> Result<Option<String>, RuntimeError> {
+        let actor = local_actor();
+        let store = &self.server.inner.store;
+        let run = store.run(&self.run_id, &actor.id)?;
+        let rows =
+            store.session_event_window(&run.session_id, &actor.id, None, i64::MAX as usize)?;
+        // `compact_up_to_cursor` lives in the rust_events.rowid space the
+        // history endpoint projects. The dropped prefix maps one-to-one onto
+        // message-producing events newer than the newest covered set — the
+        // history the loop compacts is exactly these events (possibly plus
+        // messages this run emitted, which the store already holds).
+        let mut covered = 0_u64;
+        for (_, envelope) in &rows {
+            if let CanonicalEvent::SessionCompacted(compacted) = &envelope.event
+                && compacted.summary.is_some()
+            {
+                covered = covered.max(compacted.compact_up_to_cursor.unwrap_or(0));
+            }
+        }
+        let mut remaining = dropped.len();
+        let mut covered_cursor = None;
+        for (cursor, envelope) in &rows {
+            let produces_message = matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item)
+                    if matches!(item.role.as_deref(), Some("user" | "assistant"))
+            ) || matches!(
+                &envelope.event,
+                CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
+            );
+            if *cursor <= covered || !produces_message {
+                continue;
+            }
+            remaining -= 1;
+            if remaining == 0 {
+                covered_cursor = Some(*cursor);
+                break;
+            }
+        }
+        let mut transcript = String::new();
+        for message in dropped {
+            let role = match message.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+            };
+            let mut line = message.content.clone().unwrap_or_default();
+            if !message.tool_calls.is_empty() {
+                let calls = message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        format!(
+                            "{} {}",
+                            call.name,
+                            truncate_chars(
+                                &serde_json::to_string(&call.arguments).unwrap_or_default(),
+                                100,
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&format!("[calls: {calls}]"));
+            }
+            transcript.push_str(&format!("{role}: {}\n", truncate_chars(&line, 300)));
+        }
+        let summary = self
+            .server
+            .summarize_conversation(&transcript, &self.server.inner.default_model.clone())
+            .await;
+        if summary.is_some() {
+            *self.pending_compact_cursor.lock().await = covered_cursor;
+        }
+        Ok(summary)
     }
 
     async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
