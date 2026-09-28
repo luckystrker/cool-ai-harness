@@ -509,27 +509,78 @@ fn confinement_io(error: std::io::Error) -> ToolError {
 /// rewrite them through the file tools could grant itself tool access or
 /// arbitrary per-write commands. Writes to them go through the policy
 /// commands / manual edits only — never through `write_file`/`edit_file`.
-fn reject_protected_write(path: &std::path::Path) -> Result<(), ToolError> {
-    // Lexically collapse `.`/`..` the way the capability dir resolves them
-    // at open time — `sub/../.cool/policy.json` must not slip the check.
-    let mut parts: Vec<String> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                parts.push(part.to_string_lossy().into_owned());
+/// The check runs on BOTH the lexical name and the resolved canonical
+/// target: the lexical pass catches name variants on case-insensitive
+/// filesystems, and the canonical pass stops an in-workspace symlink from
+/// smuggling a write into a protected file under another name.
+fn reject_protected_write(
+    workspace: &cool_security::Workspace,
+    path: &std::path::Path,
+) -> Result<(), ToolError> {
+    let is_protected = |relative: &std::path::Path| {
+        let mut parts: Vec<String> = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    parts.push(part.to_string_lossy().into_owned());
+                }
+                std::path::Component::ParentDir => {
+                    parts.pop();
+                }
+                _ => {}
             }
-            std::path::Component::ParentDir => {
-                parts.pop();
-            }
-            _ => {}
         }
+        parts.len() == 2
+            && parts[0].eq_ignore_ascii_case(".cool")
+            && matches!(
+                parts[1].to_lowercase().as_str(),
+                "policy.json" | "config.json"
+            )
+    };
+    if is_protected(path) {
+        return Err(ToolError::Security(format!(
+            "{} is managed by policy commands, not writable by the agent",
+            path.display()
+        )));
     }
-    if parts.len() == 2
-        && parts[0].eq_ignore_ascii_case(".cool")
-        && matches!(
-            parts[1].to_lowercase().as_str(),
-            "policy.json" | "config.json"
-        )
+    // Resolve the canonical target: canonicalize the deepest existing
+    // ancestor (symlinks resolved by the sandboxed dir handle, escapes
+    // already rejected there) and append the literal remainder.
+    let dir = workspace.dir();
+    let canonical_root = dir.canonicalize(".").map_err(confinement_io)?;
+    let mut prefix: &std::path::Path = path;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let resolved = loop {
+        match dir.canonicalize(prefix) {
+            Ok(base) => {
+                let mut base = base;
+                for component in tail.iter().rev() {
+                    base.push(component);
+                }
+                break base;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match prefix.file_name() {
+                    Some(name) => {
+                        tail.push(name.to_owned());
+                        prefix = prefix.parent().unwrap_or_else(|| std::path::Path::new(""));
+                    }
+                    None => {
+                        let mut base = canonical_root.clone();
+                        for component in tail.iter().rev() {
+                            base.push(component);
+                        }
+                        break base;
+                    }
+                }
+            }
+            Err(error) => return Err(confinement_io(error)),
+        }
+    };
+    if resolved
+        .strip_prefix(&canonical_root)
+        .map(is_protected)
+        .unwrap_or(false)
     {
         return Err(ToolError::Security(format!(
             "{} is managed by policy commands, not writable by the agent",
@@ -1097,7 +1148,7 @@ impl ToolHandler for WriteFile {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let path = workspace_path(context, requested)?;
-        reject_protected_write(&path)?;
+        reject_protected_write(&context.workspace, &path)?;
         if let Some(parent) = path.parent()
             && parent.components().next().is_some()
         {
@@ -1256,7 +1307,7 @@ impl ToolHandler for EditFile {
         }
         // Checked AFTER symlink resolution so a link cannot smuggle a write
         // into `.cool/policy.json` / `.cool/config.json`.
-        reject_protected_write(&path)?;
+        reject_protected_write(&context.workspace, &path)?;
 
         let mut original_permissions = None;
         let before = match context.workspace.dir().metadata(&path) {
@@ -1715,12 +1766,14 @@ impl ToolHandler for PythonFallbackTool {
 /// network capability: a `Deny` resolution propagates `NetAccess::None` so a
 /// network that is off-limits to the tool is also off-limits to its child
 /// (`--unshare-net`/seatbelt, or a fail-closed `HostLauncher` refusal).
-/// `Ask`/`Allow` keep `Full` — the tool call itself is already gated by its
-/// own capability decision and approval before it ever spawns a child.
+/// `Ask` resolves to `None` too: approving e.g. a `shell` call's Execute
+/// capability must NOT silently grant it full networking — the child stays
+/// offline unless the Network capability itself resolves `Allow` (a
+/// dedicated net approval/allowlist is a documented follow-up).
 fn process_net(context: &ToolContext) -> NetAccess {
     match context.policy.resolve(Capability::Network) {
-        Decision::Deny => NetAccess::None,
-        _ => NetAccess::Full,
+        Decision::Allow => NetAccess::Full,
+        _ => NetAccess::None,
     }
 }
 
@@ -2087,9 +2140,14 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
     }
     // A nonzero exit is a checker FAILURE — surface it as a warning even
     // when the checker printed output (bare output reads like a success).
-    // The cap covers the final returned string, marker included.
+    // Redact BEFORE capping: `[REDACTED]`/masking can expand the text, so
+    // the cap applies to the final returned string, marker included.
     let warning =
         (!status.success()).then(|| format!("warning: diagnostics exited with {status}\n"));
+    for secret in &secret_values {
+        text = text.replace(secret, "[REDACTED]");
+    }
+    let mut text = mask_secrets(&text);
     let headroom = DIAGNOSTICS_LIMIT - warning.as_deref().map_or(0, str::len);
     if text.len() > headroom {
         const MARKER: &str = "\n... [diagnostics truncated at 4 KiB] ...";
@@ -2100,9 +2158,37 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
         text.truncate(end);
         text.push_str(MARKER);
     }
-    for secret in &secret_values {
-        text = text.replace(secret, "[REDACTED]");
-    }
-    let text = mask_secrets(&text);
     Some(format!("{}{}", warning.unwrap_or_default(), text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cool_security::{Capability, Decision};
+
+    fn context_with_network(decision: Decision) -> ToolContext {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = cool_security::Workspace::new(directory.path()).unwrap();
+        // Leak the tempdir so the workspace outlives the context — fine in tests.
+        std::mem::forget(directory);
+        let mut context = ToolContext::new(workspace, CapabilityPolicy::new(Some(Decision::Allow)));
+        context.policy.set(Capability::Network, decision);
+        context
+    }
+
+    /// Shell approvals no longer smuggle full network access: only an
+    /// explicit Network:Allow policy yields NetAccess::Full — Ask and Deny
+    /// both map to None inside the sandbox.
+    #[test]
+    fn process_net_only_grants_full_access_on_explicit_allow() {
+        for decision in [Decision::Ask, Decision::Deny] {
+            let context = context_with_network(decision);
+            assert!(
+                matches!(process_net(&context), NetAccess::None),
+                "network decision {decision:?} must not grant host networking"
+            );
+        }
+        let context = context_with_network(Decision::Allow);
+        assert!(matches!(process_net(&context), NetAccess::Full));
+    }
 }

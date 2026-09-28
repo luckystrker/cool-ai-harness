@@ -434,6 +434,7 @@ impl TaskExecutor {
                 .with_rule_source(crate::rule_source_for(
                     Some(self.store.clone()),
                     workspace.clone(),
+                    self.host.rules.clone(),
                 )),
         };
         // The task's approval policy is enforced by the capability policy: a

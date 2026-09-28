@@ -166,11 +166,26 @@ impl SandboxBackend {
     }
 
     /// Whether the backend can actually run on this host — a present-but-
-    /// unusable binary is probed with a cheap spawn so selection never
-    /// picks a launcher that fails at runtime.
+    /// unusable binary is probed by launching a trivial sandboxed command,
+    /// so selection never picks a launcher that fails at runtime (e.g.
+    /// `bwrap` installed while unprivileged user namespaces are disabled).
     pub fn available(self) -> bool {
         match self {
-            Self::Bwrap => cfg!(target_os = "linux") && probe_runs(&["bwrap", "--version"]),
+            Self::Bwrap => {
+                cfg!(target_os = "linux")
+                    && ["/bin/true", "/usr/bin/true"].iter().any(|bin| {
+                        probe_runs(&[
+                            "bwrap",
+                            "--die-with-parent",
+                            "--ro-bind",
+                            bin,
+                            "/__cool_probe__",
+                            "--unshare-net",
+                            "--",
+                            "/__cool_probe__",
+                        ])
+                    })
+            }
             Self::Seatbelt => {
                 cfg!(target_os = "macos")
                     && probe_runs(&[
@@ -312,12 +327,41 @@ pub fn bwrap_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<Stri
         "/tmp".to_owned(),
     ];
     // Read-only binds for the paths a toolchain legitimately needs — never
-    // a blanket `/`, which would expose host secrets to the child.
-    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt"] {
+    // a blanket `/`, which would expose host secrets to the child. `/etc`
+    // is NOT bound wholesale: it holds host credentials (shadow, private
+    // keys, cloud/agent configs). Instead it gets an empty tmpfs plus only
+    // the specific files a toolchain resolver/TLS stack actually reads.
+    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/opt"] {
         if std::path::Path::new(dir).is_dir() {
             argv.push("--ro-bind".to_owned());
             argv.push(dir.to_owned());
             argv.push(dir.to_owned());
+        }
+    }
+    argv.push("--tmpfs".to_owned());
+    argv.push("/etc".to_owned());
+    for entry in [
+        "resolv.conf",
+        "hosts",
+        "nsswitch.conf",
+        "localtime",
+        "os-release",
+        "ld.so.cache",
+        "ld.so.conf",
+        "ld.so.conf.d",
+        "ssl",
+        "pki",
+        "ca-certificates",
+        "alternatives",
+        "mime.types",
+        "services",
+        "protocols",
+    ] {
+        let path = format!("/etc/{entry}");
+        if std::path::Path::new(&path).exists() {
+            argv.push("--ro-bind".to_owned());
+            argv.push(path.clone());
+            argv.push(path);
         }
     }
     argv.extend([

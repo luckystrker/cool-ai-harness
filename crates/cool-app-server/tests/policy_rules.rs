@@ -63,6 +63,14 @@ fn shell_rule(scope: &str) -> PolicyRuleRecord {
     }
 }
 
+/// `policy.rule_add` no longer mints `allow` rules (widening access
+/// requires the approval flow) — rule-management tests use deny.
+fn deny_rule(scope: &str) -> PolicyRuleRecord {
+    let mut rule = shell_rule(scope);
+    rule.decision = "deny".to_owned();
+    rule
+}
+
 async fn rules_list(
     client: &AppClient,
     scope: Option<&str>,
@@ -89,7 +97,7 @@ async fn project_rules_persist_to_workspace_policy_json_and_list() {
 
     let added = client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
-            rule: shell_rule("project"),
+            rule: deny_rule("project"),
             run_id: None,
         }))
         .await
@@ -111,7 +119,7 @@ async fn project_rules_persist_to_workspace_policy_json_and_list() {
     let listed = rules_list(&client, Some("project"), None).await;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].tool, "shell");
-    assert_eq!(listed[0].decision, "allow");
+    assert_eq!(listed[0].decision, "deny");
 
     // Deleting removes both the in-memory rule and the persisted file entry.
     match client
@@ -140,7 +148,7 @@ async fn user_rules_persist_in_the_durable_store() {
 
     let added = client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
-            rule: shell_rule("user"),
+            rule: deny_rule("user"),
             run_id: None,
         }))
         .await
@@ -167,7 +175,7 @@ async fn session_rules_attach_to_their_run_and_delete() {
 
     let added = client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
-            rule: shell_rule("session"),
+            rule: deny_rule("session"),
             run_id: Some("run-1".to_owned()),
         }))
         .await
@@ -419,7 +427,7 @@ async fn project_rule_ids_are_stable_across_deletes() {
     let (client, task) = connected_client(app.clone()).await;
 
     for pattern in ["cargo *", "npm *"] {
-        let mut rule = shell_rule("project");
+        let mut rule = deny_rule("project");
         rule.pattern = pattern.to_owned();
         client
             .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
@@ -437,7 +445,7 @@ async fn project_rule_ids_are_stable_across_deletes() {
         }))
         .await
         .unwrap();
-    let mut third = shell_rule("project");
+    let mut third = deny_rule("project");
     third.pattern = "pip *".to_owned();
     match client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
@@ -499,6 +507,59 @@ async fn malformed_policy_json_loads_a_deny_all_rule() {
     task.await.expect("server task").expect("clean disconnect");
 }
 
+/// Valid JSON whose `rules` key is missing or not an array is malformed
+/// too — it must not fall through to "no rules" (which would lose deny
+/// rules written by older or future formats). Fail closed.
+#[tokio::test]
+async fn policy_json_without_rules_array_loads_a_deny_all_rule() {
+    for body in ["{}", "{\"rules\": \"oops\"}"] {
+        let directory = tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join(".cool")).unwrap();
+        std::fs::write(directory.path().join(".cool/policy.json"), body).unwrap();
+        let app = server(directory.path(), false);
+        let (client, task) = connected_client(app.clone()).await;
+
+        let listed = rules_list(&client, Some("project"), None).await;
+        assert_eq!(listed.len(), 1, "policy body {body} should fail closed");
+        assert_eq!(listed[0].decision, "deny");
+        assert!(
+            listed[0]
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("malformed")
+        );
+
+        drop(client);
+        task.await.expect("server task").expect("clean disconnect");
+    }
+}
+
+/// `policy.rule_add` cannot mint `allow` rules — widening access goes
+/// through the approved `approval.resolve` + `remember` path only.
+/// `deny`/`ask` rules stay self-service (they cannot widen access).
+#[tokio::test]
+async fn policy_rule_add_rejects_allow_decision() {
+    let directory = tempdir().unwrap();
+    let app = server(directory.path(), false);
+    let (client, task) = connected_client(app.clone()).await;
+
+    let response = client
+        .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+            rule: shell_rule("project"),
+            run_id: None,
+        }))
+        .await;
+    assert!(
+        response.is_err(),
+        "allow rule via policy.rule_add should fail, got {response:?}"
+    );
+    assert!(rules_list(&client, Some("project"), None).await.is_empty());
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
 /// Project rule ids are monotonic across restarts: after a fresh server is
 /// opened over the same workspace, `next_id` resumes from the persisted
 /// counter — a deleted id is never recycled onto a different rule (SEC: a
@@ -509,7 +570,7 @@ async fn project_rule_ids_survive_restart() {
     let app = server(directory.path(), false);
     let (client, task) = connected_client(app.clone()).await;
     for pattern in ["cargo *", "npm *"] {
-        let mut rule = shell_rule("project");
+        let mut rule = deny_rule("project");
         rule.pattern = pattern.to_owned();
         client
             .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
@@ -533,7 +594,7 @@ async fn project_rule_ids_survive_restart() {
     // "Restart": a brand-new server over the same workspace.
     let restarted = server(directory.path(), false);
     let (client, task) = connected_client(restarted.clone()).await;
-    let mut rule = shell_rule("project");
+    let mut rule = deny_rule("project");
     rule.pattern = "pip *".to_owned();
     match client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
@@ -590,7 +651,7 @@ async fn project_policy_file_edits_are_read_live() {
 
     // The persisted counter is honored too — a new (non-identical) rule
     // gets project:7.
-    let mut added = shell_rule("project");
+    let mut added = deny_rule("project");
     added.pattern = "npm *".to_owned();
     match client
         .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
@@ -720,6 +781,31 @@ async fn approval_remember_persists_into_the_run_workspace() {
                 .unwrap_or_default()
                 .contains("\"rules\":[]"),
         "server workspace must not gain the run's rule"
+    );
+
+    // rules_list/rule_delete route to the RUN workspace via run_id — the
+    // persisted project rule is manageable there even though it was never
+    // written under the server workspace.
+    let listed = rules_list(&client, Some("project"), Some(&run_id)).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id.as_deref(), Some("project:0"));
+
+    match client
+        .request(Command::PolicyRuleDelete(PolicyRuleDeleteParams {
+            idempotency_key: key("rule-delete-run-ws"),
+            rule_id: "project:0".to_owned(),
+            run_id: Some(run_id.clone()),
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PolicyRuleDeleted(result) => assert!(result.deleted),
+        payload => panic!("unexpected rule_delete payload: {payload:?}"),
+    }
+    assert!(
+        rules_list(&client, Some("project"), Some(&run_id))
+            .await
+            .is_empty()
     );
 
     drop(client);

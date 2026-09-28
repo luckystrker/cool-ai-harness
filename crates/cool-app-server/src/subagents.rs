@@ -502,6 +502,7 @@ impl SubagentExecutor {
             .with_rule_source(crate::rule_source_for(
                 Some(self.store.clone()),
                 workspace.clone(),
+                self.host.rules.clone(),
             )),
         };
         let child_sink = LegacyTranscriptSink {

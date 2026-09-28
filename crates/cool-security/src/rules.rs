@@ -242,11 +242,34 @@ type SessionRuleSet = (Arc<RwLock<Vec<PolicyRule>>>, u64);
 pub struct RuleState {
     project: Mutex<Vec<PolicyRule>>,
     sessions: Mutex<HashMap<String, SessionRuleSet>>,
+    /// Rules persisted but not yet committed by their owning approval —
+    /// hidden from rule sources until `promote_pending` marks them live.
+    /// Shared server-wide so every rule source applies the same window.
+    pending: Mutex<Vec<PolicyRule>>,
 }
 
 impl RuleState {
     fn lock<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
         mutex.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Marks a persisted rule as pending: rule sources skip it until it is
+    /// promoted, so a rule never applies before its approval commits.
+    pub fn hide_pending(&self, rule: &PolicyRule) {
+        Self::lock(&self.pending).push(rule.clone());
+    }
+
+    /// Lifts a rule out of the pending window — call once the approval
+    /// that backs it has committed (or to drop the marker on abort).
+    pub fn promote_pending(&self, rule: &PolicyRule) {
+        Self::lock(&self.pending).retain(|pending| !pending.same_signature(rule));
+    }
+
+    /// Whether a rule is still inside its pre-commit hidden window.
+    pub fn is_pending(&self, rule: &PolicyRule) -> bool {
+        Self::lock(&self.pending)
+            .iter()
+            .any(|pending| pending.same_signature(rule))
     }
 
     /// The project rules (persisted `project:N` ids, never reused).
