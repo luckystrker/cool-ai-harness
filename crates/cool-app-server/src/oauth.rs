@@ -162,6 +162,23 @@ pub fn flow_ready(flow: &OAuthFlow) -> Result<(), OAuthError> {
     Ok(())
 }
 
+/// A caller-supplied `redirect_uri` is accepted only when it is the flow's
+/// own manual callback or an HTTP loopback URI — anything else would let a
+/// client send the authorization code to an arbitrary destination.
+pub fn redirect_uri_allowed(flow: &OAuthFlow, uri: &str) -> bool {
+    if Some(uri) == flow.manual_redirect {
+        return true;
+    }
+    for prefix in ["http://localhost", "http://127.0.0.1"] {
+        if let Some(rest) = uri.strip_prefix(prefix)
+            && rest.starts_with([':', '/'])
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// All supported logins. Unknown names return `None` → the caller reports
 /// `oauth_provider_unsupported` (spec: plumbing + clear error when a flow is
 /// not usable instead of a guessed endpoint).

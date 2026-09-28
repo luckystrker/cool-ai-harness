@@ -1429,9 +1429,14 @@ fn rewind_marks_runs_and_replays_prefix() {
         .unwrap();
     assert!(outcome.created);
     assert_eq!(outcome.value.rewound_run_ids, vec![run.clone()]);
-    // The checkpoint lives past the cursor (seq 4 > cursor of seq 3) — it is
-    // NOT picked up: refs are collected only inside the retained prefix.
-    assert_eq!(outcome.value.checkpoint_ref, None);
+    // The checkpoint lives past the cursor (seq 4 > cursor of seq 3): it is
+    // the pre-dispatch snapshot of the FIRST mutating call being discarded —
+    // i.e. the workspace state the retained prefix ended in — so it IS the
+    // correct restore point.
+    assert_eq!(
+        outcome.value.checkpoint_ref.as_deref(),
+        Some("refs/cool/checkpoints/s/9")
+    );
     assert_eq!(
         store.run(&run, "local-user").unwrap().status,
         RunStatus::Rewound
@@ -1514,6 +1519,113 @@ fn rewind_marks_runs_and_replays_prefix() {
         ),
         Err(StoreError::ActorMismatch)
     ));
+}
+
+#[test]
+fn second_rewind_skips_rewound_runs() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    for (seq, canonical) in [
+        (
+            1,
+            CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: None,
+            }),
+        ),
+        (
+            2,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: Some("prompt-0".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            3,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("answer-1".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            4,
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("discarded".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+        ),
+        (
+            5,
+            CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "stop".to_owned(),
+                error_code: None,
+            }),
+        ),
+    ] {
+        store
+            .append_event("local-user", &event(&session, &run, seq, canonical))
+            .unwrap();
+    }
+    let cursor_of = |content: &str| {
+        store
+            .session_event_window(&session, "local-user", None, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, envelope)| {
+                matches!(
+                    &envelope.event,
+                    CanonicalEvent::ItemCompleted(item) if item.content.as_deref() == Some(content)
+                )
+            })
+            .map(|(cursor, _)| cursor)
+            .next_back()
+            .unwrap()
+    };
+    let first = store
+        .rewind_session(
+            "local-user",
+            "rewind-1",
+            "fp-1",
+            &session,
+            cursor_of("answer-1"),
+            None,
+        )
+        .unwrap();
+    assert!(first.created);
+    // Rewind run2 at the same logical point: its own run.rewound/RunCompleted
+    // tail sits beyond the cursor, while the rewound run1's discarded rows
+    // sit before it — an unfiltered copy would re-add them.
+    let second = store
+        .rewind_session(
+            "local-user",
+            "rewind-2",
+            "fp-2",
+            &session,
+            cursor_of("answer-1"),
+            None,
+        )
+        .unwrap();
+    assert!(second.created);
+    // The prefix copied into run3 must come only from run2 — the rewound
+    // run1's rows (including its discarded tail) are skipped entirely.
+    let copied = store
+        .all_events(&second.value.run_id, "local-user")
+        .unwrap()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            CanonicalEvent::ItemCompleted(item) => item.content.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied, ["prompt-0", "answer-1"]);
+    assert_eq!(
+        second.value.rewound_run_ids.len(),
+        1,
+        "only run2 is superseded — run1 is already rewound"
+    );
 }
 
 #[test]

@@ -445,29 +445,45 @@ fn openai_payload(request: &ModelRequest) -> Value {
             };
             let mut value = json!({"role": role, "content": message.content});
             if let Some(parts) = message.parts.as_deref().filter(|parts| !parts.is_empty()) {
-                let mut blocks = Vec::new();
-                if let Some(text) = message
-                    .content
-                    .as_ref()
-                    .filter(|text| !text.is_empty())
-                {
-                    blocks.push(json!({"type": "text", "text": text}));
-                }
-                for part in parts {
-                    match part {
-                        ModelContentPart::Text { text } => {
-                            blocks.push(json!({"type": "text", "text": text}));
+                // image_url blocks are only valid on user/assistant messages;
+                // tool/system roles degrade to the text-marker fallback so a
+                // view_image result doesn't 400 the whole request.
+                if matches!(message.role, MessageRole::User | MessageRole::Assistant) {
+                    let mut blocks = Vec::new();
+                    if let Some(text) = message
+                        .content
+                        .as_ref()
+                        .filter(|text| !text.is_empty())
+                    {
+                        blocks.push(json!({"type": "text", "text": text}));
+                    }
+                    for part in parts {
+                        match part {
+                            ModelContentPart::Text { text } => {
+                                blocks.push(json!({"type": "text", "text": text}));
+                            }
+                            ModelContentPart::Image {
+                                media_type,
+                                data_base64,
+                            } => blocks.push(json!({
+                                "type": "image_url",
+                                "image_url": {"url": format!("data:{media_type};base64,{data_base64}")}
+                            })),
                         }
-                        ModelContentPart::Image {
-                            media_type,
-                            data_base64,
-                        } => blocks.push(json!({
-                            "type": "image_url",
-                            "image_url": {"url": format!("data:{media_type};base64,{data_base64}")}
-                        })),
+                    }
+                    value["content"] = Value::Array(blocks);
+                } else {
+                    let degraded = Message::parts_as_text(parts);
+                    if !degraded.is_empty() {
+                        let merged = match message.content.as_deref() {
+                            Some(content) if !content.is_empty() => {
+                                format!("{content}\n{degraded}")
+                            }
+                            _ => degraded,
+                        };
+                        value["content"] = Value::String(merged);
                     }
                 }
-                value["content"] = Value::Array(blocks);
             }
             if !message.tool_calls.is_empty() {
                 value["tool_calls"] = Value::Array(

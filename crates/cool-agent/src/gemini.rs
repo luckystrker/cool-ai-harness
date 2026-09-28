@@ -338,6 +338,9 @@ fn gemini_content(message: &Message) -> Value {
 
 /// Tool results become `functionResponse` parts on a user-role content; the
 /// JSON output is nested under `result` to satisfy the `object` shape.
+/// `Message.parts` (e.g. `view_image` output) rides in the same content:
+/// images as `inlineData`, text as `text` — otherwise the model never sees
+/// the pixels a tool returned.
 fn tool_content(message: &Message) -> Value {
     let name = message.name.clone().unwrap_or_default();
     let response = message
@@ -351,9 +354,23 @@ fn tool_content(message: &Message) -> Value {
             parsed
         })
         .unwrap_or_else(|| json!({"result": message.content.clone().unwrap_or_default()}));
+    let mut parts = vec![json!({"functionResponse": {"name": name, "response": response}})];
+    if let Some(message_parts) = &message.parts {
+        for part in message_parts {
+            match part {
+                ModelContentPart::Image {
+                    media_type,
+                    data_base64,
+                } => parts.push(json!({
+                    "inlineData": {"mimeType": media_type, "data": data_base64}
+                })),
+                ModelContentPart::Text { text } => parts.push(json!({"text": text})),
+            }
+        }
+    }
     json!({
         "role": "user",
-        "parts": [{"functionResponse": {"name": name, "response": response}}],
+        "parts": parts,
     })
 }
 
@@ -390,6 +407,33 @@ async fn process_sse_line(
             message.to_owned(),
             retryable,
         ));
+    }
+    // Usage rides on the same chunk as `finishReason` — emit it first so the
+    // agent (which stops reading at Finish) still sees the accounting.
+    if let Some(usage) = value.get("usageMetadata") {
+        let prompt_tokens = usage
+            .get("promptTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let completion_tokens = usage
+            .get("candidatesTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let total_tokens = usage
+            .get("totalTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(prompt_tokens + completion_tokens);
+        let cost_micro_usd = estimate_cost_micro_usd(model, prompt_tokens, completion_tokens, 0, 0);
+        let _ = sender
+            .send(Ok(ModelEvent::Usage(Usage {
+                prompt_tokens,
+                completion_tokens,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                total_tokens,
+                cost_micro_usd,
+            })))
+            .await;
     }
     if let Some(candidates) = value.get("candidates").and_then(Value::as_array)
         && let Some(candidate) = candidates.first()
@@ -437,31 +481,6 @@ async fn process_sse_line(
                 }))
                 .await;
         }
-    }
-    if let Some(usage) = value.get("usageMetadata") {
-        let prompt_tokens = usage
-            .get("promptTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let completion_tokens = usage
-            .get("candidatesTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let total_tokens = usage
-            .get("totalTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(prompt_tokens + completion_tokens);
-        let cost_micro_usd = estimate_cost_micro_usd(model, prompt_tokens, completion_tokens, 0, 0);
-        let _ = sender
-            .send(Ok(ModelEvent::Usage(Usage {
-                prompt_tokens,
-                completion_tokens,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                total_tokens,
-                cost_micro_usd,
-            })))
-            .await;
     }
     Ok(())
 }
@@ -561,6 +580,18 @@ mod tests {
         assert_eq!(call.call_id, "gemini-call-1");
         assert_eq!(call.name, "read_file");
         assert_eq!(call.arguments["path"], "a.txt");
+        // Usage rides the same chunk as finishReason and is emitted BEFORE
+        // content/finish so the agent (which stops reading at Finish) still
+        // sees the accounting.
+        assert!(matches!(
+            receiver.recv().await.unwrap().unwrap(),
+            ModelEvent::Usage(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 4,
+                total_tokens: 14,
+                ..
+            })
+        ));
         assert_eq!(
             receiver.recv().await.unwrap().unwrap(),
             ModelEvent::Content("done".to_owned())
@@ -571,15 +602,6 @@ mod tests {
                 reason: Some("stop".to_owned())
             }
         );
-        assert!(matches!(
-            receiver.recv().await.unwrap().unwrap(),
-            ModelEvent::Usage(Usage {
-                prompt_tokens: 10,
-                completion_tokens: 4,
-                total_tokens: 14,
-                ..
-            })
-        ));
     }
 
     #[tokio::test]

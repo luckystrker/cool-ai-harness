@@ -180,7 +180,10 @@ export const conversationsApi = {
    * conversation for navigation.
    */
   forkFromCursor: async (convId: number, cursor: number): Promise<Conversation> => {
-    const sessionId = await sessionFor(convId)
+    const [sessionId, source] = await Promise.all([
+      sessionFor(convId),
+      sdk.conversationsGet({ id: convId }),
+    ])
     const forked = await sdk.sessionFork({
       idempotencyKey: idempotencyKey(),
       sessionId,
@@ -189,7 +192,12 @@ export const conversationsApi = {
       upToEventSeq: null,
     })
     const conversation = await sdk.conversationsCreate(
-      toConversationCreate({}, idempotencyKey())
+      toConversationCreate(
+        // Carry the workspace binding over — a fork without the source's
+        // working directory can't share its checkpoint refs or files.
+        { working_directory: source.workingDirectory ?? undefined },
+        idempotencyKey()
+      )
     )
     await sdk.sessionForConversation({
       idempotencyKey: idempotencyKey(),

@@ -647,10 +647,16 @@ impl DurableStore {
                 |row| row.get::<_, String>(0),
             )?;
             for row in rows {
-                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                let mut source: EventEnvelope = serde_json::from_str(&row?)?;
                 if !is_history_event(&source.event) {
                     continue;
                 }
+                // Workspace-bound extensions (`checkpoint_ref` — the
+                // P2.18 key, kept as a literal since cool-state can't see
+                // cool-agent's constant) name refs in the source session's
+                // working tree; on the fork they either don't resolve or
+                // would restore the wrong tree — strip them.
+                source.extensions.remove("checkpoint_ref");
                 copied.push(source);
             }
         }
@@ -723,8 +729,13 @@ impl DurableStore {
     /// so the next prompt builds history from exactly the retained prefix.
     ///
     /// Rejects with `RewindRejected` when any run is still live or nothing
-    /// sits beyond the cursor. The returned `checkpoint_ref` is the newest
-    /// filesystem checkpoint recorded in the retained events (P2.18).
+    /// sits beyond the cursor. The returned `checkpoint_ref` is the
+    /// pre-dispatch snapshot of the FIRST mutating call beyond the cursor —
+    /// the workspace state the retained prefix ended in (P2.18).
+    ///
+    /// Only events in runs that are not already `rewound` feed the retained
+    /// prefix or the checkpoint scan, so a second rewind can neither copy
+    /// previously discarded history nor select a superseded checkpoint.
     pub fn rewind_session(
         &self,
         actor_id: &str,
@@ -760,8 +771,9 @@ impl DurableStore {
         if owner != actor_id {
             return Err(StoreError::ActorMismatch);
         }
-        let mut runs_statement = transaction
-            .prepare("SELECT id, status FROM rust_runs WHERE session_id = ?1 ORDER BY rowid")?;
+        let mut runs_statement = transaction.prepare(
+            "SELECT id, status FROM rust_runs WHERE session_id = ?1 AND status != 'rewound' ORDER BY rowid",
+        )?;
         let runs = runs_statement
             .query_map([session_id], |row| {
                 Ok((
@@ -779,7 +791,7 @@ impl DurableStore {
         let cursor_i64 = to_cursor.min(i64::MAX as u64) as i64;
         let beyond: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-             WHERE r.session_id = ?1 AND e.rowid > ?2",
+             WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid > ?2",
             params![session_id, cursor_i64],
             |row| row.get(0),
         )?;
@@ -788,14 +800,35 @@ impl DurableStore {
         }
         let run_id = format!("run-{}", Uuid::new_v4());
         let now = timestamp();
-        // Collect the retained history prefix and the newest checkpoint ref
-        // inside it before superseding the source runs.
+        // Collect the retained history prefix before superseding the source
+        // runs. The workspace checkpoint is the pre-dispatch snapshot of the
+        // FIRST mutating call beyond the cursor — restoring it returns the
+        // tree to the state the retained prefix ended in, which keeps changes
+        // made by calls whose results are retained (their pre-dispatch
+        // snapshot would discard them) and still undoes the first discarded
+        // mutation when the cursor sits before it.
         let mut copied = Vec::new();
         let mut checkpoint_ref: Option<String> = None;
         {
             let mut statement = transaction.prepare(
                 "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-                 WHERE r.session_id = ?1 AND e.rowid <= ?2 ORDER BY r.rowid, e.seq",
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid <= ?2 ORDER BY r.rowid, e.seq",
+            )?;
+            let rows = statement.query_map(params![session_id, cursor_i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                if !is_history_event(&source.event) {
+                    continue;
+                }
+                copied.push(source);
+            }
+        }
+        {
+            let mut statement = transaction.prepare(
+                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid > ?2 ORDER BY e.rowid",
             )?;
             let rows = statement.query_map(params![session_id, cursor_i64], |row| {
                 row.get::<_, String>(0)
@@ -806,11 +839,8 @@ impl DurableStore {
                     && let Some(value) = value.as_str()
                 {
                     checkpoint_ref = Some(value.to_owned());
+                    break;
                 }
-                if !is_history_event(&source.event) {
-                    continue;
-                }
-                copied.push(source);
             }
         }
         let rewound_run_ids: Vec<String> = runs.iter().map(|(id, _)| id.clone()).collect();

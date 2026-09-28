@@ -87,27 +87,39 @@ pub async fn snapshot_before_tool(
         .session_id
         .clone()
         .unwrap_or_else(|| "workspace".to_owned());
-    let is_git = context
-        .workspace
-        .dir()
-        .metadata(".git")
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false);
+    let is_git = context.workspace.dir().metadata(".git").is_ok();
+    // `seq` is per run — two runs of the same session produce the same
+    // ToolRequested seq — so the ref/path is keyed by seq+call_id to keep
+    // refs a second run writes from silently retargeting an older run's
+    // recorded checkpoint.
+    let safe_call_id: String = call_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let checkpoint_key = format!("{call_seq}-{safe_call_id}");
     if is_git {
-        git_snapshot(context, &session, call_id, call_seq)
+        git_snapshot(context, &session, call_id, &checkpoint_key)
             .await
             .map(Some)
     } else {
-        manifest_snapshot(context, tool_name, call_id, call_seq, arguments).map(Some)
+        manifest_snapshot(context, tool_name, call_id, &checkpoint_key, arguments).map(Some)
     }
 }
 
 /// Restore the workspace to `checkpoint_ref`. Git restores run
-/// `read-tree`/`checkout-index` on the workspace index — destructive to the
-/// working tree by design, and left in place: files the run created after
-/// the checkpoint (untracked paths) are NOT removed. Manifest restores
-/// rewrite the recorded files; a non-restorable manifest (pre-`shell`/
-/// `git` snapshot) is a hard error.
+/// `read-tree`/`checkout-index` against a private index under
+/// `.cool/checkpoints/` — the user's index and refs are never touched, so
+/// staged changes survive a rewind; the working tree itself is overwritten
+/// by design and files created after the checkpoint are removed (`git clean`
+/// on the private index, keeping `.cool` and gitignored paths). Manifest
+/// restores rewrite the recorded files; a non-restorable manifest
+/// (pre-`shell`/`git` snapshot) is a hard error.
 pub async fn restore_checkpoint(
     workspace: &Workspace,
     launcher: &Arc<dyn ProcessLauncher>,
@@ -117,12 +129,26 @@ pub async fn restore_checkpoint(
     if let Some(manifest_path) = checkpoint_ref.strip_prefix(MANIFEST_PREFIX) {
         return restore_manifest(workspace, manifest_path);
     }
+    if !checkpoint_ref.starts_with(GIT_REF_PREFIX) {
+        return Err(format!(
+            "unrecognized checkpoint ref '{checkpoint_ref}' (expected {GIT_REF_PREFIX}/…)"
+        ));
+    }
+    workspace
+        .dir()
+        .create_dir_all(INDEX_DIR)
+        .map_err(|error| format!("checkpoint index dir: {error}"))?;
+    let index_path = workspace.root().join(INDEX_DIR).join("restore-index");
+    let _ = workspace
+        .dir()
+        .remove_file(format!("{INDEX_DIR}/restore-index"));
+    let index_env = [("GIT_INDEX_FILE".to_owned(), plain_path(&index_path))];
     run_plumbing(
         workspace,
         launcher,
         environment,
         &["read-tree", checkpoint_ref],
-        &[],
+        &index_env,
     )
     .await?;
     run_plumbing(
@@ -130,7 +156,18 @@ pub async fn restore_checkpoint(
         launcher,
         environment,
         &["checkout-index", "-a", "-f"],
-        &[],
+        &index_env,
+    )
+    .await?;
+    // Files created after the checkpoint are untracked relative to the
+    // restored index — remove them so the tree matches the checkpoint,
+    // but keep gitignored content (build outputs) and our own .cool state.
+    run_plumbing(
+        workspace,
+        launcher,
+        environment,
+        &["clean", "-fd", "-e", ".cool"],
+        &index_env,
     )
     .await?;
     Ok(())
@@ -142,7 +179,7 @@ async fn git_snapshot(
     context: &ToolContext,
     session_id: &str,
     call_id: &str,
-    call_seq: u64,
+    checkpoint_key: &str,
 ) -> Result<String, String> {
     let workspace = &context.workspace;
     workspace
@@ -167,8 +204,20 @@ async fn git_snapshot(
         .dir()
         .remove_file(format!("{INDEX_DIR}/index-{safe_call_id}"));
     let index_env = [("GIT_INDEX_FILE".to_owned(), plain_path(&index_path))];
+    // Seed the private index from HEAD so already-tracked files stay
+    // tracked — including paths a later `.gitignore` entry covers, which
+    // `add -A` on an empty index would silently skip. No HEAD (unborn
+    // branch) starts the index empty; that failure is ignored.
+    let _ = run_plumbing(
+        workspace,
+        &context.launcher,
+        &context.environment,
+        &["read-tree", "HEAD"],
+        &index_env,
+    )
+    .await;
     // `:(exclude).cool` keeps the runtime's own spill/checkpoint state out
-    // of the snapshot; .gitignore still applies to everything else.
+    // of the snapshot; .gitignore still applies to untracked files.
     run_plumbing(
         workspace,
         &context.launcher,
@@ -194,7 +243,7 @@ async fn git_snapshot(
     )
     .await
     .ok();
-    let reference = format!("{GIT_REF_PREFIX}/{session_id}/{call_seq}");
+    let reference = format!("{GIT_REF_PREFIX}/{session_id}/{checkpoint_key}");
     let mut commit_args = vec!["commit-tree".to_owned(), tree];
     if let Some(head) = head.as_ref().filter(|head| !head.is_empty()) {
         commit_args.push("-p".to_owned());
@@ -270,11 +319,11 @@ fn manifest_snapshot(
     context: &ToolContext,
     tool_name: &str,
     call_id: &str,
-    call_seq: u64,
+    checkpoint_key: &str,
     arguments: &Map<String, Value>,
 ) -> Result<String, String> {
     let dir = context.workspace.dir();
-    let snapshot_dir = format!("{SNAPSHOT_DIR}/{call_seq}");
+    let snapshot_dir = format!("{SNAPSHOT_DIR}/{checkpoint_key}");
     dir.create_dir_all(format!("{snapshot_dir}/files"))
         .map_err(|error| format!("snapshot dir: {error}"))?;
     let restorable = !matches!(tool_name, "shell" | "git");
@@ -313,7 +362,11 @@ fn manifest_snapshot(
     }
     let manifest = SnapshotManifest {
         version: 1,
-        seq: call_seq,
+        seq: checkpoint_key
+            .split('-')
+            .next()
+            .and_then(|seq| seq.parse::<u64>().ok())
+            .unwrap_or_default(),
         call_id: call_id.to_owned(),
         tool: tool_name.to_owned(),
         restorable,

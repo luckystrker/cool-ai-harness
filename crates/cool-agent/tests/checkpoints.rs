@@ -84,7 +84,8 @@ async fn git_snapshot_uses_private_index_and_never_touches_head_or_index() {
     .await
     .unwrap()
     .expect("checkpoint ref");
-    assert_eq!(reference, "refs/cool/checkpoints/session-1/9");
+    // `seq` is per run — the call id disambiguates refs across runs.
+    assert_eq!(reference, "refs/cool/checkpoints/session-1/9-call-1");
 
     // The checkpoint commit exists and HEAD/user index are untouched.
     git(dir.path(), &["rev-parse", "--verify", &reference]);
@@ -128,8 +129,9 @@ async fn git_snapshot_and_restore_roundtrip() {
         std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "v1"
     );
-    // Documented: files created after the checkpoint are left in place.
-    assert!(dir.path().join("created.txt").exists());
+    // Files created after the checkpoint are removed — the tree matches
+    // the checkpoint exactly (gitignored paths and .cool are kept).
+    assert!(!dir.path().join("created.txt").exists());
 }
 
 #[tokio::test]

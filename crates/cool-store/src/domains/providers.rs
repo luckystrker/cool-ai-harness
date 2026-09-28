@@ -175,6 +175,18 @@ impl std::fmt::Debug for ProviderPatch {
     }
 }
 
+/// `auth_kind` is a closed vocabulary (`api_key` | `oauth`) — a misspelled
+/// value must fail closed at the store boundary rather than disabling
+/// authentication handling for the row.
+fn validate_auth_kind(auth_kind: &str) -> Result<(), StoreError> {
+    match auth_kind {
+        "api_key" | "oauth" => Ok(()),
+        other => Err(StoreError::InvalidInput(format!(
+            "unsupported auth_kind '{other}' (expected api_key|oauth)"
+        ))),
+    }
+}
+
 fn fetch_provider(
     connection: &Connection,
     user_id: i64,
@@ -216,6 +228,9 @@ impl crate::LegacyStore {
         actor_id: &str,
         new: &NewProvider,
     ) -> Result<Provider, StoreError> {
+        if let Some(auth_kind) = new.auth_kind.as_deref() {
+            validate_auth_kind(auth_kind)?;
+        }
         let connection = self.connection()?;
         let user_id = user_id_for(&connection, actor_id)?;
         let timestamp = now_python();
@@ -250,6 +265,9 @@ impl crate::LegacyStore {
         provider_id: i64,
         patch: &ProviderPatch,
     ) -> Result<Provider, StoreError> {
+        if let Some(auth_kind) = patch.auth_kind.as_deref() {
+            validate_auth_kind(auth_kind)?;
+        }
         let connection = self.connection()?;
         let user_id = user_id_for(&connection, actor_id)?;
         fetch_provider(&connection, user_id, provider_id)?

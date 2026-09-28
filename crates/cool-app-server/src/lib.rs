@@ -1570,7 +1570,7 @@ impl AppServer {
                         }
                         None => {
                             restore_error = Some(
-                                "no filesystem checkpoint recorded at or before the cursor"
+                                "no mutating-tool checkpoint beyond the cursor — nothing to undo"
                                     .to_owned(),
                             );
                         }
@@ -1619,6 +1619,28 @@ impl AppServer {
                         return;
                     }
                 }
+                let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+                    let _ = self
+                        .send(
+                            &outbound,
+                            failure(id, error(-32010, "legacy_store_unavailable", false)),
+                        )
+                        .await;
+                    return;
+                };
+                // The conversation must exist and belong to the actor before
+                // ANY link is written — the bind path below must not attach a
+                // session to a foreign or nonexistent conversation id.
+                let conversation = match legacy.get_conversation(&actor.id, params.conversation_id)
+                {
+                    Ok(conversation) => conversation,
+                    Err(error) => {
+                        let _ = self
+                            .send(&outbound, failure(id, legacy::store_error(error)))
+                            .await;
+                        return;
+                    }
+                };
                 // Fork flow: bind an existing actor-owned session to the
                 // conversation instead of creating one and importing the
                 // legacy transcript.
@@ -1636,25 +1658,6 @@ impl AppServer {
                     let _ = self.send(&outbound, frame).await;
                     return;
                 }
-                let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32010, "legacy_store_unavailable", false)),
-                        )
-                        .await;
-                    return;
-                };
-                let conversation = match legacy.get_conversation(&actor.id, params.conversation_id)
-                {
-                    Ok(conversation) => conversation,
-                    Err(error) => {
-                        let _ = self
-                            .send(&outbound, failure(id, legacy::store_error(error)))
-                            .await;
-                        return;
-                    }
-                };
                 let window = match legacy.recent_messages(
                     &actor.id,
                     params.conversation_id,
@@ -3495,25 +3498,27 @@ impl AppServer {
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(workspace.clone(), server.merged_policy())
-                    .with_actor(local_actor().id)
-                    .with_launcher(server.inner.config.host.launcher.clone())
-                    .with_environment(server.inner.config.host.environment.clone())
-                    .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
-                    .with_rule_source(server.rule_source(&workspace))
-                    .with_session_id(run.session_id.clone())
-                    .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
-                        server: server.clone(),
-                    }))
-                    .with_conversation(
-                        server
-                            .inner
-                            .store
-                            .conversation_id_for_session(&local_actor().id, &run.session_id)
-                            .ok()
-                            .flatten(),
-                    )
-                    .with_question_gate(approvals.clone()),
+                tool_context: {
+                    let conversation_id = server
+                        .inner
+                        .store
+                        .conversation_id_for_session(&local_actor().id, &run.session_id)
+                        .ok()
+                        .flatten();
+                    ToolContext::new(workspace.clone(), server.merged_policy())
+                        .with_actor(local_actor().id)
+                        .with_launcher(server.inner.config.host.launcher.clone())
+                        .with_environment(server.inner.config.host.environment.clone())
+                        .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                        .with_rule_source(server.rule_source(&workspace))
+                        .with_session_id(run.session_id.clone())
+                        .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                            server: server.clone(),
+                            conversation_id,
+                        }))
+                        .with_conversation(conversation_id)
+                        .with_question_gate(approvals.clone())
+                },
             };
             let lifecycle_sink =
                 server
@@ -4358,7 +4363,18 @@ impl AppServer {
         Ok(ExpandedContent {
             text: out,
             model_parts,
-            replay_parts: parts.to_vec(),
+            // The extension replays the prompt — its text parts must carry
+            // the same secret masking as the durable content, not the raw
+            // input.
+            replay_parts: parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => ContentPart::Text {
+                        text: mask_secrets(text),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
         })
     }
 
@@ -4854,60 +4870,18 @@ struct LifecycleEventSink {
 #[async_trait]
 impl EventSink for LifecycleEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
-        let payload = lifecycle_payload(&event);
-        match &event {
-            CanonicalEvent::RunStarted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SessionStart", payload.clone()).await;
-                self.dispatch(
-                    "UserPromptSubmit",
-                    serde_json::json!({"content": self.prompt}),
-                )
-                .await;
-                Ok(envelope)
-            }
-            CanonicalEvent::ToolStarted(_) => {
-                self.dispatch("PreToolUse", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolApprovalRequired(_) => {
-                self.dispatch("PermissionRequest", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::SessionCompacted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostCompact", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentStarted(_) => {
-                self.dispatch("SubagentStart", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostToolUse", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SubagentStop", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::RunCompleted(_)
-            | CanonicalEvent::RunFailed(_)
-            | CanonicalEvent::RunCancelled(_) => {
-                if self.terminal_already_recorded() {
-                    return self.inner.emit(event).await;
-                }
-                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
-                let envelope = self.inner.emit(event).await?;
-                let hook = if cancelled { "Interrupt" } else { "Stop" };
-                self.dispatch(hook, payload.clone()).await;
-                self.dispatch("SessionEnd", payload).await;
-                Ok(envelope)
-            }
-            _ => self.inner.emit(event).await,
-        }
+        self.emit_routed(event, None).await
+    }
+
+    /// Lifecycle hooks fire on the same routing as `emit`; envelope
+    /// extensions (checkpoint refs, replay parts) must reach the persisting
+    /// sink rather than being dropped by the trait default.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_routed(event, Some(extensions)).await
     }
 
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
@@ -4941,6 +4915,78 @@ impl EventSink for LifecycleEventSink {
 }
 
 impl LifecycleEventSink {
+    async fn forward(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        match extensions {
+            Some(extensions) => self.inner.emit_with_extensions(event, extensions).await,
+            None => self.inner.emit(event).await,
+        }
+    }
+
+    async fn emit_routed(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let payload = lifecycle_payload(&event);
+        match &event {
+            CanonicalEvent::RunStarted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SessionStart", payload.clone()).await;
+                self.dispatch(
+                    "UserPromptSubmit",
+                    serde_json::json!({"content": self.prompt}),
+                )
+                .await;
+                Ok(envelope)
+            }
+            CanonicalEvent::ToolStarted(_) => {
+                self.dispatch("PreToolUse", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolApprovalRequired(_) => {
+                self.dispatch("PermissionRequest", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::SessionCompacted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostCompact", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentStarted(_) => {
+                self.dispatch("SubagentStart", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostToolUse", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SubagentStop", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::RunCompleted(_)
+            | CanonicalEvent::RunFailed(_)
+            | CanonicalEvent::RunCancelled(_) => {
+                if self.terminal_already_recorded() {
+                    return self.forward(event, extensions).await;
+                }
+                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
+                let envelope = self.forward(event, extensions).await?;
+                let hook = if cancelled { "Interrupt" } else { "Stop" };
+                self.dispatch(hook, payload.clone()).await;
+                self.dispatch("SessionEnd", payload).await;
+                Ok(envelope)
+            }
+            _ => self.forward(event, extensions).await,
+        }
+    }
+
     async fn dispatch(&self, event: &str, payload: serde_json::Value) {
         let events = self.lifecycle.on_event(event, payload, &self.policy).await;
         for lifecycle_event in events {
@@ -5012,10 +5058,13 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
 }
 
 /// P2.12: resolves artifact ids to `(media_type, bytes)` for multimodal
-/// tools and prompt expansion — `BlobStore`-backed, actor-scoped.
+/// tools and prompt expansion — `BlobStore`-backed, scoped to the
+/// conversation the run is bound to (same rule as prompt attachments;
+/// without a linked conversation reads fail closed).
 #[derive(Clone)]
 struct ServerArtifactReader {
     server: AppServer,
+    conversation_id: Option<i64>,
 }
 
 impl std::fmt::Debug for ServerArtifactReader {
@@ -5029,10 +5078,19 @@ impl cool_agent::ArtifactReader for ServerArtifactReader {
         let artifact_id: i64 = artifact_id
             .parse()
             .map_err(|_| format!("invalid artifact id '{artifact_id}'"))?;
+        let Some(legacy) = self.server.inner.config.legacy_store.as_deref() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let artifact = legacy
+            .get_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        if Some(artifact.conversation_id) != self.conversation_id {
+            return Err(format!("artifact {artifact_id}: not in this conversation"));
+        }
         let Some(blobs) = self.server.blob_store() else {
             return Err("artifact store unavailable".to_owned());
         };
-        let (artifact, body) = blobs
+        let (_, body) = blobs
             .read_artifact(&local_actor().id, artifact_id)
             .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
         Ok((artifact.media_type, body))
@@ -7066,8 +7124,37 @@ impl AppServer {
                 masked_detail_error(-32036, oauth_error.code, &oauth_error.message),
             );
         }
+        if let Some(uri) = params.redirect_uri.as_deref()
+            && !oauth::redirect_uri_allowed(&flow, uri)
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32037,
+                    "oauth_redirect_invalid",
+                    "redirect_uri must be the flow's manual callback or an http://localhost|127.0.0.1 loopback URI",
+                ),
+            );
+        }
         let pkce = oauth::pkce_pair();
         let state = flow.state(&pkce);
+        // Without an explicit redirect_uri the flow must have a usable
+        // default — a fixed loopback port or a manual callback. Otherwise the
+        // authorize URL would carry a literal `:0` placeholder no provider
+        // accepts: tell the caller to bind its own loopback listener.
+        if params.redirect_uri.is_none()
+            && flow.loopback_port.is_none()
+            && flow.manual_redirect.is_none()
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32038,
+                    "oauth_redirect_required",
+                    "provider has no default callback — bind a loopback listener and pass redirect_uri",
+                ),
+            );
+        }
         // Claude defaults to Anthropic's manual paste-the-code callback — the
         // only redirect verified against the console app. Callers that bound
         // their own listener pass `redirect_uri` explicitly.

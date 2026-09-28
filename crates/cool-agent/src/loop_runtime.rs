@@ -870,10 +870,13 @@ impl AgentRuntime {
             runnable.push((index, call, tool));
         }
         let mut join_set = JoinSet::new();
+        // P2.18: pre-dispatch filesystem checkpoints run for EVERY mutating
+        // call before any tool in the batch starts — otherwise a spawned
+        // call's in-flight writes would land in a later call's "pre-dispatch"
+        // snapshot (torn checkpoint). A failed snapshot never blocks the
+        // call — the error lands on ToolStarted.extensions.checkpoint_error.
+        let mut prepared = Vec::with_capacity(runnable.len());
         for (index, call, tool) in runnable {
-            // P2.18: pre-dispatch filesystem checkpoint for mutating tools.
-            // A failed snapshot never blocks the call — the error lands on
-            // ToolStarted.extensions.checkpoint_error instead.
             let mut extensions = Extensions::new();
             match crate::checkpoints::snapshot_before_tool(
                 context,
@@ -906,6 +909,9 @@ impl AgentRuntime {
                 extensions,
             )
             .await?;
+            prepared.push((index, call, tool));
+        }
+        for (index, call, tool) in prepared {
             let mut context = context.clone();
             context.cancel = Some(cancel.clone());
             context.call_id = Some(call.call_id.clone());
