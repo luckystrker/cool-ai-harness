@@ -1,5 +1,5 @@
 use cool_agent::{ToolContext, builtin_registry};
-use cool_security::{CapabilityPolicy, Decision, Workspace};
+use cool_security::{Capability, CapabilityPolicy, Decision, Workspace};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -402,6 +402,69 @@ async fn combined_process_output_respects_the_shared_cap() {
     let spill_path = result.output["stderrSpillPath"].as_str().unwrap();
     let spill = std::fs::read(directory.path().join(spill_path)).unwrap();
     assert_eq!(spill.len(), 4096);
+}
+
+/// Reused call ids must not let one spill overwrite another.
+#[tokio::test]
+async fn spill_filenames_are_unique_per_call() {
+    let directory = tempdir().unwrap();
+    write(directory.path(), "out.txt", vec![b'o'; 4096].as_slice());
+    let registry = builtin_registry();
+    let mut context = context(directory.path());
+    context.allow_trusted_host_processes = true;
+    context.max_output_bytes = 512;
+    context.timeout = std::time::Duration::from_secs(120);
+    context.call_id = Some("reused-id".to_owned());
+    let shell = registry.get("shell").unwrap();
+    let mut paths = Vec::new();
+    for _ in 0..2 {
+        #[cfg(windows)]
+        let arguments = json!({"program": "cmd.exe", "args": ["/D", "/C", "type out.txt"]});
+        #[cfg(not(windows))]
+        let arguments = json!({"program": "/bin/sh", "args": ["-c", "cat out.txt"]});
+        let result = shell.execute(&context, arguments).await.unwrap();
+        paths.push(
+            result.output["stdoutSpillPath"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_ne!(paths[0], paths[1], "reused call_id must not collide");
+    for path in &paths {
+        assert!(directory.path().join(path).exists(), "missing {path}");
+    }
+}
+
+/// A read-only tool must not write spill files when the run's policy denies
+/// Write — the truncated result stays in-band with a marker instead.
+#[tokio::test]
+async fn read_only_tool_skips_spill_when_write_is_denied() {
+    let directory = tempdir().unwrap();
+    let mut content = String::new();
+    for index in 0..200 {
+        content.push_str(&format!("needle line {index}\n"));
+    }
+    write(directory.path(), "dense.txt", content.as_bytes());
+    let registry = builtin_registry();
+    let mut context = context(directory.path());
+    context.max_output_bytes = 512;
+    context.policy.set(Capability::Write, Decision::Deny);
+    let search = registry.get("search_files").unwrap();
+    let result = search
+        .execute(&context, json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    assert!(result.truncated);
+    assert_eq!(
+        result.output["spillSkipped"],
+        "Write capability denied by policy"
+    );
+    assert!(result.output.get("spillPath").is_none());
+    assert!(
+        !directory.path().join(".cool").exists(),
+        "denied spill must not create .cool/"
+    );
 }
 
 /// A stream larger than the 10MB spill cap still keeps its true ending: the

@@ -665,14 +665,16 @@ fn spill_stem(context: &ToolContext) -> String {
 }
 
 /// Persist a capped copy of an over-cap body beneath `.cool/spill/` and return
-/// its workspace-relative path.
+/// its workspace-relative path. The uuid suffix keeps filenames unique when a
+/// sanitized call_id repeats across calls or runs.
 fn spill_output(
     context: &ToolContext,
     stem: &str,
     label: &str,
     bytes: &[u8],
 ) -> Result<String, ToolError> {
-    let relative = Path::new(SPILL_DIR).join(format!("{stem}-{label}.txt"));
+    let suffix = &Uuid::new_v4().simple().to_string()[..8];
+    let relative = Path::new(SPILL_DIR).join(format!("{stem}-{label}-{suffix}.txt"));
     if let Some(parent) = relative.parent() {
         context
             .workspace
@@ -740,25 +742,32 @@ fn bound_result(
         return Ok((output, false));
     }
     output["truncated"] = json!(true);
-    for key in ["matches", "paths"] {
-        if output.get(key).and_then(Value::as_array).is_none() {
-            continue;
+    // Only read-only tools reach this path; a spill write is a Write-effect,
+    // so the policy's Write decision gates it.
+    if context.policy.resolve(Capability::Write) == Decision::Allow {
+        for key in ["matches", "paths"] {
+            if output.get(key).and_then(Value::as_array).is_none() {
+                continue;
+            }
+            while serialized > SPILL_FILE_MAX_BYTES
+                && output[key].as_array().is_some_and(|list| !list.is_empty())
+            {
+                let list = output[key].as_array_mut().unwrap();
+                let drop = (serialized - SPILL_FILE_MAX_BYTES)
+                    / (serialized / list.len().max(1)).max(1)
+                    + 1;
+                list.truncate(list.len().saturating_sub(drop));
+                serialized = serialize(&output)?;
+            }
+            break;
         }
-        while serialized > SPILL_FILE_MAX_BYTES
-            && output[key].as_array().is_some_and(|list| !list.is_empty())
-        {
-            let list = output[key].as_array_mut().unwrap();
-            let drop =
-                (serialized - SPILL_FILE_MAX_BYTES) / (serialized / list.len().max(1)).max(1) + 1;
-            list.truncate(list.len().saturating_sub(drop));
-            serialized = serialize(&output)?;
-        }
-        break;
+        let bytes = serde_json::to_vec(&output)
+            .map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
+        let spill_path = spill_output(context, stem, "results", &bytes)?;
+        output["spillPath"] = json!(spill_path);
+    } else {
+        output["spillSkipped"] = json!("Write capability denied by policy");
     }
-    let bytes =
-        serde_json::to_vec(&output).map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
-    let spill_path = spill_output(context, stem, "results", &bytes)?;
-    output["spillPath"] = json!(spill_path);
     for key in ["matches", "paths"] {
         if output.get(key).and_then(Value::as_array).is_none() {
             continue;
@@ -1240,6 +1249,10 @@ async fn run_bounded_process(
     let stderr = stderr_task
         .await
         .map_err(|error| ToolError::Io(std::io::Error::other(error)))??;
+    // Whether the stream itself was cut at the capture cap — independent of
+    // the output budget, so `truncated` stays honest at larger budgets.
+    let stdout_cut = stdout.truncated();
+    let stderr_cut = stderr.truncated();
     let mut stdout = String::from_utf8_lossy(&stdout.body()).into_owned();
     let mut stderr = String::from_utf8_lossy(&stderr.body()).into_owned();
     for secret in secret_values {
@@ -1256,12 +1269,18 @@ async fn run_bounded_process(
     });
     let mut truncated = false;
     // stdout and stderr share the output budget — each stream spills to
-    // `.cool/spill/` when it would push the combined body over the cap.
+    // `.cool/spill/` when it would push the combined body over the cap. A
+    // stream already cut at the capture cap reports truncated even when the
+    // head/marker/tail body fits in-band.
     let mut budget = context.max_output_bytes;
-    for (stream, body) in [("stdout", &stdout), ("stderr", &stderr)] {
+    for (stream, body, cut) in [
+        ("stdout", &stdout, stdout_cut),
+        ("stderr", &stderr, stderr_cut),
+    ] {
         if body.len() <= budget {
             budget -= body.len();
             output[stream] = json!(body);
+            truncated |= cut;
             continue;
         }
         let spill_path = spill_output(context, &stem, stream, body.as_bytes())?;
