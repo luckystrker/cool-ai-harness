@@ -3212,7 +3212,7 @@ impl AppServer {
             input.push_str(
                 "[Task progress file — preserve this tracked state verbatim in the summary]\n",
             );
-            input.push_str(&progress);
+            input.push_str(&mask_secrets(&progress));
             input.push_str("\n\n");
         }
         input.push_str(transcript);
@@ -4381,10 +4381,10 @@ impl EventSink for AppServerEventSink {
                 covered = covered.max(compacted.compact_up_to_cursor.unwrap_or(0));
             }
         }
-        // `dropped` also contains messages a previous compaction already
-        // covered plus prior synthetic summaries (which have no backing
-        // event); only count the messages newer than `covered`, or a second
-        // compaction would move the cursor past turns the summary never saw.
+        // `dropped` maps to message-producing events in order. A replayed —
+        // or already compacted live — history starts after `covered` (its
+        // prefix was replaced by synthetic summaries), while an uncompacted
+        // live history still contains those messages itself.
         let produces_message = |envelope: &EventEnvelope| {
             matches!(
                 &envelope.event,
@@ -4395,28 +4395,29 @@ impl EventSink for AppServerEventSink {
                 CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
             )
         };
-        let already_covered = rows
+        let message_cursors: Vec<u64> = rows
             .iter()
-            .filter(|(cursor, envelope)| *cursor <= covered && produces_message(envelope))
+            .filter(|(_, envelope)| produces_message(envelope))
+            .map(|(cursor, _)| *cursor)
+            .collect();
+        let already_covered = message_cursors
+            .iter()
+            .filter(|cursor| **cursor <= covered)
             .count();
         let synthetic = dropped
             .iter()
             .filter(|message| is_summary_message(message))
             .count();
-        let mut remaining = dropped.len().saturating_sub(already_covered + synthetic);
-        let mut covered_cursor = None;
-        for (cursor, envelope) in &rows {
-            if remaining == 0 {
-                break;
-            }
-            if *cursor <= covered || !produces_message(envelope) {
-                continue;
-            }
-            remaining -= 1;
-            if remaining == 0 {
-                covered_cursor = Some(*cursor);
-            }
-        }
+        let nonsynthetic = dropped.len().saturating_sub(synthetic);
+        let post_covered = message_cursors.len().saturating_sub(already_covered);
+        let needed = if synthetic > 0 && nonsynthetic <= post_covered {
+            nonsynthetic + already_covered
+        } else {
+            nonsynthetic
+        };
+        let covered_cursor = needed
+            .checked_sub(1)
+            .and_then(|index| message_cursors.get(index).copied());
         let mut transcript = String::new();
         for message in dropped {
             let role = match message.role {

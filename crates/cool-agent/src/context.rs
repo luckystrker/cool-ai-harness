@@ -270,7 +270,7 @@ pub fn compact_history(
     });
     let available = max_tokens.saturating_sub(system_tokens);
 
-    if let Some(summary) = summary.filter(|_| groups.len() > COMPACTION_KEEP_LAST_GROUPS) {
+    if let Some(summary) = summary.filter(|_| groups.len() > 1) {
         // Bound the injected summary inside the same reserve the candidate
         // selection used, so the retained set `summary_drop_candidates`
         // chose stays accurate (the 8-token slack covers estimate overhead).

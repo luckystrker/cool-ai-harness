@@ -1125,10 +1125,35 @@ impl ToolHandler for EditFile {
             None => false,
         };
         let edits = parse_edits(&arguments)?;
-        let path = workspace_path(context, requested)?;
+        let mut path = workspace_path(context, requested)?;
 
+        // Follow a symlink to its in-workspace target: writing through a
+        // temp file + rename would replace the link itself and leave the
+        // linked file untouched. `read_link` rejects absolute targets.
+        if let Ok(link_metadata) = context.workspace.dir().symlink_metadata(&path)
+            && link_metadata.file_type().is_symlink()
+        {
+            let target = context
+                .workspace
+                .dir()
+                .read_link(&path)
+                .map_err(confinement_io)?;
+            let resolved = match path.parent() {
+                Some(parent) => parent.join(target),
+                None => target,
+            };
+            path = workspace_path(
+                context,
+                resolved.to_str().ok_or_else(|| {
+                    ToolError::InvalidArguments("symlink target is not a valid path".to_owned())
+                })?,
+            )?;
+        }
+
+        let mut original_permissions = None;
         let before = match context.workspace.dir().metadata(&path) {
             Ok(metadata) if metadata.is_file() => {
+                original_permissions = Some(metadata.permissions());
                 let mut text = String::new();
                 use std::io::Read as _;
                 context
@@ -1213,8 +1238,7 @@ impl ToolHandler for EditFile {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| ToolError::InvalidArguments("path must name a file".to_owned()))?;
-        let tmp_path =
-            path.with_file_name(format!(".{file_name}.cool-edit-{}", std::process::id()));
+        let tmp_path = path.with_file_name(format!(".{file_name}.cool-edit-{}", Uuid::new_v4()));
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         use std::io::Write as _;
@@ -1230,7 +1254,18 @@ impl ToolHandler for EditFile {
                 .workspace
                 .dir()
                 .rename(&tmp_path, context.workspace.dir(), &path)
-                .map_err(confinement_io)
+                .map_err(confinement_io)?;
+            // The temp file's fresh inode carries default permissions —
+            // restore the original mode so editing a private file does not
+            // make it world-readable.
+            if let Some(permissions) = original_permissions.clone() {
+                context
+                    .workspace
+                    .dir()
+                    .set_permissions(&path, permissions)
+                    .map_err(confinement_io)?;
+            }
+            Ok(())
         })();
         if let Err(error) = write_result {
             let _ = context.workspace.dir().remove_file(&tmp_path);
@@ -1241,7 +1276,11 @@ impl ToolHandler for EditFile {
         let diff = unified_diff(requested, before.as_deref().unwrap_or(""), &after);
         let diff_truncated = diff.len() > DIFF_LIMIT;
         let diff = if diff_truncated {
-            let cut = diff[..DIFF_LIMIT].rfind('\n').unwrap_or(DIFF_LIMIT);
+            let mut boundary = DIFF_LIMIT;
+            while !diff.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            let cut = diff[..boundary].rfind('\n').unwrap_or(boundary);
             format!("{}\n… diff truncated", &diff[..cut])
         } else {
             diff

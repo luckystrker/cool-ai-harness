@@ -1444,3 +1444,121 @@ fn summary_candidates_cover_groups_that_overflow_the_retained_budget() {
     assert_eq!(compacted.messages.len(), 3);
     assert_eq!(compacted.messages[2].content.as_deref(), Some(big.as_str()));
 }
+
+#[test]
+fn compact_history_uses_summary_even_with_four_or_fewer_groups() {
+    let big = "x".repeat(8_000);
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "sys"),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+        Message::text(cool_agent::MessageRole::User, big.clone()),
+    ];
+    // Four ~2000-token groups do not all fit the retained budget, so the
+    // older ones are dropped — with the summary, not silently.
+    let compacted = cool_agent::compact_history(&history, 4_000, Some("digest".to_owned()));
+    assert_eq!(compacted.summary.as_deref(), Some("digest"));
+    assert_eq!(compacted.dropped_messages, 3);
+    assert!(
+        compacted
+            .messages
+            .iter()
+            .any(cool_agent::is_summary_message)
+    );
+}
+
+#[tokio::test]
+async fn synthetic_summary_does_not_suppress_the_system_prompt() {
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("answer".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    // A replayed history starts with the synthetic summary — the configured
+    // system prompt must still land first.
+    let mut request = request(directory.path());
+    request.history = vec![
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nprior digest",
+        ),
+        Message::text(cool_agent::MessageRole::User, "earlier turn"),
+    ];
+    runtime
+        .run(
+            request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let messages = &requests[0].messages;
+    assert_eq!(messages[0].role, cool_agent::MessageRole::System);
+    assert!(
+        messages[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with("be precise"),
+        "the configured system prompt must not be suppressed by the summary"
+    );
+    assert!(messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("[Summary of earlier work]"))
+    }));
+}
+
+#[tokio::test]
+async fn long_task_mode_masks_secrets_in_the_progress_file() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join(".cool/task")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/task/progress.md"),
+        "## Done\n- scaffolded\n## Next\n- deploy with password: hunter2hunter2\n## Acceptance criteria\n- ci green\n",
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("resumed".to_owned()),
+        ModelEvent::Finish {
+            reason: Some("stop".to_owned()),
+        },
+    ])]));
+    let runtime = scripted_answer(&provider);
+    let sink = RecordingSink::default();
+    let (_, cancel) = CancelSignal::channel();
+    let mut long_request = request(directory.path());
+    long_request.mode = Some("long_task".to_owned());
+    runtime
+        .run(
+            long_request,
+            &sink,
+            &AutoApprovalGate {
+                outcome: ApprovalOutcome::Approved,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests().await;
+    let system = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == cool_agent::MessageRole::System)
+        .unwrap();
+    let content = system.content.clone().unwrap_or_default();
+    assert!(content.contains("[TASK PROGRESS"));
+    assert!(!content.contains("hunter2hunter2"));
+    assert!(content.contains("[REDACTED]"));
+}

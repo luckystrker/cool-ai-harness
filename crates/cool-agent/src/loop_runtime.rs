@@ -10,7 +10,7 @@ use cool_protocol::{
     SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
     ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
-use cool_security::{Decision, mask_json};
+use cool_security::{Decision, mask_json, mask_secrets};
 use cool_state::{BudgetDelta, DurableStore, StoreError};
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::context::{
-    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
+    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens, is_summary_message,
     load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
@@ -304,17 +304,19 @@ impl AgentRuntime {
         } else {
             request.history
         };
+        // A replayed synthetic compaction summary is also a system message:
+        // it must not suppress or absorb the configured system prompt.
         if let Some(system_prompt) = request.system_prompt.take()
             && !history
                 .iter()
-                .any(|message| message.role == MessageRole::System)
+                .any(|message| message.role == MessageRole::System && !is_summary_message(message))
         {
             history.insert(0, Message::text(MessageRole::System, system_prompt));
         }
         if let Ok(Some(instructions)) = load_project_instructions(&request.tool_context.workspace) {
             if let Some(system) = history
                 .iter_mut()
-                .find(|message| message.role == MessageRole::System)
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
             {
                 let content = system.content.get_or_insert_default();
                 content.push_str("\n\n");
@@ -331,13 +333,14 @@ impl AgentRuntime {
             let section = match load_task_progress(&request.tool_context.workspace) {
                 Ok(Some(progress)) => format!(
                     "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
-                     state and keep the file updated as work proceeds.\n\n{progress}"
+                     state and keep the file updated as work proceeds.\n\n{}",
+                    mask_secrets(&progress)
                 ),
                 _ => LONG_TASK_BOOTSTRAP_SECTION.to_owned(),
             };
             if let Some(system) = history
                 .iter_mut()
-                .find(|message| message.role == MessageRole::System)
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
             {
                 let content = system.content.get_or_insert_default();
                 content.push_str("\n\n");
@@ -404,6 +407,9 @@ impl AgentRuntime {
                 }))
                 .await?;
             }
+            // Continue from the compacted history: the next compaction sees
+            // the synthetic summary instead of the messages it covered.
+            history = compacted.messages;
             let definitions = self
                 .tools
                 .definitions()
@@ -417,7 +423,7 @@ impl AgentRuntime {
                 .collect();
             let model_request = ModelRequest {
                 model: request.model.clone(),
-                messages: compacted.messages,
+                messages: history.clone(),
                 tools: definitions,
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
