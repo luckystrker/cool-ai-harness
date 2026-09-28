@@ -193,6 +193,12 @@ pub enum Command {
     RunSubscribe(RunSubscribeParams),
     #[serde(rename = "approval.resolve")]
     ApprovalResolve(ApprovalResolveParams),
+    #[serde(rename = "policy.rules_list")]
+    PolicyRulesList(PolicyRulesListParams),
+    #[serde(rename = "policy.rule_add")]
+    PolicyRuleAdd(PolicyRuleAddParams),
+    #[serde(rename = "policy.rule_delete")]
+    PolicyRuleDelete(PolicyRuleDeleteParams),
     #[serde(rename = "status.get")]
     StatusGet(StatusGetParams),
     #[serde(rename = "tools.list")]
@@ -693,6 +699,88 @@ pub struct ApprovalResolveParams {
     #[ts(type = "number")]
     pub expected_revision: u64,
     pub decision: ApprovalDecision,
+    /// Persist a rule for the approved call: `"session"` keeps it in memory
+    /// for the run, `"project"` writes `<workspace>/.cool/policy.json`,
+    /// `"user"` stores it in the durable `policy_rules` table.
+    #[serde(default)]
+    pub remember: Option<String>,
+    /// Rule payload for `remember`; when absent the server derives one from
+    /// the tool call (same shape as `ToolApprovalRequired.suggestedRule`).
+    #[serde(default)]
+    pub rule: Option<PolicyRuleRecord>,
+}
+
+/// Wire mirror of `cool_security::PolicyRule` — kept as plain strings so the
+/// protocol crate carries no cool-security dependency.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleRecord {
+    /// Qualified id (`"user:3"`, `"project:1"`, `"session:0"`) for deletes.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Tool name, or `"*"` for every tool.
+    pub tool: String,
+    /// `command` | `path_glob` | `domain` | `any`.
+    pub kind: String,
+    #[serde(default)]
+    pub pattern: String,
+    /// `allow` | `ask` | `deny`.
+    pub decision: String,
+    /// `session` | `project` | `user`.
+    pub scope: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRulesListParams {
+    /// Optional scope filter (`session|project|user`); absent lists all.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Session rules of this run when `scope = "session"`.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRulesListResult {
+    pub rules: Vec<PolicyRuleRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleAddParams {
+    pub rule: PolicyRuleRecord,
+    /// Session rules attach to a live run; required when `scope = "session"`.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleDeleteParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    /// Qualified rule id from `policy.rules_list` (`"user:3"`, `"project:1"`,
+    /// `"session:0"`).
+    pub rule_id: String,
+    /// Required when deleting a `session:` rule.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleDeleteResult {
+    pub deleted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -800,7 +888,7 @@ pub enum CanonicalEvent {
     #[serde(rename = "tool.requested")]
     ToolRequested(ToolRequested),
     #[serde(rename = "tool.approval_required")]
-    ToolApprovalRequired(ToolApprovalRequired),
+    ToolApprovalRequired(Box<ToolApprovalRequired>),
     #[serde(rename = "tool.approval_resolved")]
     ToolApprovalResolved(ToolApprovalResolved),
     #[serde(rename = "tool.started")]
@@ -943,6 +1031,14 @@ pub struct ToolApprovalRequired {
     pub breakpoint_type: Option<String>,
     pub result_preview: Option<String>,
     pub current_content: Option<String>,
+    /// The exec/policy rule that produced this ask (`None` when the ask came
+    /// from the capability fallback).
+    #[serde(default)]
+    pub matched_rule: Option<String>,
+    /// A rule the client can persist via `approval.resolve {remember}` to
+    /// stop prompting for equivalent calls.
+    #[serde(default)]
+    pub suggested_rule: Option<PolicyRuleRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1518,6 +1614,9 @@ pub struct ApprovalResolvedResult {
     #[ts(type = "number")]
     pub revision: u64,
     pub outcome: ApprovalOutcome,
+    /// The persisted rule when the resolve carried `remember` (P1.6).
+    #[serde(default)]
+    pub remembered_rule: Option<PolicyRuleRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1696,6 +1795,9 @@ pub enum ResponsePayload {
     RunCancelled(RunCancelledResult),
     RunSubscribed(RunSubscribedResult),
     ApprovalResolved(ApprovalResolvedResult),
+    PolicyRulesListed(PolicyRulesListResult),
+    PolicyRuleAdded(PolicyRuleRecord),
+    PolicyRuleDeleted(PolicyRuleDeleteResult),
     EventPage(EventPage),
     Status(StatusGetResult),
     ToolsListed(Vec<ToolCatalogRecord>),

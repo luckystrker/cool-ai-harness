@@ -21,6 +21,7 @@ pub mod constructor;
 pub mod conversations;
 pub mod memory;
 pub mod plans;
+pub mod policy_rules;
 pub mod profiles;
 pub mod providers;
 pub mod research;

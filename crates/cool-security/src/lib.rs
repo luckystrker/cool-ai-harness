@@ -16,7 +16,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+mod rules;
+
+pub use rules::{PolicyRule, RulePatternKind, RuleScope, RuleState, RuleSubject, match_rules};
+
+/// Ordering is meaningful: `Deny > Ask > Allow`, so `Decision::stricter` is
+/// `Ord::max`. Serialized as lowercase `"allow"|"ask"|"deny"` on the wire and
+/// in stored rule rows.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
     Ask,
@@ -43,6 +51,9 @@ pub enum Capability {
 pub struct CapabilityPolicy {
     wildcard: Option<Decision>,
     decisions: BTreeMap<Capability, Decision>,
+    /// Tool-call rules evaluated before `evaluate` in the agent loop — first
+    /// match wins, no match falls back to the capability fallback.
+    rules: Vec<PolicyRule>,
 }
 
 impl CapabilityPolicy {
@@ -50,7 +61,32 @@ impl CapabilityPolicy {
         Self {
             wildcard,
             decisions: BTreeMap::new(),
+            rules: Vec::new(),
         }
+    }
+
+    pub fn rules(&self) -> &[PolicyRule] {
+        &self.rules
+    }
+
+    pub fn set_rules(&mut self, rules: Vec<PolicyRule>) {
+        self.rules = rules;
+    }
+
+    /// Appends rules (used when merging scopes: session → project → user).
+    pub fn extend_rules(&mut self, rules: impl IntoIterator<Item = PolicyRule>) {
+        self.rules.extend(rules);
+    }
+
+    pub fn with_rules(mut self, rules: impl IntoIterator<Item = PolicyRule>) -> Self {
+        self.extend_rules(rules);
+        self
+    }
+
+    /// The first matching rule for a tool call — applied **before** the
+    /// capability fallback in `execute_tool_batch`.
+    pub fn match_rule(&self, tool: &str, subject: &RuleSubject) -> Option<&PolicyRule> {
+        match_rules(&self.rules, tool, subject)
     }
 
     pub fn set(&mut self, capability: Capability, decision: Decision) {
@@ -87,6 +123,7 @@ impl CapabilityPolicy {
                 .unwrap_or(Decision::Allow)
                 .stricter(child.wildcard.unwrap_or(Decision::Allow)),
         ));
+        let mut floor = self.wildcard.unwrap_or(Decision::Allow);
         for capability in [
             Capability::Read,
             Capability::Write,
@@ -99,7 +136,23 @@ impl CapabilityPolicy {
                 capability,
                 self.resolve(capability).stricter(child.resolve(capability)),
             );
+            floor = floor.max(self.resolve(capability));
         }
+        // Rules merge parent-first (parent rules always win on the same
+        // subject). A child rule can never widen the parent: every child
+        // decision is clamped to at least the parent's strictest resolution,
+        // so e.g. an `allow` rule from a child degrades to `ask` when the
+        // parent would have asked for any capability the call may need.
+        result.rules = self
+            .rules
+            .iter()
+            .cloned()
+            .chain(child.rules.iter().map(|rule| {
+                let mut rule = rule.clone();
+                rule.decision = rule.decision.stricter(floor);
+                rule
+            }))
+            .collect();
         result
     }
 }

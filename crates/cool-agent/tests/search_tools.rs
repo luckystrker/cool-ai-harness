@@ -1,6 +1,7 @@
-use cool_agent::{ToolContext, builtin_registry};
+use cool_agent::{HostLauncher, ToolContext, builtin_registry};
 use cool_security::{Capability, CapabilityPolicy, Decision, Workspace};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn context(root: &std::path::Path) -> ToolContext {
@@ -339,7 +340,7 @@ async fn oversized_process_output_spills_to_workspace_file() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.max_output_bytes = 2048;
     let shell = registry.get("shell").unwrap();
     #[cfg(windows)]
@@ -374,7 +375,7 @@ async fn combined_process_output_respects_the_shared_cap() {
     write(directory.path(), "err.txt", vec![b'e'; 4096].as_slice());
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.max_output_bytes = 4096;
     context.timeout = std::time::Duration::from_secs(120);
     let shell = registry.get("shell").unwrap();
@@ -411,7 +412,7 @@ async fn spill_filenames_are_unique_per_call() {
     write(directory.path(), "out.txt", vec![b'o'; 4096].as_slice());
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.max_output_bytes = 512;
     context.timeout = std::time::Duration::from_secs(120);
     context.call_id = Some("reused-id".to_owned());
@@ -477,7 +478,7 @@ async fn overspill_process_output_keeps_the_true_tail() {
     write(directory.path(), "big.txt", &big);
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     let shell = registry.get("shell").unwrap();
     #[cfg(windows)]
     let arguments = json!({

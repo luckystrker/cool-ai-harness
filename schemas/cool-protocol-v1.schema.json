@@ -400,6 +400,26 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "remember": {
+          "description": "Persist a rule for the approved call: `\"session\"` keeps it in memory\nfor the run, `\"project\"` writes `<workspace>/.cool/policy.json`,\n`\"user\"` stores it in the durable `policy_rules` table.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rule": {
+          "description": "Rule payload for `remember`; when absent the server derives one from\nthe tool call (same shape as `ToolApprovalRequired.suggestedRule`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -418,6 +438,18 @@
         },
         "outcome": {
           "$ref": "#/$defs/ApprovalOutcome"
+        },
+        "rememberedRule": {
+          "description": "The persisted rule when the resolve carried `remember` (P1.6).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "revision": {
           "type": "integer",
@@ -1970,6 +2002,57 @@
             },
             "params": {
               "$ref": "#/$defs/ApprovalResolveParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rules_list"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRulesListParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rule_add"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRuleAddParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rule_delete"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRuleDeleteParams"
             }
           },
           "additionalProperties": false,
@@ -8198,6 +8281,148 @@
         "status"
       ]
     },
+    "PolicyRuleAddParams": {
+      "type": "object",
+      "properties": {
+        "rule": {
+          "$ref": "#/$defs/PolicyRuleRecord"
+        },
+        "runId": {
+          "description": "Session rules attach to a live run; required when `scope = \"session\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rule"
+      ]
+    },
+    "PolicyRuleDeleteParams": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "ruleId": {
+          "description": "Qualified rule id from `policy.rules_list` (`\"user:3\"`, `\"project:1\"`,\n`\"session:0\"`).",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Required when deleting a `session:` rule.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "ruleId"
+      ]
+    },
+    "PolicyRuleDeleteResult": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "deleted"
+      ]
+    },
+    "PolicyRuleRecord": {
+      "description": "Wire mirror of `cool_security::PolicyRule` — kept as plain strings so the\nprotocol crate carries no cool-security dependency.",
+      "type": "object",
+      "properties": {
+        "decision": {
+          "description": "`allow` | `ask` | `deny`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Qualified id (`\"user:3\"`, `\"project:1\"`, `\"session:0\"`) for deletes.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "`command` | `path_glob` | `domain` | `any`.",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pattern": {
+          "type": "string",
+          "default": ""
+        },
+        "scope": {
+          "description": "`session` | `project` | `user`.",
+          "type": "string"
+        },
+        "tool": {
+          "description": "Tool name, or `\"*\"` for every tool.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "kind",
+        "decision",
+        "scope"
+      ]
+    },
+    "PolicyRulesListParams": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "description": "Session rules of this run when `scope = \"session\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "description": "Optional scope filter (`session|project|user`); absent lists all.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyRulesListResult": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PolicyRuleRecord"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ]
+    },
     "ProfileCreateParams": {
       "type": "object",
       "properties": {
@@ -9334,6 +9559,57 @@
             },
             "value": {
               "$ref": "#/$defs/ApprovalResolvedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rules_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRulesListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rule_added"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rule_deleted"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRuleDeleteResult"
             }
           },
           "additionalProperties": false,
@@ -15287,6 +15563,14 @@
             "null"
           ]
         },
+        "matchedRule": {
+          "description": "The exec/policy rule that produced this ask (`None` when the ask came\nfrom the capability fallback).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "name": {
           "type": "string"
         },
@@ -15303,6 +15587,18 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "suggestedRule": {
+          "description": "A rule the client can persist via `approval.resolve {remember}` to\nstop prompting for equivalent calls.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,

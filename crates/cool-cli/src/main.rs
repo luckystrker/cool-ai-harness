@@ -76,6 +76,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
             let mut endpoint: Option<PathBuf> = None;
             let mut data_dir = default_data_dir();
             let mut legacy_store = false;
+            let mut process_launcher: Option<String> = None;
+            let mut sandbox: Option<String> = None;
+            let mut allow_shell = false;
             while let Some(argument) = args.next() {
                 match argument.as_str() {
                     "--transport" => {
@@ -94,6 +97,16 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                         );
                     }
                     "--legacy-store" => legacy_store = true,
+                    "--process-launcher" => {
+                        process_launcher = Some(
+                            args.next()
+                                .ok_or_else(|| usage("missing process-launcher value"))?,
+                        );
+                    }
+                    "--sandbox" => {
+                        sandbox = Some(args.next().ok_or_else(|| usage("missing sandbox value"))?);
+                    }
+                    "--allow-shell" => allow_shell = true,
                     _ => return Err(usage("unknown app-server argument")),
                 }
             }
@@ -103,7 +116,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "local" => return Err(usage("local transport needs endpoint")),
                 _ => return Err(usage("transport must be stdio or local")),
             }
-            let server = build_server(&data_dir, legacy_store).await?;
+            let host =
+                cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
+            let server = build_server(&data_dir, legacy_store, host).await?;
             match transport.as_str() {
                 "stdio" => server
                     .serve_stdio()
@@ -147,6 +162,11 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                     "agentLoop": true,
                     "trustedTools": true,
                     "baselineProvider": "openai-compatible",
+                    "processLauncher": {
+                        "default": "disabled",
+                        "envOverride": env::var("COOL_PROCESS_LAUNCHER").ok(),
+                        "sandboxBackends": cool_agent::sandbox_backend_status()
+                    },
                     "plugins": true,
                     "pluginInstall": ["local", "git-pinned"],
                     "mcp": ["stdio", "streamable-http"],
@@ -270,9 +290,69 @@ fn configured_secrets() -> Option<Arc<SecretKeyring>> {
     Some(Arc::new(SecretKeyring::new(key, std::iter::empty())))
 }
 
+/// Launcher selection for the CLI surface (P0.3/P2.17).
+///
+/// Chain: `COOL_PROCESS_LAUNCHER` env → explicit flag → default disabled.
+/// `--allow-shell` is the `--process-launcher=host` shorthand; `--sandbox`
+/// selects the sandbox backend (`bwrap|seatbelt|jobobject`) and implies
+/// `--process-launcher=sandboxed`. Unknown or unavailable values fail closed.
+fn cli_launcher(
+    process_launcher: Option<String>,
+    sandbox: Option<String>,
+    allow_shell: bool,
+) -> Result<Arc<dyn cool_agent::ProcessLauncher>, String> {
+    if allow_shell {
+        if process_launcher.is_some() {
+            return Err("--allow-shell conflicts with --process-launcher".to_owned());
+        }
+        return Ok(Arc::new(cool_agent::HostLauncher));
+    }
+    let backend = sandbox
+        .map(|value| {
+            cool_agent::SandboxBackend::parse(&value)
+                .ok_or_else(|| format!("unknown sandbox backend '{value}'"))
+        })
+        .transpose()?;
+    match process_launcher {
+        None => match backend {
+            Some(backend) => cool_agent::resolve_launcher("sandboxed", Some(backend)),
+            None => Ok(Arc::new(cool_agent::DisabledLauncher)),
+        },
+        Some(kind) => cool_agent::resolve_launcher(&kind, backend),
+    }
+}
+
+/// The `HostContext` for a CLI-built server/context: the launcher from the
+/// selection chain plus the host environment that launched processes inherit
+/// (only populated when a launcher is enabled — a disabled launcher runs no
+/// processes at all).
+fn cli_host(
+    process_launcher: Option<String>,
+    sandbox: Option<String>,
+    allow_shell: bool,
+) -> Result<cool_agent::HostContext, String> {
+    // `COOL_PROCESS_LAUNCHER`/`COOL_SANDBOX_BACKEND` override the flags.
+    let launcher = match cool_agent::launcher_from_env() {
+        Ok(Some(launcher)) => launcher,
+        Ok(None) => cli_launcher(process_launcher, sandbox, allow_shell)?,
+        Err(error) => return Err(error),
+    };
+    let environment = if launcher.kind() == cool_agent::LauncherKind::Disabled {
+        std::collections::HashMap::new()
+    } else {
+        std::env::vars().collect()
+    };
+    Ok(cool_agent::HostContext {
+        launcher,
+        environment,
+        rules: std::sync::Arc::new(cool_security::RuleState::default()),
+    })
+}
+
 async fn build_server(
     data_dir: &std::path::Path,
     legacy_store: bool,
+    host: cool_agent::HostContext,
 ) -> Result<AppServer, (i32, serde_json::Value)> {
     // Resolve the legacy store before creating rust-core.db so a misconfigured
     // `--legacy-store` exits without touching the data directory. A fresh data
@@ -291,6 +371,7 @@ async fn build_server(
         // Content-addressed artifact blobs live beside the database (Python
         // `artifacts/` layout); enables the blob endpoints + upload paths.
         artifacts_dir: Some(data_dir.join("artifacts")),
+        host,
         ..ServerConfig::default()
     };
     let (provider, model) = configured_provider(config.event_delay, true)?;
@@ -1017,6 +1098,9 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
     let mut options = cool_http::ServeOptions::default();
     let mut data_dir = default_data_dir();
     let mut legacy_store = false;
+    let mut process_launcher: Option<String> = None;
+    let mut sandbox: Option<String> = None;
+    let mut allow_shell = false;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -1074,6 +1158,21 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
             "--tls-terminated" => options.tls_terminated = true,
             "--allow-remote" => options.allow_remote = true,
             "--legacy-store" => legacy_store = true,
+            "--process-launcher" => {
+                process_launcher = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing process-launcher value"))?,
+                );
+            }
+            "--sandbox" => {
+                sandbox = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing sandbox value"))?,
+                );
+            }
+            "--allow-shell" => allow_shell = true,
             _ => return Err(usage("unknown serve argument")),
         }
     }
@@ -1088,7 +1187,8 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
     cool_http::validate_options(&options).map_err(|error| usage(&error.to_string()))?;
     let bind = options.bind;
     let profile = cool_http::profile_name(options.profile);
-    let server = build_server(&data_dir, legacy_store).await?;
+    let host = cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
+    let server = build_server(&data_dir, legacy_store, host).await?;
     let facade =
         cool_http::HttpFacade::new(server, options).map_err(|error| usage(&error.to_string()))?;
     let listener = tokio::net::TcpListener::bind(bind)
@@ -1612,13 +1712,40 @@ async fn start_configured_opencode_worker(runtime: &ExtensionRuntime, data_dir: 
 }
 
 async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
-    let (scripted, prompt_parts) = match arguments.first().map(String::as_str) {
-        Some("--scripted") => (true, &arguments[1..]),
-        _ => (false, arguments.as_slice()),
-    };
+    let mut scripted = false;
+    let mut allow_shell = false;
+    let mut process_launcher: Option<String> = None;
+    let mut sandbox: Option<String> = None;
+    let mut prompt_parts: Vec<String> = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--scripted" => scripted = true,
+            "--allow-shell" => allow_shell = true,
+            "--process-launcher" => {
+                process_launcher = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing process-launcher value"))?,
+                );
+            }
+            "--sandbox" => {
+                sandbox = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| usage("missing sandbox value"))?,
+                );
+            }
+            _ if argument.starts_with("--") => {
+                return Err(usage("unknown run argument"));
+            }
+            _ => prompt_parts.push(argument),
+        }
+    }
     if prompt_parts.is_empty() {
         return Err(usage("run needs a prompt"));
     }
+    let host = cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
     let prompt = prompt_parts.join(" ");
     let workspace = current_workspace()?;
     let (provider, model): (Arc<dyn ModelDriver>, String) = if scripted {
@@ -1660,7 +1787,9 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 tool_context: ToolContext::new(
                     workspace,
                     CapabilityPolicy::new(Some(Decision::Ask)),
-                ),
+                )
+                .with_launcher(host.launcher.clone())
+                .with_environment(host.environment.clone()),
             },
             &sink,
             &AutoApprovalGate {

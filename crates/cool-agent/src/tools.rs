@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_security::{
-    Capability, CapabilityPolicy, Decision, Workspace, mask_json, mask_secrets,
+    Capability, CapabilityPolicy, Decision, PolicyRule, Workspace, mask_json, mask_secrets,
     sanitize_environment,
 };
 use globset::{Glob, GlobMatcher};
@@ -16,6 +15,9 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::launcher::{
+    DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
+};
 use crate::loop_runtime::CancelSignal;
 
 #[derive(Clone, Debug)]
@@ -57,6 +59,9 @@ pub struct ToolResult {
     pub is_error: bool,
     pub error_code: Option<String>,
     pub truncated: bool,
+    /// Post-write linter/checker output (P1.9), ≤4 KiB masked — `"skipped"`
+    /// when the process launcher is disabled.
+    pub diagnostics: Option<String>,
 }
 
 impl ToolResult {
@@ -66,6 +71,7 @@ impl ToolResult {
             is_error: false,
             error_code: None,
             truncated: false,
+            diagnostics: None,
         }
     }
 
@@ -76,6 +82,7 @@ impl ToolResult {
             is_error: true,
             error_code: Some(code),
             truncated: false,
+            diagnostics: None,
         }
     }
 
@@ -124,9 +131,13 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     pub environment: HashMap<String, String>,
     pub allowed_secret_environment: BTreeSet<String>,
-    /// Explicit opt-in for a single-user trusted-host launcher. Production
-    /// embeddings keep this false unless they supply an OS-isolated worker.
-    pub allow_trusted_host_processes: bool,
+    /// The process launcher gate between tool calls and OS process creation
+    /// (P0.3). Defaults to `DisabledLauncher` — fail closed until the
+    /// operator selects `host` or `sandboxed`.
+    pub launcher: Arc<dyn ProcessLauncher>,
+    /// Live session-scoped policy rules (P1.6) consulted before the rest of
+    /// the policy; `approval.resolve {remember: "session"}` mutates the set.
+    pub session_rules: Option<Arc<RwLock<Vec<PolicyRule>>>>,
     pub cancel: Option<CancelSignal>,
     /// Server-derived actor for store-backed tools. Never read from tool
     /// arguments.
@@ -149,7 +160,8 @@ impl ToolContext {
             max_output_bytes: 1_048_576,
             environment: HashMap::new(),
             allowed_secret_environment: BTreeSet::new(),
-            allow_trusted_host_processes: false,
+            launcher: Arc::new(DisabledLauncher),
+            session_rules: None,
             cancel: None,
             actor_id: "local-user".to_owned(),
             conversation_id: None,
@@ -168,6 +180,25 @@ impl ToolContext {
     /// the right rows.
     pub fn with_conversation(mut self, conversation_id: Option<i64>) -> Self {
         self.conversation_id = conversation_id;
+        self
+    }
+
+    /// Selects the process launcher (`Disabled`/`Host`/`Sandboxed`).
+    pub fn with_launcher(mut self, launcher: Arc<dyn ProcessLauncher>) -> Self {
+        self.launcher = launcher;
+        self
+    }
+
+    /// Attaches the run's live session-rule set.
+    pub fn with_session_rules(mut self, rules: Arc<RwLock<Vec<PolicyRule>>>) -> Self {
+        self.session_rules = Some(rules);
+        self
+    }
+
+    /// Supplies the host environment that launched processes inherit (still
+    /// passed through `env_clear` + `sanitize_environment`).
+    pub fn with_environment(mut self, environment: HashMap<String, String>) -> Self {
+        self.environment = environment;
         self
     }
 }
@@ -530,6 +561,7 @@ impl ToolHandler for ReadFile {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -921,6 +953,7 @@ impl ToolHandler for SearchFiles {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -983,6 +1016,7 @@ impl ToolHandler for FindFiles {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -1036,11 +1070,13 @@ impl ToolHandler for WriteFile {
             .map_err(confinement_io)?;
         file.write_all(content.as_bytes()).map_err(ToolError::Io)?;
         file.flush().map_err(ToolError::Io)?;
-        Ok(ToolResult::ok(json!({
+        let mut result = ToolResult::ok(json!({
             "path": requested,
             "bytes": content.len(),
             "append": append,
-        })))
+        }));
+        result.diagnostics = run_diagnostics(context, requested).await;
+        Ok(result)
     }
 }
 
@@ -1106,6 +1142,7 @@ fn edit_error(code: &str, message: impl Into<String>, extra: Value) -> ToolResul
         is_error: true,
         error_code: Some(code.to_owned()),
         truncated: false,
+        diagnostics: None,
     }
 }
 
@@ -1303,7 +1340,9 @@ impl ToolHandler for EditFile {
         if diff_truncated {
             output["diffTruncated"] = json!(true);
         }
-        Ok(ToolResult::ok(output))
+        let mut result = ToolResult::ok(output);
+        result.diagnostics = run_diagnostics(context, requested).await;
+        Ok(result)
     }
 }
 
@@ -1623,12 +1662,6 @@ async fn run_bounded_process(
     args: &[String],
     stdin: Option<Vec<u8>>,
 ) -> Result<ToolResult, ToolError> {
-    if !context.allow_trusted_host_processes {
-        return Err(ToolError::Security(
-            "OS-isolated process launcher is not configured; trusted-host execution is disabled"
-                .to_owned(),
-        ));
-    }
     let safe_environment = sanitize_environment(
         context
             .environment
@@ -1650,29 +1683,22 @@ async fn run_bounded_process(
             .map(|(name, value)| (name.as_str(), value.as_str())),
         &context.allowed_secret_environment,
     );
-    let mut command = process_wrap::tokio::CommandWrap::with_new(program, |command| {
-        command
-            .args(args)
-            .current_dir(context.workspace.root())
-            .env_clear()
-            .envs(environment)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-    });
-    // OS-isolated launcher: the child and any descendants live in a killable
-    // containment unit — a Windows Job Object (closed on drop/kill) or a Unix
-    // process group (kill hits the whole group, not just the direct child).
-    command.wrap(process_wrap::tokio::KillOnDrop);
-    #[cfg(unix)]
-    command.wrap(process_wrap::tokio::ProcessGroup::leader());
-    #[cfg(windows)]
-    command.wrap(process_wrap::tokio::JobObject);
-    let mut child = command.spawn().map_err(ToolError::Io)?;
+    // The launcher owns the actual spawn: `Disabled` fails closed, `Host`
+    // runs inside the killable containment unit (Job Object / process group),
+    // `Sandboxed` wraps argv in the OS sandbox backend first.
+    let spec = LaunchSpec {
+        cwd: context.workspace.root().to_path_buf(),
+        env: environment.into_iter().collect(),
+        stdin: stdin.clone(),
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: context.timeout,
+            max_output_bytes: context.max_output_bytes,
+        },
+    };
+    let mut child = context
+        .launcher
+        .spawn(&program.to_string_lossy(), args, &spec)?;
     if let Some(stdin) = stdin
         && let Some(mut pipe) = child.stdin().take()
     {
@@ -1782,6 +1808,7 @@ async fn run_bounded_process(
         is_error: !status.success(),
         error_code: (!status.success()).then(|| "process_failed".to_owned()),
         truncated,
+        diagnostics: None,
     })
 }
 
@@ -1851,4 +1878,135 @@ where
         }
     }
     Ok(StreamCapture { head, tail, total })
+}
+
+/// Post-write diagnostics (P1.9): a per-extension command map from
+/// `<workspace>/.cool/config.json` merged over `~/.cool/config.json`, run
+/// through the active process launcher with a fixed timeout. A configured
+/// extension with a `Disabled` launcher reports `"skipped"`; a command that
+/// fails to run degrades to a warning string, never a tool error.
+const DIAGNOSTICS_LIMIT: usize = 4096;
+const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn diagnostics_commands(context: &ToolContext) -> HashMap<String, Vec<String>> {
+    let mut commands = HashMap::new();
+    // The user-level map reads first so the workspace map wins per key. The
+    // home config is an operator-owned fixed path outside the workspace — a
+    // plain read; no agent-controlled input reaches it.
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let path = std::path::Path::new(&home)
+            .join(".cool")
+            .join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            merge_diagnostics_map(&raw, &mut commands);
+        }
+    }
+    if let Ok(raw) = context.workspace.dir().read(".cool/config.json") {
+        merge_diagnostics_map(&String::from_utf8_lossy(&raw), &mut commands);
+    }
+    commands
+}
+
+fn merge_diagnostics_map(raw: &str, commands: &mut HashMap<String, Vec<String>>) {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    let Some(map) = value.get("diagnostics").and_then(Value::as_object) else {
+        return;
+    };
+    for (extension, command) in map {
+        let Some(argv) = command.as_array().map(|argv| {
+            argv.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        }) else {
+            continue;
+        };
+        if argv.is_empty() {
+            continue;
+        }
+        commands.insert(extension.trim_start_matches('.').to_lowercase(), argv);
+    }
+}
+
+/// Run the configured diagnostics command for `path` after a successful
+/// write/edit. Returns `None` when no command is configured for the
+/// extension — the common case, so the field stays absent.
+async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<String> {
+    let extension = Path::new(requested)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_lowercase();
+    let commands = diagnostics_commands(context);
+    let argv = commands.get(&extension)?;
+    if context.launcher.kind() == LauncherKind::Disabled {
+        return Some("skipped".to_owned());
+    }
+    let mut argv = argv.iter();
+    let program = argv.next()?;
+    let args: Vec<String> = argv.map(|arg| arg.replace("{file}", requested)).collect();
+    let environment = sanitize_environment(
+        context
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        &context.allowed_secret_environment,
+    );
+    // Values the sanitizer strips from the child's environment are literal
+    // redaction markers in its output — the generic mask does not cover them.
+    let secret_values: Vec<String> = context
+        .environment
+        .iter()
+        .filter(|(name, _)| !environment.contains_key(*name))
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .collect();
+    let spec = LaunchSpec {
+        cwd: context.workspace.root().to_path_buf(),
+        env: environment.into_iter().collect(),
+        stdin: None,
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: DIAGNOSTICS_TIMEOUT,
+            max_output_bytes: DIAGNOSTICS_LIMIT,
+        },
+    };
+    let mut child = match context.launcher.spawn(program, &args, &spec) {
+        Ok(child) => child,
+        Err(error) => return Some(format!("warning: diagnostics unavailable: {error}")),
+    };
+    let stdout = child.stdout().take().map(|stream| {
+        tokio::spawn(async move { drain_stream(stream, DIAGNOSTICS_LIMIT, 0).await })
+    });
+    let stderr = child.stderr().take().map(|stream| {
+        tokio::spawn(async move { drain_stream(stream, DIAGNOSTICS_LIMIT, 0).await })
+    });
+    let status = match timeout(DIAGNOSTICS_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            let _ = std::pin::Pin::from(child.kill()).await;
+            let _ = child.wait().await;
+            return Some("warning: diagnostics timed out".to_owned());
+        }
+    };
+    let mut text = String::new();
+    for stream in [stdout, stderr].into_iter().flatten() {
+        if let Ok(Ok(capture)) = stream.await {
+            text.push_str(&String::from_utf8_lossy(&capture.body()));
+        }
+    }
+    if text.len() > DIAGNOSTICS_LIMIT {
+        text.truncate(DIAGNOSTICS_LIMIT);
+        text.push_str("\n... [diagnostics truncated at 4 KiB] ...");
+    }
+    for secret in &secret_values {
+        text = text.replace(secret, "[REDACTED]");
+    }
+    let text = mask_secrets(&text);
+    Some(if status.success() || !text.is_empty() {
+        text
+    } else {
+        format!("warning: diagnostics exited with {status}")
+    })
 }

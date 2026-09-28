@@ -47,10 +47,12 @@ use cool_protocol::{
     SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
     ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
-use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
+use cool_security::{
+    CapabilityPolicy, Decision, PolicyRule, RuleScope, SecretKeyring, Workspace, mask_secrets,
+};
 use cool_state::{
-    BudgetDelta, CancelAcceptance, ConversationLink, DurableStore, EventProvenance,
-    ImportedHistoryEvent, StoreError,
+    ApprovalResolution, BudgetDelta, CancelAcceptance, ConversationLink, DurableStore,
+    EventProvenance, ImportedHistoryEvent, StoreError,
 };
 use cool_store::LegacyStore;
 use cool_store::domains::webhooks::NewWebhookEvent;
@@ -89,6 +91,9 @@ pub struct ServerConfig {
     /// on the CLI path). When unset (tests without a filesystem layout),
     /// research reports persist on the row without an artifact.
     pub artifacts_dir: Option<PathBuf>,
+    /// Process-launcher selection + host environment + shared rule state
+    /// (P0.3/P1.6). Defaults fail closed: `DisabledLauncher`, empty env.
+    pub host: cool_agent::HostContext,
 }
 
 impl Default for ServerConfig {
@@ -105,6 +110,7 @@ impl Default for ServerConfig {
             legacy_store: None,
             secrets: None,
             artifacts_dir: None,
+            host: cool_agent::HostContext::default(),
         }
     }
 }
@@ -127,6 +133,7 @@ impl std::fmt::Debug for ServerConfig {
             )
             .field("secrets", &self.secrets.is_some())
             .field("artifacts_dir", &self.artifacts_dir)
+            .field("launcher", &self.host.launcher.kind())
             .finish()
     }
 }
@@ -575,6 +582,12 @@ impl AppServer {
             !config.write_timeout.is_zero(),
             "write_timeout must be positive"
         );
+        // P1.6: project-scope rules live in <workspace>/.cool/policy.json —
+        // load them into the shared rule state executors clone into contexts.
+        config
+            .host
+            .rules
+            .set_project_rules(load_project_rules(&workspace));
         let subagent_executor = config.legacy_store.as_ref().map(|legacy| {
             Arc::new(SubagentExecutor::new(
                 Arc::clone(legacy),
@@ -583,6 +596,7 @@ impl AppServer {
                 workspace.clone(),
                 policy.clone(),
                 default_model.clone(),
+                config.host.clone(),
             ))
         });
         let research_executor = config
@@ -607,6 +621,7 @@ impl AppServer {
                 default_model.clone(),
                 cool_store::scheduler::SchedulerConfig::default(),
                 research_executor.as_ref().map(Arc::clone),
+                config.host.clone(),
             ))
         });
         let blob_store = config
@@ -647,6 +662,207 @@ impl AppServer {
     /// (the CLI) start its loop with [`TaskExecutor::spawn_loop`].
     pub fn task_executor(&self) -> Option<Arc<TaskExecutor>> {
         self.inner.task_executor.clone()
+    }
+
+    /// Capability policy for a new run: the base policy plus the merged
+    /// project + user rules (session rules attach live per run, P1.6).
+    fn merged_policy(&self) -> CapabilityPolicy {
+        let mut policy = self.inner.policy.clone();
+        let mut rules = self.inner.config.host.rules.project_rules();
+        if let Some(legacy) = &self.inner.config.legacy_store {
+            rules.extend(user_policy_rules(
+                legacy,
+                &project_key(&self.inner.workspace),
+            ));
+        }
+        policy.set_rules(rules);
+        policy
+    }
+
+    /// Persists a rule by scope. Returns the rule with its assigned id.
+    fn add_policy_rule(
+        &self,
+        mut rule: PolicyRule,
+        run_id: Option<&str>,
+    ) -> Result<PolicyRule, String> {
+        match rule.scope {
+            RuleScope::Session => {
+                let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
+                Ok(self.inner.config.host.rules.add_session_rule(run_id, rule))
+            }
+            RuleScope::Project => {
+                let rule = self.inner.config.host.rules.add_project_rule(rule);
+                persist_project_rules(
+                    &self.inner.workspace,
+                    &self.inner.config.host.rules.project_rules(),
+                )
+                .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
+                Ok(rule)
+            }
+            RuleScope::User => {
+                let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
+                    "user-scope rules require the durable store (--legacy-store)".to_owned()
+                })?;
+                let row = legacy
+                    .insert_policy_rule(&cool_store::domains::policy_rules::NewPolicyRule {
+                        tool: rule.tool.clone(),
+                        pattern_kind: rule.kind.name().to_owned(),
+                        pattern: rule.pattern.clone(),
+                        decision: match rule.decision {
+                            Decision::Allow => "allow",
+                            Decision::Ask => "ask",
+                            Decision::Deny => "deny",
+                        }
+                        .to_owned(),
+                        scope: "user".to_owned(),
+                        project_key: None,
+                        note: rule.note.clone(),
+                        created_by: Some(local_actor().id),
+                    })
+                    .map_err(|error| error.to_string())?;
+                rule.id = Some(format!("user:{}", row.id));
+                rule.scope = RuleScope::User;
+                Ok(rule)
+            }
+        }
+    }
+
+    fn delete_policy_rule(&self, rule_id: &str, run_id: Option<&str>) -> Result<bool, String> {
+        let Some((scope, index)) = rule_id.split_once(':') else {
+            return Err(format!(
+                "invalid rule id '{rule_id}' (expected scope:id, e.g. user:3)"
+            ));
+        };
+        match scope {
+            "session" => {
+                let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
+                let index: usize = index
+                    .parse()
+                    .map_err(|_| format!("invalid session rule id '{rule_id}'"))?;
+                Ok(self
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .delete_session_rule(run_id, index))
+            }
+            "project" => {
+                let index: usize = index
+                    .parse()
+                    .map_err(|_| format!("invalid project rule id '{rule_id}'"))?;
+                let deleted = self.inner.config.host.rules.delete_project_rule(index);
+                if deleted {
+                    persist_project_rules(
+                        &self.inner.workspace,
+                        &self.inner.config.host.rules.project_rules(),
+                    )
+                    .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
+                }
+                Ok(deleted)
+            }
+            "user" => {
+                let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
+                    "user-scope rules require the durable store (--legacy-store)".to_owned()
+                })?;
+                let id: i64 = index
+                    .parse()
+                    .map_err(|_| format!("invalid user rule id '{rule_id}'"))?;
+                legacy
+                    .delete_policy_rule(id)
+                    .map_err(|error| error.to_string())
+            }
+            _ => Err(format!("unknown rule scope '{scope}' in '{rule_id}'")),
+        }
+    }
+
+    /// Persists the rule a `remember`-flagged `approval.resolve` asks for.
+    /// An explicit `rule` payload wins; otherwise the rule is re-derived from
+    /// the ticket's stored (already masked) call — the same shape as the
+    /// `suggestedRule` the approval event carried.
+    fn remember_approval_rule(
+        &self,
+        resolution: &ApprovalResolution,
+        scope: &str,
+        explicit: Option<&cool_protocol::PolicyRuleRecord>,
+    ) -> Result<cool_protocol::PolicyRuleRecord, String> {
+        let scope =
+            RuleScope::parse(scope).ok_or_else(|| format!("unknown remember scope '{scope}'"))?;
+        let mut rule = match explicit {
+            Some(record) => cool_agent::policy_rule_from_record(record)
+                .ok_or_else(|| "invalid rule payload".to_owned())?,
+            None => {
+                // Rebuild the stored call from the run's approval event.
+                let call = self
+                    .inner
+                    .store
+                    .all_events(&resolution.run_id, &local_actor().id)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find_map(|envelope| match envelope.event {
+                        CanonicalEvent::ToolApprovalRequired(required)
+                            if required.approval_id == resolution.approval_id =>
+                        {
+                            Some(cool_agent::ToolCall {
+                                call_id: required.call_id,
+                                name: required.name,
+                                arguments: required
+                                    .arguments
+                                    .into_iter()
+                                    .collect::<serde_json::Map<_, _>>(),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| "approval call is not recoverable".to_owned())?;
+                cool_agent::suggest_policy_rule(&call)
+                    .ok_or_else(|| "no suggested rule for this tool call".to_owned())?
+            }
+        };
+        rule.scope = scope;
+        let stored = self.add_policy_rule(rule, Some(&resolution.run_id))?;
+        Ok(cool_agent::policy_rule_record(&stored))
+    }
+
+    /// All rules across scopes (session rules only for `run_id`, when given),
+    /// with qualified ids — first-match-wins order: session → project → user.
+    fn list_policy_rules(
+        &self,
+        scope: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<Vec<PolicyRule>, String> {
+        let mut rules = Vec::new();
+        let include = |wanted: &str| scope.is_none_or(|scope| scope == wanted);
+        if include("session")
+            && let Some(run_id) = run_id
+        {
+            rules.extend(
+                self.inner
+                    .config
+                    .host
+                    .rules
+                    .session_rules(run_id)
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .cloned(),
+            );
+        }
+        if include("project") {
+            rules.extend(self.inner.config.host.rules.project_rules());
+        }
+        if include("user") {
+            if let Some(legacy) = &self.inner.config.legacy_store {
+                rules.extend(user_policy_rules(
+                    legacy,
+                    &project_key(&self.inner.workspace),
+                ));
+            } else if scope == Some("user") {
+                return Err(
+                    "user-scope rules require the durable store (--legacy-store)".to_owned(),
+                );
+            }
+        }
+        Ok(rules)
     }
 
     /// The foreground subagent executor (for agent tools that delegate).
@@ -1561,6 +1777,7 @@ impl AppServer {
             Command::ApprovalResolve(params) => {
                 let actor = local_actor();
                 let fingerprint = fingerprint(&params);
+                let approved = params.decision == cool_protocol::ApprovalDecision::Approved;
                 let resolved = self.inner.store.resolve_approval(
                     &actor.id,
                     params.idempotency_key.as_str(),
@@ -1580,10 +1797,40 @@ impl AppServer {
                         {
                             let _ = waiter.send(Some(resolution.outcome.clone()));
                         }
+                        // P1.6: `remember` persists a rule for the approved
+                        // call — explicit `rule` wins, else the suggested
+                        // rule derived from the ticket's stored call.
+                        let mut remembered = None;
+                        if approved && let Some(scope) = params.remember.as_deref() {
+                            match self.remember_approval_rule(
+                                &resolution,
+                                scope,
+                                params.rule.as_ref(),
+                            ) {
+                                Ok(rule) => remembered = Some(rule),
+                                Err(message) => {
+                                    let _ = self
+                                        .send(
+                                            &outbound,
+                                            failure(
+                                                id,
+                                                masked_detail_error(
+                                                    -32021,
+                                                    "rule_persist_failed",
+                                                    &message,
+                                                ),
+                                            ),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
                         let response = ApprovalResolvedResult {
                             approval_id: resolution.approval_id,
                             revision: resolution.revision,
                             outcome: resolution.outcome,
+                            remembered_rule: remembered,
                         };
                         if self
                             .send(
@@ -1602,6 +1849,64 @@ impl AppServer {
                         let _ = self.send(&outbound, failure(id, store_error(store))).await;
                     }
                 }
+            }
+            Command::PolicyRulesList(params) => {
+                let frame = match self
+                    .list_policy_rules(params.scope.as_deref(), params.run_id.as_deref())
+                {
+                    Ok(rules) => success(
+                        id,
+                        ResponsePayload::PolicyRulesListed(cool_protocol::PolicyRulesListResult {
+                            rules: rules.iter().map(cool_agent::policy_rule_record).collect(),
+                        }),
+                    ),
+                    Err(message) => failure(
+                        id,
+                        masked_detail_error(-32022, "policy_rules_failed", &message),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::PolicyRuleAdd(params) => {
+                let frame = match cool_agent::policy_rule_from_record(&params.rule) {
+                    Some(rule) => match self.add_policy_rule(rule, params.run_id.as_deref()) {
+                        Ok(stored) => success(
+                            id,
+                            ResponsePayload::PolicyRuleAdded(cool_agent::policy_rule_record(
+                                &stored,
+                            )),
+                        ),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32022, "policy_rules_failed", &message),
+                        ),
+                    },
+                    None => failure(
+                        id,
+                        masked_detail_error(
+                            -32002,
+                            "invalid_params",
+                            "rule has an unknown kind, decision or scope",
+                        ),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::PolicyRuleDelete(params) => {
+                let frame = match self.delete_policy_rule(&params.rule_id, params.run_id.as_deref())
+                {
+                    Ok(deleted) => success(
+                        id,
+                        ResponsePayload::PolicyRuleDeleted(cool_protocol::PolicyRuleDeleteResult {
+                            deleted,
+                        }),
+                    ),
+                    Err(message) => failure(
+                        id,
+                        masked_detail_error(-32022, "policy_rules_failed", &message),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
             }
             Command::StatusGet(_) => {
                 let status = match &self.inner.lifecycle {
@@ -2834,8 +3139,11 @@ impl AppServer {
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(workspace, server.inner.policy.clone())
+                tool_context: ToolContext::new(workspace, server.merged_policy())
                     .with_actor(local_actor().id)
+                    .with_launcher(server.inner.config.host.launcher.clone())
+                    .with_environment(server.inner.config.host.environment.clone())
+                    .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
                     .with_conversation(
                         server
                             .inner
@@ -3833,8 +4141,10 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: None,
-            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone())
-                .with_actor(local_actor().id),
+            tool_context: ToolContext::new(workspace.clone(), self.merged_policy())
+                .with_actor(local_actor().id)
+                .with_launcher(self.inner.config.host.launcher.clone())
+                .with_environment(self.inner.config.host.environment.clone()),
         };
         let sink = PlanStepSink::default();
         let outcome = self
@@ -4648,7 +4958,7 @@ impl ApprovalGate for AppServerApprovalGate {
         _sink: &dyn EventSink,
         cancel: &mut CancelSignal,
     ) -> Result<cool_protocol::ApprovalOutcome, RuntimeError> {
-        let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(
+        let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(Box::new(
             cool_protocol::ToolApprovalRequired {
                 call_id: request.call.call_id.clone(),
                 name: request.call.name.clone(),
@@ -4659,8 +4969,13 @@ impl ApprovalGate for AppServerApprovalGate {
                 breakpoint_type: None,
                 result_preview: None,
                 current_content: None,
+                matched_rule: request.matched_rule.clone(),
+                suggested_rule: request
+                    .suggested_rule
+                    .as_ref()
+                    .map(cool_agent::policy_rule_record),
             },
-        ))?;
+        )))?;
         let CanonicalEvent::ToolApprovalRequired(masked) = masked else {
             unreachable!("event variant is preserved by masking")
         };
@@ -4680,6 +4995,8 @@ impl ApprovalGate for AppServerApprovalGate {
             &request.call.name,
             &masked.arguments,
             &masked.reason,
+            masked.matched_rule.as_deref(),
+            masked.suggested_rule.as_ref(),
         )?;
         let (sender, mut receiver) = watch::channel(None);
         self.server
@@ -5699,6 +6016,82 @@ fn encode_bounded_frame(frame: ServerFrame, limit: usize) -> io::Result<Vec<u8>>
 
 fn fingerprint<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("protocol parameters serialize deterministically")
+}
+
+/// Workspace key for `policy_rules.project_key` rows — the workspace root
+/// path, stable for a given checkout.
+fn project_key(workspace: &Workspace) -> String {
+    workspace.root().to_string_lossy().into_owned()
+}
+
+/// Loads `<workspace>/.cool/policy.json` — `{"rules": [...]}` — tolerating a
+/// missing file (no rules) and skipping malformed entries (fail closed: a
+/// rule that cannot be parsed cannot accidentally grant anything).
+fn load_project_rules(workspace: &Workspace) -> Vec<PolicyRule> {
+    let Ok(body) = workspace.dir().read(".cool/policy.json") else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Vec::new();
+    };
+    parsed
+        .get("rules")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    serde_json::from_value::<PolicyRule>(item.clone())
+                        .ok()
+                        .map(|mut rule| {
+                            rule.scope = RuleScope::Project;
+                            rule.id = Some(format!("project:{index}"));
+                            rule
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Rewrites `<workspace>/.cool/policy.json` after a project-rule mutation.
+fn persist_project_rules(workspace: &Workspace, rules: &[PolicyRule]) -> Result<(), StoreError> {
+    let body = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "rules": rules,
+    }))?;
+    workspace.dir().create_dir_all(".cool")?;
+    workspace.dir().write(".cool/policy.json", body)?;
+    Ok(())
+}
+
+/// Maps a `policy_rules` row to a `PolicyRule`, skipping unparsable columns.
+fn user_policy_rules(legacy: &LegacyStore, project_key: &str) -> Vec<PolicyRule> {
+    legacy
+        .list_policy_rules(Some(project_key))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let kind = cool_security::RulePatternKind::parse(&row.pattern_kind)?;
+            let decision = match row.decision.as_str() {
+                "allow" => Decision::Allow,
+                "ask" => Decision::Ask,
+                "deny" => Decision::Deny,
+                _ => return None,
+            };
+            let scope = RuleScope::parse(&row.scope).unwrap_or(RuleScope::User);
+            Some(PolicyRule {
+                tool: row.tool,
+                kind,
+                pattern: row.pattern,
+                decision,
+                scope,
+                note: row.note,
+                id: Some(format!("user:{}", row.id)),
+            })
+        })
+        .collect()
 }
 
 fn rpc_id_from_value(value: &serde_json::Value) -> RpcId {

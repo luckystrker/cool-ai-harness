@@ -464,6 +464,8 @@ impl AppClient {
                     approval_id: approval_id.to_owned(),
                     expected_revision: revision,
                     decision,
+                    remember: None,
+                    rule: None,
                 },
             ))
             .await?;

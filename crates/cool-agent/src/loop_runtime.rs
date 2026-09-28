@@ -10,7 +10,10 @@ use cool_protocol::{
     SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
     ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
-use cool_security::{Decision, mask_json, mask_secrets};
+use cool_security::{
+    Decision, PolicyRule, RulePatternKind, RuleScope, RuleSubject, mask_json, mask_secrets,
+    match_rules,
+};
 use cool_state::{BudgetDelta, DurableStore, StoreError};
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -85,6 +88,11 @@ pub struct ApprovalRequest {
     pub approval_id: String,
     pub call: ToolCall,
     pub reason: String,
+    /// The policy rule that produced this ask (`None` for a capability ask).
+    pub matched_rule: Option<String>,
+    /// A suggested persistent rule derived from the call, so the approval UI
+    /// can offer "remember this" (P1.6).
+    pub suggested_rule: Option<PolicyRule>,
 }
 
 #[derive(Clone)]
@@ -197,17 +205,21 @@ impl ApprovalGate for AutoApprovalGate {
         sink: &dyn EventSink,
         _cancel: &mut CancelSignal,
     ) -> Result<ApprovalOutcome, RuntimeError> {
-        sink.emit(CanonicalEvent::ToolApprovalRequired(ToolApprovalRequired {
-            call_id: request.call.call_id.clone(),
-            name: request.call.name.clone(),
-            arguments: request.call.arguments.clone().into_iter().collect(),
-            reason: request.reason,
-            approval_id: request.approval_id.clone(),
-            revision: 1,
-            breakpoint_type: None,
-            result_preview: None,
-            current_content: None,
-        }))
+        sink.emit(CanonicalEvent::ToolApprovalRequired(Box::new(
+            ToolApprovalRequired {
+                call_id: request.call.call_id.clone(),
+                name: request.call.name.clone(),
+                arguments: request.call.arguments.clone().into_iter().collect(),
+                reason: request.reason,
+                approval_id: request.approval_id.clone(),
+                revision: 1,
+                breakpoint_type: None,
+                result_preview: None,
+                current_content: None,
+                matched_rule: request.matched_rule,
+                suggested_rule: request.suggested_rule.as_ref().map(policy_rule_record),
+            },
+        )))
         .await?;
         sink.emit(CanonicalEvent::ToolApprovalResolved(ToolApprovalResolved {
             call_id: request.call.call_id,
@@ -618,12 +630,35 @@ impl AgentRuntime {
                 immediate.insert(index, (call, result));
                 continue;
             };
-            let decision = context
-                .policy
-                .evaluate(tool.capabilities.iter().copied(), tool.default_decision)
-                .effective;
+            // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
+            // session rules first (most local wins), then project + user
+            // rules merged into the policy. First match wins.
+            let subject = rule_subject(&call);
+            let matched_rule = context
+                .session_rules
+                .as_ref()
+                .and_then(|rules| {
+                    let guard = rules.read().unwrap_or_else(|error| error.into_inner());
+                    match_rules(guard.iter(), &call.name, &subject).cloned()
+                })
+                .or_else(|| context.policy.match_rule(&call.name, &subject).cloned());
+            let decision = match matched_rule.as_ref() {
+                Some(rule) => rule.decision,
+                None => {
+                    context
+                        .policy
+                        .evaluate(tool.capabilities.iter().copied(), tool.default_decision)
+                        .effective
+                }
+            };
             if decision == Decision::Deny {
-                let result = ToolResult::error("capability_denied", "tool capability was denied");
+                let result = ToolResult::error(
+                    "capability_denied",
+                    match matched_rule.as_ref() {
+                        Some(rule) => format!("denied by policy rule: {}", rule.describe()),
+                        None => "tool capability was denied".to_owned(),
+                    },
+                );
                 emit_tool_result(sink, &call, &result).await?;
                 immediate.insert(index, (call, result));
                 continue;
@@ -635,6 +670,8 @@ impl AgentRuntime {
                             approval_id: format!("approval-{}", Uuid::new_v4()),
                             call: call.clone(),
                             reason: "tool requires approval".to_owned(),
+                            matched_rule: matched_rule.as_ref().map(PolicyRule::describe),
+                            suggested_rule: suggest_policy_rule(&call),
                         },
                         sink,
                         cancel,
@@ -823,10 +860,16 @@ async fn emit_tool_result(
         }))
         .await?;
     } else {
+        let mut payload = result.output.clone();
+        // P1.9: post-write diagnostics travel inside the free-form result —
+        // already masked and ≤4 KiB by the diagnostics runner.
+        if let Some(diagnostics) = &result.diagnostics {
+            payload["diagnostics"] = Value::String(diagnostics.clone());
+        }
         sink.emit(CanonicalEvent::ToolCompleted(ToolCompleted {
             call_id: call.call_id.clone(),
             name: call.name.clone(),
-            result: result.output.clone(),
+            result: payload,
         }))
         .await?;
     }
@@ -1203,6 +1246,160 @@ pub fn history_from_event_rows(
         );
     }
     Ok(history)
+}
+
+/// The subject a `PolicyRule` is matched against, derived from the call:
+/// `"program args…"` for process tools, the workspace-relative path for file
+/// tools, the host for network tools, `None` otherwise.
+fn rule_subject(call: &ToolCall) -> RuleSubject {
+    let arguments = &call.arguments;
+    let arg_str = |key: &str| arguments.get(key).and_then(Value::as_str);
+    match call.name.as_str() {
+        "shell" => {
+            let program = arg_str("program").unwrap_or_default();
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            RuleSubject::Command(format!("{program} {args}").trim_end().to_owned())
+        }
+        "git" => {
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            RuleSubject::Command(format!("git {args}").trim_end().to_owned())
+        }
+        _ if arg_str("path").is_some() => {
+            RuleSubject::Path(arg_str("path").unwrap_or_default().to_owned())
+        }
+        _ => {
+            for key in ["url", "host", "domain"] {
+                if let Some(value) = arg_str(key) {
+                    let host = url::Url::parse(value)
+                        .ok()
+                        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                        .unwrap_or_else(|| value.to_owned());
+                    return RuleSubject::Domain(host);
+                }
+            }
+            RuleSubject::None
+        }
+    }
+}
+
+/// The suggested persistent rule for an approval card — a command-prefix glob
+/// for process tools, a path glob for file tools, a domain for network tools.
+/// `None` when no stable suggestion exists.
+pub fn suggest_policy_rule(call: &ToolCall) -> Option<PolicyRule> {
+    let scope_default = |rule: PolicyRule| rule.scoped(RuleScope::Project);
+    match call.name.as_str() {
+        "shell" => {
+            let program = call
+                .arguments
+                .get("program")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if program.is_empty() {
+                return None;
+            }
+            Some(scope_default(PolicyRule::new(
+                "shell",
+                RulePatternKind::Command,
+                format!("{program} *"),
+                Decision::Allow,
+            )))
+        }
+        "git" => {
+            let args = call
+                .arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let sub = args.first().and_then(Value::as_str).unwrap_or_default();
+            let pattern = if sub.is_empty() || sub.starts_with('-') {
+                "git *".to_owned()
+            } else {
+                format!("git {sub} *")
+            };
+            Some(scope_default(PolicyRule::new(
+                "git",
+                RulePatternKind::Command,
+                pattern,
+                Decision::Allow,
+            )))
+        }
+        "write_file" | "edit_file" => call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                scope_default(PolicyRule::new(
+                    call.name.as_str(),
+                    RulePatternKind::PathGlob,
+                    path,
+                    Decision::Allow,
+                ))
+            }),
+        _ => None,
+    }
+}
+
+/// Protocol wire mirror for a `PolicyRule`.
+pub fn policy_rule_record(rule: &PolicyRule) -> cool_protocol::PolicyRuleRecord {
+    cool_protocol::PolicyRuleRecord {
+        id: rule.id.clone(),
+        tool: rule.tool.clone(),
+        kind: rule.kind.name().to_owned(),
+        pattern: rule.pattern.clone(),
+        decision: match rule.decision {
+            Decision::Allow => "allow",
+            Decision::Ask => "ask",
+            Decision::Deny => "deny",
+        }
+        .to_owned(),
+        scope: rule.scope.name().to_owned(),
+        note: rule.note.clone(),
+    }
+}
+
+/// Parse a wire `PolicyRuleRecord` back into a `PolicyRule` (unknown kind /
+/// decision / scope strings fail closed with `None`).
+pub fn policy_rule_from_record(record: &cool_protocol::PolicyRuleRecord) -> Option<PolicyRule> {
+    let kind = RulePatternKind::parse(&record.kind)?;
+    let decision = match record.decision.as_str() {
+        "allow" => Decision::Allow,
+        "ask" => Decision::Ask,
+        "deny" => Decision::Deny,
+        _ => return None,
+    };
+    let scope = RuleScope::parse(&record.scope)?;
+    Some(PolicyRule {
+        tool: record.tool.clone(),
+        kind,
+        pattern: record.pattern.clone(),
+        decision,
+        scope,
+        note: record.note.clone(),
+        id: record.id.clone(),
+    })
 }
 
 fn timestamp() -> String {

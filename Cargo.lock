@@ -481,6 +481,7 @@ dependencies = [
  "base64",
  "cap-std",
  "fernet",
+ "globset",
  "regex",
  "serde",
  "serde_json",

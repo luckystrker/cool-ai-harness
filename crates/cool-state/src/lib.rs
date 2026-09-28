@@ -1363,6 +1363,8 @@ impl DurableStore {
             tool_name,
             &BTreeMap::new(),
             reason,
+            None,
+            None,
         )
     }
 
@@ -1376,6 +1378,8 @@ impl DurableStore {
         tool_name: &str,
         arguments: &BTreeMap<String, serde_json::Value>,
         reason: &str,
+        matched_rule: Option<&str>,
+        suggested_rule: Option<&cool_protocol::PolicyRuleRecord>,
     ) -> Result<ApprovalTicket, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1425,7 +1429,7 @@ impl DurableStore {
             source: "cool-security".to_owned(),
             causation_id: Some(call_id.to_owned()),
             correlation_id: None,
-            event: CanonicalEvent::ToolApprovalRequired(ToolApprovalRequired {
+            event: CanonicalEvent::ToolApprovalRequired(Box::new(ToolApprovalRequired {
                 call_id: call_id.to_owned(),
                 name: tool_name.to_owned(),
                 arguments: arguments.clone(),
@@ -1435,7 +1439,9 @@ impl DurableStore {
                 breakpoint_type: None,
                 result_preview: None,
                 current_content: None,
-            }),
+                matched_rule: matched_rule.map(str::to_owned),
+                suggested_rule: suggested_rule.cloned(),
+            })),
             extensions: Default::default(),
         };
         append_event_tx(&transaction, actor_id, &event)?;

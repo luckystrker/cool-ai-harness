@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
-use cool_agent::{CancelSignal, ToolContext, ToolError, builtin_registry};
+use cool_agent::{CancelSignal, HostLauncher, ToolContext, ToolError, builtin_registry};
 use cool_security::{Capability, CapabilityPolicy, Decision, Workspace};
 use serde_json::json;
 use tempfile::tempdir;
@@ -133,7 +134,7 @@ async fn sandbox_process_has_no_host_secret_without_explicit_allow() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.environment = HashMap::from([
         ("OPENAI_API_KEY".to_owned(), "sk-never-leak".to_owned()),
         ("SAFE_VALUE".to_owned(), "visible".to_owned()),
@@ -175,7 +176,7 @@ async fn sandbox_process_cancellation_kills_and_reaps_before_returning() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     let (sender, cancel) = CancelSignal::channel();
     context.cancel = Some(cancel);
     let shell = registry.get("shell").unwrap();
@@ -193,7 +194,7 @@ async fn sandbox_process_cancellation_kills_and_reaps_before_returning() {
 }
 
 #[tokio::test]
-async fn host_process_execution_fails_closed_without_explicit_trusted_host_opt_in() {
+async fn host_process_execution_fails_closed_without_a_launcher() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let context = context(directory.path());
@@ -216,7 +217,7 @@ async fn containment_unit_kills_descendants_with_the_child() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.timeout = Duration::from_millis(500);
     let shell = registry.get("shell").unwrap();
     // The parent spawns a descendant that writes a marker ~4s in, then blocks.

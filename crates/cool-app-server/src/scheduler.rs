@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cool_agent::{
-    AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, EventSink, Message,
-    MessageRole, RunOutcome, RuntimeError, ToolContext,
+    AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, EventSink,
+    HostContext, Message, MessageRole, RunOutcome, RuntimeError, ToolContext,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, SchedulerJobRecord,
@@ -54,6 +54,8 @@ pub struct TaskExecutor {
     default_model: String,
     config: SchedulerConfig,
     research_executor: Option<Arc<crate::research::ResearchExecutor>>,
+    /// Shared launcher / host env / rule state injected into every context.
+    host: HostContext,
     engine: Mutex<Scheduler>,
     /// Live cancel channels per `task_runs.id`.
     live: Mutex<HashMap<i64, watch::Sender<Option<String>>>>,
@@ -61,6 +63,7 @@ pub struct TaskExecutor {
 }
 
 impl TaskExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<LegacyStore>,
         runtime: AgentRuntime,
@@ -69,6 +72,7 @@ impl TaskExecutor {
         default_model: String,
         config: SchedulerConfig,
         research_executor: Option<Arc<crate::research::ResearchExecutor>>,
+        host: HostContext,
     ) -> Self {
         Self {
             store,
@@ -78,10 +82,24 @@ impl TaskExecutor {
             default_model,
             config,
             research_executor,
+            host,
             engine: Mutex::new(Scheduler::new(config)),
             live: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
         }
+    }
+
+    /// The task's capability policy plus the merged project + user rules
+    /// (P1.6) — `task_policy` narrows the base policy first.
+    fn merged_task_policy(&self, task: &ScheduledTask) -> CapabilityPolicy {
+        let mut policy = task_policy(&self.policy, task);
+        let mut rules = self.host.rules.project_rules();
+        rules.extend(crate::user_policy_rules(
+            &self.store,
+            &crate::project_key(&self.workspace),
+        ));
+        policy.set_rules(rules);
+        policy
     }
 
     /// Engine status for `tasks.scheduler`.
@@ -413,8 +431,10 @@ impl TaskExecutor {
             max_tokens: None,
             limits,
             tool_names,
-            tool_context: ToolContext::new(workspace, task_policy(&self.policy, &task))
-                .with_actor(crate::local_actor().id),
+            tool_context: ToolContext::new(workspace, self.merged_task_policy(&task))
+                .with_actor(crate::local_actor().id)
+                .with_launcher(self.host.launcher.clone())
+                .with_environment(self.host.environment.clone()),
         };
         // The task's approval policy is enforced by the capability policy: a
         // `deny_external` task denies `send_external`, everything else is
