@@ -137,6 +137,7 @@ try {
       model: null,
       planMode: false,
       systemPrompt: null,
+      longTaskMode: false,
     },
   });
   if (prompted.kind !== "prompt_accepted") throw new Error("session.prompt contract mismatch");

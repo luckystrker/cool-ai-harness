@@ -134,19 +134,23 @@ export const conversationsApi = {
   compact: async (convId: number): Promise<CompactResponse> =>
     toCompactResponse(await sdk.conversationsCompact({ idempotencyKey: idempotencyKey(), id: convId })),
 
-  /** Resolve a pending tool-call approval (gated behind an "ask" permission). */
+  /** Resolve a pending tool-call approval (gated behind an "ask" permission).
+   * `remember` persists a policy rule for the approved call (P1.6). */
   approveToolCall: async (
     _convId: number,
     approvalId: string,
     approved: boolean,
     expectedRevision: number,
-    _runId: number
+    _runId: number,
+    remember?: "session" | "project" | "user"
   ): Promise<{ resolved: boolean; approved: boolean }> => {
     await sdk.approvalResolve({
       idempotencyKey: idempotencyKey(),
       approvalId,
       expectedRevision,
       decision: approved ? "approved" : "denied",
+      remember: remember ?? null,
+      rule: null,
     })
     return { resolved: true, approved }
   },

@@ -50,6 +50,9 @@ export class CoolSdk {
   runEvents(params: protocol.RunEventsParams) { return this.send<protocol.EventPage>({ method: "run.events", params }); }
   runSubscribe(params: protocol.RunSubscribeParams) { return this.send<protocol.RunSubscribedResult>({ method: "run.subscribe", params }); }
   approvalResolve(params: protocol.ApprovalResolveParams) { return this.send<protocol.ApprovalResolvedResult>({ method: "approval.resolve", params }); }
+  policyRulesList(params: protocol.PolicyRulesListParams) { return this.send<protocol.PolicyRulesListResult>({ method: "policy.rules_list", params }); }
+  policyRuleAdd(params: protocol.PolicyRuleAddParams) { return this.send<protocol.PolicyRuleRecord>({ method: "policy.rule_add", params }); }
+  policyRuleDelete(params: protocol.PolicyRuleDeleteParams) { return this.send<protocol.PolicyRuleDeleteResult>({ method: "policy.rule_delete", params }); }
   statusGet(params: protocol.StatusGetParams) { return this.send<protocol.StatusGetResult>({ method: "status.get", params }); }
   toolsList(params: protocol.EmptyParams) { return this.send<protocol.ToolCatalogRecord[]>({ method: "tools.list", params }); }
   extensionsStatus(params: protocol.EmptyParams) { return this.send<protocol.ExtensionStatusResult>({ method: "extensions.status", params }); }

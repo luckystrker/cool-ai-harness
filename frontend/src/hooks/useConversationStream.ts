@@ -261,6 +261,8 @@ export function useConversationStream() {
           breakpointType: p.breakpointType ?? undefined,
           resultPreview: p.resultPreview ?? undefined,
           currentContent: p.currentContent ?? undefined,
+          matchedRule: p.matchedRule ?? undefined,
+          suggestedRule: p.suggestedRule ?? undefined,
           status: "pending",
         }
         flush(acc)
@@ -552,7 +554,7 @@ export function useConversationStream() {
    * Updates the card status (resolving → approved/denied) and calls the
    * canonical `approval.resolve` command; the agent loop resumes server-side.
    */
-  const respondApproval = useCallback(async (approved: boolean) => {
+  const respondApproval = useCallback(async (approved: boolean, remember?: "session" | "project" | "user") => {
     const acc = accRef.current
     const pending = acc?.approval
     if (!pending || pending.status !== "pending") return
@@ -569,7 +571,8 @@ export function useConversationStream() {
         resolvedApprovalId,
         approved,
         pending.revision,
-        pending.runId
+        pending.runId,
+        remember
       )
       // Only update if the current approval still refers to the same call.
       // A newer tool_approval_request may have arrived while we awaited the
