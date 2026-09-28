@@ -1,14 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, PlanCreated,
-    PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal, SessionCompacted,
-    SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
-    ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, Extensions, ItemEvent,
+    PlanCreated, PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal,
+    SessionCompacted, SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved,
+    ToolCompleted, ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
 use cool_security::{
     Decision, PolicyRule, RulePatternKind, RuleScope, RuleSubject, mask_json, mask_secrets,
@@ -173,6 +173,17 @@ impl From<StoreError> for RuntimeError {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError>;
+    /// Emit with envelope `extensions` attached (P2.18 checkpoint refs,
+    /// P2.12 replay parts). Sinks that persist envelopes store the map;
+    /// observing sinks ignore it.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let _ = extensions;
+        self.emit(event).await
+    }
     async fn before_compaction(&self, _history: &[Message]) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -716,13 +727,19 @@ impl AgentRuntime {
     ) -> Result<ToolBatchOutcome, RuntimeError> {
         let mut immediate = HashMap::new();
         let mut runnable = Vec::new();
+        // The ToolRequested seq names each call's checkpoint ref
+        // (`refs/cool/checkpoints/{session}/{seq}`, P2.18): deterministic and
+        // durable before the snapshot runs.
+        let mut requested_seqs = HashMap::new();
         for (index, call) in calls.iter().cloned().enumerate() {
-            sink.emit(CanonicalEvent::ToolRequested(ToolRequested {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone().into_iter().collect(),
-            }))
-            .await?;
+            let requested = sink
+                .emit(CanonicalEvent::ToolRequested(ToolRequested {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone().into_iter().collect(),
+                }))
+                .await?;
+            requested_seqs.insert(call.call_id.clone(), requested.seq);
             let Some(tool) = self.tools.get(&call.name) else {
                 let result = ToolResult::error("tool_not_found", "tool is not registered");
                 emit_tool_result(sink, &call, &result).await?;
@@ -834,10 +851,40 @@ impl AgentRuntime {
         }
         let mut join_set = JoinSet::new();
         for (index, call, tool) in runnable {
-            sink.emit(CanonicalEvent::ToolStarted(ToolLifecycle {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-            }))
+            // P2.18: pre-dispatch filesystem checkpoint for mutating tools.
+            // A failed snapshot never blocks the call — the error lands on
+            // ToolStarted.extensions.checkpoint_error instead.
+            let mut extensions = Extensions::new();
+            match crate::checkpoints::snapshot_before_tool(
+                context,
+                &call.name,
+                &call.call_id,
+                requested_seqs.get(&call.call_id).copied().unwrap_or(0),
+                &call.arguments,
+            )
+            .await
+            {
+                Ok(Some(reference)) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_EXTENSION_KEY.to_owned(),
+                        Value::String(reference),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_ERROR_EXTENSION_KEY.to_owned(),
+                        Value::String(error),
+                    );
+                }
+            }
+            sink.emit_with_extensions(
+                CanonicalEvent::ToolStarted(ToolLifecycle {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                }),
+                extensions,
+            )
             .await?;
             let mut context = context.clone();
             context.cancel = Some(cancel.clone());
@@ -1185,6 +1232,14 @@ impl StoreEventSink {
 #[async_trait]
 impl EventSink for StoreEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_with_extensions(event, Extensions::new()).await
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let event = mask_canonical_event(event)?;
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
             let run = self.store.run(&self.run_id, &self.owner_actor_id)?;
@@ -1230,7 +1285,7 @@ impl EventSink for StoreEventSink {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         Ok(self
             .store

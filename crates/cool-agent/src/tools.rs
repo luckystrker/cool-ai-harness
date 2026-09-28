@@ -177,6 +177,20 @@ pub struct ToolContext {
     /// Tools `activate_tools` has enabled for this run (P1.10): the loop
     /// unions it into the deferred filter each iteration.
     pub active_tools: Arc<RwLock<BTreeSet<String>>>,
+    /// Durable session the run belongs to (P2.18): names checkpoint refs
+    /// `refs/cool/checkpoints/{session_id}/{seq}`. `None` outside session
+    /// runs (tests, direct tool calls) — checkpoints use a neutral ref.
+    pub session_id: Option<String>,
+    /// Reads artifact bytes for multimodal tools (`view_image`, P2.12):
+    /// resolves an artifact id to `(media_type, bytes)`.
+    /// `None` outside the app server — artifact-backed calls fail closed.
+    pub artifact_reader: Option<Arc<dyn ArtifactReader>>,
+}
+
+/// Artifact bytes for multimodal tools — implemented by the app server
+/// over `BlobStore` (P2.12). Returns `(media_type, bytes)`.
+pub trait ArtifactReader: Send + Sync + fmt::Debug {
+    fn read_artifact(&self, artifact_id: &str) -> Result<(String, Vec<u8>), String>;
 }
 
 impl ToolContext {
@@ -199,7 +213,22 @@ impl ToolContext {
             spawn_depth: 0,
             history_snapshot: None,
             active_tools: Arc::new(RwLock::new(BTreeSet::new())),
+            session_id: None,
+            artifact_reader: None,
         }
+    }
+
+    /// Binds the durable session so checkpoint refs name it (P2.18).
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Installs the artifact reader multimodal tools resolve artifacts
+    /// through (P2.12).
+    pub fn with_artifact_reader(mut self, reader: Arc<dyn ArtifactReader>) -> Self {
+        self.artifact_reader = Some(reader);
+        self
     }
 
     /// Sets the server-derived actor that store-backed tools scope their reads
