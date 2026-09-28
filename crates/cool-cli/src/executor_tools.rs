@@ -45,7 +45,9 @@ pub fn executor_tool_registry(
             [Capability::Network, Capability::Execute],
             Decision::Ask,
             DeepResearch { research },
-        ),
+        )
+        // Rare, expensive tool — stays hidden until search/activate (P1.10).
+        .deferred(),
         Tool::new(
             definition(
                 "spawn_subagent",
@@ -127,7 +129,9 @@ pub fn executor_tool_registry(
             [],
             Decision::Allow,
             CreateSkill { skills },
-        ),
+        )
+        // Rare tool — stays hidden until search/activate (P1.10).
+        .deferred(),
     ]
 }
 

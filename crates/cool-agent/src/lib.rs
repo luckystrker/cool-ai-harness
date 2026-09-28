@@ -37,8 +37,8 @@ pub use provider::{
     ScriptedDriver, Usage,
 };
 pub use tools::{
-    MAX_SPAWN_DEPTH, PythonFallbackTool, RuleSource, Tool, ToolCatalogEntry, ToolContext,
-    ToolDefinition, ToolError, ToolHandler, ToolRegistry, ToolResult, builtin_registry,
-    capability_name,
+    DEFAULT_EAGER_TOOL_LIMIT, MAX_SPAWN_DEPTH, PythonFallbackTool, RuleSource, Tool,
+    ToolActivation, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError, ToolHandler,
+    ToolRegistry, ToolResult, builtin_registry, capability_name, eager_tool_limit,
 };
 pub use web_tools::{WebToolsConfig, web_tool_registry};

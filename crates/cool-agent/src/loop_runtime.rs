@@ -384,6 +384,23 @@ impl AgentRuntime {
                 history.insert(0, Message::text(MessageRole::System, section));
             }
         }
+        // P1.10: when deferred tools exist, tell the model how to surface
+        // them — the catalog line sits on the system message like project
+        // instructions do.
+        if self.tools.has_deferred_tools() {
+            let line = "Some tools are hidden. Use search_tools(query) to discover and \
+                        activate_tools(names) to enable them.";
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(line);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, line));
+            }
+        }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {
             model: Some(request.model.clone()),
             mode: Some(
@@ -455,9 +472,17 @@ impl AgentRuntime {
             // Continue from the compacted history: the next compaction sees
             // the synthetic summary instead of the messages it covered.
             history = compacted.messages;
+            // P1.10: deferred tools ship only once `activate_tools` lists them
+            // in the run's `active_tools` set.
+            let active_tools = request
+                .tool_context
+                .active_tools
+                .read()
+                .map(|set| set.clone())
+                .unwrap_or_default();
             let definitions = self
                 .tools
-                .definitions()
+                .visible_definitions(&active_tools)
                 .into_iter()
                 .filter(|definition| {
                     request

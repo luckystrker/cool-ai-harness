@@ -174,6 +174,9 @@ pub struct ToolContext {
     /// every tool batch — `spawn_subagent`'s `fork_context` seeds child
     /// history/context from it. `None` outside the loop (tests, direct calls).
     pub history_snapshot: Option<Vec<Message>>,
+    /// Tools `activate_tools` has enabled for this run (P1.10): the loop
+    /// unions it into the deferred filter each iteration.
+    pub active_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl ToolContext {
@@ -195,6 +198,7 @@ impl ToolContext {
             question_gate: None,
             spawn_depth: 0,
             history_snapshot: None,
+            active_tools: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 
@@ -244,6 +248,13 @@ impl ToolContext {
         self
     }
 
+    /// Shares an already-populated `active_tools` set (P1.10) — e.g. a test
+    /// pre-activating tools or a runner reusing one set across requests.
+    pub fn with_active_tools(mut self, active: Arc<RwLock<BTreeSet<String>>>) -> Self {
+        self.active_tools = active;
+        self
+    }
+
     /// Marks how deep this run sits in the `spawn_subagent` chain (P1.7).
     pub fn with_spawn_depth(mut self, depth: u32) -> Self {
         self.spawn_depth = depth;
@@ -253,6 +264,28 @@ impl ToolContext {
 
 /// Maximum `spawn_subagent` nesting: a run at this depth cannot spawn (P1.7).
 pub const MAX_SPAWN_DEPTH: u32 = 3;
+
+/// Default catalog size above which `mcp_*` tools defer to lazy activation
+/// (`COOL_EAGER_TOOL_LIMIT`, P1.10).
+pub const DEFAULT_EAGER_TOOL_LIMIT: usize = 20;
+
+/// The catalog size above which `mcp_*` tools are hidden from the model until
+/// `activate_tools` exposes them (P1.10).
+pub fn eager_tool_limit() -> usize {
+    std::env::var("COOL_EAGER_TOOL_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_EAGER_TOOL_LIMIT)
+}
+
+/// Whether a tool's definition ships to the model eagerly or stays hidden
+/// until `activate_tools` exposes it for the run (P1.10).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolActivation {
+    #[default]
+    Eager,
+    Deferred,
+}
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -268,6 +301,9 @@ pub struct Tool {
     pub definition: ToolDefinition,
     pub capabilities: BTreeSet<Capability>,
     pub default_decision: Decision,
+    /// Eager tools always ship in `definitions()`; deferred ones hide until
+    /// `activate_tools` enables them for the run (P1.10).
+    pub activation: ToolActivation,
     handler: Arc<dyn ToolHandler>,
 }
 
@@ -282,8 +318,15 @@ impl Tool {
             definition,
             capabilities: capabilities.into_iter().collect(),
             default_decision,
+            activation: ToolActivation::Eager,
             handler: Arc::new(handler),
         }
+    }
+
+    /// Marks the tool deferred — hidden from `definitions()` until activated.
+    pub fn deferred(mut self) -> Self {
+        self.activation = ToolActivation::Deferred;
+        self
     }
 
     pub async fn execute(
@@ -340,6 +383,47 @@ impl ToolRegistry {
             .values()
             .map(|tool| tool.definition.clone())
             .collect()
+    }
+
+    /// Whether a tool is hidden from the model right now: explicitly deferred
+    /// tools, plus every `mcp_*` tool once the catalog outgrows
+    /// `eager_tool_limit()` (P1.10).
+    fn is_deferred(tool: &Tool, catalog_size: usize) -> bool {
+        tool.activation == ToolActivation::Deferred
+            || (catalog_size > eager_tool_limit() && tool.definition.name.starts_with("mcp_"))
+    }
+
+    /// Definitions the model sees: eager tools plus deferred tools the run
+    /// has activated (P1.10).
+    pub fn visible_definitions(&self, active_tools: &BTreeSet<String>) -> Vec<ToolDefinition> {
+        let tools = read_tools(&self.tools);
+        let catalog_size = tools.len();
+        tools
+            .values()
+            .filter(|tool| {
+                !Self::is_deferred(tool, catalog_size)
+                    || active_tools.contains(&tool.definition.name)
+            })
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+
+    /// Whether the named tool is currently deferred (P1.10).
+    pub fn is_tool_deferred(&self, name: &str) -> bool {
+        let tools = read_tools(&self.tools);
+        tools
+            .get(name)
+            .is_some_and(|tool| Self::is_deferred(tool, tools.len()))
+    }
+
+    /// Whether any tool is currently deferred — gates the "hidden tools"
+    /// system-prompt hint (P1.10).
+    pub fn has_deferred_tools(&self) -> bool {
+        let tools = read_tools(&self.tools);
+        let catalog_size = tools.len();
+        tools
+            .values()
+            .any(|tool| Self::is_deferred(tool, catalog_size))
     }
 
     /// Rich, deterministic (name-sorted) catalog for the UI tool pickers.
@@ -406,7 +490,7 @@ impl ToolRegistry {
 }
 
 pub fn builtin_registry() -> ToolRegistry {
-    ToolRegistry::new([
+    let registry = ToolRegistry::new([
         Tool::new(
             definition("read_file", "Read a UTF-8 workspace file; page with offset_bytes/maxBytes when truncated", json!({"type":"object","properties":{"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1},"offset_bytes":{"type":"integer","minimum":0}},"required":["path"],"additionalProperties":false})),
             [Capability::Read],
@@ -468,7 +552,38 @@ pub fn builtin_registry() -> ToolRegistry {
             AskUser,
         ),
     ])
-    .expect("builtin tool names are valid")
+    .expect("builtin tool names are valid");
+    // P1.10 meta-tools: clones share the registry's backing map, so tools
+    // registered later (executor/MCP) are searchable the moment they land.
+    for tool in [
+        Tool::new(
+            definition(
+                "search_tools",
+                "Search the full tool catalog — including hidden/deferred tools — by name and description. Returns the top 5 matches with their parameter schemas; use activate_tools(names) to make a hidden tool callable.",
+                json!({"type":"object","properties":{"query":{"type":"string","description":"Free-text query matched against tool names and descriptions"}},"required":["query"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            SearchTools {
+                registry: registry.clone(),
+            },
+        ),
+        Tool::new(
+            definition(
+                "activate_tools",
+                "Enable hidden tools for the rest of this run: their schemas appear from the next model turn. Activation is not permission — policy evaluation still gates each call.",
+                json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"},"description":"Catalog names from search_tools","minItems":1}},"required":["names"],"additionalProperties":false}),
+            ),
+            [],
+            Decision::Allow,
+            ActivateTools {
+                registry: registry.clone(),
+            },
+        ),
+    ] {
+        registry.register(tool).expect("meta tool names are unique");
+    }
+    registry
 }
 
 fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
@@ -1866,6 +1981,120 @@ impl ToolHandler for AskUser {
             )),
             Err(error) => Ok(ToolResult::error("user_unavailable", error.to_string())),
         }
+    }
+}
+
+/// `search_tools` (P1.10): ranks the full catalog — including deferred tools
+/// the model cannot currently see — by name/description match against the
+/// query and returns the top entries so the agent can `activate_tools` them.
+struct SearchTools {
+    registry: ToolRegistry,
+}
+
+#[async_trait]
+impl ToolHandler for SearchTools {
+    async fn execute(
+        &self,
+        _context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["query"])?;
+        let query = required_text(&arguments, "query")?.to_lowercase();
+
+        let mut scored: Vec<(i64, ToolCatalogEntry)> = self
+            .registry
+            .catalog()
+            .into_iter()
+            .filter(|entry| {
+                // Search covers the whole catalog except the meta-tools
+                // themselves; deferred entries are exactly what needs finding.
+                entry.name != "search_tools" && entry.name != "activate_tools"
+            })
+            .map(|entry| (tool_match_score(&query, &entry), entry))
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.name.cmp(&right.1.name))
+        });
+        let tools: Vec<Value> = scored
+            .into_iter()
+            .take(5)
+            .map(|(score, entry)| {
+                json!({
+                    "name": entry.name,
+                    "description": entry.description,
+                    "parameters": entry.parameters,
+                    "deferred": self.registry.is_tool_deferred(&entry.name),
+                    "score": score,
+                })
+            })
+            .collect();
+        Ok(ToolResult::ok(json!({ "tools": tools })))
+    }
+}
+
+/// Small substring scorer: name hits outweigh description hits.
+fn tool_match_score(query: &str, entry: &ToolCatalogEntry) -> i64 {
+    let name = entry.name.to_lowercase();
+    let description = entry.description.to_lowercase();
+    let mut score = 0_i64;
+    if name.contains(query) {
+        score += 10;
+    }
+    if description.contains(query) {
+        score += 4;
+    }
+    for token in query.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
+        let token = token.trim_matches('_');
+        if token.is_empty() {
+            continue;
+        }
+        if name.contains(token) {
+            score += 6;
+        }
+        if description.contains(token) {
+            score += 2;
+        }
+    }
+    score
+}
+
+/// `activate_tools` (P1.10): writes names into the run's `active_tools` so the
+/// next loop iteration's `visible_definitions` includes them. Activation is
+/// NOT permission — `policy.evaluate` still gates every call.
+struct ActivateTools {
+    registry: ToolRegistry,
+}
+
+#[async_trait]
+impl ToolHandler for ActivateTools {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["names"])?;
+        let names = string_array(&arguments, "names")?;
+        let mut activated = Vec::new();
+        let mut unknown = Vec::new();
+        let mut active = context
+            .active_tools
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for name in names {
+            if self.registry.get(&name).is_some() {
+                active.insert(name.clone());
+                activated.push(name);
+            } else {
+                unknown.push(name);
+            }
+        }
+        Ok(ToolResult::ok(json!({
+            "activated": activated,
+            "unknown": unknown,
+        })))
     }
 }
 
