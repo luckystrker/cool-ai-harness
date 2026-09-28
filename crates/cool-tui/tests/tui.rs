@@ -208,6 +208,8 @@ fn busy_state_routes_input_to_steering_and_approval_keys_resolve() {
         breakpoint_type: None,
         result_preview: None,
         current_content: None,
+        matched_rule: None,
+        suggested_rule: None,
     });
     let commands = state.on_key(TuiKey::Char('a'));
     assert_eq!(
@@ -230,6 +232,8 @@ fn busy_state_routes_input_to_steering_and_approval_keys_resolve() {
         breakpoint_type: None,
         result_preview: None,
         current_content: None,
+        matched_rule: None,
+        suggested_rule: None,
     });
     let commands = state.on_key(TuiKey::Esc);
     assert!(matches!(

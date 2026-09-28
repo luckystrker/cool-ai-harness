@@ -2,6 +2,10 @@ import { useState } from "react"
 import { ShieldAlert, ShieldCheck, ShieldX, Bug, Loader2, FileDiff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import type { PolicyRuleRecord } from "@/api/generated/cool_protocol"
+
+/** Policy-rule persistence scope sent as `remember` on approval.resolve. */
+export type RememberScope = "session" | "project" | "user"
 
 /** Approval request rendered inline in the chat flow (replaces the modal dialog). */
 export interface InlineApproval {
@@ -20,13 +24,17 @@ export interface InlineApproval {
   resultPreview?: string
   /** Current file content before the write (for diff/preview). */
   currentContent?: string
+  /** The policy rule that matched this call, when a rule produced the ask (P1.6). */
+  matchedRule?: string
+  /** Server-suggested rule for "don't ask again" persistence (P1.6). */
+  suggestedRule?: PolicyRuleRecord
   /** Lifecycle: waiting for the user → resolving → resolved outcome. */
   status: "pending" | "resolving" | "approved" | "denied" | "timed_out"
 }
 
 interface ApprovalCardProps {
   approval: InlineApproval
-  onRespond: (approved: boolean) => void
+  onRespond: (approved: boolean, remember?: RememberScope) => void
 }
 
 /**
@@ -37,6 +45,7 @@ interface ApprovalCardProps {
  */
 export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
   const [argsOpen, setArgsOpen] = useState(false)
+  const [remember, setRemember] = useState<RememberScope | null>(null)
   const isBreakpoint = approval.isBreakpoint ?? false
   const hasArgs = Object.keys(approval.arguments ?? {}).length > 0
   const resolved = approval.status !== "pending" && approval.status !== "resolving"
@@ -85,6 +94,9 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           {isBreakpoint
             ? `A ${approval.breakpointType ?? ""} breakpoint fired. Review before proceeding.`
             : approval.reason || "The agent wants to run a tool that requires your approval."}
+          {approval.matchedRule && (
+            <span className="block font-mono text-[11px]">{approval.matchedRule}</span>
+          )}
         </p>
       )}
 
@@ -151,7 +163,7 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           </span>
         ) : (
           <>
-            <Button size="sm" className="h-7 px-3 text-xs" onClick={() => onRespond(true)}>
+            <Button size="sm" className="h-7 px-3 text-xs" onClick={() => onRespond(true, remember ?? undefined)}>
               Allow
             </Button>
             <Button
@@ -162,6 +174,28 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
             >
               Deny
             </Button>
+            {approval.suggestedRule && (
+              <label className="ml-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-amber-500"
+                  checked={remember !== null}
+                  onChange={(e) => setRemember(e.target.checked ? "project" : null)}
+                />
+                don't ask again
+                {remember && (
+                  <select
+                    className="h-6 rounded border bg-background px-1 text-xs"
+                    value={remember}
+                    onChange={(e) => setRemember(e.target.value as RememberScope)}
+                  >
+                    <option value="session">this session</option>
+                    <option value="project">this project</option>
+                    <option value="user">all projects</option>
+                  </select>
+                )}
+              </label>
+            )}
           </>
         )}
       </div>

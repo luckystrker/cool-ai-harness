@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
-use cool_agent::{CancelSignal, ToolContext, ToolError, builtin_registry};
+use cool_agent::{CancelSignal, HostLauncher, ToolContext, ToolError, builtin_registry};
 use cool_security::{Capability, CapabilityPolicy, Decision, Workspace};
 use serde_json::json;
 use tempfile::tempdir;
@@ -128,12 +129,96 @@ async fn file_tools_reject_links_pointing_outside_the_workspace() {
     }
 }
 
+/// `.cool/policy.json` / `.cool/config.json` are managed by the policy
+/// commands — an agent must not rewrite them through the file tools, and
+/// an in-workspace symlink must not smuggle the write under another name.
+#[cfg(any(windows, unix))]
+#[tokio::test]
+async fn write_file_rejects_protected_policy_files_and_symlinked_targets() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".cool")).unwrap();
+    std::fs::write(directory.path().join(".cool/policy.json"), "{\"rules\":[]}").unwrap();
+    let registry = builtin_registry();
+    let context = context(directory.path());
+    let write = registry.get("write_file").unwrap();
+
+    for path in [
+        ".cool/policy.json",
+        ".cool/config.json",
+        "sub/../.cool/policy.json",
+    ] {
+        let outcome = write
+            .execute(&context, json!({"path": path, "content": "{\"rules\":[]}"}))
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::Security(_))) || outcome.unwrap().is_error,
+            "protected write via {path} must be rejected"
+        );
+    }
+
+    // A directory link `l -> .cool` makes `l/policy.json` resolve onto the
+    // protected file — the canonical check must still reject it.
+    let link = directory.path().join("l");
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd.exe")
+            .args([
+                "/D",
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &directory.path().join(".cool").to_string_lossy(),
+            ])
+            .status()
+            .expect("junction creation requires no special privilege");
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".cool", &link).unwrap();
+    }
+    let outcome = write
+        .execute(
+            &context,
+            json!({"path": "l/policy.json", "content": "{\"rules\":[]}"}),
+        )
+        .await;
+    assert!(
+        matches!(outcome, Err(ToolError::Security(_))) || outcome.unwrap().is_error,
+        "write to protected file through an in-workspace link must be rejected"
+    );
+    // The protected file is untouched by every attempt above.
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join(".cool/policy.json")).unwrap(),
+        "{\"rules\":[]}"
+    );
+
+    // Ordinary writes through a valid link still work — the check only
+    // guards the two protected paths. Windows junctions fail closed through
+    // the capability dir (see the note in the escaping-link test), so the
+    // positive case is asserted on Unix only.
+    #[cfg(unix)]
+    {
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink("real", directory.path().join("r")).unwrap();
+        write
+            .execute(&context, json!({"path": "r/ok.txt", "content": "fine"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(real.join("ok.txt")).unwrap(),
+            "fine"
+        );
+    }
+}
+
 #[tokio::test]
 async fn sandbox_process_has_no_host_secret_without_explicit_allow() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.environment = HashMap::from([
         ("OPENAI_API_KEY".to_owned(), "sk-never-leak".to_owned()),
         ("SAFE_VALUE".to_owned(), "visible".to_owned()),
@@ -175,7 +260,7 @@ async fn sandbox_process_cancellation_kills_and_reaps_before_returning() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     let (sender, cancel) = CancelSignal::channel();
     context.cancel = Some(cancel);
     let shell = registry.get("shell").unwrap();
@@ -193,7 +278,7 @@ async fn sandbox_process_cancellation_kills_and_reaps_before_returning() {
 }
 
 #[tokio::test]
-async fn host_process_execution_fails_closed_without_explicit_trusted_host_opt_in() {
+async fn host_process_execution_fails_closed_without_a_launcher() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let context = context(directory.path());
@@ -216,7 +301,7 @@ async fn containment_unit_kills_descendants_with_the_child() {
     let directory = tempdir().unwrap();
     let registry = builtin_registry();
     let mut context = context(directory.path());
-    context.allow_trusted_host_processes = true;
+    context.launcher = Arc::new(HostLauncher);
     context.timeout = Duration::from_millis(500);
     let shell = registry.get("shell").unwrap();
     // The parent spawns a descendant that writes a marker ~4s in, then blocks.

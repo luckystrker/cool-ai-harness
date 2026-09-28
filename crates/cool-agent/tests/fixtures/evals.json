@@ -117,5 +117,77 @@
       "run.completed"
     ],
     "expectedFile": true
+  },
+  {
+    "id": "rule_denies_shell_without_dialog",
+    "calls": [
+      {
+        "callId": "shell-denied",
+        "name": "shell",
+        "arguments": {"program": "rm", "args": ["-rf", "x"]}
+      }
+    ],
+    "capability": null,
+    "decision": null,
+    "rules": [
+      {"tool": "shell", "kind": "command", "pattern": "rm *", "decision": "deny"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "capability_deny_is_an_outer_bound_over_rule_allow",
+    "calls": [
+      {
+        "callId": "write-deny-outer-bound",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "rule cannot lift deny"}
+      }
+    ],
+    "capability": "write",
+    "decision": "deny",
+    "rules": [
+      {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "rule_allow_relaxes_ask_to_allow",
+    "calls": [
+      {
+        "callId": "write-rule-relaxed",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "rule relaxes ask"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "rules": [
+      {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
+    ],
+    "approval": "denied",
+    "expectedEvents": ["tool.completed", "run.completed"],
+    "expectedFile": true
+  },
+  {
+    "id": "rule_deny_beats_capability_allow",
+    "calls": [
+      {
+        "callId": "write-rule-denied",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "denied by rule"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "rules": [
+      {"tool": "*", "kind": "path_glob", "pattern": "*.txt", "decision": "deny"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
   }
 ]

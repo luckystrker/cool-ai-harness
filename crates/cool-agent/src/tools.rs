@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_security::{
-    Capability, CapabilityPolicy, Decision, Workspace, mask_json, mask_secrets,
+    Capability, CapabilityPolicy, Decision, PolicyRule, Workspace, mask_json, mask_secrets,
     sanitize_environment,
 };
 use globset::{Glob, GlobMatcher};
@@ -16,6 +15,9 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::launcher::{
+    DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
+};
 use crate::loop_runtime::CancelSignal;
 
 #[derive(Clone, Debug)]
@@ -57,6 +59,9 @@ pub struct ToolResult {
     pub is_error: bool,
     pub error_code: Option<String>,
     pub truncated: bool,
+    /// Post-write linter/checker output (P1.9), ≤4 KiB masked — `"skipped"`
+    /// when the process launcher is disabled.
+    pub diagnostics: Option<String>,
 }
 
 impl ToolResult {
@@ -66,6 +71,7 @@ impl ToolResult {
             is_error: false,
             error_code: None,
             truncated: false,
+            diagnostics: None,
         }
     }
 
@@ -76,6 +82,7 @@ impl ToolResult {
             is_error: true,
             error_code: Some(code),
             truncated: false,
+            diagnostics: None,
         }
     }
 
@@ -116,6 +123,11 @@ impl From<std::io::Error> for ToolError {
     }
 }
 
+/// Live policy-rule source (P1.6): invoked per tool call so project-file and
+/// durable-store mutations apply to in-flight runs instead of a run-start
+/// snapshot. Returns rules in match order (project before user).
+pub type RuleSource = Arc<dyn Fn() -> Vec<PolicyRule> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: Workspace,
@@ -124,9 +136,17 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     pub environment: HashMap<String, String>,
     pub allowed_secret_environment: BTreeSet<String>,
-    /// Explicit opt-in for a single-user trusted-host launcher. Production
-    /// embeddings keep this false unless they supply an OS-isolated worker.
-    pub allow_trusted_host_processes: bool,
+    /// The process launcher gate between tool calls and OS process creation
+    /// (P0.3). Defaults to `DisabledLauncher` — fail closed until the
+    /// operator selects `host` or `sandboxed`.
+    pub launcher: Arc<dyn ProcessLauncher>,
+    /// Live session-scoped policy rules (P1.6) consulted before the rest of
+    /// the policy; `approval.resolve {remember: "session"}` mutates the set.
+    pub session_rules: Option<Arc<RwLock<Vec<PolicyRule>>>>,
+    /// Live project+user rule source, consulted after session rules and
+    /// before the policy's own rule set (P1.6 — keeps in-flight runs on the
+    /// current rule file/store rather than a run-start snapshot).
+    pub rule_source: Option<RuleSource>,
     pub cancel: Option<CancelSignal>,
     /// Server-derived actor for store-backed tools. Never read from tool
     /// arguments.
@@ -149,7 +169,9 @@ impl ToolContext {
             max_output_bytes: 1_048_576,
             environment: HashMap::new(),
             allowed_secret_environment: BTreeSet::new(),
-            allow_trusted_host_processes: false,
+            launcher: Arc::new(DisabledLauncher),
+            session_rules: None,
+            rule_source: None,
             cancel: None,
             actor_id: "local-user".to_owned(),
             conversation_id: None,
@@ -168,6 +190,31 @@ impl ToolContext {
     /// the right rows.
     pub fn with_conversation(mut self, conversation_id: Option<i64>) -> Self {
         self.conversation_id = conversation_id;
+        self
+    }
+
+    /// Selects the process launcher (`Disabled`/`Host`/`Sandboxed`).
+    pub fn with_launcher(mut self, launcher: Arc<dyn ProcessLauncher>) -> Self {
+        self.launcher = launcher;
+        self
+    }
+
+    /// Attaches the run's live session-rule set.
+    pub fn with_session_rules(mut self, rules: Arc<RwLock<Vec<PolicyRule>>>) -> Self {
+        self.session_rules = Some(rules);
+        self
+    }
+
+    /// Attaches the live project+user rule source.
+    pub fn with_rule_source(mut self, source: RuleSource) -> Self {
+        self.rule_source = Some(source);
+        self
+    }
+
+    /// Supplies the host environment that launched processes inherit (still
+    /// passed through `env_clear` + `sanitize_environment`).
+    pub fn with_environment(mut self, environment: HashMap<String, String>) -> Self {
+        self.environment = environment;
         self
     }
 }
@@ -457,6 +504,92 @@ fn confinement_io(error: std::io::Error) -> ToolError {
     }
 }
 
+/// `.cool/policy.json` (capability rules) and `.cool/config.json`
+/// (diagnostics commands) are security configuration: an agent that could
+/// rewrite them through the file tools could grant itself tool access or
+/// arbitrary per-write commands. Writes to them go through the policy
+/// commands / manual edits only — never through `write_file`/`edit_file`.
+/// The check runs on BOTH the lexical name and the resolved canonical
+/// target: the lexical pass catches name variants on case-insensitive
+/// filesystems, and the canonical pass stops an in-workspace symlink from
+/// smuggling a write into a protected file under another name.
+fn reject_protected_write(
+    workspace: &cool_security::Workspace,
+    path: &std::path::Path,
+) -> Result<(), ToolError> {
+    let is_protected = |relative: &std::path::Path| {
+        let mut parts: Vec<String> = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    parts.push(part.to_string_lossy().into_owned());
+                }
+                std::path::Component::ParentDir => {
+                    parts.pop();
+                }
+                _ => {}
+            }
+        }
+        parts.len() == 2
+            && parts[0].eq_ignore_ascii_case(".cool")
+            && matches!(
+                parts[1].to_lowercase().as_str(),
+                "policy.json" | "config.json"
+            )
+    };
+    if is_protected(path) {
+        return Err(ToolError::Security(format!(
+            "{} is managed by policy commands, not writable by the agent",
+            path.display()
+        )));
+    }
+    // Resolve the canonical target: canonicalize the deepest existing
+    // ancestor (symlinks resolved by the sandboxed dir handle, escapes
+    // already rejected there) and append the literal remainder.
+    let dir = workspace.dir();
+    let canonical_root = dir.canonicalize(".").map_err(confinement_io)?;
+    let mut prefix: &std::path::Path = path;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let resolved = loop {
+        match dir.canonicalize(prefix) {
+            Ok(base) => {
+                let mut base = base;
+                for component in tail.iter().rev() {
+                    base.push(component);
+                }
+                break base;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match prefix.file_name() {
+                    Some(name) => {
+                        tail.push(name.to_owned());
+                        prefix = prefix.parent().unwrap_or_else(|| std::path::Path::new(""));
+                    }
+                    None => {
+                        let mut base = canonical_root.clone();
+                        for component in tail.iter().rev() {
+                            base.push(component);
+                        }
+                        break base;
+                    }
+                }
+            }
+            Err(error) => return Err(confinement_io(error)),
+        }
+    };
+    if resolved
+        .strip_prefix(&canonical_root)
+        .map(is_protected)
+        .unwrap_or(false)
+    {
+        return Err(ToolError::Security(format!(
+            "{} is managed by policy commands, not writable by the agent",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl ToolHandler for ReadFile {
     async fn execute(
@@ -530,6 +663,7 @@ impl ToolHandler for ReadFile {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -921,6 +1055,7 @@ impl ToolHandler for SearchFiles {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -983,6 +1118,7 @@ impl ToolHandler for FindFiles {
             is_error: false,
             error_code: None,
             truncated,
+            diagnostics: None,
         })
     }
 }
@@ -1012,6 +1148,7 @@ impl ToolHandler for WriteFile {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let path = workspace_path(context, requested)?;
+        reject_protected_write(&context.workspace, &path)?;
         if let Some(parent) = path.parent()
             && parent.components().next().is_some()
         {
@@ -1036,11 +1173,13 @@ impl ToolHandler for WriteFile {
             .map_err(confinement_io)?;
         file.write_all(content.as_bytes()).map_err(ToolError::Io)?;
         file.flush().map_err(ToolError::Io)?;
-        Ok(ToolResult::ok(json!({
+        let mut result = ToolResult::ok(json!({
             "path": requested,
             "bytes": content.len(),
             "append": append,
-        })))
+        }));
+        result.diagnostics = run_diagnostics(context, requested).await;
+        Ok(result)
     }
 }
 
@@ -1106,6 +1245,7 @@ fn edit_error(code: &str, message: impl Into<String>, extra: Value) -> ToolResul
         is_error: true,
         error_code: Some(code.to_owned()),
         truncated: false,
+        diagnostics: None,
     }
 }
 
@@ -1165,6 +1305,9 @@ impl ToolHandler for EditFile {
                 "symlink chain exceeds 8 hops".to_owned(),
             ));
         }
+        // Checked AFTER symlink resolution so a link cannot smuggle a write
+        // into `.cool/policy.json` / `.cool/config.json`.
+        reject_protected_write(&context.workspace, &path)?;
 
         let mut original_permissions = None;
         let before = match context.workspace.dir().metadata(&path) {
@@ -1303,7 +1446,9 @@ impl ToolHandler for EditFile {
         if diff_truncated {
             output["diffTruncated"] = json!(true);
         }
-        Ok(ToolResult::ok(output))
+        let mut result = ToolResult::ok(output);
+        result.diagnostics = run_diagnostics(context, requested).await;
+        Ok(result)
     }
 }
 
@@ -1617,18 +1762,27 @@ impl ToolHandler for PythonFallbackTool {
     }
 }
 
+/// The `NetAccess` a launched process gets, derived from the tool's declared
+/// network capability: a `Deny` resolution propagates `NetAccess::None` so a
+/// network that is off-limits to the tool is also off-limits to its child
+/// (`--unshare-net`/seatbelt, or a fail-closed `HostLauncher` refusal).
+/// `Ask` resolves to `None` too: approving e.g. a `shell` call's Execute
+/// capability must NOT silently grant it full networking — the child stays
+/// offline unless the Network capability itself resolves `Allow` (a
+/// dedicated net approval/allowlist is a documented follow-up).
+fn process_net(context: &ToolContext) -> NetAccess {
+    match context.policy.resolve(Capability::Network) {
+        Decision::Allow => NetAccess::Full,
+        _ => NetAccess::None,
+    }
+}
+
 async fn run_bounded_process(
     context: &ToolContext,
     program: &Path,
     args: &[String],
     stdin: Option<Vec<u8>>,
 ) -> Result<ToolResult, ToolError> {
-    if !context.allow_trusted_host_processes {
-        return Err(ToolError::Security(
-            "OS-isolated process launcher is not configured; trusted-host execution is disabled"
-                .to_owned(),
-        ));
-    }
     let safe_environment = sanitize_environment(
         context
             .environment
@@ -1650,29 +1804,22 @@ async fn run_bounded_process(
             .map(|(name, value)| (name.as_str(), value.as_str())),
         &context.allowed_secret_environment,
     );
-    let mut command = process_wrap::tokio::CommandWrap::with_new(program, |command| {
-        command
-            .args(args)
-            .current_dir(context.workspace.root())
-            .env_clear()
-            .envs(environment)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-    });
-    // OS-isolated launcher: the child and any descendants live in a killable
-    // containment unit — a Windows Job Object (closed on drop/kill) or a Unix
-    // process group (kill hits the whole group, not just the direct child).
-    command.wrap(process_wrap::tokio::KillOnDrop);
-    #[cfg(unix)]
-    command.wrap(process_wrap::tokio::ProcessGroup::leader());
-    #[cfg(windows)]
-    command.wrap(process_wrap::tokio::JobObject);
-    let mut child = command.spawn().map_err(ToolError::Io)?;
+    // The launcher owns the actual spawn: `Disabled` fails closed, `Host`
+    // runs inside the killable containment unit (Job Object / process group),
+    // `Sandboxed` wraps argv in the OS sandbox backend first.
+    let spec = LaunchSpec {
+        cwd: context.workspace.root().to_path_buf(),
+        env: environment.into_iter().collect(),
+        stdin: stdin.clone(),
+        net: process_net(context),
+        limits: ResourceLimits {
+            timeout: context.timeout,
+            max_output_bytes: context.max_output_bytes,
+        },
+    };
+    let mut child = context
+        .launcher
+        .spawn(&program.to_string_lossy(), args, &spec)?;
     if let Some(stdin) = stdin
         && let Some(mut pipe) = child.stdin().take()
     {
@@ -1782,6 +1929,7 @@ async fn run_bounded_process(
         is_error: !status.success(),
         error_code: (!status.success()).then(|| "process_failed".to_owned()),
         truncated,
+        diagnostics: None,
     })
 }
 
@@ -1851,4 +1999,196 @@ where
         }
     }
     Ok(StreamCapture { head, tail, total })
+}
+
+/// Post-write diagnostics (P1.9): a per-extension command map from
+/// `<workspace>/.cool/config.json` merged over `~/.cool/config.json`, run
+/// through the active process launcher with a fixed timeout. A configured
+/// extension with a `Disabled` launcher reports `"skipped"`; a command that
+/// fails to run degrades to a warning string, never a tool error.
+const DIAGNOSTICS_LIMIT: usize = 4096;
+const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn diagnostics_commands(context: &ToolContext) -> HashMap<String, Vec<String>> {
+    let mut commands = HashMap::new();
+    // The user-level map reads first so the workspace map wins per key. The
+    // home config is an operator-owned fixed path outside the workspace — a
+    // plain read; no agent-controlled input reaches it.
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let path = std::path::Path::new(&home)
+            .join(".cool")
+            .join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            merge_diagnostics_map(&raw, &mut commands);
+        }
+    }
+    if let Ok(raw) = context.workspace.dir().read(".cool/config.json") {
+        merge_diagnostics_map(&String::from_utf8_lossy(&raw), &mut commands);
+    }
+    commands
+}
+
+fn merge_diagnostics_map(raw: &str, commands: &mut HashMap<String, Vec<String>>) {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    let Some(map) = value.get("diagnostics").and_then(Value::as_object) else {
+        return;
+    };
+    for (extension, command) in map {
+        let Some(argv) = command.as_array().map(|argv| {
+            argv.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        }) else {
+            continue;
+        };
+        if argv.is_empty() {
+            continue;
+        }
+        commands.insert(extension.trim_start_matches('.').to_lowercase(), argv);
+    }
+}
+
+/// Run the configured diagnostics command for `path` after a successful
+/// write/edit. Returns `None` when no command is configured for the
+/// extension — the common case, so the field stays absent.
+async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<String> {
+    let extension = Path::new(requested)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_lowercase();
+    let commands = diagnostics_commands(context);
+    let argv = commands.get(&extension)?;
+    if context.launcher.kind() == LauncherKind::Disabled {
+        return Some("skipped".to_owned());
+    }
+    let mut argv = argv.iter();
+    let program = argv.next()?;
+    let args: Vec<String> = argv.map(|arg| arg.replace("{file}", requested)).collect();
+    let environment = sanitize_environment(
+        context
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        &context.allowed_secret_environment,
+    );
+    // Literal redaction covers everything the sanitizer stripped AND the
+    // allowed secrets — an allowed value still cannot leak through output a
+    // child chooses to echo back.
+    let secret_values: Vec<String> = context
+        .environment
+        .iter()
+        .filter(|(name, _)| {
+            !environment.contains_key(*name) || context.allowed_secret_environment.contains(*name)
+        })
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .collect();
+    let spec = LaunchSpec {
+        cwd: context.workspace.root().to_path_buf(),
+        env: environment.into_iter().collect(),
+        stdin: None,
+        net: process_net(context),
+        limits: ResourceLimits {
+            timeout: DIAGNOSTICS_TIMEOUT,
+            max_output_bytes: DIAGNOSTICS_LIMIT,
+        },
+    };
+    let mut child = match context.launcher.spawn(program, &args, &spec) {
+        Ok(child) => child,
+        Err(error) => return Some(format!("warning: diagnostics unavailable: {error}")),
+    };
+    let stdout = child.stdout().take().map(|stream| {
+        tokio::spawn(async move { drain_stream(stream, DIAGNOSTICS_LIMIT, 0).await })
+    });
+    let stderr = child.stderr().take().map(|stream| {
+        tokio::spawn(async move { drain_stream(stream, DIAGNOSTICS_LIMIT, 0).await })
+    });
+    // The file is already written — a cancellation here races the outer
+    // batch abort, so prefer the cancel signal and report quickly instead of
+    // waiting the full timeout on a doomed child.
+    let status = if let Some(mut cancel) = context.cancel.clone() {
+        tokio::select! {
+            waited = timeout(DIAGNOSTICS_TIMEOUT, child.wait()) => match waited {
+                Ok(Ok(status)) => Some(status),
+                _ => None,
+            },
+            _ = cancel.wait() => {
+                let _ = std::pin::Pin::from(child.kill()).await;
+                let _ = child.wait().await;
+                return Some("warning: diagnostics cancelled".to_owned());
+            }
+        }
+    } else {
+        match timeout(DIAGNOSTICS_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => None,
+        }
+    };
+    let Some(status) = status else {
+        let _ = std::pin::Pin::from(child.kill()).await;
+        let _ = child.wait().await;
+        return Some("warning: diagnostics timed out".to_owned());
+    };
+    let mut text = String::new();
+    for stream in [stdout, stderr].into_iter().flatten() {
+        if let Ok(Ok(capture)) = stream.await {
+            text.push_str(&String::from_utf8_lossy(&capture.body()));
+        }
+    }
+    // A nonzero exit is a checker FAILURE — surface it as a warning even
+    // when the checker printed output (bare output reads like a success).
+    // Redact BEFORE capping: `[REDACTED]`/masking can expand the text, so
+    // the cap applies to the final returned string, marker included.
+    let warning =
+        (!status.success()).then(|| format!("warning: diagnostics exited with {status}\n"));
+    for secret in &secret_values {
+        text = text.replace(secret, "[REDACTED]");
+    }
+    let mut text = mask_secrets(&text);
+    let headroom = DIAGNOSTICS_LIMIT - warning.as_deref().map_or(0, str::len);
+    if text.len() > headroom {
+        const MARKER: &str = "\n... [diagnostics truncated at 4 KiB] ...";
+        let mut end = headroom.saturating_sub(MARKER.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(MARKER);
+    }
+    Some(format!("{}{}", warning.unwrap_or_default(), text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cool_security::{Capability, Decision};
+
+    fn context_with_network(decision: Decision) -> ToolContext {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = cool_security::Workspace::new(directory.path()).unwrap();
+        // Leak the tempdir so the workspace outlives the context — fine in tests.
+        std::mem::forget(directory);
+        let mut context = ToolContext::new(workspace, CapabilityPolicy::new(Some(Decision::Allow)));
+        context.policy.set(Capability::Network, decision);
+        context
+    }
+
+    /// Shell approvals no longer smuggle full network access: only an
+    /// explicit Network:Allow policy yields NetAccess::Full — Ask and Deny
+    /// both map to None inside the sandbox.
+    #[test]
+    fn process_net_only_grants_full_access_on_explicit_allow() {
+        for decision in [Decision::Ask, Decision::Deny] {
+            let context = context_with_network(decision);
+            assert!(
+                matches!(process_net(&context), NetAccess::None),
+                "network decision {decision:?} must not grant host networking"
+            );
+        }
+        let context = context_with_network(Decision::Allow);
+        assert!(matches!(process_net(&context), NetAccess::Full));
+    }
 }

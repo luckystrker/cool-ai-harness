@@ -72,6 +72,10 @@ struct ResolvedConfig {
     max_cost_usd: Option<f64>,
     capability_policy: Option<Value>,
     working_directory: Option<String>,
+    /// Profile-selected process launcher (P0.3): `settings.process_launcher`
+    /// + `settings.sandbox_backend`. `COOL_PROCESS_LAUNCHER` and the CLI flag
+    ///   still take precedence in `execute`.
+    launcher: Option<Arc<dyn cool_agent::ProcessLauncher>>,
 }
 
 /// Live cancel channels per `subagent_runs.id`.
@@ -94,6 +98,9 @@ pub struct SubagentExecutor {
     workspace: Workspace,
     policy: CapabilityPolicy,
     default_model: String,
+    /// Shared launcher / host env / rule state the children inherit
+    /// (subagents narrow the policy but keep the parent's launcher, P0.3).
+    host: cool_agent::HostContext,
     /// Live cancel channels per `subagent_runs.id`. A std mutex (never held
     /// across an await) so the cleanup guard can remove the entry from `Drop`
     /// even if the executor task panics.
@@ -101,6 +108,7 @@ pub struct SubagentExecutor {
 }
 
 impl SubagentExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<LegacyStore>,
         durable: DurableStore,
@@ -108,6 +116,7 @@ impl SubagentExecutor {
         workspace: Workspace,
         policy: CapabilityPolicy,
         default_model: String,
+        host: cool_agent::HostContext,
     ) -> Self {
         Self {
             store,
@@ -116,8 +125,17 @@ impl SubagentExecutor {
             workspace,
             policy,
             default_model,
+            host,
             live: StdMutex::new(HashMap::new()),
         }
+    }
+
+    /// The base capability policy; the child's `capability_policy` narrows
+    /// it at `subagent_policy`. Project + user rules ride the live
+    /// `rule_source` attached per run instead — for the subagent's own
+    /// working directory, not the server's (P1.6).
+    fn merged_policy(&self) -> CapabilityPolicy {
+        self.policy.clone()
     }
 
     /// Launch one subagent run. Idempotent on `(actor, key)`: a replay returns
@@ -390,6 +408,12 @@ impl SubagentExecutor {
             .and_then(|settings| settings.get("capability_policy"))
             .cloned()
             .or(role_policy);
+        let launcher = cool_agent::launcher_from_profile(
+            profile
+                .as_ref()
+                .and_then(|profile| profile.settings.as_ref()),
+        )
+        .map_err(cool_store::StoreError::InvalidInput)?;
         Ok(ResolvedConfig {
             role_name: role
                 .as_ref()
@@ -404,6 +428,7 @@ impl SubagentExecutor {
             max_cost_usd,
             capability_policy,
             working_directory: parent.working_directory,
+            launcher,
         })
     }
 
@@ -443,6 +468,19 @@ impl SubagentExecutor {
                 .map(|usd| (usd * 1_000_000.0) as u64),
             ..AgentLimits::default()
         };
+        // Launcher chain (P0.3): env → profile → executor default (flag or
+        // disabled). An invalid env value fails the child closed.
+        let launcher = match cool_agent::launcher_from_env() {
+            Ok(Some(launcher)) => launcher,
+            Ok(None) => resolved
+                .launcher
+                .clone()
+                .unwrap_or_else(|| self.host.launcher.clone()),
+            Err(error) => {
+                self.fail_run(&actor, context, &error);
+                return;
+            }
+        };
         let request = AgentRequest {
             model: resolved.model.clone(),
             history: Vec::new(),
@@ -454,10 +492,18 @@ impl SubagentExecutor {
             limits,
             tool_names: resolved.tool_names.clone(),
             tool_context: ToolContext::new(
-                workspace,
-                subagent_policy(&self.policy, resolved.capability_policy.as_ref()),
+                workspace.clone(),
+                subagent_policy(&self.merged_policy(), resolved.capability_policy.as_ref()),
             )
-            .with_actor(crate::local_actor().id),
+            .with_actor(crate::local_actor().id)
+            .with_launcher(launcher)
+            .with_environment(self.host.environment.clone())
+            .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
+            .with_rule_source(crate::rule_source_for(
+                Some(self.store.clone()),
+                workspace.clone(),
+                self.host.rules.clone(),
+            )),
         };
         let child_sink = LegacyTranscriptSink {
             store: Arc::clone(&self.store),
@@ -499,6 +545,9 @@ impl SubagentExecutor {
                 },
             )
             .await;
+        // The run is settled — drop its session-rule set so finished runs
+        // don't accumulate per-run state forever.
+        self.host.rules.remove_session(&context.run_id.to_string());
         let (status, summary, error, usage_json) = match &outcome {
             Ok(RunOutcome::Completed { history, usage }) => (
                 "completed",

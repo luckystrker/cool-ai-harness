@@ -338,6 +338,7 @@ async fn approval_resolution_is_actor_bound_idempotent_and_durable() {
             &run_id,
             "call-1",
             "write_file",
+            &std::collections::BTreeMap::new(),
             "write requires review",
         )
         .unwrap();
