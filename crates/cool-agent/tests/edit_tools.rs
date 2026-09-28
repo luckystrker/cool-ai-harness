@@ -345,6 +345,60 @@ async fn edit_file_resolves_symlinks_instead_of_replacing_them() {
     );
 }
 
+#[tokio::test]
+async fn edit_file_resolves_chained_symlinks_to_the_real_file() {
+    let directory = tempdir().unwrap();
+    write(
+        directory.path(),
+        "real.rs",
+        "fn main() {\n    old_call();\n}\n",
+    );
+    #[cfg(unix)]
+    {
+        let l2 = std::os::unix::fs::symlink("real.rs", directory.path().join("link2.rs"));
+        let l1 = std::os::unix::fs::symlink("link2.rs", directory.path().join("link1.rs"));
+        if l2.is_err() || l1.is_err() {
+            // Symlink creation needs privileges on some platforms.
+            return;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let l2 = std::os::windows::fs::symlink_file("real.rs", directory.path().join("link2.rs"));
+        let l1 = std::os::windows::fs::symlink_file("link2.rs", directory.path().join("link1.rs"));
+        if l2.is_err() || l1.is_err() {
+            return;
+        }
+    }
+    let registry = builtin_registry();
+    let edit = registry.get("edit_file").unwrap();
+    let result = edit
+        .execute(
+            &context(directory.path()),
+            edit_args(
+                "link1.rs",
+                json!([{"old": "old_call()", "new": "new_call()"}]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("real.rs")).unwrap(),
+        "fn main() {\n    new_call();\n}\n",
+        "the edit applies through the chain to the real file"
+    );
+    for link in ["link1.rs", "link2.rs"] {
+        assert!(
+            std::fs::symlink_metadata(directory.path().join(link))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{link} must survive the edit"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn edit_file_preserves_the_original_permissions() {

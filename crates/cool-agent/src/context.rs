@@ -314,10 +314,21 @@ pub fn compact_history(
         retained_tokens -= estimate_history_tokens(&groups[first]);
         first += 1;
     }
+    // history_groups keeps only the first system message — prior synthetic
+    // summaries are preserved so a drop-only fallback does not erase the
+    // state an earlier compaction folded away.
+    let kept_first_summary = usize::from(system.as_ref().is_some_and(is_summary_message));
     let mut messages = Vec::new();
     if let Some(system) = system {
         messages.push(system);
     }
+    messages.extend(
+        history
+            .iter()
+            .filter(|message| is_summary_message(message))
+            .skip(kept_first_summary)
+            .cloned(),
+    );
     messages.extend(groups.into_iter().skip(first).flatten());
     Compaction {
         dropped_messages: history.len().saturating_sub(messages.len()),

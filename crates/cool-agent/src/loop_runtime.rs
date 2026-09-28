@@ -163,9 +163,12 @@ pub trait EventSink: Send + Sync {
     /// replaces those groups with a synthetic system message; `None` keeps
     /// the drop-oldest fallback. Implementations that have no model driver
     /// leave the default — a summarizer failure must never block the loop.
+    /// `retained` is how many non-system history messages stay after the
+    /// dropped prefix — the coverage cursor anchors before that tail.
     async fn summarize_for_compaction(
         &self,
         _dropped: &[Message],
+        _retained: usize,
     ) -> Result<Option<String>, RuntimeError> {
         Ok(None)
     }
@@ -390,7 +393,17 @@ impl AgentRuntime {
                 if dropped.is_empty() {
                     None
                 } else {
-                    sink.summarize_for_compaction(&dropped)
+                    let retained = history
+                        .iter()
+                        .filter(|message| message.role != MessageRole::System)
+                        .count()
+                        .saturating_sub(
+                            dropped
+                                .iter()
+                                .filter(|message| message.role != MessageRole::System)
+                                .count(),
+                        );
+                    sink.summarize_for_compaction(&dropped, retained)
                         .await
                         .unwrap_or_default()
                 }

@@ -28,7 +28,7 @@ use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
     ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_event_rows,
-    is_summary_message, load_task_progress, mask_canonical_event, planning_system_prompt,
+    load_task_progress, mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -4234,8 +4234,9 @@ impl EventSink for LifecycleEventSink {
     async fn summarize_for_compaction(
         &self,
         dropped: &[Message],
+        retained: usize,
     ) -> Result<Option<String>, RuntimeError> {
-        self.inner.summarize_for_compaction(dropped).await
+        self.inner.summarize_for_compaction(dropped, retained).await
     }
 }
 
@@ -4362,6 +4363,7 @@ impl EventSink for AppServerEventSink {
     async fn summarize_for_compaction(
         &self,
         dropped: &[Message],
+        retained: usize,
     ) -> Result<Option<String>, RuntimeError> {
         let actor = local_actor();
         let store = &self.server.inner.store;
@@ -4369,22 +4371,10 @@ impl EventSink for AppServerEventSink {
         let rows =
             store.session_event_window(&run.session_id, &actor.id, None, i64::MAX as usize)?;
         // `compact_up_to_cursor` lives in the rust_events.rowid space the
-        // history endpoint projects. The dropped prefix maps one-to-one onto
-        // message-producing events newer than the newest covered set — the
-        // history the loop compacts is exactly these events (possibly plus
-        // messages this run emitted, which the store already holds).
-        let mut covered = 0_u64;
-        for (_, envelope) in &rows {
-            if let CanonicalEvent::SessionCompacted(compacted) = &envelope.event
-                && compacted.summary.is_some()
-            {
-                covered = covered.max(compacted.compact_up_to_cursor.unwrap_or(0));
-            }
-        }
-        // `dropped` maps to message-producing events in order. A replayed —
-        // or already compacted live — history starts after `covered` (its
-        // prefix was replaced by synthetic summaries), while an uncompacted
-        // live history still contains those messages itself.
+        // history endpoint projects. History's non-system messages map
+        // one-to-one onto the LAST message-producing events — every
+        // compaction (summary or drop-only) keeps a suffix of the log — so
+        // the summary covers everything before `retained`'s tail.
         let produces_message = |envelope: &EventEnvelope| {
             matches!(
                 &envelope.event,
@@ -4400,23 +4390,9 @@ impl EventSink for AppServerEventSink {
             .filter(|(_, envelope)| produces_message(envelope))
             .map(|(cursor, _)| *cursor)
             .collect();
-        let already_covered = message_cursors
-            .iter()
-            .filter(|cursor| **cursor <= covered)
-            .count();
-        let synthetic = dropped
-            .iter()
-            .filter(|message| is_summary_message(message))
-            .count();
-        let nonsynthetic = dropped.len().saturating_sub(synthetic);
-        let post_covered = message_cursors.len().saturating_sub(already_covered);
-        let needed = if synthetic > 0 && nonsynthetic <= post_covered {
-            nonsynthetic + already_covered
-        } else {
-            nonsynthetic
-        };
-        let covered_cursor = needed
-            .checked_sub(1)
+        let covered_cursor = message_cursors
+            .len()
+            .checked_sub(retained + 1)
             .and_then(|index| message_cursors.get(index).copied());
         let mut transcript = String::new();
         for message in dropped {

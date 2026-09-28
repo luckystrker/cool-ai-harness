@@ -1049,6 +1049,35 @@ fn compact_history_with_summary_keeps_last_groups_and_reports_counts() {
     assert_eq!(compacted.messages[2].content.as_deref(), Some("u3"));
 }
 
+#[test]
+fn compact_history_drop_fallback_preserves_prior_summary() {
+    let history = vec![
+        Message::text(cool_agent::MessageRole::System, "system"),
+        Message::text(
+            cool_agent::MessageRole::System,
+            "[Summary of earlier work]\nold digest",
+        ),
+        Message::text(cool_agent::MessageRole::User, "x".repeat(200)),
+        Message::text(cool_agent::MessageRole::User, "y".repeat(200)),
+        Message::text(cool_agent::MessageRole::User, "z".repeat(200)),
+    ];
+    // Summarization fails — the drop-only fallback must keep the prior
+    // synthetic summary instead of silently dropping it with old groups.
+    let compacted = cool_agent::compact_history(&history, 40, None);
+    assert!(compacted.dropped_messages > 0);
+    assert_eq!(
+        compacted.messages[1].content.as_deref(),
+        Some("[Summary of earlier work]\nold digest"),
+        "the earlier summary survives a drop-only compaction"
+    );
+    assert!(
+        compacted
+            .messages
+            .iter()
+            .any(cool_agent::is_summary_message)
+    );
+}
+
 struct SummarizingSink {
     inner: RecordingSink,
     fail: bool,
@@ -1076,6 +1105,7 @@ impl EventSink for SummarizingSink {
     async fn summarize_for_compaction(
         &self,
         dropped: &[Message],
+        _retained: usize,
     ) -> Result<Option<String>, cool_agent::RuntimeError> {
         *self.calls.lock().unwrap() += 1;
         self.dropped_lens.lock().unwrap().push(dropped.len());

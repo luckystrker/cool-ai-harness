@@ -1130,9 +1130,14 @@ impl ToolHandler for EditFile {
         // Follow a symlink to its in-workspace target: writing through a
         // temp file + rename would replace the link itself and leave the
         // linked file untouched. `read_link` rejects absolute targets.
-        if let Ok(link_metadata) = context.workspace.dir().symlink_metadata(&path)
-            && link_metadata.file_type().is_symlink()
-        {
+        // Chained links resolve fully, capped at 8 hops.
+        for _ in 0..8 {
+            let Ok(link_metadata) = context.workspace.dir().symlink_metadata(&path) else {
+                break;
+            };
+            if !link_metadata.file_type().is_symlink() {
+                break;
+            }
             let target = context
                 .workspace
                 .dir()
@@ -1148,6 +1153,17 @@ impl ToolHandler for EditFile {
                     ToolError::InvalidArguments("symlink target is not a valid path".to_owned())
                 })?,
             )?;
+        }
+        if context
+            .workspace
+            .dir()
+            .symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(ToolError::InvalidArguments(
+                "symlink chain exceeds 8 hops".to_owned(),
+            ));
         }
 
         let mut original_permissions = None;
@@ -1248,24 +1264,19 @@ impl ToolHandler for EditFile {
                 .dir()
                 .open_with(&tmp_path, &options)
                 .map_err(confinement_io)?;
+            // The temp file's fresh inode carries default permissions —
+            // apply the original mode before content is written so a private
+            // file never sits world-readable on disk.
+            if let Some(permissions) = original_permissions {
+                file.set_permissions(permissions).map_err(ToolError::Io)?;
+            }
             file.write_all(after.as_bytes()).map_err(ToolError::Io)?;
             file.flush().map_err(ToolError::Io)?;
             context
                 .workspace
                 .dir()
                 .rename(&tmp_path, context.workspace.dir(), &path)
-                .map_err(confinement_io)?;
-            // The temp file's fresh inode carries default permissions —
-            // restore the original mode so editing a private file does not
-            // make it world-readable.
-            if let Some(permissions) = original_permissions.clone() {
-                context
-                    .workspace
-                    .dir()
-                    .set_permissions(&path, permissions)
-                    .map_err(confinement_io)?;
-            }
-            Ok(())
+                .map_err(confinement_io)
         })();
         if let Err(error) = write_result {
             let _ = context.workspace.dir().remove_file(&tmp_path);
@@ -1273,18 +1284,12 @@ impl ToolHandler for EditFile {
         }
 
         const DIFF_LIMIT: usize = 4096;
-        let diff = unified_diff(requested, before.as_deref().unwrap_or(""), &after);
-        let diff_truncated = diff.len() > DIFF_LIMIT;
-        let diff = if diff_truncated {
-            let mut boundary = DIFF_LIMIT;
-            while !diff.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            let cut = diff[..boundary].rfind('\n').unwrap_or(boundary);
-            format!("{}\n… diff truncated", &diff[..cut])
-        } else {
-            diff
-        };
+        let (diff, diff_truncated) = unified_diff(
+            requested,
+            before.as_deref().unwrap_or(""),
+            &after,
+            DIFF_LIMIT,
+        );
         let mut output = json!({
             "path": requested,
             "editsApplied": edits.len(),
@@ -1383,10 +1388,18 @@ fn line_ops(a: &[&str], b: &[&str]) -> Option<Vec<u8>> {
 /// ~60-line unified diff renderer: `--- a/ +++ b/` headers and `@@` hunks
 /// with 3 context lines, neighbouring hunks merged when their context
 /// windows touch.
-fn unified_diff(path: &str, before: &str, after: &str) -> String {
+fn unified_diff(path: &str, before: &str, after: &str, max_len: usize) -> (String, bool) {
     const CONTEXT: usize = 3;
     if before == after {
-        return String::new();
+        return (String::new(), false);
+    }
+    // Emission stops once the output passes `max_len` — large-file edits
+    // cannot allocate an unbounded diff string.
+    fn finish(mut out: String, truncated: bool) -> (String, bool) {
+        if truncated {
+            out.push_str("… diff truncated\n");
+        }
+        (out, truncated)
     }
     let a: Vec<&str> = if before.is_empty() {
         Vec::new()
@@ -1405,13 +1418,19 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
             out.push('-');
             out.push_str(line);
             out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
         }
         for line in &b {
             out.push('+');
             out.push_str(line);
             out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
         }
-        return out;
+        return finish(out, false);
     };
     let mut entries: Vec<(u8, &str)> = Vec::with_capacity(ops.len());
     let (mut i, mut j) = (0usize, 0usize);
@@ -1488,9 +1507,12 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
             out.push(*op as char);
             out.push_str(text);
             out.push('\n');
+            if out.len() > max_len {
+                return finish(out, true);
+            }
         }
     }
-    out
+    finish(out, false)
 }
 
 struct ProcessTool {

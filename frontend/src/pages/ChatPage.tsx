@@ -130,10 +130,14 @@ export function ChatPage() {
   const isMobile = useIsMobile()
   const { openDrawer } = useMobileNav()
 
-  // When a different conversation is selected, drop any pending bubbles.
+  // When a different conversation is selected, drop any pending bubbles and
+  // per-conversation run modes — a foreign progress file must not leak into
+  // the next chat.
   useEffect(() => {
     clearPending()
     setRecorderOpen(false)
+    setPlanMode(false)
+    setLongTaskMode(false)
   }, [convId, clearPending])
 
   // Compaction: messages covered by the working-memory rolling summary are
