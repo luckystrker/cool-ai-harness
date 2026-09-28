@@ -20,9 +20,9 @@ pub use checkpoints::{
 };
 pub use context::{
     COMPACTION_KEEP_LAST_GROUPS, COMPACTION_SUMMARY_PREFIX, Compaction, Message, MessageRole,
-    PLANNING_SYSTEM_PROMPT, ToolCall, compact_history, default_agent_system_prompt,
-    estimate_history_tokens, is_summary_message, load_project_instructions, load_task_progress,
-    planning_system_prompt, summary_drop_candidates,
+    ModelContentPart, PLANNING_SYSTEM_PROMPT, ToolCall, compact_history,
+    default_agent_system_prompt, estimate_history_tokens, is_summary_message,
+    load_project_instructions, load_task_progress, planning_system_prompt, summary_drop_candidates,
 };
 pub use launcher::{
     DisabledLauncher, HostContext, HostLauncher, LaunchSpec, LauncherKind, NetAccess,

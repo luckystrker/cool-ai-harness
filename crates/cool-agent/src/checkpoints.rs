@@ -227,7 +227,7 @@ async fn git_snapshot(
         workspace,
         &context.launcher,
         &context.environment,
-        &commit_args
+        commit_args
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>()

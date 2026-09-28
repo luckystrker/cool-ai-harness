@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalDecision, ApprovalOutcome, CanonicalEvent, EventEnvelope,
-    ItemEvent, RunCancelledResult, RunStarted, RunTerminal, SteerAcceptedResult,
+    Extensions, ItemEvent, RunCancelledResult, RunStarted, RunTerminal, SteerAcceptedResult,
     ToolApprovalRequired, ToolApprovalResolved, ToolFailed, V1Version, WorkerEvent,
 };
 use cool_security::mask_json;
@@ -1262,6 +1262,7 @@ impl DurableStore {
         fingerprint: &str,
         run_id: &str,
         content: &str,
+        extensions: Extensions,
     ) -> Result<IdempotentOutcome<SteerAcceptedResult>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1302,7 +1303,7 @@ impl DurableStore {
                 content: Some(content.to_owned()),
                 tool_calls: Vec::new(),
             }),
-            extensions: Default::default(),
+            extensions,
         };
         append_event_tx(&transaction, actor_id, &event)?;
         let result = SteerAcceptedResult {

@@ -1087,6 +1087,7 @@ fn steer_appends_a_durable_user_item_only_to_active_runs() {
             "steer-fingerprint",
             &run,
             "focus",
+            Default::default(),
         )
         .unwrap();
     assert!(steer.created);
@@ -1108,16 +1109,31 @@ fn steer_appends_a_durable_user_item_only_to_active_runs() {
             "steer-fingerprint",
             &run,
             "focus",
+            Default::default(),
         )
         .unwrap();
     assert!(!replay.created);
     assert_eq!(replay.value.seq, 2);
     assert!(matches!(
-        store.steer_run("local-user", "steer-key", "changed", &run, "focus"),
+        store.steer_run(
+            "local-user",
+            "steer-key",
+            "changed",
+            &run,
+            "focus",
+            Default::default(),
+        ),
         Err(StoreError::IdempotencyConflict)
     ));
     assert!(matches!(
-        store.steer_run("another-user", "foreign", "foreign", &run, "focus"),
+        store.steer_run(
+            "another-user",
+            "foreign",
+            "foreign",
+            &run,
+            "focus",
+            Default::default(),
+        ),
         Err(StoreError::ActorMismatch)
     ));
 
@@ -1136,7 +1152,14 @@ fn steer_appends_a_durable_user_item_only_to_active_runs() {
         )
         .unwrap();
     assert!(matches!(
-        store.steer_run("local-user", "late", "late", &run, "too late"),
+        store.steer_run(
+            "local-user",
+            "late",
+            "late",
+            &run,
+            "too late",
+            Default::default(),
+        ),
         Err(StoreError::RunNotActive)
     ));
 }
@@ -1405,7 +1428,7 @@ fn rewind_marks_runs_and_replays_prefix() {
         )
         .unwrap();
     assert!(outcome.created);
-    assert_eq!(outcome.value.rewound_run_ids, [run.clone()]);
+    assert_eq!(outcome.value.rewound_run_ids, vec![run.clone()]);
     // The checkpoint lives past the cursor (seq 4 > cursor of seq 3) — it is
     // NOT picked up: refs are collected only inside the retained prefix.
     assert_eq!(outcome.value.checkpoint_ref, None);

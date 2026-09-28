@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, Extensions, ItemEvent,
-    PlanCreated, PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal,
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, ContentPart, EventEnvelope, Extensions,
+    ItemEvent, PlanCreated, PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal,
     SessionCompacted, SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved,
     ToolCompleted, ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
@@ -23,8 +23,8 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::context::{
-    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens, is_summary_message,
-    load_project_instructions, load_task_progress, summary_drop_candidates,
+    Message, MessageRole, ModelContentPart, ToolCall, compact_history, estimate_history_tokens,
+    is_summary_message, load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
@@ -72,6 +72,14 @@ pub struct AgentRequest {
     pub model: String,
     pub history: Vec<Message>,
     pub user_input: String,
+    /// Resolved model-visible parts for the first user message (P2.12):
+    /// base64 image data lives here, `user_input` keeps the degraded
+    /// `[image: <id>]` marker text that durable history carries.
+    pub user_parts: Vec<ModelContentPart>,
+    /// The protocol parts as the client sent them — recorded on the user
+    /// `ItemCompleted` envelope under `extensions.content_parts` so the UI
+    /// can replay attachment refs without the bytes (P2.12).
+    pub user_replay_parts: Vec<ContentPart>,
     pub system_prompt: Option<String>,
     /// Optional run-mode marker surfaced on `run.started` (`plan` for planning
     /// turns). `None` keeps the default agent mode.
@@ -437,12 +445,22 @@ impl AgentRuntime {
             ),
         }))
         .await?;
-        let user_message = Message::text(MessageRole::User, request.user_input);
-        sink.emit(CanonicalEvent::ItemCompleted(ItemEvent {
-            role: Some("user".to_owned()),
-            content: user_message.content.clone(),
-            tool_calls: Vec::new(),
-        }))
+        let user_message =
+            Message::with_parts(MessageRole::User, request.user_input, request.user_parts);
+        let mut user_extensions = Extensions::default();
+        if !request.user_replay_parts.is_empty()
+            && let Ok(value) = serde_json::to_value(&request.user_replay_parts)
+        {
+            user_extensions.insert("content_parts".to_owned(), value);
+        }
+        sink.emit_with_extensions(
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: user_message.content.clone(),
+                tool_calls: Vec::new(),
+            }),
+            user_extensions,
+        )
         .await?;
         history.push(user_message);
         let mut total_usage = Usage::default();
@@ -627,6 +645,7 @@ impl AgentRuntime {
             let assistant_message = Message {
                 role: MessageRole::Assistant,
                 content: (!content.is_empty()).then_some(content),
+                parts: None,
                 tool_calls: calls.clone(),
                 tool_call_id: None,
                 name: None,
@@ -699,10 +718,11 @@ impl AgentRuntime {
                         });
                     }
                 }
-                let message = Message::tool_result(
+                let mut message = Message::tool_result(
                     &call,
                     serde_json::to_string(&output).unwrap_or_else(|_| "null".to_owned()),
                 );
+                message.parts = result.output_parts.clone();
                 history.push(message);
             }
             if let Some(reason) = batch.cancelled {
@@ -1366,6 +1386,10 @@ pub fn history_from_event_rows(
                     Message {
                         role,
                         content: item.content.clone(),
+                        // Image bytes are never re-fetched for history —
+                        // rebuilt messages degrade to the `[image: id]`
+                        // marker text (P2.12).
+                        parts: None,
                         tool_calls: item
                             .tool_calls
                             .iter()
@@ -1388,6 +1412,7 @@ pub fn history_from_event_rows(
                         serde_json::to_string(&tool.result)
                             .map_err(|error| RuntimeError::Sink(error.to_string()))?,
                     ),
+                    parts: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(tool.call_id.clone()),
                     name: Some(tool.name.clone()),
@@ -1404,6 +1429,7 @@ pub fn history_from_event_rows(
                         }))
                         .map_err(|error| RuntimeError::Sink(error.to_string()))?,
                     ),
+                    parts: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(tool.call_id.clone()),
                     name: Some(tool.name.clone()),

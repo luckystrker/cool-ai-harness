@@ -1804,6 +1804,8 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 model,
                 history: Vec::new(),
                 user_input: prompt,
+                user_parts: Vec::new(),
+                user_replay_parts: Vec::new(),
                 system_prompt: None,
                 mode: None,
                 temperature: 0.7,

@@ -421,6 +421,8 @@ impl TaskExecutor {
             model,
             history: Vec::new(),
             user_input: task.prompt.clone(),
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: None,
             mode: Some("task".to_owned()),
             temperature: 0.0,

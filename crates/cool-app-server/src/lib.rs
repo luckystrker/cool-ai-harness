@@ -26,9 +26,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
-    CancelSignal, EventSink, GateOutcome, Message, MessageRole, RunOutcome, RuntimeError,
-    ScriptedDriver, ToolContext, Usage, builtin_registry, default_agent_system_prompt,
-    history_from_event_rows, load_task_progress, mask_canonical_event, planning_system_prompt,
+    CancelSignal, EventSink, GateOutcome, Message, MessageRole, ModelContentPart, RunOutcome,
+    RuntimeError, ScriptedDriver, ToolContext, Usage, builtin_registry,
+    default_agent_system_prompt, history_from_event_rows, load_task_progress, mask_canonical_event,
+    planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -450,11 +451,32 @@ struct RunRecord {
 /// the spawned run does not retain the whole request envelope.
 struct PromptRequest {
     content: String,
+    /// Resolved image bytes for the model's first turn (P2.12); `content`
+    /// carries the durable `[image: <artifact_id>]` markers instead.
+    model_parts: Vec<ModelContentPart>,
+    /// Attachment refs for the `ItemCompleted` `content_parts` extension —
+    /// the UI replays chips from these, never from bytes (P2.12).
+    replay_parts: Vec<ContentPart>,
     model: Option<String>,
     system_prompt: Option<String>,
     plan_mode: bool,
     long_task_mode: bool,
 }
+
+/// `expand_prompt_parts` result (P2.12): `text` is what durable history and
+/// model `content` keep (with `[image: <artifact_id>]` markers), `model_parts`
+/// carries the resolved image bytes for this turn only, `replay_parts` is the
+/// attachment-ref list persisted on the `ItemCompleted` `content_parts`
+/// envelope extension so the UI can replay attachments without bytes.
+struct ExpandedContent {
+    text: String,
+    model_parts: Vec<ModelContentPart>,
+    replay_parts: Vec<ContentPart>,
+}
+
+/// Largest image attachment decoded into a model part (P2.12) — matches the
+/// `view_image` tool ceiling; bigger blobs degrade to the marker only.
+const MAX_IMAGE_PART_BYTES: u64 = 10 * 1024 * 1024;
 
 struct ConnectionState {
     initialized: bool,
@@ -1699,29 +1721,27 @@ impl AppServer {
                 let _ = self.send(&outbound, frame).await;
             }
             Command::SessionSteer(params) => {
-                if params
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32602, "unsupported_content_part", false)),
-                        )
-                        .await;
-                    return;
-                }
-                let content = params
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if content.trim().is_empty() {
+                let actor = local_actor();
+                // Image/artifact parts are expanded like prompt parts (P2.12):
+                // the steered item's `content` keeps the marker text and its
+                // envelope `extensions.content_parts` carries the refs
+                // `drain_steers` resolves into model image parts.
+                let run = match self.inner.store.run(&params.run_id, &actor.id) {
+                    Ok(run) => run,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                let expanded =
+                    match self.expand_prompt_parts(&actor, &run.session_id, &params.content) {
+                        Ok(expanded) => expanded,
+                        Err(error) => {
+                            let _ = self.send(&outbound, failure(id, error)).await;
+                            return;
+                        }
+                    };
+                if expanded.text.trim().is_empty() {
                     let _ = self
                         .send(
                             &outbound,
@@ -1730,14 +1750,20 @@ impl AppServer {
                         .await;
                     return;
                 }
-                let actor = local_actor();
+                let mut extensions = cool_protocol::Extensions::default();
+                if !expanded.replay_parts.is_empty()
+                    && let Ok(value) = serde_json::to_value(&expanded.replay_parts)
+                {
+                    extensions.insert("content_parts".to_owned(), value);
+                }
                 let fingerprint = fingerprint(&params);
                 let frame = match self.inner.store.steer_run(
                     &actor.id,
                     params.idempotency_key.as_str(),
                     &fingerprint,
                     &params.run_id,
-                    &mask_secrets(&content),
+                    &mask_secrets(&expanded.text),
+                    extensions,
                 ) {
                     Ok(steer) => {
                         let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
@@ -1784,9 +1810,9 @@ impl AppServer {
                         return;
                     }
                 }
-                let content =
+                let expanded =
                     match self.expand_prompt_parts(&actor, &params.session_id, &params.content) {
-                        Ok(content) => content,
+                        Ok(expanded) => expanded,
                         Err(error) => {
                             let _ = self.send(&outbound, failure(id, error)).await;
                             return;
@@ -1794,7 +1820,7 @@ impl AppServer {
                     };
                 if !self.prompt_start_frames_fit(
                     &params.session_id,
-                    &content,
+                    &expanded.text,
                     params.model.as_deref(),
                 ) {
                     let _ = self
@@ -1833,7 +1859,9 @@ impl AppServer {
                             self.spawn_agent_run(
                                 run_id,
                                 PromptRequest {
-                                    content,
+                                    content: expanded.text,
+                                    model_parts: expanded.model_parts,
+                                    replay_parts: expanded.replay_parts,
                                     model: params.model,
                                     system_prompt: params.system_prompt,
                                     plan_mode: params.plan_mode,
@@ -3446,6 +3474,8 @@ impl AppServer {
                     .unwrap_or_else(|| server.inner.default_model.clone()),
                 history: Vec::<Message>::new(),
                 user_input: prompt.content,
+                user_parts: prompt.model_parts,
+                user_replay_parts: prompt.replay_parts,
                 system_prompt,
                 mode,
                 temperature: 0.0,
@@ -3850,6 +3880,8 @@ impl AppServer {
             model: model.to_owned(),
             history: Vec::new(),
             user_input: input,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
             mode: Some("compact".to_owned()),
             temperature: 0.0,
@@ -4189,31 +4221,37 @@ impl AppServer {
         Ok(())
     }
 
-    /// Expand `ContentPart`s into the text-only user input the Rust runtime
-    /// accepts (Python `build_multimodal_content`, `backend/app/multimodal.py`):
-    /// extracted text is inlined as `[Attachment: name]`, supported images get
-    /// a marker pointing at `image_analyze` (the Rust `Message` has no vision
-    /// parts — tracked as an M12 checkpoint gap), opaque files get the
+    /// Expand `ContentPart`s (Python `build_multimodal_content`,
+    /// `backend/app/multimodal.py`): extracted text is inlined as
+    /// `[Attachment: name]`, supported images become model image parts plus a
+    /// `[image: <id>]` marker (P2.12), opaque files get the
     /// `no text extracted` marker. Ownership matches Python: when the session
     /// is linked to a conversation, artifacts must belong to it.
+    /// `expand_prompt_parts` output (P2.12): the durable marker text, the
+    /// model-facing image parts (base64, this turn only), and the attachment
+    /// refs that land on the `ItemCompleted` `content_parts` extension.
     fn expand_prompt_parts(
         &self,
         actor: &ActorRef,
         session_id: &str,
         parts: &[ContentPart],
-    ) -> Result<String, ProtocolError> {
+    ) -> Result<ExpandedContent, ProtocolError> {
         if parts
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
         {
-            return Ok(parts
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"));
+            return Ok(ExpandedContent {
+                text: parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                model_parts: Vec::new(),
+                replay_parts: Vec::new(),
+            });
         }
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return Err(error(-32010, "legacy_store_unavailable", false));
@@ -4248,7 +4286,9 @@ impl AppServer {
             .ok_or_else(|| {
                 legacy::invalid_input("Artifact attachments require a linked conversation")
             })?;
+        let blobs = self.inner.blob_store.as_ref();
         let mut out = String::new();
+        let mut model_parts = Vec::new();
         let mut emitted = HashSet::new();
         for part in parts {
             match part {
@@ -4275,16 +4315,22 @@ impl AppServer {
                             "Artifact {id} not found in this conversation"
                         )));
                     }
-                    if artifact.kind == "image"
-                        && blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str())
-                    {
-                        // Rust messages are text-only and there is no vision
-                        // tool; the attachment is acknowledged but its pixels
-                        // cannot be inspected (parity gap, tracked in M12).
-                        out.push_str(&format!(
-                            "\n[Attached image: {} — artifact #{}; image content is not visible to this runtime]",
-                            artifact.filename, artifact.id
-                        ));
+                    if blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str()) {
+                        // Image parts resolve to base64 for this turn; the
+                        // durable text keeps only the marker (P2.12).
+                        out.push_str(&format!("\n[image: {id}]"));
+                        if let Some(blobs) = blobs
+                            && let Ok((_, bytes)) = blobs.read_artifact(&actor.id, id)
+                        {
+                            use base64::Engine as _;
+                            if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES {
+                                model_parts.push(ModelContentPart::Image {
+                                    media_type: artifact.media_type.clone(),
+                                    data_base64: base64::engine::general_purpose::STANDARD
+                                        .encode(bytes),
+                                });
+                            }
+                        }
                     } else if let Some(text) = artifact.extracted_text.as_deref() {
                         out.push_str(&format!("\n[Attachment: {}]\n{text}", artifact.filename));
                     } else {
@@ -4296,7 +4342,11 @@ impl AppServer {
                 }
             }
         }
-        Ok(out)
+        Ok(ExpandedContent {
+            text: out,
+            model_parts,
+            replay_parts: parts.to_vec(),
+        })
     }
 
     /// Kick off a canonical run for a research row created by `research.create`
@@ -4454,6 +4504,8 @@ impl AppServer {
             model: model.to_owned(),
             history: history.to_vec(),
             user_input: prompt,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: None,
             mode: Some("plan_step".to_owned()),
             temperature: 0.0,
@@ -5151,7 +5203,12 @@ impl EventSink for AppServerEventSink {
                     continue;
                 }
                 if let Some(content) = item.content.clone() {
-                    messages.push(Message::text(MessageRole::User, content));
+                    // Steered attachments: the envelope's content_parts refs
+                    // resolve to image parts for this turn only — the item's
+                    // text already carries the `[image: <id>]` markers any
+                    // rebuilt history will keep (P2.12).
+                    let parts = self.steer_model_parts(envelope);
+                    messages.push(Message::with_parts(MessageRole::User, content, parts));
                 }
             }
         }
@@ -5162,6 +5219,46 @@ impl EventSink for AppServerEventSink {
 }
 
 impl AppServerEventSink {
+    /// A steered user item's `content_parts` envelope refs → this-turn model
+    /// image parts (P2.12). Bytes come from the blob store fresh; anything
+    /// unreadable or oversized just degrades to the marker already in
+    /// `content`.
+    fn steer_model_parts(&self, envelope: &EventEnvelope) -> Vec<ModelContentPart> {
+        let Some(blobs) = self.server.blob_store() else {
+            return Vec::new();
+        };
+        let Some(value) = envelope.extensions.get("content_parts") else {
+            return Vec::new();
+        };
+        let Ok(parts) = serde_json::from_value::<Vec<ContentPart>>(value.clone()) else {
+            return Vec::new();
+        };
+        use base64::Engine as _;
+        let actor = local_actor();
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Image {
+                    artifact_id,
+                    media_type,
+                } => {
+                    let id = artifact_id.parse::<i64>().ok()?;
+                    match blobs.read_artifact(&actor.id, id) {
+                        Ok((_, bytes)) if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES => {
+                            Some(ModelContentPart::Image {
+                                media_type: media_type.clone(),
+                                data_base64: base64::engine::general_purpose::STANDARD
+                                    .encode(bytes),
+                            })
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// User items this loop emitted itself are already in its history —
     /// `drain_steers` must not deliver them a second time.
     async fn track_user_item(&self, envelope: &EventEnvelope) {

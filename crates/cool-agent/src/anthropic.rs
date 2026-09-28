@@ -25,7 +25,7 @@ use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::context::{Message, MessageRole, ToolCall};
+use crate::context::{Message, MessageRole, ModelContentPart, ToolCall};
 use crate::pricing::estimate_cost_micro_usd;
 use crate::provider::{
     ModelDriver, ModelEvent, ModelRequest, ModelStream, ProviderError, Usage, decode_sse_lines,
@@ -240,12 +240,31 @@ fn anthropic_payload(request: &ModelRequest) -> Value {
 /// become `tool_use` blocks appended after any text.
 fn anthropic_message(message: &Message) -> Value {
     if message.role == MessageRole::Tool {
+        // `tool_result.content` may be a string or a block array — vision
+        // parts (`view_image`) travel as image blocks (P2.12).
+        let content = match message.parts.as_deref().filter(|parts| !parts.is_empty()) {
+            Some(parts) => {
+                let mut blocks = Vec::new();
+                if let Some(text) = message.content.as_ref().filter(|text| !text.is_empty()) {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+                for block in parts.iter().filter_map(anthropic_part_block) {
+                    blocks.push(block);
+                }
+                Value::Array(blocks)
+            }
+            None => message
+                .content
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        };
         return json!({
             "role": "user",
             "content": [{
                 "type": "tool_result",
                 "tool_use_id": message.tool_call_id,
-                "content": message.content,
+                "content": content,
             }],
         });
     }
@@ -265,10 +284,29 @@ fn anthropic_message(message: &Message) -> Value {
             "input": Value::Object(call.arguments.clone()),
         }));
     }
+    if let Some(parts) = message.parts.as_deref().filter(|parts| !parts.is_empty()) {
+        for block in parts.iter().filter_map(anthropic_part_block) {
+            blocks.push(block);
+        }
+    }
     if blocks.is_empty() {
         blocks.push(json!({"type": "text", "text": ""}));
     }
     json!({"role": role, "content": blocks})
+}
+
+/// One `ModelContentPart` → an Anthropic `{type:"text"|"image"}` block.
+fn anthropic_part_block(part: &ModelContentPart) -> Option<Value> {
+    match part {
+        ModelContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
+        ModelContentPart::Image {
+            media_type,
+            data_base64,
+        } => Some(json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data_base64}
+        })),
+    }
 }
 
 #[derive(Default)]
@@ -497,6 +535,7 @@ mod tests {
         Message {
             role,
             content: content.map(str::to_owned),
+            parts: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -622,5 +661,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "provider_overloaded_error");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn message_serializes_image_parts_as_base64_blocks() {
+        let user = anthropic_message(&Message::with_parts(
+            MessageRole::User,
+            "look\n[image: artifact-1]",
+            vec![ModelContentPart::Image {
+                media_type: "image/png".to_owned(),
+                data_base64: "aGk=".to_owned(),
+            }],
+        ));
+        assert_eq!(user["role"], "user");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"type": "text", "text": "look\n[image: artifact-1]"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}
+                },
+            ])
+        );
+
+        // A tool result carrying view_image output parts serializes the same
+        // blocks inside its tool_result content.
+        let mut tool = message(MessageRole::Tool, Some("{\"image\": \"shot.png\"}"));
+        tool.tool_call_id = Some("call_1".to_owned());
+        tool.parts = Some(vec![ModelContentPart::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "aGk=".to_owned(),
+        }]);
+        let value = anthropic_message(&tool);
+        assert_eq!(value["content"][0]["type"], "tool_result");
+        assert_eq!(value["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(
+            value["content"][0]["content"],
+            json!([
+                {"type": "text", "text": "{\"image\": \"shot.png\"}"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}
+                },
+            ])
+        );
     }
 }

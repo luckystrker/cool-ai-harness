@@ -1160,7 +1160,10 @@ async fn artifact_parts_fail_closed_without_a_legacy_store() {
 }
 
 #[tokio::test]
-async fn steer_rejects_non_text_parts() {
+async fn steer_non_text_parts_reach_run_lookup() {
+    // Non-text parts are expanded like prompt parts (P2.12): the run lookup
+    // happens first, so an unknown run fails with run_not_found rather than
+    // the removed unsupported_content_part rejection.
     let server = AppServer::new(ServerConfig::default());
     let (mut client, task) = connection(server.clone());
     initialize(&mut client, 1).await;
@@ -1179,7 +1182,7 @@ async fn steer_rejects_non_text_parts() {
         .await;
     assert_eq!(
         client.failure(RpcId::Integer(3)).await.cool_code,
-        "unsupported_content_part"
+        "run_not_found"
     );
     drop(client);
     task.await.expect("server task").expect("clean disconnect");

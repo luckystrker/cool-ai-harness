@@ -71,11 +71,28 @@ pub struct ToolCall {
     pub arguments: serde_json::Map<String, Value>,
 }
 
+/// A model-facing content block on a [`Message`] (P2.12). `Text` mirrors
+/// `content`; `Image` carries the already-resolved bytes — artifact ids are
+/// never sent to providers, only `media_type` + base64.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelContentPart {
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        data_base64: String,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Message {
     pub role: MessageRole,
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<ModelContentPart>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
@@ -87,9 +104,25 @@ impl Message {
         Self {
             role,
             content: Some(content.into()),
+            parts: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+        }
+    }
+
+    /// A message carrying model-visible parts alongside its text `content`
+    /// (P2.12). `content` stays the degraded text view — markers like
+    /// `[image: <artifact_id>]` — so history rebuilt without `parts` still
+    /// reads sensibly.
+    pub fn with_parts(
+        role: MessageRole,
+        content: impl Into<String>,
+        parts: Vec<ModelContentPart>,
+    ) -> Self {
+        Self {
+            parts: (!parts.is_empty()).then_some(parts),
+            ..Self::text(role, content)
         }
     }
 
@@ -97,10 +130,34 @@ impl Message {
         Self {
             role: MessageRole::Tool,
             content: Some(content.into()),
+            parts: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(call.call_id.clone()),
             name: Some(call.name.clone()),
         }
+    }
+
+    /// Every part rendered as text — the fallback for drivers without image
+    /// support and for `parts`-unaware consumers (P2.12).
+    pub fn parts_as_text(parts: &[ModelContentPart]) -> String {
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                ModelContentPart::Text { text } => {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(text);
+                }
+                ModelContentPart::Image { media_type, .. } => {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&format!("[image: {media_type}]"));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -397,4 +454,52 @@ pub fn load_task_progress(workspace: &Workspace) -> std::io::Result<Option<Strin
         content.push_str("\n\n… (truncated — file exceeds 16 KB limit)");
     }
     Ok(Some(content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_parts_keeps_degraded_text_alongside_parts() {
+        let message = Message::with_parts(
+            MessageRole::User,
+            "look\n[image: artifact-1]",
+            vec![ModelContentPart::Image {
+                media_type: "image/png".to_owned(),
+                data_base64: "aGk=".to_owned(),
+            }],
+        );
+        assert_eq!(
+            message.content.as_deref(),
+            Some("look\n[image: artifact-1]")
+        );
+        assert_eq!(message.parts.as_deref().map(<[_]>::len), Some(1));
+    }
+
+    #[test]
+    fn with_parts_collapses_empty_parts_for_replay() {
+        // Degradation: a message rebuilt without parts is indistinguishable
+        // from a plain text message, so history never re-sends pixels.
+        assert_eq!(
+            Message::with_parts(MessageRole::User, "text", Vec::new()).parts,
+            None
+        );
+    }
+
+    #[test]
+    fn parts_as_text_renders_images_as_markers() {
+        assert_eq!(
+            Message::parts_as_text(&[
+                ModelContentPart::Text {
+                    text: "look".to_owned()
+                },
+                ModelContentPart::Image {
+                    media_type: "image/png".to_owned(),
+                    data_base64: "aGk=".to_owned(),
+                },
+            ]),
+            "look\n[image: image/png]"
+        );
+    }
 }

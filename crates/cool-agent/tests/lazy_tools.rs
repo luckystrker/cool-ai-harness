@@ -98,6 +98,8 @@ fn request(workspace: &std::path::Path) -> AgentRequest {
         model: "scripted".to_owned(),
         history: Vec::new(),
         user_input: "hi".to_owned(),
+        user_parts: Vec::new(),
+        user_replay_parts: Vec::new(),
         system_prompt: Some("be precise".to_owned()),
         mode: None,
         temperature: 0.0,

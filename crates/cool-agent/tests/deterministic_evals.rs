@@ -85,6 +85,8 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     model: "scripted".to_owned(),
                     history: Vec::new(),
                     user_input: scenario.id.clone(),
+                    user_parts: Vec::new(),
+                    user_replay_parts: Vec::new(),
                     system_prompt: None,
                     mode: None,
                     temperature: 0.0,

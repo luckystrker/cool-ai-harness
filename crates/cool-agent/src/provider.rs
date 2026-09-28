@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::context::{Message, MessageRole, ToolCall};
+use crate::context::{Message, MessageRole, ModelContentPart, ToolCall};
 use crate::tools::ToolDefinition;
 
 pub type ModelStream = Pin<Box<dyn Stream<Item = Result<ModelEvent, ProviderError>> + Send>>;
@@ -129,13 +129,31 @@ impl ModelDriver for ScriptedDriver {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError> {
         self.requests.lock().await.push(request.clone());
         if self.echo {
-            let content = request
+            let mut content = request
                 .messages
                 .iter()
                 .rev()
                 .find(|message| message.role == MessageRole::User)
                 .and_then(|message| message.content.clone())
                 .unwrap_or_default();
+            // Vision parts do not survive echo — count them out loud so a
+            // scripted run can still observe that images arrived (P2.12).
+            let images = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+                .and_then(|message| message.parts.as_deref())
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter(|part| matches!(part, ModelContentPart::Image { .. }))
+                        .count()
+                })
+                .unwrap_or(0);
+            if images > 0 {
+                content.push_str(&format!("\n[{images} image(s)]"));
+            }
             let events = VecDeque::from(vec![
                 Ok(ModelEvent::Content(content)),
                 Ok(ModelEvent::Finish {
@@ -362,6 +380,31 @@ fn openai_payload(request: &ModelRequest) -> Value {
                 MessageRole::Tool => "tool",
             };
             let mut value = json!({"role": role, "content": message.content});
+            if let Some(parts) = message.parts.as_deref().filter(|parts| !parts.is_empty()) {
+                let mut blocks = Vec::new();
+                if let Some(text) = message
+                    .content
+                    .as_ref()
+                    .filter(|text| !text.is_empty())
+                {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+                for part in parts {
+                    match part {
+                        ModelContentPart::Text { text } => {
+                            blocks.push(json!({"type": "text", "text": text}));
+                        }
+                        ModelContentPart::Image {
+                            media_type,
+                            data_base64,
+                        } => blocks.push(json!({
+                            "type": "image_url",
+                            "image_url": {"url": format!("data:{media_type};base64,{data_base64}")}
+                        })),
+                    }
+                }
+                value["content"] = Value::Array(blocks);
+            }
             if !message.tool_calls.is_empty() {
                 value["tool_calls"] = Value::Array(
                     message
@@ -678,6 +721,66 @@ mod tests {
         assert_eq!(
             driver.base_url.join("chat/completions").unwrap().as_str(),
             "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_payload_serializes_image_parts_as_data_urls() {
+        let request = ModelRequest {
+            model: "gpt-4o".to_owned(),
+            messages: vec![
+                Message::text(MessageRole::User, "plain text only"),
+                Message::with_parts(
+                    MessageRole::User,
+                    "what is this?\n[image: artifact-1]",
+                    vec![ModelContentPart::Image {
+                        media_type: "image/png".to_owned(),
+                        data_base64: "aGk=".to_owned(),
+                    }],
+                ),
+            ],
+            tools: Vec::new(),
+            temperature: 0.0,
+            max_tokens: None,
+        };
+        let payload = openai_payload(&request);
+        assert_eq!(payload["messages"][0]["content"], "plain text only");
+        let blocks = payload["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(
+            blocks,
+            &vec![
+                json!({"type": "text", "text": "what is this?\n[image: artifact-1]"}),
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aGk="}
+                }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_echo_counts_image_parts() {
+        let driver = ScriptedDriver::echo();
+        let mut stream = driver
+            .stream(ModelRequest {
+                model: "scripted".to_owned(),
+                messages: vec![Message::with_parts(
+                    MessageRole::User,
+                    "look\n[image: artifact-1]",
+                    vec![ModelContentPart::Image {
+                        media_type: "image/png".to_owned(),
+                        data_base64: "aGk=".to_owned(),
+                    }],
+                )],
+                tools: Vec::new(),
+                temperature: 0.0,
+                max_tokens: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            ModelEvent::Content("look\n[image: artifact-1]\n[1 image(s)]".to_owned())
         );
     }
 }
