@@ -708,6 +708,11 @@ pub struct ApprovalResolveParams {
     /// the tool call (same shape as `ToolApprovalRequired.suggestedRule`).
     #[serde(default)]
     pub rule: Option<PolicyRuleRecord>,
+    /// Free-form answer for `breakpointType: "question"` asks (the `ask_user`
+    /// tool): an option id/string or arbitrary JSON. Ignored for plain
+    /// allow/deny approvals.
+    #[serde(default)]
+    pub answer: Option<serde_json::Value>,
 }
 
 /// Wire mirror of `cool_security::PolicyRule` — kept as plain strings so the

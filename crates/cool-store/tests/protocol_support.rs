@@ -254,10 +254,10 @@ fn budget_status_uses_calendar_windows_and_override() {
 #[test]
 fn profile_seeding_is_idempotent_and_preserves_edits() {
     let store = store();
-    assert_eq!(store.seed_builtin_profiles().expect("seed"), 5);
+    assert_eq!(store.seed_builtin_profiles().expect("seed"), 6);
     assert_eq!(store.seed_builtin_profiles().expect("reseed"), 0);
     let profiles = store.list_profiles(true).expect("profiles");
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     assert!(profiles.iter().all(|profile| profile.is_builtin));
 
     let coder = profiles

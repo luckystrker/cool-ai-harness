@@ -93,6 +93,26 @@ pub struct ApprovalRequest {
     /// A suggested persistent rule derived from the call, so the approval UI
     /// can offer "remember this" (P1.6).
     pub suggested_rule: Option<PolicyRule>,
+    /// Breakpoint classification on the wire (`"question"` for `ask_user`);
+    /// `None` renders the generic approval card (P1.8).
+    pub breakpoint_type: Option<String>,
+}
+
+/// What the gate resolved for one ask: the allow/deny decision plus an
+/// optional free-form payload for question breakpoints (P1.8 `ask_user`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateOutcome {
+    pub decision: ApprovalOutcome,
+    pub answer: Option<Value>,
+}
+
+impl GateOutcome {
+    pub fn decided(decision: ApprovalOutcome) -> Self {
+        Self {
+            decision,
+            answer: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -189,7 +209,17 @@ pub trait ApprovalGate: Send + Sync {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError>;
+    ) -> Result<GateOutcome, RuntimeError>;
+
+    /// Expires a pending approval system-side. Called when the tool-side
+    /// timeout wins the race first (P1.8 `question_timeout`): without it the
+    /// durable ticket stays `pending` and the run remains `awaiting_approval`
+    /// forever. Returns `true` when this call performed the transition —
+    /// `false` means the ticket was already resolved (a user answer won the
+    /// race) or the gate keeps no durable ticket.
+    async fn expire(&self, _approval_id: &str) -> Result<bool, RuntimeError> {
+        Ok(false)
+    }
 }
 
 #[derive(Clone)]
@@ -204,7 +234,7 @@ impl ApprovalGate for AutoApprovalGate {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         _cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError> {
+    ) -> Result<GateOutcome, RuntimeError> {
         sink.emit(CanonicalEvent::ToolApprovalRequired(Box::new(
             ToolApprovalRequired {
                 call_id: request.call.call_id.clone(),
@@ -213,7 +243,7 @@ impl ApprovalGate for AutoApprovalGate {
                 reason: request.reason,
                 approval_id: request.approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: request.breakpoint_type,
                 result_preview: None,
                 current_content: None,
                 matched_rule: request.matched_rule,
@@ -228,7 +258,7 @@ impl ApprovalGate for AutoApprovalGate {
             decision: self.outcome.clone(),
         }))
         .await?;
-        Ok(self.outcome.clone())
+        Ok(GateOutcome::decided(self.outcome.clone()))
     }
 }
 
@@ -364,6 +394,28 @@ impl AgentRuntime {
                 history.insert(0, Message::text(MessageRole::System, section));
             }
         }
+        // P1.10: when deferred tools exist, tell the model how to surface
+        // them — the catalog line sits on the system message like project
+        // instructions do. Runs whose tool_names allowlist hides the
+        // meta-tools get no hint: it would advertise tools they cannot call.
+        let meta_tools_visible = request
+            .tool_names
+            .as_ref()
+            .is_none_or(|names| names.contains("search_tools") && names.contains("activate_tools"));
+        if self.tools.has_deferred_tools() && meta_tools_visible {
+            let line = "Some tools are hidden. Use search_tools(query) to discover and \
+                        activate_tools(names) to enable them.";
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(line);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, line));
+            }
+        }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {
             model: Some(request.model.clone()),
             mode: Some(
@@ -435,9 +487,17 @@ impl AgentRuntime {
             // Continue from the compacted history: the next compaction sees
             // the synthetic summary instead of the messages it covered.
             history = compacted.messages;
+            // P1.10: deferred tools ship only once `activate_tools` lists them
+            // in the run's `active_tools` set.
+            let active_tools = request
+                .tool_context
+                .active_tools
+                .read()
+                .map(|set| set.clone())
+                .unwrap_or_default();
             let definitions = self
                 .tools
-                .definitions()
+                .visible_definitions(&active_tools)
                 .into_iter()
                 .filter(|definition| {
                     request
@@ -576,18 +636,43 @@ impl AgentRuntime {
             .await?;
             history.push(assistant_message);
             if calls.is_empty() {
-                sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
-                    reason: "stop".to_owned(),
-                    error_code: None,
-                }))
-                .await?;
-                return Ok(RunOutcome::Completed {
-                    history,
-                    usage: total_usage,
-                });
+                // A steer can land during the final (tool-free) turn — drain
+                // once more before completing or `send_to_subagent`/steer
+                // callers would see delivery reported while the message is
+                // never consumed by this run.
+                let steers = sink.drain_steers().await?;
+                if steers.is_empty() {
+                    sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "stop".to_owned(),
+                        error_code: None,
+                    }))
+                    .await?;
+                    return Ok(RunOutcome::Completed {
+                        history,
+                        usage: total_usage,
+                    });
+                }
+                history.extend(steers);
+                // A steer on the final allowed iteration costs a turn like
+                // any other — fail with `iteration_limit` rather than falling
+                // out of the loop into the unreachable tail.
+                if iteration == request.limits.max_iterations {
+                    return finish_failed(sink, history, "iteration_limit".to_owned()).await;
+                }
+                continue;
             }
+            // The snapshot lets `spawn_subagent(fork_context)` seed a child
+            // with the transcript as the model itself just saw it (P1.7).
+            request.tool_context.history_snapshot = Some(history.clone());
             let batch = self
-                .execute_tool_batch(calls, &request.tool_context, sink, approvals, &mut cancel)
+                .execute_tool_batch(
+                    calls,
+                    &request.tool_context,
+                    request.tool_names.as_ref(),
+                    sink,
+                    approvals,
+                    &mut cancel,
+                )
                 .await?;
             for (call, result) in batch.results {
                 // The model sees the same payload the event log does —
@@ -624,6 +709,7 @@ impl AgentRuntime {
         &self,
         calls: Vec<ToolCall>,
         context: &ToolContext,
+        tool_names: Option<&BTreeSet<String>>,
         sink: &dyn EventSink,
         approvals: &dyn ApprovalGate,
         cancel: &mut CancelSignal,
@@ -643,6 +729,37 @@ impl AgentRuntime {
                 immediate.insert(index, (call, result));
                 continue;
             };
+            // Visibility gates execution too (P1.10/P2.15): a `tool_names`
+            // allowlist is not just an advertising filter — a profile that
+            // hides a tool must not be callable by name — and a deferred
+            // tool runs only once activated. Both fail before policy.
+            if let Some(names) = tool_names
+                && !names.contains(&call.name)
+            {
+                let result = ToolResult::error(
+                    "tool_not_allowed",
+                    "tool is outside this run's tool allowlist",
+                );
+                emit_tool_result(sink, &call, &result).await?;
+                immediate.insert(index, (call, result));
+                continue;
+            }
+            if self.tools.is_tool_deferred(&call.name) {
+                let activated = context
+                    .active_tools
+                    .read()
+                    .map(|set| set.contains(&call.name))
+                    .unwrap_or(false);
+                if !activated {
+                    let result = ToolResult::error(
+                        "tool_not_active",
+                        "tool is deferred; call activate_tools to enable it",
+                    );
+                    emit_tool_result(sink, &call, &result).await?;
+                    immediate.insert(index, (call, result));
+                    continue;
+                }
+            }
             // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
             // session rules first (most local wins), then the live
             // project+user source, then rules embedded in the policy itself.
@@ -700,12 +817,13 @@ impl AgentRuntime {
                             reason: "tool requires approval".to_owned(),
                             matched_rule: matched_rule.as_ref().map(PolicyRule::describe),
                             suggested_rule: suggest_policy_rule(&call),
+                            breakpoint_type: None,
                         },
                         sink,
                         cancel,
                     )
                     .await?;
-                if outcome != ApprovalOutcome::Approved {
+                if outcome.decision != ApprovalOutcome::Approved {
                     let result = ToolResult::error("approval_denied", "tool approval was denied");
                     emit_tool_result(sink, &call, &result).await?;
                     immediate.insert(index, (call, result));

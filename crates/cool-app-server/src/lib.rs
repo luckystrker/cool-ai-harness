@@ -14,7 +14,7 @@ pub use blobs::{BlobError, BlobStore};
 pub use client::{AppClient, ClientError};
 pub use research::{ResearchExecutor, ResearchOutcome};
 pub use scheduler::TaskExecutor;
-pub use subagents::{SubagentExecutor, SubagentLaunchSpec};
+pub use subagents::{ForkContext, SubagentExecutor, SubagentIsolation, SubagentLaunchSpec};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -26,9 +26,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
-    CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
-    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_event_rows,
-    load_task_progress, mask_canonical_event, planning_system_prompt,
+    CancelSignal, EventSink, GateOutcome, Message, MessageRole, RunOutcome, RuntimeError,
+    ScriptedDriver, ToolContext, Usage, builtin_registry, default_agent_system_prompt,
+    history_from_event_rows, load_task_progress, mask_canonical_event, planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -152,7 +152,7 @@ struct Inner {
     workspace: Workspace,
     policy: CapabilityPolicy,
     default_model: String,
-    approval_waiters: Mutex<HashMap<String, watch::Sender<Option<cool_protocol::ApprovalOutcome>>>>,
+    approval_waiters: Mutex<HashMap<String, watch::Sender<Option<GateOutcome>>>>,
     /// Connection that started each live run, so `run.subscribe` fan-out can
     /// skip it (the owner already receives events through its run sink).
     run_owners: Mutex<HashMap<String, String>>,
@@ -1364,6 +1364,7 @@ impl AppServer {
             reason,
             None,
             None,
+            None,
         )
     }
 
@@ -2004,6 +2005,7 @@ impl AppServer {
                     &params.approval_id,
                     params.expected_revision,
                     params.decision,
+                    params.answer.as_ref(),
                 );
                 match resolved {
                     Ok(resolution) => {
@@ -2029,7 +2031,10 @@ impl AppServer {
                             .await
                             .remove(&resolution.approval_id)
                         {
-                            let _ = waiter.send(Some(resolution.outcome.clone()));
+                            let _ = waiter.send(Some(GateOutcome {
+                                decision: resolution.outcome.clone(),
+                                answer: resolution.answer.clone(),
+                            }));
                         }
                         let response = ApprovalResolvedResult {
                             approval_id: resolution.approval_id,
@@ -2654,6 +2659,7 @@ impl AppServer {
                             name: params.name.clone(),
                             prompt: params.prompt.clone(),
                             model: params.model.clone(),
+                            ..SubagentLaunchSpec::default()
                         };
                         let fingerprint = legacy::fingerprint(&params);
                         match executor
@@ -2693,6 +2699,7 @@ impl AppServer {
                                 name: item.name.clone(),
                                 prompt: item.prompt.clone(),
                                 model: item.model.clone(),
+                                ..SubagentLaunchSpec::default()
                             })
                             .collect::<Vec<_>>();
                         let fingerprint = legacy::fingerprint(&params);
@@ -3317,12 +3324,15 @@ impl AppServer {
                 own_user_items: Arc::new(Mutex::new(HashSet::new())),
                 pending_compact_cursor: Arc::new(Mutex::new(None)),
             };
-            let approvals = AppServerApprovalGate {
+            // Shared between the run's approval asks (passed by reference) and
+            // the `ask_user` question gate on the tool context (P1.8) — the
+            // app-server transport is the only surface that can reach a human.
+            let approvals = Arc::new(AppServerApprovalGate {
                 server: server.clone(),
                 run_id: run_id.clone(),
                 session_id: run.session_id.clone(),
                 outbound: outbound.clone(),
-            };
+            });
             let masked_prompt = mask_secrets(&prompt.content);
             // Planning mode owns the system prompt: a caller cannot override the
             // directive that turns the turn into plan generation. The prompt is
@@ -3371,7 +3381,8 @@ impl AppServer {
                             .conversation_id_for_session(&local_actor().id, &run.session_id)
                             .ok()
                             .flatten(),
-                    ),
+                    )
+                    .with_question_gate(approvals.clone()),
             };
             let lifecycle_sink =
                 server
@@ -3394,7 +3405,7 @@ impl AppServer {
                 .run(
                     request,
                     event_sink,
-                    &approvals,
+                    approvals.as_ref(),
                     CancelSignal::from_receiver(cancel),
                 )
                 .await;
@@ -4425,6 +4436,7 @@ impl AppServer {
             name: Some(format!("plan-step-{}:{role_name}", step.position)),
             prompt: prompt.to_owned(),
             model: None,
+            ..SubagentLaunchSpec::default()
         };
         let key = format!("plan-step:{}:{}", plan.id, step.position);
         let run = match executor.launch(&actor.id, spec, &key, &key).await {
@@ -5181,7 +5193,7 @@ impl ApprovalGate for AppServerApprovalGate {
         request: ApprovalRequest,
         _sink: &dyn EventSink,
         cancel: &mut CancelSignal,
-    ) -> Result<cool_protocol::ApprovalOutcome, RuntimeError> {
+    ) -> Result<GateOutcome, RuntimeError> {
         let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(Box::new(
             cool_protocol::ToolApprovalRequired {
                 call_id: request.call.call_id.clone(),
@@ -5190,7 +5202,7 @@ impl ApprovalGate for AppServerApprovalGate {
                 reason: request.reason.clone(),
                 approval_id: request.approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: request.breakpoint_type.clone(),
                 result_preview: None,
                 current_content: None,
                 matched_rule: request.matched_rule.clone(),
@@ -5221,6 +5233,7 @@ impl ApprovalGate for AppServerApprovalGate {
             &masked.reason,
             masked.matched_rule.as_deref(),
             masked.suggested_rule.as_ref(),
+            masked.breakpoint_type.as_deref(),
         )?;
         let (sender, mut receiver) = watch::channel(None);
         self.server
@@ -5254,7 +5267,7 @@ impl ApprovalGate for AppServerApprovalGate {
                 ));
             }
         }
-        if let Some(outcome) = self
+        if let Some((outcome, answer)) = self
             .server
             .inner
             .store
@@ -5266,9 +5279,20 @@ impl ApprovalGate for AppServerApprovalGate {
                 .lock()
                 .await
                 .remove(&ticket.approval_id);
-            return Ok(outcome);
+            return Ok(GateOutcome {
+                decision: outcome,
+                answer,
+            });
         }
-        let result = tokio::select! {
+        // The waiter entry must go on every exit — including a caller-side
+        // timeout (P1.8 `question_timeout`) dropping this pending future,
+        // which an `is_err`-only cleanup could not observe. `WaiterCleanup`
+        // removes it from `Drop`.
+        let _waiter_cleanup = WaiterCleanup {
+            inner: Arc::clone(&self.server.inner),
+            approval_id: ticket.approval_id.clone(),
+        };
+        tokio::select! {
             outcome = async {
                 loop {
                     receiver.changed().await.map_err(|_| RuntimeError::Sink("approval channel closed".to_owned()))?;
@@ -5278,16 +5302,62 @@ impl ApprovalGate for AppServerApprovalGate {
                 }
             } => outcome,
             reason = cancel.wait() => Err(RuntimeError::Sink(format!("approval cancelled: {reason}"))),
-        };
-        if result.is_err() {
-            self.server
-                .inner
-                .approval_waiters
-                .lock()
-                .await
-                .remove(&ticket.approval_id);
         }
-        result
+    }
+
+    /// `ask_user` timeout path (P1.8): the tool-side timer won, so expire the
+    /// durable ticket — `timed_out` + `ToolApprovalResolved` flips the run
+    /// back to `running` and clears the pending question card — then fan the
+    /// resolution out to subscribers exactly like a user decision. `false`
+    /// means a user answer committed first and wins the race.
+    async fn expire(&self, approval_id: &str) -> Result<bool, RuntimeError> {
+        if !self
+            .server
+            .inner
+            .store
+            .expire_approval(&local_actor().id, approval_id)?
+        {
+            return Ok(false);
+        }
+        if let Some(event) = self
+            .server
+            .inner
+            .store
+            .all_events(&self.run_id, &local_actor().id)?
+            .into_iter()
+            .last()
+        {
+            self.server.publish_to_subscribers(&event).await;
+            let _ = self.server.send(&self.outbound, notification(event)).await;
+        }
+        Ok(true)
+    }
+}
+
+/// Removes a `approval_waiters` entry when the gate request future exits —
+/// normally or by being dropped (a `tokio::time::timeout` in the tool loses
+/// the future mid-`select!`, skipping every statement after the select).
+struct WaiterCleanup {
+    inner: Arc<Inner>,
+    approval_id: String,
+}
+
+impl Drop for WaiterCleanup {
+    fn drop(&mut self) {
+        match self.inner.approval_waiters.try_lock() {
+            Ok(mut waiters) => {
+                waiters.remove(&self.approval_id);
+            }
+            Err(_) => {
+                // Contended at drop time — a spawned task still removes the
+                // entry; the receiver is dead either way.
+                let inner = Arc::clone(&self.inner);
+                let approval_id = self.approval_id.clone();
+                tokio::spawn(async move {
+                    inner.approval_waiters.lock().await.remove(&approval_id);
+                });
+            }
+        }
     }
 }
 
@@ -5304,12 +5374,12 @@ impl Drop for SocketCleanup {
 /// Captures the concatenated content deltas of one plan step; a plan step does
 /// not project its own transcript.
 #[derive(Default)]
-struct PlanStepSink {
+pub(crate) struct PlanStepSink {
     text: std::sync::Mutex<String>,
 }
 
 impl PlanStepSink {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.text
             .lock()
             .map(|text| text.clone())
@@ -5575,7 +5645,7 @@ fn error_text(error: &cool_store::StoreError) -> String {
 const MAX_IMPORTED_MESSAGES: usize = 10_000;
 
 /// System directive for `conversations.compact` (rolling summary).
-const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
+pub(crate) const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
 
 fn session_conversation_payload(link: ConversationLink) -> ResponsePayload {
     ResponsePayload::SessionForConversation(SessionConversationResult {

@@ -280,6 +280,7 @@ async fn approval_resolve_with_remember_persists_and_lists_the_rule() {
             decision: cool_protocol::ApprovalDecision::Approved,
             remember: Some("user".to_owned()),
             rule: Some(shell_rule("user")),
+            answer: None,
         }))
         .await
         .unwrap()
@@ -369,6 +370,7 @@ async fn approval_resolve_rejects_rule_unrelated_to_the_call() {
             decision: cool_protocol::ApprovalDecision::Approved,
             remember: Some("user".to_owned()),
             rule: Some(unrelated),
+            answer: None,
         }))
         .await
     {
@@ -391,6 +393,7 @@ async fn approval_resolve_rejects_rule_unrelated_to_the_call() {
             decision: cool_protocol::ApprovalDecision::Approved,
             remember: Some("user".to_owned()),
             rule: Some(shell_rule("user")),
+            answer: None,
         }))
         .await
         .unwrap()
@@ -408,6 +411,7 @@ async fn approval_resolve_rejects_rule_unrelated_to_the_call() {
             decision: cool_protocol::ApprovalDecision::Approved,
             remember: Some("user".to_owned()),
             rule: Some(shell_rule("user")),
+            answer: None,
         }))
         .await
         .unwrap();
@@ -759,6 +763,7 @@ async fn approval_remember_persists_into_the_run_workspace() {
             decision: cool_protocol::ApprovalDecision::Approved,
             remember: Some("project".to_owned()),
             rule: None,
+            answer: None,
         }))
         .await
         .unwrap();

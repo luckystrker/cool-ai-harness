@@ -21,22 +21,26 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_agent::{
-    AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, EventSink, Message,
-    MessageRole, RunOutcome, RuntimeError, SubagentRequest, ToolContext,
+    AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, EventSink, LaunchSpec,
+    Message, MessageRole, NetAccess, ResourceLimits, RunOutcome, RuntimeError, SubagentRequest,
+    ToolContext,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, RunTerminal,
     UsageUpdated, V1Version,
 };
-use cool_security::{CapabilityPolicy, Workspace, mask_json, mask_secrets};
+use cool_security::{
+    CapabilityPolicy, PolicyRule, Workspace, mask_json, mask_secrets, sanitize_environment,
+};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::StoreError;
-use cool_store::domains::conversations::{NewConversation, NewMessage};
+use cool_store::domains::conversations::{MessagePage, NewConversation, NewMessage};
 use cool_store::domains::runs::NewRun;
 use cool_store::domains::subagents::{NewSubagentRun, SubagentRun, TERMINAL_SUBAGENT_STATUSES};
 use serde_json::{Value, json};
@@ -45,9 +49,58 @@ use uuid::Uuid;
 
 use crate::scheduler::{capability_from_name, decision_from_name};
 
+/// How much of the spawning run's context a child inherits (P1.7).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ForkContext {
+    /// Fresh context — the child sees only its prompt.
+    #[default]
+    None,
+    /// A model-written summary of the parent's transcript, folded into the
+    /// child's system prompt.
+    Summary,
+    /// The parent's full transcript becomes the child's starting history.
+    Full,
+}
+
+impl ForkContext {
+    pub fn parse(value: Option<&str>) -> Result<Self, StoreError> {
+        match value.unwrap_or("none") {
+            "none" => Ok(Self::None),
+            "summary" => Ok(Self::Summary),
+            "full" => Ok(Self::Full),
+            other => Err(StoreError::InvalidInput(format!(
+                "unknown fork_context '{other}' (expected none|summary|full)"
+            ))),
+        }
+    }
+}
+
+/// Whether the child shares the parent's workspace or gets a git worktree
+/// of its own (P1.7).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SubagentIsolation {
+    #[default]
+    Shared,
+    /// `git worktree add .cool/worktrees/{run_id} -b cool/sub/{run_id}` inside
+    /// the parent workspace via the configured process launcher.
+    Worktree,
+}
+
+impl SubagentIsolation {
+    pub fn parse(value: Option<&str>) -> Result<Self, StoreError> {
+        match value.unwrap_or("shared") {
+            "shared" => Ok(Self::Shared),
+            "worktree" => Ok(Self::Worktree),
+            other => Err(StoreError::InvalidInput(format!(
+                "unknown isolation '{other}' (expected shared|worktree)"
+            ))),
+        }
+    }
+}
+
 /// One launch request, decoupled from the protocol params so the executor does
 /// not retain the request envelope.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SubagentLaunchSpec {
     pub parent_conversation_id: i64,
     pub role_id: Option<i64>,
@@ -58,6 +111,16 @@ pub struct SubagentLaunchSpec {
     pub name: Option<String>,
     pub prompt: String,
     pub model: Option<String>,
+    /// Context forking requested by the parent (P1.7).
+    pub fork_context: ForkContext,
+    /// Workspace isolation requested by the parent (P1.7).
+    pub isolation: SubagentIsolation,
+    /// Depth of the spawning run (`ToolContext.spawn_depth`); the child runs
+    /// at `spawn_depth + 1` and cannot spawn at `cool_agent::MAX_SPAWN_DEPTH`.
+    pub spawn_depth: u32,
+    /// Parent transcript snapshot for `fork_context` full/summary — the live
+    /// history the runtime refreshed before the tool batch ran.
+    pub parent_history: Vec<Message>,
 }
 
 /// Resolved role/profile configuration for one subagent execution (Python
@@ -71,6 +134,9 @@ struct ResolvedConfig {
     max_iterations: i64,
     max_cost_usd: Option<f64>,
     capability_policy: Option<Value>,
+    /// Session rules seeded from profile `settings["exec_rules"]` before the
+    /// run starts (P2.15 reviewer preset narrows `git` to diff/log this way).
+    exec_rules: Vec<PolicyRule>,
     working_directory: Option<String>,
     /// Profile-selected process launcher (P0.3): `settings.process_launcher`
     /// + `settings.sandbox_backend`. `COOL_PROCESS_LAUNCHER` and the CLI flag
@@ -88,6 +154,10 @@ struct ChildContext {
     child_run_id: i64,
     child_conversation_id: i64,
     parent_conversation_id: i64,
+    /// Row id of the persisted launch prompt; steer drain baselines here so a
+    /// `send_to_subagent` accepted while the run is still `queued` lands
+    /// above the cursor instead of being dropped (P1.7).
+    prompt_message_id: i64,
 }
 
 /// Runs launched subagents through the Rust agent runtime.
@@ -309,7 +379,7 @@ impl SubagentExecutor {
         )?;
         // Persist the prompt as the child's first message so the transcript is
         // visible while the run is queued/running (Python `create_subagent_run`).
-        self.store.add_message(
+        let prompt_message = self.store.add_message(
             actor_id,
             child.id,
             &NewMessage {
@@ -340,14 +410,16 @@ impl SubagentExecutor {
             child_run_id: child_run.id,
             child_conversation_id: child.id,
             parent_conversation_id: spec.parent_conversation_id,
+            prompt_message_id: prompt_message.id,
         };
+        let spec = spec.clone();
         tokio::spawn(async move {
             // The guard removes the live entry even if `execute` panics.
             let _guard = LiveGuard {
                 executor: Arc::clone(&executor),
                 run_id: context.run_id,
             };
-            executor.execute(context, resolved, cancel_rx).await;
+            executor.execute(context, resolved, spec, cancel_rx).await;
         });
         Ok(run)
     }
@@ -414,6 +486,12 @@ impl SubagentExecutor {
                 .and_then(|profile| profile.settings.as_ref()),
         )
         .map_err(cool_store::StoreError::InvalidInput)?;
+        let exec_rules = profile
+            .as_ref()
+            .and_then(|profile| profile.settings.as_ref())
+            .and_then(|settings| settings.get("exec_rules"))
+            .and_then(|value| serde_json::from_value::<Vec<PolicyRule>>(value.clone()).ok())
+            .unwrap_or_default();
         Ok(ResolvedConfig {
             role_name: role
                 .as_ref()
@@ -427,6 +505,7 @@ impl SubagentExecutor {
             max_iterations,
             max_cost_usd,
             capability_policy,
+            exec_rules,
             working_directory: parent.working_directory,
             launcher,
         })
@@ -436,6 +515,7 @@ impl SubagentExecutor {
         &self,
         context: ChildContext,
         resolved: ResolvedConfig,
+        spec: SubagentLaunchSpec,
         cancel_rx: watch::Receiver<Option<String>>,
     ) {
         let actor = crate::local_actor();
@@ -448,28 +528,9 @@ impl SubagentExecutor {
         {
             return;
         }
-        // A subagent that names an unusable working directory fails closed
-        // rather than silently running tools against the server workspace.
-        let workspace = match resolved.working_directory.as_deref() {
-            Some(path) => match Workspace::new(path) {
-                Ok(workspace) => workspace,
-                Err(_) => {
-                    self.fail_run(&actor, context, "invalid working directory");
-                    return;
-                }
-            },
-            None => self.workspace.clone(),
-        };
-        let limits = AgentLimits {
-            max_iterations: resolved.max_iterations.clamp(1, i64::from(u32::MAX)) as u32,
-            max_cost_micro_usd: resolved
-                .max_cost_usd
-                .filter(|usd| *usd > 0.0)
-                .map(|usd| (usd * 1_000_000.0) as u64),
-            ..AgentLimits::default()
-        };
         // Launcher chain (P0.3): env → profile → executor default (flag or
-        // disabled). An invalid env value fails the child closed.
+        // disabled). An invalid env value fails the child closed. Resolved
+        // before the workspace because a worktree isolation launch uses it.
         let launcher = match cool_agent::launcher_from_env() {
             Ok(Some(launcher)) => launcher,
             Ok(None) => resolved
@@ -481,11 +542,120 @@ impl SubagentExecutor {
                 return;
             }
         };
+        // A subagent that names an unusable working directory fails closed
+        // rather than silently running tools against the server workspace.
+        let mut workspace = match resolved.working_directory.as_deref() {
+            Some(path) => match Workspace::new(path) {
+                Ok(workspace) => workspace,
+                Err(_) => {
+                    self.fail_run(&actor, context, "invalid working directory");
+                    return;
+                }
+            },
+            None => self.workspace.clone(),
+        };
+        // isolation=worktree (P1.7): the child edits a git worktree of its own
+        // so parallel siblings cannot collide on the shared checkout.
+        // Keep the pre-isolation workspace: it is the checkout the worktree
+        // was created from — possibly a conversation cwd, not the server's —
+        // and teardown needs it for `git worktree`/`branch -D` cleanup.
+        let parent_workspace = workspace.clone();
+        if spec.isolation == SubagentIsolation::Worktree {
+            match create_worktree(
+                launcher.as_ref(),
+                &workspace,
+                &self.host.environment,
+                context.run_id,
+            )
+            .await
+            {
+                Ok(directory) => match Workspace::new(&directory) {
+                    Ok(worktree) => workspace = worktree,
+                    Err(_) => {
+                        remove_worktree(
+                            launcher.as_ref(),
+                            &workspace,
+                            &self.host.environment,
+                            context.run_id,
+                        )
+                        .await;
+                        self.fail_run(
+                            &actor,
+                            context,
+                            "worktree created but is not a usable workspace",
+                        );
+                        return;
+                    }
+                },
+                Err(error) => {
+                    self.fail_run(&actor, context, &error);
+                    return;
+                }
+            }
+        }
+        // fork_context (P1.7): `full` starts the child on the parent's
+        // transcript; `summary` folds a model-written digest of it into the
+        // child's system prompt.
+        let (history, system_prompt) = match spec.fork_context {
+            ForkContext::Full => {
+                let mut history = spec.parent_history.clone();
+                // The snapshot ends mid-turn: the assistant message that
+                // spawned this child carries tool calls whose results do not
+                // exist yet — providers reject that transcript.
+                close_open_tool_calls(&mut history);
+                if let Some(prompt) = &resolved.system_prompt {
+                    // The forked transcript carries the parent's system
+                    // message, so the runtime's "history already has System"
+                    // guard would silently drop the child's own persona —
+                    // and `compact_history` keeps only the FIRST system
+                    // message, so a second one would be lost on compaction
+                    // too. Fold the child's persona into the parent's first
+                    // system message so both survive.
+                    match history.first_mut() {
+                        Some(message) if message.role == MessageRole::System => {
+                            let parent = message.content.take().unwrap_or_default();
+                            message.content =
+                                Some(format!("{prompt}\n\n[Parent instructions]\n{parent}"));
+                        }
+                        _ => history.insert(0, Message::text(MessageRole::System, prompt.clone())),
+                    }
+                }
+                (history, None)
+            }
+            ForkContext::Summary => {
+                let summary = self
+                    .summarize_parent(&workspace, &spec.parent_history, &resolved.model)
+                    .await;
+                match summary {
+                    Some(summary) => (
+                        Vec::new(),
+                        Some(
+                            format!(
+                                "{}\n\n[Parent conversation summary — forked context]\n{summary}",
+                                resolved.system_prompt.as_deref().unwrap_or_default()
+                            )
+                            .trim()
+                            .to_owned(),
+                        ),
+                    ),
+                    None => (Vec::new(), resolved.system_prompt.clone()),
+                }
+            }
+            ForkContext::None => (Vec::new(), resolved.system_prompt.clone()),
+        };
+        let limits = AgentLimits {
+            max_iterations: resolved.max_iterations.clamp(1, i64::from(u32::MAX)) as u32,
+            max_cost_micro_usd: resolved
+                .max_cost_usd
+                .filter(|usd| *usd > 0.0)
+                .map(|usd| (usd * 1_000_000.0) as u64),
+            ..AgentLimits::default()
+        };
         let request = AgentRequest {
             model: resolved.model.clone(),
-            history: Vec::new(),
+            history,
             user_input: resolved.prompt.clone(),
-            system_prompt: resolved.system_prompt.clone(),
+            system_prompt,
             mode: Some("subagent".to_owned()),
             temperature: 0.0,
             max_tokens: None,
@@ -496,9 +666,13 @@ impl SubagentExecutor {
                 subagent_policy(&self.merged_policy(), resolved.capability_policy.as_ref()),
             )
             .with_actor(crate::local_actor().id)
-            .with_launcher(launcher)
+            .with_launcher(launcher.clone())
             .with_environment(self.host.environment.clone())
             .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
+            // Nested `spawn_subagent` scopes to this child's conversation —
+            // without it `SpawnSubagent` falls back to conversation 1.
+            .with_conversation(Some(context.child_conversation_id))
+            .with_spawn_depth(spec.spawn_depth.saturating_add(1))
             .with_rule_source(crate::rule_source_for(
                 Some(self.store.clone()),
                 workspace.clone(),
@@ -512,6 +686,12 @@ impl SubagentExecutor {
             model: resolved.model.clone(),
             reasoning: StdMutex::new(String::new()),
             usage: StdMutex::new(None),
+            // Steers (`send_to_subagent`) are user messages appended after
+            // launch; baseline at the persisted launch prompt so a steer
+            // queued before this task ran is still drained — it carries an id
+            // above the prompt's — while the prompt itself is never
+            // re-delivered as a steer.
+            steer_cursor: AtomicI64::new(context.prompt_message_id),
         };
         // The parent session is projected best-effort: a conversation that was
         // never linked to a canonical session has no run to append to.
@@ -528,6 +708,14 @@ impl SubagentExecutor {
         } else {
             &disabled
         };
+        // Profile `exec_rules` seed the run's session rules — evaluated
+        // before the capability fallback (P2.15 reviewer keeps `git` to
+        // read-only subcommands this way).
+        for rule in &resolved.exec_rules {
+            self.host
+                .rules
+                .add_session_rule(&context.run_id.to_string(), rule.clone());
+        }
         let subagent_request = SubagentRequest {
             run_id: context.run_id.to_string(),
             role: resolved.role_name.clone(),
@@ -548,6 +736,47 @@ impl SubagentExecutor {
         // The run is settled — drop its session-rule set so finished runs
         // don't accumulate per-run state forever.
         self.host.rules.remove_session(&context.run_id.to_string());
+        // The worktree Workspace's `cap_std::fs::Dir` is an open handle on
+        // `.cool/worktrees/{id}` — while it lives the directory cannot be
+        // deleted on Windows (os error 32). The clones held by ToolContext
+        // and the rule source were consumed by `run`; drop this one before
+        // teardown.
+        drop(workspace);
+        // Worktree children edit an isolated checkout — preserve their work
+        // instead of deleting it: commit any dirty state onto `cool/sub/{id}`,
+        // remove only the checkout, and surface the branch name in the run
+        // summary so the parent can merge or cherry-pick (P1.7). When the
+        // commit fails and the checkout is still dirty, keep it — deleting it
+        // would erase the child's work.
+        let worktree_note = if spec.isolation == SubagentIsolation::Worktree {
+            let clean = commit_worktree_changes(
+                launcher.as_ref(),
+                &parent_workspace,
+                &self.host.environment,
+                context.run_id,
+            )
+            .await;
+            if clean {
+                remove_worktree(
+                    launcher.as_ref(),
+                    &parent_workspace,
+                    &self.host.environment,
+                    context.run_id,
+                )
+                .await;
+                Some(format!(
+                    "edits preserved on branch `cool/sub/{}` — merge or cherry-pick into the parent checkout",
+                    context.run_id
+                ))
+            } else {
+                Some(format!(
+                    "edits could not be committed — checkout kept at `.cool/worktrees/{0}` (branch `cool/sub/{0}` may be incomplete)",
+                    context.run_id
+                ))
+            }
+        } else {
+            None
+        };
         let (status, summary, error, usage_json) = match &outcome {
             Ok(RunOutcome::Completed { history, usage }) => (
                 "completed",
@@ -558,6 +787,13 @@ impl SubagentExecutor {
             Ok(RunOutcome::Cancelled { .. }) => ("cancelled", None, None, None),
             Ok(RunOutcome::Failed { code, .. }) => ("failed", None, Some(mask_secrets(code)), None),
             Err(error) => ("failed", None, Some(mask_secrets(&error.to_string())), None),
+        };
+        let summary = match (&summary, &worktree_note) {
+            (text, Some(note)) => Some(format!(
+                "{}\n\n[{note}]",
+                text.as_deref().unwrap_or_default()
+            )),
+            (text, None) => text.clone(),
         };
         let usage = usage_json.as_ref();
         // `finalize_*` preserves an earlier cancellation rather than
@@ -756,6 +992,9 @@ struct LegacyTranscriptSink {
     model: String,
     reasoning: StdMutex<String>,
     usage: StdMutex<Option<UsageUpdated>>,
+    /// Legacy `messages.id` cursor for `drain_steers` (P1.7): rows past it are
+    /// pending `send_to_subagent` steers.
+    steer_cursor: AtomicI64,
 }
 
 impl LegacyTranscriptSink {
@@ -846,6 +1085,36 @@ impl EventSink for LegacyTranscriptSink {
         }
         Ok(synthetic_envelope())
     }
+
+    async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
+        // Mirror of the canonical sink's steer drain: `send_to_subagent`
+        // appends legacy user messages to the child conversation; anything
+        // newer than the cursor becomes a steer for the next iteration.
+        let page = self
+            .store
+            .list_messages(
+                &self.actor_id,
+                self.conversation_id,
+                &MessagePage {
+                    before_id: None,
+                    after_id: Some(self.steer_cursor.load(Ordering::SeqCst)),
+                    limit: Some(100),
+                },
+            )
+            .map_err(|error| RuntimeError::Sink(error.to_string()))?;
+        let mut max_id = self.steer_cursor.load(Ordering::SeqCst);
+        let mut steers = Vec::new();
+        for message in page {
+            max_id = max_id.max(message.id);
+            if message.role == "user"
+                && let Some(content) = message.content
+            {
+                steers.push(Message::text(MessageRole::User, content));
+            }
+        }
+        self.steer_cursor.fetch_max(max_id, Ordering::SeqCst);
+        Ok(steers)
+    }
 }
 
 /// Projects subagent lifecycle events into the parent conversation's canonical
@@ -920,5 +1189,358 @@ fn synthetic_envelope() -> EventEnvelope {
             tool_calls: Vec::new(),
         }),
         extensions: Default::default(),
+    }
+}
+
+/// `isolation=worktree` (P1.7): `git worktree add .cool/worktrees/{run_id}`
+/// through the configured process launcher — the same gate shell tools spawn
+/// through, so a disabled launcher fails closed rather than spawning `git`
+/// unsandboxed.
+async fn create_worktree(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    workspace: &Workspace,
+    environment: &HashMap<String, String>,
+    run_id: i64,
+) -> Result<std::path::PathBuf, String> {
+    let root = workspace.root();
+    let base = root.join(".cool").join("worktrees");
+    std::fs::create_dir_all(&base)
+        .map_err(|error| format!("cannot create {}: {error}", base.display()))?;
+    let directory = base.join(run_id.to_string());
+    let branch = format!("cool/sub/{run_id}");
+    // `Workspace::root()` is canonicalized — on Windows that's a verbatim
+    // `\\?\` path that git itself refuses when writing the worktree's `.git`
+    // pointer file, so hand git the plain path.
+    let directory_arg = directory
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(str::to_owned)
+        .unwrap_or_else(|| directory.to_string_lossy().into_owned());
+    let args = vec![
+        "worktree".to_owned(),
+        "add".to_owned(),
+        directory_arg,
+        "-b".to_owned(),
+        branch,
+    ];
+    let spec = LaunchSpec {
+        cwd: root.to_path_buf(),
+        // Same secret filtering the process tools apply — git hooks and
+        // credential helpers must not see host tokens.
+        env: sanitize_environment(
+            environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            &BTreeSet::new(),
+        )
+        .into_iter()
+        .collect(),
+        stdin: None,
+        // `git worktree` is local-only; `Full` is the level every launcher
+        // backend accepts (HostLauncher fails closed below it).
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1 << 20,
+        },
+    };
+    let mut child = launcher
+        .spawn("git", &args, &spec)
+        .map_err(|error| format!("cannot launch git worktree add: {error}"))?;
+    // Both pipes are drained before `wait`: a child that fills an unclaimed
+    // pipe buffer would deadlock otherwise.
+    let mut stderr_bytes = Vec::new();
+    if let Some(mut stderr) = child.stderr().take() {
+        use tokio::io::AsyncReadExt as _;
+        let _ = stderr.read_to_end(&mut stderr_bytes).await;
+    }
+    if let Some(mut stdout) = child.stdout().take() {
+        use tokio::io::AsyncReadExt as _;
+        let mut stdout_bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut stdout_bytes).await;
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("git worktree add did not finish: {error}"))?;
+    if status.success() {
+        Ok(directory)
+    } else {
+        Err(format!(
+            "git worktree add exited with {status}: {}",
+            String::from_utf8_lossy(&stderr_bytes).trim()
+        ))
+    }
+}
+
+/// `isolation=worktree` handoff: commits the child's dirty state onto its
+/// `cool/sub/{id}` branch so teardown deletes only the checkout, not the
+/// work. `--no-verify` skips repo hooks for the same reason the environment
+/// is sanitized. Returns whether the checkout ended up clean — the caller
+/// keeps the checkout instead of deleting it when `false`.
+async fn commit_worktree_changes(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    workspace: &Workspace,
+    environment: &HashMap<String, String>,
+    run_id: i64,
+) -> bool {
+    let directory = workspace
+        .root()
+        .join(".cool")
+        .join("worktrees")
+        .join(run_id.to_string());
+    if !directory.exists() {
+        return true;
+    }
+    let env: Vec<(String, String)> = sanitize_environment(
+        environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        &BTreeSet::new(),
+    )
+    .into_iter()
+    .collect();
+    let staged = run_git(
+        launcher,
+        &directory,
+        &env,
+        &["add".to_owned(), "-A".to_owned()],
+    )
+    .await;
+    if matches!(staged, Some((true, _))) {
+        let _ = run_git(
+            launcher,
+            &directory,
+            &env,
+            &[
+                "-c".to_owned(),
+                "user.name=cool-subagent".to_owned(),
+                "-c".to_owned(),
+                "user.email=cool-subagent@local".to_owned(),
+                "commit".to_owned(),
+                "--no-verify".to_owned(),
+                "-m".to_owned(),
+                format!("cool subagent {run_id} edits"),
+            ],
+        )
+        .await;
+    }
+    // `status --porcelain` is the source of truth: it reports a clean tree
+    // whether the child committed everything itself, our commit succeeded,
+    // or there was nothing to commit — and reports leftovers whenever any
+    // of those steps failed.
+    match run_git(
+        launcher,
+        &directory,
+        &env,
+        &["status".to_owned(), "--porcelain".to_owned()],
+    )
+    .await
+    {
+        Some((true, stdout)) => stdout.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Runs `git <args>` in `cwd` through the launcher with both pipes drained
+/// (a child that fills an unclaimed pipe buffer would deadlock on `wait`).
+/// Returns `(success, stdout)`; spawn/wait failures return `None`.
+async fn run_git(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    cwd: &std::path::Path,
+    env: &[(String, String)],
+    args: &[String],
+) -> Option<(bool, String)> {
+    let spec = LaunchSpec {
+        cwd: cwd.to_path_buf(),
+        env: env.to_vec(),
+        stdin: None,
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1 << 20,
+        },
+    };
+    let mut child = launcher.spawn("git", args, &spec).ok()?;
+    use tokio::io::AsyncReadExt as _;
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout().take() {
+        let _ = stdout.read_to_end(&mut stdout_bytes).await;
+    }
+    if let Some(mut stderr) = child.stderr().take() {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes).await;
+    }
+    let status = child.wait().await.ok()?;
+    Some((
+        status.success(),
+        String::from_utf8_lossy(&stdout_bytes).into_owned(),
+    ))
+}
+
+/// Best-effort teardown of a worktree-isolated child: delete the checkout
+/// (`git worktree remove` is skipped — it path-matches the registration and
+/// 8.3/verbatim spellings of the same directory never match on Windows),
+/// then `git worktree prune` for the bookkeeping. The `cool/sub/{id}` branch
+/// is kept deliberately — it carries the child's edits for the parent to
+/// merge or cherry-pick. Cleanup failures only leave litter under
+/// `.cool/worktrees/` — never fail the run.
+async fn remove_worktree(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    workspace: &Workspace,
+    environment: &HashMap<String, String>,
+    run_id: i64,
+) {
+    let root = workspace.root();
+    let directory = root
+        .join(".cool")
+        .join("worktrees")
+        .join(run_id.to_string());
+    // The caller drops the child's `Workspace` (a `cap_std` handle on this
+    // directory) before teardown; a short retry still covers handles that
+    // release asynchronously elsewhere on Windows.
+    for _ in 0..50 {
+        match std::fs::remove_dir_all(&directory) {
+            Ok(_) => break,
+            Err(_) if !directory.exists() => break,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let args = vec!["worktree".to_owned(), "prune".to_owned()];
+    let spec = LaunchSpec {
+        cwd: root.to_path_buf(),
+        env: sanitize_environment(
+            environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            &BTreeSet::new(),
+        )
+        .into_iter()
+        .collect(),
+        stdin: None,
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1 << 20,
+        },
+    };
+    if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
+        use tokio::io::AsyncReadExt as _;
+        // Drain both pipes before `wait` so a chatty git cannot deadlock
+        // on a full buffer.
+        if let Some(mut stderr) = child.stderr().take() {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        if let Some(mut stdout) = child.stdout().take() {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes).await;
+        }
+        let _ = child.wait().await;
+    }
+}
+
+/// Closes assistant tool calls that have no result message — the
+/// `fork_context=full` snapshot ends mid-batch, while providers reject
+/// transcripts with unanswered calls.
+fn close_open_tool_calls(history: &mut Vec<Message>) {
+    let answered: BTreeSet<&str> = history
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    let pending: Vec<String> = history
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .flat_map(|message| message.tool_calls.iter())
+        .filter(|call| !answered.contains(call.call_id.as_str()))
+        .map(|call| call.call_id.clone())
+        .collect();
+    for call_id in pending {
+        let mut message = Message::text(
+            MessageRole::Tool,
+            "result unavailable — the context forked while this call was in flight",
+        );
+        message.tool_call_id = Some(call_id);
+        history.push(message);
+    }
+}
+
+/// Renders the parent transcript for `fork_context=summary`, capped so a long
+/// run cannot blow the summarizer's input budget.
+fn render_parent_transcript(history: &[Message]) -> String {
+    let mut output = String::new();
+    for message in history {
+        let role = match message.role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        };
+        if let Some(content) = &message.content {
+            for line in content.lines().take(40) {
+                output.push_str(&format!("{role}: {line}\n"));
+            }
+        }
+        for call in &message.tool_calls {
+            let arguments = serde_json::to_string(&call.arguments).unwrap_or_default();
+            output.push_str(&format!("{role}: [tool call {}({arguments})]\n", call.name));
+        }
+        if output.len() > 48_000 {
+            break;
+        }
+    }
+    output
+}
+
+impl SubagentExecutor {
+    /// `fork_context=summary` (P1.7): a one-iteration model call that digests
+    /// the parent transcript — the inline variant of the P0.4 summarizer the
+    /// canonical sink uses for compaction.
+    async fn summarize_parent(
+        &self,
+        workspace: &Workspace,
+        history: &[Message],
+        model: &str,
+    ) -> Option<String> {
+        let transcript = render_parent_transcript(history);
+        if transcript.trim().is_empty() {
+            return None;
+        }
+        let request = AgentRequest {
+            model: model.to_owned(),
+            history: Vec::new(),
+            user_input: transcript,
+            system_prompt: Some(crate::SUMMARIZER_SYSTEM_PROMPT.to_owned()),
+            mode: Some("compact".to_owned()),
+            temperature: 0.0,
+            max_tokens: Some(1000),
+            limits: AgentLimits {
+                max_iterations: 1,
+                ..AgentLimits::default()
+            },
+            tool_names: Some(BTreeSet::new()),
+            tool_context: ToolContext::new(workspace.clone(), self.merged_policy())
+                .with_actor(crate::local_actor().id),
+        };
+        let sink = crate::PlanStepSink::default();
+        let (_sender, signal) = CancelSignal::channel();
+        let outcome = self
+            .runtime
+            .run(
+                request,
+                &sink,
+                &AutoApprovalGate {
+                    outcome: ApprovalOutcome::Approved,
+                },
+                signal,
+            )
+            .await
+            .ok()?;
+        if !matches!(outcome, RunOutcome::Completed { .. }) {
+            return None;
+        }
+        let text = mask_secrets(sink.text().trim());
+        (!text.is_empty()).then_some(text)
     }
 }

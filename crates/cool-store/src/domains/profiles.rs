@@ -157,6 +157,11 @@ struct BuiltinPreset {
     avatar_color: &'static str,
     temperature: f64,
     max_iterations: Option<i64>,
+    /// Read-only tool allowlist for restricted presets (P2.15 reviewer).
+    tool_names: Option<&'static [&'static str]>,
+    /// Raw JSON object merged into `settings` — carries `capability_policy`
+    /// and `exec_rules` for restricted presets.
+    extra_settings: Option<&'static str>,
 }
 
 /// Built-in profile presets, mirroring `personalities/presets.py`.
@@ -169,6 +174,8 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         avatar_color: "#6366F1",
         temperature: 0.7,
         max_iterations: None,
+        tool_names: None,
+        extra_settings: None,
     },
     BuiltinPreset {
         name: "Coder",
@@ -178,6 +185,8 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         avatar_color: "#10B981",
         temperature: 0.3,
         max_iterations: Some(15),
+        tool_names: None,
+        extra_settings: None,
     },
     BuiltinPreset {
         name: "Researcher",
@@ -187,6 +196,8 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         avatar_color: "#F59E0B",
         temperature: 0.5,
         max_iterations: Some(12),
+        tool_names: None,
+        extra_settings: None,
     },
     BuiltinPreset {
         name: "Writer",
@@ -196,6 +207,8 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         avatar_color: "#EC4899",
         temperature: 0.9,
         max_iterations: None,
+        tool_names: None,
+        extra_settings: None,
     },
     BuiltinPreset {
         name: "DM",
@@ -205,6 +218,32 @@ const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         avatar_color: "#8B5CF6",
         temperature: 0.85,
         max_iterations: Some(8),
+        tool_names: None,
+        extra_settings: None,
+    },
+    // P2.15 generator–verifier: a fresh read-only context that checks the
+    // generator's output. Read tools + `git` only; `exec_rules` keep `git`
+    // to read-only subcommands while `write` stays denied outright
+    // (`execute` is `ask` — a capability `deny` is the outer bound and would
+    // sink the `git diff*`/`git log*` allow rules as well).
+    BuiltinPreset {
+        name: "Reviewer",
+        slug: "reviewer",
+        description: "Read-only code reviewer for generator–verifier passes.",
+        system_prompt: "You are Reviewer, a read-only code-review agent verifying another agent's output.\n\n# Guidelines\n- Inspect the changes described in the task: read the named files and the relevant diff (`git diff`, `git log`).\n- Look for regressions, correctness bugs, missing edge cases, security issues, and violations of project conventions.\n- Do NOT modify, create, or delete anything — you are a verifier, not a fixer.\n- Reply with a severity-ordered findings list: blockers first, then warnings, then nits; include file:line references. Say explicitly when there are no findings.\n",
+        avatar_color: "#EF4444",
+        temperature: 0.2,
+        max_iterations: Some(8),
+        tool_names: Some(&[
+            "read_file",
+            "list_files",
+            "search_files",
+            "find_files",
+            "git",
+        ]),
+        extra_settings: Some(
+            r#"{"capability_policy":{"write":"deny","execute":"ask"},"exec_rules":[{"tool":"git","kind":"command","pattern":"git -c *","decision":"deny"},{"tool":"git","kind":"command","pattern":"git difftool*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--ext-diff*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--textconv*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git *--exec*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*--output*","decision":"deny"},{"tool":"git","kind":"command","pattern":"git diff*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git log*","decision":"allow"},{"tool":"git","kind":"command","pattern":"git *","decision":"deny"},{"tool":"shell","kind":"command","pattern":"*","decision":"deny"}]}"#,
+        ),
     },
 ];
 
@@ -218,6 +257,12 @@ impl crate::LegacyStore {
                 continue;
             }
             let mut settings = serde_json::Map::new();
+            if let Some(extra) = preset.extra_settings
+                && let Ok(serde_json::Value::Object(extra)) =
+                    serde_json::from_str::<serde_json::Value>(extra)
+            {
+                settings.extend(extra);
+            }
             settings.insert(
                 "temperature".to_owned(),
                 serde_json::Value::from(preset.temperature),
@@ -234,7 +279,14 @@ impl crate::LegacyStore {
                 description: Some(preset.description.to_owned()),
                 system_prompt: Some(preset.system_prompt.to_owned()),
                 model: None,
-                tool_names: None,
+                tool_names: preset.tool_names.map(|names| {
+                    serde_json::Value::Array(
+                        names
+                            .iter()
+                            .map(|name| serde_json::Value::from(*name))
+                            .collect(),
+                    )
+                }),
                 skill_names: None,
                 settings: Some(serde_json::Value::Object(settings)),
                 avatar_color: Some(preset.avatar_color.to_owned()),

@@ -567,3 +567,587 @@ async fn an_invalid_working_directory_fails_closed() {
     assert_eq!(finished.status, "failed");
     assert_eq!(finished.error.as_deref(), Some("invalid working directory"));
 }
+
+// ---------------------------------------------------------------------------
+// P1.7: background subagent execution — fork_context, isolation=worktree and
+// operator steers (send_to_subagent) draining into a running child.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+use async_trait::async_trait;
+use cool_agent::{
+    HostContext, HostLauncher, Message, MessageRole, ModelDriver, ModelStream, ProviderError,
+};
+use cool_app_server::{ForkContext, SubagentExecutor, SubagentIsolation, SubagentLaunchSpec};
+use cool_store::domains::conversations::NewMessage;
+use futures_util::stream;
+
+fn direct_executor(
+    driver: Arc<dyn ModelDriver>,
+) -> (Arc<SubagentExecutor>, Arc<LegacyStore>, tempfile::TempDir) {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let executor = Arc::new(SubagentExecutor::new(
+        store.clone(),
+        DurableStore::in_memory().expect("durable"),
+        AgentRuntime::new(driver, builtin_registry()),
+        Workspace::new(directory.path()).expect("workspace"),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted".to_owned(),
+        HostContext::default(),
+    ));
+    (executor, store, directory)
+}
+
+async fn executor_wait_terminal(executor: &SubagentExecutor, run_id: i64) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let row = executor.get_run("local-user", run_id).expect("run row");
+        if ["completed", "failed", "cancelled"].contains(&row.status.as_str()) {
+            return row.status;
+        }
+        assert!(std::time::Instant::now() < deadline, "run did not finish");
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn fork_context_full_seeds_the_child_history() {
+    let driver = Arc::new(ScriptedDriver::echo());
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "continue".to_owned(),
+                fork_context: ForkContext::Full,
+                parent_history: vec![
+                    Message::text(MessageRole::User, "earlier question"),
+                    Message::text(MessageRole::Assistant, "earlier answer"),
+                ],
+                ..SubagentLaunchSpec::default()
+            },
+            "fork-full-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    let texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect();
+    assert!(
+        texts.contains(&"earlier question") && texts.contains(&"earlier answer"),
+        "parent transcript seeded the child: {texts:?}"
+    );
+    assert_eq!(
+        messages
+            .last()
+            .and_then(|message| message.content.as_deref()),
+        Some("continue"),
+        "the spawn prompt rides last"
+    );
+}
+
+#[tokio::test]
+async fn fork_context_summary_folds_a_digest_into_the_system_prompt() {
+    // First stream call is the summarizer (digest of the parent transcript),
+    // second is the child run itself.
+    let driver = Arc::new(ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::Content("digest: parent picked green".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+    ]));
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "finish it".to_owned(),
+                fork_context: ForkContext::Summary,
+                parent_history: vec![Message::text(MessageRole::User, "pick a color")],
+                ..SubagentLaunchSpec::default()
+            },
+            "fork-summary-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 2, "summarizer + child run");
+    let system = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::System)
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(
+        system.contains("digest: parent picked green"),
+        "digest folded into the child system prompt: {system}"
+    );
+    assert!(
+        system.contains("Parent conversation summary"),
+        "forked-context marker present: {system}"
+    );
+}
+
+/// Driver whose turn-1 stream emits its tool call and then holds the finish
+/// event until the test's steer is written — the next iteration's
+/// `drain_steers` then picks the steer up deterministically.
+struct SteerGateDriver {
+    requests: tokio::sync::Mutex<Vec<cool_agent::ModelRequest>>,
+    calls: AtomicUsize,
+    released: Arc<AtomicBool>,
+}
+
+fn scripted_stream(events: Vec<ModelEvent>) -> ModelStream {
+    Box::pin(stream::iter(events.into_iter().map(Ok)))
+}
+
+#[async_trait]
+impl ModelDriver for SteerGateDriver {
+    async fn stream(
+        &self,
+        request: cool_agent::ModelRequest,
+    ) -> Result<ModelStream, ProviderError> {
+        self.requests.lock().await.push(request);
+        if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            let released = self.released.clone();
+            return Ok(Box::pin(stream::unfold(0_u8, move |step| {
+                let released = released.clone();
+                async move {
+                    match step {
+                        0 => Some((
+                            Ok(ModelEvent::ToolCall(ToolCall {
+                                call_id: "call-1".to_owned(),
+                                name: "list_files".to_owned(),
+                                arguments: serde_json::Map::from_iter([(
+                                    "path".to_owned(),
+                                    json!("."),
+                                )]),
+                            })),
+                            1_u8,
+                        )),
+                        1 => {
+                            for _ in 0..500 {
+                                if released.load(AtomicOrdering::SeqCst) {
+                                    break;
+                                }
+                                sleep(Duration::from_millis(10)).await;
+                            }
+                            Some((
+                                Ok(ModelEvent::Finish {
+                                    reason: Some("stop".to_owned()),
+                                }),
+                                2_u8,
+                            ))
+                        }
+                        _ => None,
+                    }
+                }
+            })));
+        }
+        Ok(scripted_stream(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]))
+    }
+}
+
+#[tokio::test]
+async fn send_to_subagent_steer_reaches_the_running_child() {
+    let driver = Arc::new(SteerGateDriver {
+        requests: tokio::sync::Mutex::new(Vec::new()),
+        calls: AtomicUsize::new(0),
+        released: Arc::new(AtomicBool::new(false)),
+    });
+    let runtime_driver: Arc<dyn ModelDriver> = driver.clone();
+    let (executor, store, _dir) = direct_executor(runtime_driver);
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "first step".to_owned(),
+                ..SubagentLaunchSpec::default()
+            },
+            "steer-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+
+    // Wait for the first provider call (turn 1 returned the tool call), then
+    // append the steer exactly like the send_to_subagent tool does.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !driver.requests.lock().await.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no provider request");
+        sleep(Duration::from_millis(10)).await;
+    }
+    store
+        .add_message(
+            "local-user",
+            run.conversation_id,
+            &NewMessage {
+                role: "user".to_owned(),
+                content: Some("steer: change of plan".to_owned()),
+                ..NewMessage::default()
+            },
+        )
+        .expect("steer message");
+    driver.released.store(true, AtomicOrdering::SeqCst);
+
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+    let requests = driver.requests.lock().await.clone();
+    assert_eq!(requests.len(), 2, "tool turn + follow-up turn");
+    let steered = requests[1].messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message.content.as_deref() == Some("steer: change of plan")
+    });
+    assert!(steered, "steer was drained into the child's history");
+}
+
+#[tokio::test]
+async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
+    let directory = tempdir().expect("tempdir");
+    // worktree add needs a commit to point the new branch at.
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "test"],
+        vec!["commit", "--allow-empty", "-m", "init"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(directory.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let driver = Arc::new(ScriptedDriver::echo());
+    let executor = Arc::new(SubagentExecutor::new(
+        store.clone(),
+        DurableStore::in_memory().expect("durable"),
+        AgentRuntime::new(driver, builtin_registry()),
+        Workspace::new(directory.path()).expect("workspace"),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted".to_owned(),
+        HostContext {
+            launcher: Arc::new(HostLauncher),
+            environment: std::env::vars().collect(),
+            ..HostContext::default()
+        },
+    ));
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "work in isolation".to_owned(),
+                isolation: SubagentIsolation::Worktree,
+                ..SubagentLaunchSpec::default()
+            },
+            "worktree-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    let status = executor_wait_terminal(&executor, run.id).await;
+    let row = executor.get_run("local-user", run.id).expect("row");
+    assert_eq!(status, "completed", "run failed: {:?}", row.error);
+
+    // Teardown (P1.7): the finished run's checkout is reclaimed — the
+    // `cool/sub/{id}` branch is KEPT so the child's edits are preserved for
+    // the parent to merge or cherry-pick.
+    let worktree = directory
+        .path()
+        .join(".cool")
+        .join("worktrees")
+        .join(run.id.to_string());
+    assert!(
+        !worktree.exists(),
+        "worktree removed after the run: {}",
+        worktree.display()
+    );
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(directory.path())
+        .output()
+        .expect("git worktree list");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("worktrees"),
+        "no worktree entries left: {listed:?}"
+    );
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", "cool/sub/*"])
+        .current_dir(directory.path())
+        .output()
+        .expect("git branch --list");
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).contains(&format!("cool/sub/{}", run.id)),
+        "child edits kept on cool/sub/*: {branches:?}"
+    );
+    assert!(
+        row.result_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cool/sub/"),
+        "result names the preserved branch: {:?}",
+        row.result_summary
+    );
+}
+
+#[tokio::test]
+async fn isolation_worktree_fails_closed_when_no_launcher_is_configured() {
+    let driver = Arc::new(ScriptedDriver::echo());
+    let (executor, store, _dir) = direct_executor(driver); // DisabledLauncher
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                prompt: "isolate me".to_owned(),
+                isolation: SubagentIsolation::Worktree,
+                ..SubagentLaunchSpec::default()
+            },
+            "worktree-no-launcher",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    let status = executor_wait_terminal(&executor, run.id).await;
+    assert_eq!(status, "failed");
+    let row = executor.get_run("local-user", run.id).expect("row");
+    assert!(
+        row.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("launcher"),
+        "launcher-disabled error is recorded: {:?}",
+        row.error
+    );
+}
+
+#[tokio::test]
+async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
+    // P2.15: the seeded reviewer profile keeps file reads + git only, and its
+    // exec_rules let `git diff`/`git log` through while `git push` is denied
+    // (a capability `deny` can't be lifted by rules, so `execute` stays ask).
+    let driver = Arc::new(ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "push-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["push", "origin", "main"]),
+                )]),
+            }),
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "HEAD"]),
+                )]),
+            }),
+            // `git diff --no-index --output=target` writes files — the deny
+            // rule must match `--output` anywhere in the args, not only when
+            // it immediately follows `diff`.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "output-diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "--no-index", "--output=target", "a", "b"]),
+                )]),
+            }),
+            // `--ext-diff`/`--textconv` spawn external diff commands — a
+            // read-only profile must not gain process execution through them.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "ext-diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "--ext-diff"]),
+                )]),
+            }),
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "textconv-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["log", "-p", "--textconv"]),
+                )]),
+            }),
+            // A registered but unlisted tool must fail at execution — the
+            // profile allowlist gates calls, not just advertised definitions.
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "write-call".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: serde_json::Map::from_iter([("path".to_owned(), json!("owned.md"))]),
+            }),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("reviewed".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+    ]));
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    store
+        .seed_builtin_profiles()
+        .expect("builtin profiles seed");
+    let reviewer = store
+        .list_profiles(false)
+        .expect("profiles")
+        .into_iter()
+        .find(|profile| profile.slug == "reviewer")
+        .expect("reviewer preset exists");
+    assert!(reviewer.is_builtin, "reviewer is builtin");
+
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                profile_id: Some(reviewer.id),
+                prompt: "review the diff".to_owned(),
+                ..SubagentLaunchSpec::default()
+            },
+            "reviewer-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 2);
+    let mut tool_names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    tool_names.sort_unstable();
+    assert_eq!(
+        tool_names,
+        vec![
+            "find_files",
+            "git",
+            "list_files",
+            "read_file",
+            "search_files"
+        ],
+        "reviewer sees the read-only tool set"
+    );
+    // Turn 2's history carries the tool results: `git push` denied by the
+    // exec rule, `git diff` allowed through (fails only because no process
+    // launcher exists in this harness).
+    let tool_results = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        tool_results.contains("denied by policy rule"),
+        "git push denied by the reviewer exec rules: {tool_results}"
+    );
+    let diff_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("diff-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !diff_result.contains("denied"),
+        "git diff passed the exec rules: {diff_result}"
+    );
+    let output_diff_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("output-diff-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        output_diff_result.contains("denied by policy rule"),
+        "git diff --output mid-args denied by the reviewer exec rules: {output_diff_result}"
+    );
+    for call_id in ["ext-diff-call", "textconv-call"] {
+        let result = requests[1]
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Tool
+                    && message.tool_call_id.as_deref() == Some(call_id)
+            })
+            .map(|message| serde_json::to_string(message).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            result.contains("denied by policy rule"),
+            "external-command flags denied by the reviewer exec rules ({call_id}): {result}"
+        );
+    }
+    let write_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("write-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        write_result.contains("allowlist"),
+        "unlisted write_file rejected by the tool_names gate: {write_result}"
+    );
+}

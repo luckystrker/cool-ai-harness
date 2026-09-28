@@ -2011,7 +2011,7 @@ async fn profiles_seed_clone_and_playground_are_store_backed() {
     .await;
     assert!(matches!(
         seeded,
-        ResponsePayload::ProfilesSeeded(SeedResult { created: 5 })
+        ResponsePayload::ProfilesSeeded(SeedResult { created: 6 })
     ));
 
     let listed = request(
@@ -2025,7 +2025,7 @@ async fn profiles_seed_clone_and_playground_are_store_backed() {
         ResponsePayload::ProfilesListed(profiles) => profiles,
         other => panic!("unexpected payload: {other:?}"),
     };
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     let source = profiles.iter().find(|p| p.slug == "coder").unwrap();
 
     let cloned = request(

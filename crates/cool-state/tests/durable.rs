@@ -299,6 +299,7 @@ fn one_approval_resolution_wins_the_race_and_is_audited_with_an_event() {
                     &approval_id,
                     1,
                     decision,
+                    None,
                 )
             })
         })
@@ -317,10 +318,112 @@ fn one_approval_resolution_wins_the_race_and_is_audited_with_an_event() {
         store
             .approval_outcome("local-user", &ticket.approval_id)
             .unwrap(),
-        Some(winner.outcome.clone())
+        Some((winner.outcome.clone(), None))
     );
     assert_eq!(store.all_events(&run, "local-user").unwrap().len(), 2);
     store.replay_run(&run, "local-user").unwrap();
+}
+
+#[test]
+fn expire_approval_times_out_the_ticket_and_unblocks_the_run() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    let ticket = store
+        .create_approval(
+            "local-user",
+            &session,
+            &run,
+            "call-1",
+            "ask_user",
+            "which credential?",
+        )
+        .unwrap();
+    assert_eq!(
+        store.replay_run(&run, "local-user").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+
+    assert!(
+        store
+            .expire_approval("local-user", &ticket.approval_id)
+            .unwrap()
+    );
+    // A second expiry — or a late user answer — loses to the first
+    // resolution instead of erroring or rewriting state.
+    assert!(
+        !store
+            .expire_approval("local-user", &ticket.approval_id)
+            .unwrap()
+    );
+    assert!(
+        store
+            .resolve_approval(
+                "local-user",
+                "late-resolve",
+                "fingerprint-late",
+                &ticket.approval_id,
+                1,
+                ApprovalDecision::Approved,
+                None,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .approval_outcome("local-user", &ticket.approval_id)
+            .unwrap(),
+        Some((cool_protocol::ApprovalOutcome::TimedOut, None))
+    );
+    assert_eq!(
+        store.replay_run(&run, "local-user").unwrap().status,
+        RunStatus::Running,
+        "ToolApprovalResolved flips the run back to running"
+    );
+}
+
+#[test]
+fn resolved_question_answers_persist_masked() {
+    let store = DurableStore::in_memory().unwrap();
+    let (session, run) = session_and_run(&store);
+    let ticket = store
+        .create_approval(
+            "local-user",
+            &session,
+            &run,
+            "call-1",
+            "ask_user",
+            "enter the token",
+        )
+        .unwrap();
+    let secret = "token = abcdefgh12345678";
+    let resolution = store
+        .resolve_approval(
+            "local-user",
+            "resolve-key",
+            "fingerprint-key",
+            &ticket.approval_id,
+            1,
+            ApprovalDecision::Approved,
+            Some(&serde_json::json!(secret)),
+        )
+        .unwrap();
+    // The in-memory resolution keeps the raw answer for the waiting run…
+    assert_eq!(resolution.answer.as_ref(), Some(&serde_json::json!(secret)));
+    // …but the persisted copy is masked.
+    let persisted = store
+        .approval_outcome("local-user", &ticket.approval_id)
+        .unwrap()
+        .expect("resolved outcome")
+        .1
+        .expect("persisted answer");
+    assert_ne!(persisted, serde_json::json!(secret));
+    assert!(
+        persisted
+            .as_str()
+            .unwrap_or_default()
+            .contains("[REDACTED]"),
+        "persisted answer is masked: {persisted}"
+    );
 }
 
 #[test]

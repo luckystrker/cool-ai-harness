@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cool_protocol::{
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, V1Version,
+};
 use cool_security::{
     Capability, CapabilityPolicy, Decision, PolicyRule, Workspace, mask_json, mask_secrets,
     sanitize_environment,
@@ -15,10 +18,11 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::context::{Message, ToolCall};
 use crate::launcher::{
     DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
 };
-use crate::loop_runtime::CancelSignal;
+use crate::loop_runtime::{ApprovalGate, ApprovalRequest, CancelSignal, EventSink, RuntimeError};
 
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
@@ -158,6 +162,21 @@ pub struct ToolContext {
     /// so artifacts like `.cool/spill/{call_id}-stdout.txt` correlate with the
     /// call in the event log.
     pub call_id: Option<String>,
+    /// Interactive question gate for `ask_user` (P1.8): set only on runs that
+    /// can reach a human — CLI one-shots, subagents and scheduled runs leave
+    /// it `None` so the tool fails `user_unavailable` instead of hanging.
+    pub question_gate: Option<Arc<dyn ApprovalGate>>,
+    /// How deep this run already sits in the `spawn_subagent` chain (P1.7):
+    /// root runs are `0`, children increment by one, and the tool rejects
+    /// spawns at `spawn_depth >= MAX_SPAWN_DEPTH`.
+    pub spawn_depth: u32,
+    /// The run's live transcript snapshot, refreshed by the runtime before
+    /// every tool batch — `spawn_subagent`'s `fork_context` seeds child
+    /// history/context from it. `None` outside the loop (tests, direct calls).
+    pub history_snapshot: Option<Vec<Message>>,
+    /// Tools `activate_tools` has enabled for this run (P1.10): the loop
+    /// unions it into the deferred filter each iteration.
+    pub active_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl ToolContext {
@@ -176,6 +195,10 @@ impl ToolContext {
             actor_id: "local-user".to_owned(),
             conversation_id: None,
             call_id: None,
+            question_gate: None,
+            spawn_depth: 0,
+            history_snapshot: None,
+            active_tools: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 
@@ -217,6 +240,51 @@ impl ToolContext {
         self.environment = environment;
         self
     }
+
+    /// Installs the interactive gate `ask_user` raises questions through
+    /// (P1.8). Callers without a human on the other end leave it unset.
+    pub fn with_question_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.question_gate = Some(gate);
+        self
+    }
+
+    /// Shares an already-populated `active_tools` set (P1.10) — e.g. a test
+    /// pre-activating tools or a runner reusing one set across requests.
+    pub fn with_active_tools(mut self, active: Arc<RwLock<BTreeSet<String>>>) -> Self {
+        self.active_tools = active;
+        self
+    }
+
+    /// Marks how deep this run sits in the `spawn_subagent` chain (P1.7).
+    pub fn with_spawn_depth(mut self, depth: u32) -> Self {
+        self.spawn_depth = depth;
+        self
+    }
+}
+
+/// Maximum `spawn_subagent` nesting: a run at this depth cannot spawn (P1.7).
+pub const MAX_SPAWN_DEPTH: u32 = 3;
+
+/// Default catalog size above which `mcp_*` tools defer to lazy activation
+/// (`COOL_EAGER_TOOL_LIMIT`, P1.10).
+pub const DEFAULT_EAGER_TOOL_LIMIT: usize = 20;
+
+/// The catalog size above which `mcp_*` tools are hidden from the model until
+/// `activate_tools` exposes them (P1.10).
+pub fn eager_tool_limit() -> usize {
+    std::env::var("COOL_EAGER_TOOL_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_EAGER_TOOL_LIMIT)
+}
+
+/// Whether a tool's definition ships to the model eagerly or stays hidden
+/// until `activate_tools` exposes it for the run (P1.10).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolActivation {
+    #[default]
+    Eager,
+    Deferred,
 }
 
 #[async_trait]
@@ -233,6 +301,9 @@ pub struct Tool {
     pub definition: ToolDefinition,
     pub capabilities: BTreeSet<Capability>,
     pub default_decision: Decision,
+    /// Eager tools always ship in `definitions()`; deferred ones hide until
+    /// `activate_tools` enables them for the run (P1.10).
+    pub activation: ToolActivation,
     handler: Arc<dyn ToolHandler>,
 }
 
@@ -247,8 +318,15 @@ impl Tool {
             definition,
             capabilities: capabilities.into_iter().collect(),
             default_decision,
+            activation: ToolActivation::Eager,
             handler: Arc::new(handler),
         }
+    }
+
+    /// Marks the tool deferred — hidden from `definitions()` until activated.
+    pub fn deferred(mut self) -> Self {
+        self.activation = ToolActivation::Deferred;
+        self
     }
 
     pub async fn execute(
@@ -280,6 +358,33 @@ fn write_tools(
     tools.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// Rich, deterministic (name-sorted) catalog of a tool map — used by
+/// `ToolRegistry::catalog` and by the meta-tools, which reach the map only
+/// through a `Weak` (see `install_meta_tools`).
+fn catalog_entries(tools: &RwLock<BTreeMap<String, Tool>>) -> Vec<ToolCatalogEntry> {
+    let mut entries = read_tools(tools)
+        .values()
+        .map(|tool| {
+            let mut capabilities = tool
+                .capabilities
+                .iter()
+                .map(|capability| capability_name(*capability).to_owned())
+                .collect::<Vec<_>>();
+            // Match the Python catalog's `sorted(cap.value ...)`.
+            capabilities.sort_unstable();
+            ToolCatalogEntry {
+                name: tool.definition.name.clone(),
+                description: tool.definition.description.clone(),
+                parameters: tool.definition.parameters.clone(),
+                capabilities,
+                dangerous: tool.default_decision == Decision::Ask,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
 impl ToolRegistry {
     pub fn new(tools: impl IntoIterator<Item = Tool>) -> Result<Self, ToolError> {
         let mut registry = BTreeMap::new();
@@ -307,29 +412,52 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Whether a tool is hidden from the model right now: explicitly deferred
+    /// tools, plus every `mcp_*`/`mcpx_*` (hashed long-name) tool once the
+    /// catalog outgrows `eager_tool_limit()` (P1.10).
+    fn is_deferred(tool: &Tool, catalog_size: usize) -> bool {
+        tool.activation == ToolActivation::Deferred
+            || (catalog_size > eager_tool_limit()
+                && (tool.definition.name.starts_with("mcp_")
+                    || tool.definition.name.starts_with("mcpx_")))
+    }
+
+    /// Definitions the model sees: eager tools plus deferred tools the run
+    /// has activated (P1.10).
+    pub fn visible_definitions(&self, active_tools: &BTreeSet<String>) -> Vec<ToolDefinition> {
+        let tools = read_tools(&self.tools);
+        let catalog_size = tools.len();
+        tools
+            .values()
+            .filter(|tool| {
+                !Self::is_deferred(tool, catalog_size)
+                    || active_tools.contains(&tool.definition.name)
+            })
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+
+    /// Whether the named tool is currently deferred (P1.10).
+    pub fn is_tool_deferred(&self, name: &str) -> bool {
+        let tools = read_tools(&self.tools);
+        tools
+            .get(name)
+            .is_some_and(|tool| Self::is_deferred(tool, tools.len()))
+    }
+
+    /// Whether any tool is currently deferred — gates the "hidden tools"
+    /// system-prompt hint (P1.10).
+    pub fn has_deferred_tools(&self) -> bool {
+        let tools = read_tools(&self.tools);
+        let catalog_size = tools.len();
+        tools
+            .values()
+            .any(|tool| Self::is_deferred(tool, catalog_size))
+    }
+
     /// Rich, deterministic (name-sorted) catalog for the UI tool pickers.
     pub fn catalog(&self) -> Vec<ToolCatalogEntry> {
-        let mut entries = read_tools(&self.tools)
-            .values()
-            .map(|tool| {
-                let mut capabilities = tool
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability_name(*capability).to_owned())
-                    .collect::<Vec<_>>();
-                // Match the Python catalog's `sorted(cap.value ...)`.
-                capabilities.sort_unstable();
-                ToolCatalogEntry {
-                    name: tool.definition.name.clone(),
-                    description: tool.definition.description.clone(),
-                    parameters: tool.definition.parameters.clone(),
-                    capabilities,
-                    dangerous: tool.default_decision == Decision::Ask,
-                }
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        entries
+        catalog_entries(&self.tools)
     }
 
     /// Returns a new independent registry containing this registry's tools plus
@@ -341,7 +469,49 @@ impl ToolRegistry {
             .cloned()
             .collect::<Vec<_>>();
         combined.extend(tools);
-        Self::new(combined)
+        let registry = Self::new(combined)?;
+        // The cloned meta-tool handlers still point at this registry's map —
+        // rebind them to the extension so deferred tools the host added (MCP
+        // servers, executor tools) stay discoverable and activatable.
+        registry.install_meta_tools();
+        Ok(registry)
+    }
+
+    /// Rebinds `search_tools`/`activate_tools` to this registry. Needed after
+    /// `extend`: it builds a fresh backing map, and the handlers cloned out of
+    /// the old registry would keep searching the old catalog. Handlers hold a
+    /// `Weak` to the map — a strong `Arc` inside the map would cycle and keep
+    /// dropped registries alive forever.
+    fn install_meta_tools(&self) {
+        let mut tools = write_tools(&self.tools);
+        for tool in [
+            Tool::new(
+                definition(
+                    "search_tools",
+                    "Search the full tool catalog — including hidden/deferred tools — by name and description. Returns the top 5 matches with their parameter schemas; use activate_tools(names) to make a hidden tool callable.",
+                    json!({"type":"object","properties":{"query":{"type":"string","description":"Free-text query matched against tool names and descriptions"}},"required":["query"],"additionalProperties":false}),
+                ),
+                [],
+                Decision::Allow,
+                SearchTools {
+                    tools: Arc::downgrade(&self.tools),
+                },
+            ),
+            Tool::new(
+                definition(
+                    "activate_tools",
+                    "Enable hidden tools for the rest of this run: their schemas appear from the next model turn. Activation is not permission — policy evaluation still gates each call.",
+                    json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"},"description":"Catalog names from search_tools","minItems":1}},"required":["names"],"additionalProperties":false}),
+                ),
+                [],
+                Decision::Allow,
+                ActivateTools {
+                    tools: Arc::downgrade(&self.tools),
+                },
+            ),
+        ] {
+            tools.insert(tool.definition.name.clone(), tool);
+        }
     }
 
     /// Insert a tool into the shared map at runtime. Fails on an empty name or
@@ -371,7 +541,7 @@ impl ToolRegistry {
 }
 
 pub fn builtin_registry() -> ToolRegistry {
-    ToolRegistry::new([
+    let registry = ToolRegistry::new([
         Tool::new(
             definition("read_file", "Read a UTF-8 workspace file; page with offset_bytes/maxBytes when truncated", json!({"type":"object","properties":{"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1},"offset_bytes":{"type":"integer","minimum":0}},"required":["path"],"additionalProperties":false})),
             [Capability::Read],
@@ -426,8 +596,18 @@ pub fn builtin_registry() -> ToolRegistry {
             Decision::Allow,
             PlanTool,
         ),
+        Tool::new(
+            definition("ask_user", "Ask the human driving this run a question (P1.8). On interactive runs the question renders as an approval-style card with option buttons and optional free text; the resolved answer is the tool result. Fails `user_unavailable` when no human is attached (subagents, one-shot CLI, scheduled runs) and `question_timeout` when `timeout_secs` elapses without an answer.", json!({"type":"object","properties":{"question":{"type":"string","description":"The question text shown to the user"},"options":{"type":"array","items":{"type":"string"},"description":"Clickable answer options"},"allow_free_text":{"type":"boolean","default":true,"description":"Whether a free-form answer box is offered"},"timeout_secs":{"type":"number","exclusiveMinimum":0,"description":"Optional answer timeout; expiry fails `question_timeout`"}},"required":["question"],"additionalProperties":false})),
+            [],
+            Decision::Allow,
+            AskUser,
+        ),
     ])
-    .expect("builtin tool names are valid")
+    .expect("builtin tool names are valid");
+    // P1.10 meta-tools: bound to the registry's own map, so tools registered
+    // later (executor/MCP) are searchable the moment they land.
+    registry.install_meta_tools();
+    registry
 }
 
 fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
@@ -1707,6 +1887,284 @@ impl ToolHandler for PlanTool {
             "planId": plan_id,
             "title": arguments.get("title").cloned().unwrap_or(Value::Null),
             "steps": steps,
+        })))
+    }
+}
+
+/// `ask_user` (P1.8): a capability-free meta-tool that routes a question to
+/// the human driving the run through the approval machinery. The gate request
+/// rides `breakpointType: "question"`, so interactive surfaces render the
+/// question card (option buttons + optional free text) instead of the plain
+/// allow/deny card; the resolved `answer` is the tool result.
+struct AskUser;
+
+/// Discards gate events emitted by self-contained gates (e.g.
+/// `AutoApprovalGate`) when a tool drives the approval machinery on behalf of
+/// the loop. The app-server gate ignores the passed sink and publishes through
+/// its own outbound channel, so nothing interactive is lost.
+struct BlackholeSink;
+
+#[async_trait]
+impl EventSink for BlackholeSink {
+    async fn emit(&self, _event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        Ok(EventEnvelope {
+            event_id: "blackhole".to_owned(),
+            schema_version: V1Version::VALUE,
+            session_id: "blackhole".to_owned(),
+            run_id: "blackhole".to_owned(),
+            item_id: None,
+            seq: 0,
+            occurred_at: String::new(),
+            actor: ActorRef {
+                id: "cool-agent".to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-agent".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::ItemCompleted(ItemEvent {
+                role: None,
+                content: None,
+                tool_calls: Vec::new(),
+            }),
+            extensions: Default::default(),
+        })
+    }
+}
+
+#[async_trait]
+impl ToolHandler for AskUser {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &["question", "options", "allow_free_text", "timeout_secs"],
+        )?;
+        let question = required_text(&arguments, "question")?.to_owned();
+        if let Some(options) = arguments.get("options") {
+            string_array(&json!({ "options": options.clone() }), "options")?;
+        }
+        let timeout_secs = match arguments.get("timeout_secs") {
+            Some(value) => match value
+                .as_f64()
+                .filter(|value| *value > 0.0 && *value <= 3600.0)
+            {
+                Some(secs) => Some(secs),
+                None => {
+                    return Err(ToolError::InvalidArguments(
+                        "timeout_secs must be a positive number no larger than 3600".to_owned(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        // Runs that cannot reach a human (CLI one-shot, subagent, scheduler)
+        // never install a question gate — fail closed instead of blocking.
+        let Some(gate) = &context.question_gate else {
+            return Ok(ToolResult::error(
+                "user_unavailable",
+                "no interactive user is attached to this run",
+            ));
+        };
+        let call_arguments = arguments.as_object().cloned().unwrap_or_default();
+        let request = ApprovalRequest {
+            approval_id: format!("approval-{}", Uuid::new_v4()),
+            call: ToolCall {
+                call_id: context
+                    .call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("call-{}", Uuid::new_v4())),
+                name: "ask_user".to_owned(),
+                arguments: call_arguments,
+            },
+            reason: question,
+            matched_rule: None,
+            suggested_rule: None,
+            breakpoint_type: Some("question".to_owned()),
+        };
+        let mut cancel = context
+            .cancel
+            .clone()
+            .unwrap_or_else(|| CancelSignal::channel().1);
+        let sink = BlackholeSink;
+        let approval_id = request.approval_id.clone();
+        let mut pending = std::pin::pin!(gate.request(request, &sink, &mut cancel));
+        let outcome = match timeout_secs {
+            Some(secs) => match timeout(Duration::from_secs_f64(secs), pending.as_mut()).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    // The durable ticket is still `pending`; without expiring
+                    // it the run would sit in `awaiting_approval` forever and
+                    // `run.completed` would fail its transition.
+                    let expired = gate.expire(&approval_id).await.unwrap_or(false);
+                    if expired {
+                        return Ok(ToolResult::error(
+                            "question_timeout",
+                            "the question timed out without an answer",
+                        ));
+                    }
+                    // `expire` was a no-op: an answer committed first but its
+                    // notification has not reached this waiter yet — give it a
+                    // short grace window instead of discarding the answer.
+                    match timeout(Duration::from_secs(2), pending.as_mut()).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return Ok(ToolResult::error(
+                                "question_timeout",
+                                "the question timed out without an answer",
+                            ));
+                        }
+                    }
+                }
+            },
+            None => pending.await,
+        };
+        match outcome {
+            Ok(outcome) if outcome.decision == ApprovalOutcome::Approved => {
+                Ok(ToolResult::ok(json!({
+                    "answer": outcome.answer.unwrap_or(Value::Null),
+                })))
+            }
+            Ok(outcome) if outcome.decision == ApprovalOutcome::TimedOut => Ok(ToolResult::error(
+                "question_timeout",
+                "the question timed out without an answer",
+            )),
+            Ok(_) => Ok(ToolResult::error(
+                "question_denied",
+                "the user declined to answer",
+            )),
+            Err(error) => Ok(ToolResult::error("user_unavailable", error.to_string())),
+        }
+    }
+}
+
+/// `search_tools` (P1.10): ranks the full catalog — including deferred tools
+/// the model cannot currently see — by name/description match against the
+/// query and returns the top entries so the agent can `activate_tools` them.
+struct SearchTools {
+    tools: Weak<RwLock<BTreeMap<String, Tool>>>,
+}
+
+#[async_trait]
+impl ToolHandler for SearchTools {
+    async fn execute(
+        &self,
+        _context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["query"])?;
+        let query = required_text(&arguments, "query")?.to_lowercase();
+        let Some(tools) = self.tools.upgrade() else {
+            return Ok(ToolResult::error(
+                "registry_unavailable",
+                "the tool registry was dropped",
+            ));
+        };
+
+        let mut scored: Vec<(i64, ToolCatalogEntry)> = catalog_entries(&tools)
+            .into_iter()
+            .filter(|entry| {
+                // Search covers the whole catalog except the meta-tools
+                // themselves; deferred entries are exactly what needs finding.
+                entry.name != "search_tools" && entry.name != "activate_tools"
+            })
+            .map(|entry| (tool_match_score(&query, &entry), entry))
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.name.cmp(&right.1.name))
+        });
+        let catalog_size = read_tools(&tools).len();
+        let tools: Vec<Value> = scored
+            .into_iter()
+            .take(5)
+            .map(|(score, entry)| {
+                let deferred = read_tools(&tools)
+                    .get(&entry.name)
+                    .is_some_and(|tool| ToolRegistry::is_deferred(tool, catalog_size));
+                json!({
+                    "name": entry.name,
+                    "description": entry.description,
+                    "parameters": entry.parameters,
+                    "deferred": deferred,
+                    "score": score,
+                })
+            })
+            .collect();
+        Ok(ToolResult::ok(json!({ "tools": tools })))
+    }
+}
+
+/// Small substring scorer: name hits outweigh description hits.
+fn tool_match_score(query: &str, entry: &ToolCatalogEntry) -> i64 {
+    let name = entry.name.to_lowercase();
+    let description = entry.description.to_lowercase();
+    let mut score = 0_i64;
+    if name.contains(query) {
+        score += 10;
+    }
+    if description.contains(query) {
+        score += 4;
+    }
+    for token in query.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
+        let token = token.trim_matches('_');
+        if token.is_empty() {
+            continue;
+        }
+        if name.contains(token) {
+            score += 6;
+        }
+        if description.contains(token) {
+            score += 2;
+        }
+    }
+    score
+}
+
+/// `activate_tools` (P1.10): writes names into the run's `active_tools` so the
+/// next loop iteration's `visible_definitions` includes them. Activation is
+/// NOT permission — `policy.evaluate` still gates every call.
+struct ActivateTools {
+    tools: Weak<RwLock<BTreeMap<String, Tool>>>,
+}
+
+#[async_trait]
+impl ToolHandler for ActivateTools {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["names"])?;
+        let names = string_array(&arguments, "names")?;
+        let Some(tools) = self.tools.upgrade() else {
+            return Ok(ToolResult::error(
+                "registry_unavailable",
+                "the tool registry was dropped",
+            ));
+        };
+        let mut activated = Vec::new();
+        let mut unknown = Vec::new();
+        let mut active = context
+            .active_tools
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for name in names {
+            if read_tools(&tools).contains_key(&name) {
+                active.insert(name.clone());
+                activated.push(name);
+            } else {
+                unknown.push(name);
+            }
+        }
+        Ok(ToolResult::ok(json!({
+            "activated": activated,
+            "unknown": unknown,
         })))
     }
 }

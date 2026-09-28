@@ -5,6 +5,7 @@ import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
 import { ThinkingBlock } from "./ThinkingBlock"
 import { ApprovalCard, type InlineApproval, type RememberScope } from "./ApprovalCard"
+import type { JsonValue } from "@/api/generated/cool_protocol"
 import { PlanCard } from "./PlanCard"
 
 /**
@@ -61,7 +62,7 @@ export function MessageBubble({
 }: {
   msg: MessageViewModel
   /** Callback to resolve an inline approval (approve/deny + optional rule remember). */
-  onRespondApproval?: (approved: boolean, remember?: RememberScope) => void
+  onRespondApproval?: (approved: boolean, remember?: RememberScope, answer?: JsonValue) => void
   /** Callback to approve/reject a plan (Фаза 2 §1). */
   onPlanApprove?: (approved: boolean) => void
   /** Callback to execute an approved plan. */

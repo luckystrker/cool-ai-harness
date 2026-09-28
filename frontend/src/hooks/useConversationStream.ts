@@ -17,6 +17,7 @@ import type {
   MessageViewModel,
 } from "@/components/chat/MessageBubble"
 import type { InlineApproval } from "@/components/chat/ApprovalCard"
+import type { JsonValue } from "@/api/generated/cool_protocol"
 
 /**
  * Internal ordered block used while accumulating a live turn. Thinking blocks
@@ -554,7 +555,7 @@ export function useConversationStream() {
    * Updates the card status (resolving → approved/denied) and calls the
    * canonical `approval.resolve` command; the agent loop resumes server-side.
    */
-  const respondApproval = useCallback(async (approved: boolean, remember?: "session" | "project" | "user") => {
+  const respondApproval = useCallback(async (approved: boolean, remember?: "session" | "project" | "user", answer?: JsonValue) => {
     const acc = accRef.current
     const pending = acc?.approval
     if (!pending || pending.status !== "pending") return
@@ -572,7 +573,8 @@ export function useConversationStream() {
         approved,
         pending.revision,
         pending.runId,
-        remember
+        remember,
+        answer
       )
       // Only update if the current approval still refers to the same call.
       // A newer tool_approval_request may have arrived while we awaited the
