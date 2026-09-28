@@ -1543,6 +1543,7 @@ impl DurableStore {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_approval(
         &self,
         actor_id: &str,

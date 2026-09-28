@@ -257,12 +257,11 @@ impl crate::LegacyStore {
                 continue;
             }
             let mut settings = serde_json::Map::new();
-            if let Some(extra) = preset.extra_settings {
-                if let Some(serde_json::Value::Object(extra)) =
-                    serde_json::from_str::<serde_json::Value>(extra).ok()
-                {
-                    settings.extend(extra);
-                }
+            if let Some(extra) = preset.extra_settings
+                && let Ok(serde_json::Value::Object(extra)) =
+                    serde_json::from_str::<serde_json::Value>(extra)
+            {
+                settings.extend(extra);
             }
             settings.insert(
                 "temperature".to_owned(),
