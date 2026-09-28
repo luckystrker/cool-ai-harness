@@ -48,11 +48,12 @@ use cool_protocol::{
     ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{
-    CapabilityPolicy, Decision, PolicyRule, RuleScope, SecretKeyring, Workspace, mask_secrets,
+    CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, SecretKeyring, Workspace,
+    mask_secrets,
 };
 use cool_state::{
-    ApprovalResolution, BudgetDelta, CancelAcceptance, ConversationLink, DurableStore,
-    EventProvenance, ImportedHistoryEvent, StoreError,
+    BudgetDelta, CancelAcceptance, ConversationLink, DurableStore, EventProvenance,
+    ImportedHistoryEvent, StoreError,
 };
 use cool_store::LegacyStore;
 use cool_store::domains::webhooks::NewWebhookEvent;
@@ -664,45 +665,81 @@ impl AppServer {
         self.inner.task_executor.clone()
     }
 
-    /// Capability policy for a new run: the base policy plus the merged
-    /// project + user rules (session rules attach live per run, P1.6).
+    /// The run's base capability policy. Project + user rules are NOT
+    /// snapshotted here: runs attach `rule_source` so rule mutations apply
+    /// to in-flight runs instead of a run-start copy (P1.6).
     fn merged_policy(&self) -> CapabilityPolicy {
-        let mut policy = self.inner.policy.clone();
-        let mut rules = self.inner.config.host.rules.project_rules();
-        if let Some(legacy) = &self.inner.config.legacy_store {
-            rules.extend(user_policy_rules(
-                legacy,
-                &project_key(&self.inner.workspace),
-            ));
-        }
-        policy.set_rules(rules);
-        policy
+        self.inner.policy.clone()
     }
 
-    /// Persists a rule by scope. Returns the rule with its assigned id.
+    /// Live project+user rule source for a run's workspace (P1.6): when the
+    /// run shares the server workspace the live `RuleState` answers; a
+    /// different working directory reads its own `.cool/policy.json`.
+    fn rule_source(&self, run_workspace: &Workspace) -> cool_agent::RuleSource {
+        rule_source_for(
+            self.inner.config.host.rules.clone(),
+            self.inner.config.legacy_store.clone(),
+            self.inner.workspace.clone(),
+            run_workspace.clone(),
+        )
+    }
+
+    /// Persists a rule by scope. Returns the stored rule plus whether it was
+    /// newly inserted — an identical rule already present is returned as
+    /// `(existing, false)` so retries never duplicate rules.
     fn add_policy_rule(
         &self,
         mut rule: PolicyRule,
         run_id: Option<&str>,
-    ) -> Result<PolicyRule, String> {
+    ) -> Result<(PolicyRule, bool), String> {
         match rule.scope {
             RuleScope::Session => {
                 let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
-                Ok(self.inner.config.host.rules.add_session_rule(run_id, rule))
+                let existed = self
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .session_rules(run_id)
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .any(|existing| existing.same_signature(&rule));
+                let rule = self.inner.config.host.rules.add_session_rule(run_id, rule);
+                Ok((rule, !existed))
             }
             RuleScope::Project => {
+                let existed = self
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .project_rules()
+                    .iter()
+                    .any(|existing| existing.same_signature(&rule));
                 let rule = self.inner.config.host.rules.add_project_rule(rule);
-                persist_project_rules(
-                    &self.inner.workspace,
-                    &self.inner.config.host.rules.project_rules(),
-                )
-                .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
-                Ok(rule)
+                if !existed {
+                    persist_project_rules(
+                        &self.inner.workspace,
+                        &self.inner.config.host.rules.project_rules(),
+                    )
+                    .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
+                }
+                Ok((rule, !existed))
             }
             RuleScope::User => {
                 let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
                     "user-scope rules require the durable store (--legacy-store)".to_owned()
                 })?;
+                // Dedupe: an identical stored rule makes the add a no-op —
+                // retried resolves and replays must not pile up duplicates.
+                if let Some(existing) =
+                    user_policy_rules(legacy, &project_key(&self.inner.workspace))
+                        .into_iter()
+                        .find(|existing| existing.same_signature(&rule))
+                {
+                    return Ok((existing, false));
+                }
                 let row = legacy
                     .insert_policy_rule(&cool_store::domains::policy_rules::NewPolicyRule {
                         tool: rule.tool.clone(),
@@ -722,13 +759,13 @@ impl AppServer {
                     .map_err(|error| error.to_string())?;
                 rule.id = Some(format!("user:{}", row.id));
                 rule.scope = RuleScope::User;
-                Ok(rule)
+                Ok((rule, true))
             }
         }
     }
 
     fn delete_policy_rule(&self, rule_id: &str, run_id: Option<&str>) -> Result<bool, String> {
-        let Some((scope, index)) = rule_id.split_once(':') else {
+        let Some((scope, _)) = rule_id.split_once(':') else {
             return Err(format!(
                 "invalid rule id '{rule_id}' (expected scope:id, e.g. user:3)"
             ));
@@ -736,21 +773,15 @@ impl AppServer {
         match scope {
             "session" => {
                 let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
-                let index: usize = index
-                    .parse()
-                    .map_err(|_| format!("invalid session rule id '{rule_id}'"))?;
                 Ok(self
                     .inner
                     .config
                     .host
                     .rules
-                    .delete_session_rule(run_id, index))
+                    .delete_session_rule(run_id, rule_id))
             }
             "project" => {
-                let index: usize = index
-                    .parse()
-                    .map_err(|_| format!("invalid project rule id '{rule_id}'"))?;
-                let deleted = self.inner.config.host.rules.delete_project_rule(index);
+                let deleted = self.inner.config.host.rules.delete_project_rule(rule_id);
                 if deleted {
                     persist_project_rules(
                         &self.inner.workspace,
@@ -764,7 +795,10 @@ impl AppServer {
                 let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
                     "user-scope rules require the durable store (--legacy-store)".to_owned()
                 })?;
-                let id: i64 = index
+                let Some((_, id)) = rule_id.split_once(':') else {
+                    return Err(format!("invalid user rule id '{rule_id}'"));
+                };
+                let id: i64 = id
                     .parse()
                     .map_err(|_| format!("invalid user rule id '{rule_id}'"))?;
                 legacy
@@ -776,51 +810,58 @@ impl AppServer {
     }
 
     /// Persists the rule a `remember`-flagged `approval.resolve` asks for.
-    /// An explicit `rule` payload wins; otherwise the rule is re-derived from
-    /// the ticket's stored (already masked) call — the same shape as the
-    /// `suggestedRule` the approval event carried.
+    /// The ticket's stored (already masked) call is the anchor: an explicit
+    /// `rule` payload is VALIDATED to cover that call, never trusted as
+    /// given — an approval for one tool must not mint a rule for another.
+    /// Returns the record plus whether the rule was newly inserted (callers
+    /// roll back only their own insert on a failed resolve).
     fn remember_approval_rule(
         &self,
-        resolution: &ApprovalResolution,
+        run_id: &str,
+        approval_id: &str,
         scope: &str,
         explicit: Option<&cool_protocol::PolicyRuleRecord>,
-    ) -> Result<cool_protocol::PolicyRuleRecord, String> {
+    ) -> Result<(cool_protocol::PolicyRuleRecord, bool), String> {
         let scope =
             RuleScope::parse(scope).ok_or_else(|| format!("unknown remember scope '{scope}'"))?;
-        let mut rule = match explicit {
-            Some(record) => cool_agent::policy_rule_from_record(record)
-                .ok_or_else(|| "invalid rule payload".to_owned())?,
-            None => {
-                // Rebuild the stored call from the run's approval event.
-                let call = self
-                    .inner
-                    .store
-                    .all_events(&resolution.run_id, &local_actor().id)
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .find_map(|envelope| match envelope.event {
-                        CanonicalEvent::ToolApprovalRequired(required)
-                            if required.approval_id == resolution.approval_id =>
-                        {
-                            Some(cool_agent::ToolCall {
-                                call_id: required.call_id,
-                                name: required.name,
-                                arguments: required
-                                    .arguments
-                                    .into_iter()
-                                    .collect::<serde_json::Map<_, _>>(),
-                            })
-                        }
-                        _ => None,
+        // Rebuild the stored call from the run's approval event.
+        let call = self
+            .inner
+            .store
+            .all_events(run_id, &local_actor().id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find_map(|envelope| match envelope.event {
+                CanonicalEvent::ToolApprovalRequired(required)
+                    if required.approval_id == approval_id =>
+                {
+                    Some(cool_agent::ToolCall {
+                        call_id: required.call_id,
+                        name: required.name,
+                        arguments: required
+                            .arguments
+                            .into_iter()
+                            .collect::<serde_json::Map<_, _>>(),
                     })
-                    .ok_or_else(|| "approval call is not recoverable".to_owned())?;
-                cool_agent::suggest_policy_rule(&call)
-                    .ok_or_else(|| "no suggested rule for this tool call".to_owned())?
+                }
+                _ => None,
+            })
+            .ok_or_else(|| "approval call is not recoverable".to_owned())?;
+        let mut rule = match explicit {
+            Some(record) => {
+                let rule = cool_agent::policy_rule_from_record(record)
+                    .ok_or_else(|| "invalid rule payload".to_owned())?;
+                if !rule.matches(&call.name, &cool_agent::rule_subject(&call)) {
+                    return Err("rule does not cover the approved tool call".to_owned());
+                }
+                rule
             }
+            None => cool_agent::suggest_policy_rule(&call)
+                .ok_or_else(|| "no suggested rule for this tool call".to_owned())?,
         };
         rule.scope = scope;
-        let stored = self.add_policy_rule(rule, Some(&resolution.run_id))?;
-        Ok(cool_agent::policy_rule_record(&stored))
+        let (stored, created) = self.add_policy_rule(rule, Some(run_id))?;
+        Ok((cool_agent::policy_rule_record(&stored), created))
     }
 
     /// All rules across scopes (session rules only for `run_id`, when given),
@@ -1234,15 +1275,19 @@ impl AppServer {
         run_id: &str,
         call_id: &str,
         tool_name: &str,
+        arguments: &std::collections::BTreeMap<String, serde_json::Value>,
         reason: &str,
     ) -> Result<cool_state::ApprovalTicket, StoreError> {
-        self.inner.store.create_approval(
+        self.inner.store.create_approval_with_arguments(
             &local_actor().id,
             session_id,
             run_id,
             call_id,
             tool_name,
+            arguments,
             reason,
+            None,
+            None,
         )
     }
 
@@ -1778,6 +1823,72 @@ impl AppServer {
                 let actor = local_actor();
                 let fingerprint = fingerprint(&params);
                 let approved = params.decision == cool_protocol::ApprovalDecision::Approved;
+                // P1.6: persist the `remember` rule BEFORE resolving — a
+                // failed persist must abort the resolve (the client sees the
+                // error and the approval stays pending) rather than approve
+                // the call without the rule. Dedupe keeps same-key replays
+                // idempotent. `remembered_run`/`persisted_rule` record what
+                // to roll back if the resolve itself fails.
+                let mut remembered = None;
+                let mut persisted_rule: Option<(String, String)> = None;
+                if approved && let Some(scope) = params.remember.as_deref() {
+                    // `approval_call_context` locates the ticket's run — a
+                    // replay of an already-resolved approval still finds it
+                    // (dedupe makes the second insert a no-op), so replays
+                    // stay idempotent instead of erroring on state.
+                    match self
+                        .inner
+                        .store
+                        .approval_call_context(&actor.id, &params.approval_id)
+                        .map_err(|_| "approval is not pending or does not exist".to_owned())
+                    {
+                        Err(message) => {
+                            let _ = self
+                                .send(
+                                    &outbound,
+                                    failure(
+                                        id,
+                                        masked_detail_error(
+                                            -32021,
+                                            "rule_persist_failed",
+                                            &message,
+                                        ),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                        Ok(context) => match self.remember_approval_rule(
+                            &context.run_id,
+                            &params.approval_id,
+                            scope,
+                            params.rule.as_ref(),
+                        ) {
+                            Ok((rule, created)) => {
+                                if created && let Some(id) = rule.id.clone() {
+                                    persisted_rule = Some((context.run_id, id));
+                                }
+                                remembered = Some(rule);
+                            }
+                            Err(message) => {
+                                let _ = self
+                                    .send(
+                                        &outbound,
+                                        failure(
+                                            id,
+                                            masked_detail_error(
+                                                -32021,
+                                                "rule_persist_failed",
+                                                &message,
+                                            ),
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        },
+                    }
+                }
                 let resolved = self.inner.store.resolve_approval(
                     &actor.id,
                     params.idempotency_key.as_str(),
@@ -1796,35 +1907,6 @@ impl AppServer {
                             .remove(&resolution.approval_id)
                         {
                             let _ = waiter.send(Some(resolution.outcome.clone()));
-                        }
-                        // P1.6: `remember` persists a rule for the approved
-                        // call — explicit `rule` wins, else the suggested
-                        // rule derived from the ticket's stored call.
-                        let mut remembered = None;
-                        if approved && let Some(scope) = params.remember.as_deref() {
-                            match self.remember_approval_rule(
-                                &resolution,
-                                scope,
-                                params.rule.as_ref(),
-                            ) {
-                                Ok(rule) => remembered = Some(rule),
-                                Err(message) => {
-                                    let _ = self
-                                        .send(
-                                            &outbound,
-                                            failure(
-                                                id,
-                                                masked_detail_error(
-                                                    -32021,
-                                                    "rule_persist_failed",
-                                                    &message,
-                                                ),
-                                            ),
-                                        )
-                                        .await;
-                                    return;
-                                }
-                            }
                         }
                         let response = ApprovalResolvedResult {
                             approval_id: resolution.approval_id,
@@ -1846,6 +1928,12 @@ impl AppServer {
                         }
                     }
                     Err(store) => {
+                        // The resolve failed — roll back ONLY the rule this
+                        // request inserted (a deduped pre-existing rule
+                        // belongs to an earlier resolve and stays).
+                        if let Some((run_id, rule_id)) = persisted_rule {
+                            let _ = self.delete_policy_rule(&rule_id, Some(&run_id));
+                        }
                         let _ = self.send(&outbound, failure(id, store_error(store))).await;
                     }
                 }
@@ -1870,7 +1958,7 @@ impl AppServer {
             Command::PolicyRuleAdd(params) => {
                 let frame = match cool_agent::policy_rule_from_record(&params.rule) {
                     Some(rule) => match self.add_policy_rule(rule, params.run_id.as_deref()) {
-                        Ok(stored) => success(
+                        Ok((stored, _)) => success(
                             id,
                             ResponsePayload::PolicyRuleAdded(cool_agent::policy_rule_record(
                                 &stored,
@@ -3139,11 +3227,12 @@ impl AppServer {
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(workspace, server.merged_policy())
+                tool_context: ToolContext::new(workspace.clone(), server.merged_policy())
                     .with_actor(local_actor().id)
                     .with_launcher(server.inner.config.host.launcher.clone())
                     .with_environment(server.inner.config.host.environment.clone())
                     .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                    .with_rule_source(server.rule_source(&workspace))
                     .with_conversation(
                         server
                             .inner
@@ -4144,7 +4233,8 @@ impl AppServer {
             tool_context: ToolContext::new(workspace.clone(), self.merged_policy())
                 .with_actor(local_actor().id)
                 .with_launcher(self.inner.config.host.launcher.clone())
-                .with_environment(self.inner.config.host.environment.clone()),
+                .with_environment(self.inner.config.host.environment.clone())
+                .with_rule_source(self.rule_source(workspace)),
         };
         let sink = PlanStepSink::default();
         let outcome = self
@@ -6024,35 +6114,58 @@ fn project_key(workspace: &Workspace) -> String {
     workspace.root().to_string_lossy().into_owned()
 }
 
+/// A rule that denies everything — substituted for a policy that exists but
+/// cannot be parsed, so corrupt config never degrades to the permissive
+/// capability fallback (fail closed, with the reason surfaced in `note`).
+fn deny_all_rule(scope: RuleScope, id: &str, note: &str) -> PolicyRule {
+    PolicyRule {
+        tool: "*".to_owned(),
+        kind: RulePatternKind::Any,
+        pattern: String::new(),
+        decision: Decision::Deny,
+        scope,
+        note: Some(note.to_owned()),
+        id: Some(id.to_owned()),
+    }
+}
+
 /// Loads `<workspace>/.cool/policy.json` — `{"rules": [...]}` — tolerating a
-/// missing file (no rules) and skipping malformed entries (fail closed: a
-/// rule that cannot be parsed cannot accidentally grant anything).
-fn load_project_rules(workspace: &Workspace) -> Vec<PolicyRule> {
+/// missing file (no rules) but failing CLOSED on a corrupt one: a malformed
+/// file or entry yields a deny-all rule, never an empty rule set.
+pub fn load_project_rules(workspace: &Workspace) -> Vec<PolicyRule> {
     let Ok(body) = workspace.dir().read(".cool/policy.json") else {
         return Vec::new();
     };
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return vec![deny_all_rule(
+            RuleScope::Project,
+            "project:parse-failure",
+            "malformed .cool/policy.json",
+        )];
+    };
+    let Some(items) = parsed.get("rules").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
-    parsed
-        .get("rules")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .enumerate()
-                .filter_map(|(index, item)| {
-                    serde_json::from_value::<PolicyRule>(item.clone())
-                        .ok()
-                        .map(|mut rule| {
-                            rule.scope = RuleScope::Project;
-                            rule.id = Some(format!("project:{index}"));
-                            rule
-                        })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    items
+        .iter()
+        .enumerate()
+        .flat_map(
+            |(index, item)| match serde_json::from_value::<PolicyRule>(item.clone()) {
+                Ok(mut rule) => {
+                    rule.scope = RuleScope::Project;
+                    if rule.id.is_none() {
+                        rule.id = Some(format!("project:{index}"));
+                    }
+                    vec![rule]
+                }
+                Err(_) => vec![deny_all_rule(
+                    RuleScope::Project,
+                    &format!("project:{index}:parse-failure"),
+                    "malformed entry in .cool/policy.json",
+                )],
+            },
+        )
+        .collect()
 }
 
 /// Rewrites `<workspace>/.cool/policy.json` after a project-rule mutation.
@@ -6066,32 +6179,68 @@ fn persist_project_rules(workspace: &Workspace, rules: &[PolicyRule]) -> Result<
     Ok(())
 }
 
-/// Maps a `policy_rules` row to a `PolicyRule`, skipping unparsable columns.
+/// Maps `policy_rules` rows to `PolicyRule`s. Fail closed: a row whose
+/// kind/decision cannot be parsed becomes a deny rule for that row's tool —
+/// a corrupt stored rule must widen nothing, not silently disappear.
 fn user_policy_rules(legacy: &LegacyStore, project_key: &str) -> Vec<PolicyRule> {
     legacy
         .list_policy_rules(Some(project_key))
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|row| {
-            let kind = cool_security::RulePatternKind::parse(&row.pattern_kind)?;
+        .map(|row| {
+            let kind = cool_security::RulePatternKind::parse(&row.pattern_kind);
             let decision = match row.decision.as_str() {
-                "allow" => Decision::Allow,
-                "ask" => Decision::Ask,
-                "deny" => Decision::Deny,
-                _ => return None,
+                "allow" => Some(Decision::Allow),
+                "ask" => Some(Decision::Ask),
+                "deny" => Some(Decision::Deny),
+                _ => None,
             };
             let scope = RuleScope::parse(&row.scope).unwrap_or(RuleScope::User);
-            Some(PolicyRule {
-                tool: row.tool,
-                kind,
-                pattern: row.pattern,
-                decision,
-                scope,
-                note: row.note,
-                id: Some(format!("user:{}", row.id)),
-            })
+            match (kind, decision) {
+                (Some(kind), Some(decision)) => PolicyRule {
+                    tool: row.tool,
+                    kind,
+                    pattern: row.pattern,
+                    decision,
+                    scope,
+                    note: row.note,
+                    id: Some(format!("user:{}", row.id)),
+                },
+                _ => {
+                    let mut rule = deny_all_rule(
+                        scope,
+                        &format!("user:{}:parse-failure", row.id),
+                        "malformed stored policy rule",
+                    );
+                    rule.tool = row.tool;
+                    rule
+                }
+            }
         })
         .collect()
+}
+
+/// Live project+user rule source for a run (P1.6): re-evaluated per tool
+/// call so `policy.rule_delete`/`rule_add` and file edits apply to in-flight
+/// runs. Server-workspace runs share the live `RuleState`; runs in a
+/// different working directory read that workspace's `.cool/policy.json`.
+fn rule_source_for(
+    rules: Arc<cool_security::RuleState>,
+    legacy: Option<Arc<LegacyStore>>,
+    server_workspace: Workspace,
+    run_workspace: Workspace,
+) -> cool_agent::RuleSource {
+    Arc::new(move || {
+        let mut merged = if run_workspace.root() == server_workspace.root() {
+            rules.project_rules()
+        } else {
+            load_project_rules(&run_workspace)
+        };
+        if let Some(legacy) = &legacy {
+            merged.extend(user_policy_rules(legacy, &project_key(&run_workspace)));
+        }
+        merged
+    })
 }
 
 fn rpc_id_from_value(value: &serde_json::Value) -> RpcId {

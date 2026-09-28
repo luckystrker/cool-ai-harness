@@ -217,11 +217,15 @@ Beyond the core agent loop, these subsystems are implemented:
 - **Process launcher** — every host-process spawn goes through a
   `ProcessLauncher`: `disabled` (fail-closed default), `host` (JobObject /
   process-group containment, cleared environment, secret redaction), or
-  `sandboxed` (Linux `bwrap`, macOS `sandbox-exec` seatbelt, Windows
-  JobObject). Selection order: `COOL_PROCESS_LAUNCHER` env →
+  `sandboxed` (Linux `bwrap` selective ro-binds + workspace rw,
+  macOS `sandbox-exec` seatbelt restricted reads, Windows JobObject —
+  containment only, no FS/net isolation in v1; `cool doctor` reports
+  per-backend `isolation`). Selection order: `COOL_PROCESS_LAUNCHER` env →
   `AgentProfile.settings["process_launcher"]` → `cool serve/run` flags
-  (`--allow-shell`, `--sandbox=bwrap|seatbelt|jobobject|none`);
-  `cool doctor` reports which sandbox backends are available.
+  (`--allow-shell`, `--sandbox=bwrap|seatbelt|jobobject|none`, `--flag=value`
+  forms supported). A `network` capability `deny` propagates
+  `NetAccess::None` into spawned processes; `NetAccess::Pinned` is refused
+  in v1 (needs an allowlist proxy — fail closed, no silent full access).
 - **Policy rules** — exec rules (`tool` + glob on `program args`, or
   `path_glob`/`domain` patterns) are evaluated *before* the capability
   policy, first match wins, strictest on ties. Scopes: `session`

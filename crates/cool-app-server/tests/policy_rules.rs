@@ -249,8 +249,19 @@ async fn approval_resolve_with_remember_persists_and_lists_the_rule() {
         ResponsePayload::PromptAccepted(result) => result.run_id,
         payload => panic!("unexpected prompt payload: {payload:?}"),
     };
+    // The stored call is `cargo run` — the remembered rule must cover it.
     let ticket = app
-        .create_approval(&session_id, &run_id, "call-1", "shell", "run cargo")
+        .create_approval(
+            &session_id,
+            &run_id,
+            "call-1",
+            "shell",
+            &std::collections::BTreeMap::from([
+                ("program".to_owned(), json!("cargo")),
+                ("args".to_owned(), json!(["run"])),
+            ]),
+            "run cargo",
+        )
         .unwrap();
 
     match client
@@ -277,6 +288,212 @@ async fn approval_resolve_with_remember_persists_and_lists_the_rule() {
     let listed = rules_list(&client, Some("user"), None).await;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].tool, "shell");
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+/// A `remember` rule that does not cover the approved call must be rejected:
+/// an approval for one tool must not mint an allow rule for another (SEC).
+#[tokio::test]
+async fn approval_resolve_rejects_rule_unrelated_to_the_call() {
+    let directory = tempdir().unwrap();
+    let app = server_with_driver(
+        directory.path(),
+        true,
+        Arc::new(ScriptedDriver::echo_with_delay(
+            std::time::Duration::from_secs(10),
+        )),
+    );
+    let (client, task) = connected_client(app.clone()).await;
+    let session_id = match client
+        .request(Command::SessionCreate(cool_protocol::SessionCreateParams {
+            idempotency_key: key("session"),
+            title: Some("rules".to_owned()),
+            project_key: None,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::SessionCreated(result) => result.session_id,
+        payload => panic!("unexpected session payload: {payload:?}"),
+    };
+    let run_id = match client
+        .request(Command::SessionPrompt(cool_protocol::SessionPromptParams {
+            idempotency_key: key("prompt"),
+            session_id: session_id.clone(),
+            content: vec![cool_protocol::ContentPart::Text {
+                text: "hi".to_owned(),
+            }],
+            model: None,
+            plan_mode: false,
+            system_prompt: None,
+            long_task_mode: false,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PromptAccepted(result) => result.run_id,
+        payload => panic!("unexpected prompt payload: {payload:?}"),
+    };
+    let ticket = app
+        .create_approval(
+            &session_id,
+            &run_id,
+            "call-1",
+            "shell",
+            &std::collections::BTreeMap::from([
+                ("program".to_owned(), json!("cargo")),
+                ("args".to_owned(), json!(["run"])),
+            ]),
+            "run cargo",
+        )
+        .unwrap();
+
+    // `rm *` does not cover `cargo run` — rejected, nothing persisted.
+    let mut unrelated = shell_rule("user");
+    unrelated.pattern = "rm *".to_owned();
+    match client
+        .request(Command::ApprovalResolve(ApprovalResolveParams {
+            idempotency_key: key("resolve-unrelated"),
+            approval_id: ticket.approval_id.clone(),
+            expected_revision: ticket.revision,
+            decision: cool_protocol::ApprovalDecision::Approved,
+            remember: Some("user".to_owned()),
+            rule: Some(unrelated),
+        }))
+        .await
+    {
+        Err(error) => assert!(
+            error.to_string().contains("rule_persist_failed")
+                || error.to_string().contains("does not cover"),
+            "unexpected error: {error}"
+        ),
+        Ok(payload) => panic!("unrelated rule must not persist: {payload:?}"),
+    }
+    assert!(rules_list(&client, Some("user"), None).await.is_empty());
+
+    // Replays dedupe: the same key resolves again and still one rule exists.
+    let resolve_key = key("resolve");
+    match client
+        .request(Command::ApprovalResolve(ApprovalResolveParams {
+            idempotency_key: resolve_key.clone(),
+            approval_id: ticket.approval_id.clone(),
+            expected_revision: ticket.revision,
+            decision: cool_protocol::ApprovalDecision::Approved,
+            remember: Some("user".to_owned()),
+            rule: Some(shell_rule("user")),
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::ApprovalResolved(result) => {
+            assert!(result.remembered_rule.is_some());
+        }
+        payload => panic!("unexpected resolve payload: {payload:?}"),
+    }
+    client
+        .request(Command::ApprovalResolve(ApprovalResolveParams {
+            idempotency_key: resolve_key,
+            approval_id: ticket.approval_id.clone(),
+            expected_revision: ticket.revision,
+            decision: cool_protocol::ApprovalDecision::Approved,
+            remember: Some("user".to_owned()),
+            rule: Some(shell_rule("user")),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(rules_list(&client, Some("user"), None).await.len(), 1);
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+/// Project-rule ids are stable across deletes — deleting `project:0` never
+/// reassigns `project:1`, and the next add gets `project:2` (SEC: a stale id
+/// must never delete the wrong rule).
+#[tokio::test]
+async fn project_rule_ids_are_stable_across_deletes() {
+    let directory = tempdir().unwrap();
+    let app = server(directory.path(), false);
+    let (client, task) = connected_client(app.clone()).await;
+
+    for pattern in ["cargo *", "npm *"] {
+        let mut rule = shell_rule("project");
+        rule.pattern = pattern.to_owned();
+        client
+            .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+                rule,
+                run_id: None,
+            }))
+            .await
+            .unwrap();
+    }
+    client
+        .request(Command::PolicyRuleDelete(PolicyRuleDeleteParams {
+            idempotency_key: key("rule-delete-0"),
+            rule_id: "project:0".to_owned(),
+            run_id: None,
+        }))
+        .await
+        .unwrap();
+    let mut third = shell_rule("project");
+    third.pattern = "pip *".to_owned();
+    match client
+        .request(Command::PolicyRuleAdd(PolicyRuleAddParams {
+            rule: third,
+            run_id: None,
+        }))
+        .await
+        .unwrap()
+    {
+        ResponsePayload::PolicyRuleAdded(rule) => {
+            assert_eq!(rule.id.as_deref(), Some("project:2"));
+        }
+        payload => panic!("unexpected rule_add payload: {payload:?}"),
+    }
+    // `project:1` still addresses the npm rule — deleting it removes npm.
+    client
+        .request(Command::PolicyRuleDelete(PolicyRuleDeleteParams {
+            idempotency_key: key("rule-delete-1"),
+            rule_id: "project:1".to_owned(),
+            run_id: None,
+        }))
+        .await
+        .unwrap();
+    let listed = rules_list(&client, Some("project"), None).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].pattern, "pip *");
+
+    drop(client);
+    task.await.expect("server task").expect("clean disconnect");
+}
+
+/// A malformed `.cool/policy.json` fails closed: the server loads a deny-all
+/// rule instead of silently falling back to the permissive policy (SEC).
+#[tokio::test]
+async fn malformed_policy_json_loads_a_deny_all_rule() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join(".cool")).unwrap();
+    std::fs::write(
+        directory.path().join(".cool/policy.json"),
+        "{ not valid json !!!",
+    )
+    .unwrap();
+    let app = server(directory.path(), false);
+    let (client, task) = connected_client(app.clone()).await;
+
+    let listed = rules_list(&client, Some("project"), None).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tool, "*");
+    assert_eq!(listed[0].decision, "deny");
+    assert!(
+        listed[0]
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("malformed")
+    );
 
     drop(client);
     task.await.expect("server task").expect("clean disconnect");

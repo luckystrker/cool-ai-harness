@@ -170,6 +170,15 @@ impl PolicyRule {
         }
     }
 
+    /// Whether another rule has the same `(tool, kind, pattern, decision)`
+    /// signature — the dedupe key for persistence layers.
+    pub fn same_signature(&self, other: &PolicyRule) -> bool {
+        self.tool == other.tool
+            && self.kind == other.kind
+            && self.pattern == other.pattern
+            && self.decision == other.decision
+    }
+
     /// Short human-readable form for the `matched_rule` approval field.
     pub fn describe(&self) -> String {
         let decision = match self.decision {
@@ -225,10 +234,14 @@ pub fn match_rules<'a>(
 /// `approval.resolve {remember: "session"}` and `policy.rule_add` mutate.
 /// User-scope rules are not held here — they are read through the durable
 /// store (`policy_rules` table) at each merge.
+/// One run's session-rule set plus its monotonically increasing id counter
+/// (session ids are never reused within a run).
+type SessionRuleSet = (Arc<RwLock<Vec<PolicyRule>>>, u64);
+
 #[derive(Default)]
 pub struct RuleState {
     project: Mutex<Vec<PolicyRule>>,
-    sessions: Mutex<HashMap<String, Arc<RwLock<Vec<PolicyRule>>>>>,
+    sessions: Mutex<HashMap<String, SessionRuleSet>>,
 }
 
 impl RuleState {
@@ -236,7 +249,7 @@ impl RuleState {
         mutex.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// The project rules (positional `project:N` ids), in match order.
+    /// The project rules (persisted `project:N` ids, never reused).
     pub fn project_rules(&self) -> Vec<PolicyRule> {
         Self::lock(&self.project).clone()
     }
@@ -245,26 +258,43 @@ impl RuleState {
         *Self::lock(&self.project) = rules;
     }
 
-    /// Appends a project rule and returns it with its `project:N` id.
+    /// The next never-reused `"{scope}:N"` id — max existing suffix + 1, so
+    /// deletions never reassign another rule's id.
+    fn next_id(rules: &[PolicyRule], scope: &str) -> String {
+        let prefix = format!("{scope}:");
+        let next = rules
+            .iter()
+            .filter_map(|rule| rule.id.as_deref())
+            .filter_map(|id| id.strip_prefix(prefix.as_str()))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .map(|suffix| suffix + 1)
+            .max()
+            .unwrap_or(0);
+        format!("{scope}:{next}")
+    }
+
+    /// Appends a project rule (deduplicated by signature) and returns it with
+    /// a stable, never-reused `project:N` id.
     pub fn add_project_rule(&self, rule: PolicyRule) -> PolicyRule {
         let mut rules = Self::lock(&self.project);
+        if let Some(existing) = rules.iter().find(|existing| existing.same_signature(&rule)) {
+            return existing.clone();
+        }
         let mut rule = rule;
         rule.scope = RuleScope::Project;
-        rule.id = Some(format!("project:{}", rules.len()));
+        rule.id = Some(Self::next_id(&rules, "project"));
         rules.push(rule.clone());
         rule
     }
 
-    /// Deletes the rule with positional id `project:N`.
-    pub fn delete_project_rule(&self, index: usize) -> bool {
+    /// Deletes the rule whose id is `project:N`. Ids are stable: deleting one
+    /// rule never reassigns the ids of the others.
+    pub fn delete_project_rule(&self, id: &str) -> bool {
         let mut rules = Self::lock(&self.project);
-        if index >= rules.len() {
+        let Some(index) = rules.iter().position(|rule| rule.id.as_deref() == Some(id)) else {
             return false;
-        }
+        };
         rules.remove(index);
-        for (position, rule) in rules.iter_mut().enumerate() {
-            rule.id = Some(format!("project:{position}"));
-        }
         true
     }
 
@@ -273,34 +303,40 @@ impl RuleState {
         let mut sessions = Self::lock(&self.sessions);
         sessions
             .entry(run_id.to_owned())
-            .or_insert_with(|| Arc::new(RwLock::new(Vec::new())))
+            .or_insert_with(|| (Arc::new(RwLock::new(Vec::new())), 0))
+            .0
             .clone()
     }
 
-    /// Appends a session rule to `run_id`'s set, assigning `session:N`.
+    /// Appends a session rule to `run_id`'s set (deduplicated by signature),
+    /// assigning a stable `session:N` id.
     pub fn add_session_rule(&self, run_id: &str, rule: PolicyRule) -> PolicyRule {
-        let rules = self.session_rules(run_id);
-        let mut rules = rules.write().unwrap_or_else(|error| error.into_inner());
+        let mut sessions = Self::lock(&self.sessions);
+        let (set, counter) = sessions
+            .entry(run_id.to_owned())
+            .or_insert_with(|| (Arc::new(RwLock::new(Vec::new())), 0));
+        let mut rules = set.write().unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = rules.iter().find(|existing| existing.same_signature(&rule)) {
+            return existing.clone();
+        }
         let mut rule = rule;
         rule.scope = RuleScope::Session;
-        rule.id = Some(format!("session:{}", rules.len()));
+        rule.id = Some(format!("session:{counter}"));
+        *counter += 1;
         rules.push(rule.clone());
         rule
     }
 
-    /// Deletes `session:N` from `run_id`'s set.
-    pub fn delete_session_rule(&self, run_id: &str, index: usize) -> bool {
-        let Some(rules) = Self::lock(&self.sessions).get(run_id).cloned() else {
+    /// Deletes the rule whose id is `session:N` from `run_id`'s set.
+    pub fn delete_session_rule(&self, run_id: &str, id: &str) -> bool {
+        let Some((set, _)) = Self::lock(&self.sessions).get(run_id).cloned() else {
             return false;
         };
-        let mut rules = rules.write().unwrap_or_else(|error| error.into_inner());
-        if index >= rules.len() {
+        let mut rules = set.write().unwrap_or_else(|error| error.into_inner());
+        let Some(index) = rules.iter().position(|rule| rule.id.as_deref() == Some(id)) else {
             return false;
-        }
+        };
         rules.remove(index);
-        for (position, rule) in rules.iter_mut().enumerate() {
-            rule.id = Some(format!("session:{position}"));
-        }
         true
     }
 
@@ -413,6 +449,59 @@ mod tests {
             "web_fetch",
             &RuleSubject::Domain("a.corp.internal".to_owned())
         ));
+    }
+
+    #[test]
+    fn rule_ids_are_stable_across_deletes_and_deduped_on_re_add() {
+        let state = RuleState::default();
+        let first = state.add_project_rule(mk(
+            "shell",
+            RulePatternKind::Command,
+            "cargo *",
+            Decision::Deny,
+        ));
+        let second = state.add_project_rule(mk(
+            "shell",
+            RulePatternKind::Command,
+            "npm *",
+            Decision::Allow,
+        ));
+        assert_eq!(first.id.as_deref(), Some("project:0"));
+        assert_eq!(second.id.as_deref(), Some("project:1"));
+
+        // Deleting never reassigns ids; re-adding dedupes instead of copying.
+        assert!(state.delete_project_rule("project:0"));
+        let third = state.add_project_rule(mk(
+            "shell",
+            RulePatternKind::Command,
+            "pip *",
+            Decision::Ask,
+        ));
+        assert_eq!(third.id.as_deref(), Some("project:2"));
+        let duplicate = state.add_project_rule(mk(
+            "shell",
+            RulePatternKind::Command,
+            "npm *",
+            Decision::Allow,
+        ));
+        assert_eq!(duplicate.id.as_deref(), Some("project:1"));
+        assert_eq!(state.project_rules().len(), 2);
+        assert!(state.delete_project_rule("project:1"));
+        assert!(!state.delete_project_rule("project:0"));
+        assert_eq!(state.project_rules()[0].id.as_deref(), Some("project:2"));
+
+        // Session rules follow the same scheme per run.
+        let session = state.add_session_rule(
+            "run-1",
+            mk("shell", RulePatternKind::Any, "", Decision::Deny),
+        );
+        assert_eq!(session.id.as_deref(), Some("session:0"));
+        assert!(state.delete_session_rule("run-1", "session:0"));
+        let next = state.add_session_rule(
+            "run-1",
+            mk("shell", RulePatternKind::Any, "", Decision::Allow),
+        );
+        assert_eq!(next.id.as_deref(), Some("session:1"));
     }
 
     #[test]

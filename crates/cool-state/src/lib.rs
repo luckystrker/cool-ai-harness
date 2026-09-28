@@ -254,6 +254,16 @@ pub struct ApprovalTicket {
     pub created: bool,
 }
 
+/// Where an approval ticket points before it is resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalCallContext {
+    pub session_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    /// `pending` / `approved` / `denied`.
+    pub state: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalResolution {
     pub approval_id: String,
@@ -1478,6 +1488,41 @@ impl DurableStore {
                 "unknown approval state {state}"
             ))),
         }
+    }
+
+    /// The run/session/call an approval ticket belongs to, plus its current
+    /// state — used to persist `remember` rules before the resolve commits.
+    pub fn approval_call_context(
+        &self,
+        actor_id: &str,
+        approval_id: &str,
+    ) -> Result<ApprovalCallContext, StoreError> {
+        let connection = self.connection()?;
+        let (owner, session_id, run_id, call_id, state) = connection
+            .query_row(
+                "SELECT actor_id, session_id, run_id, call_id, state FROM rust_approvals WHERE id = ?1",
+                [approval_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("approval"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        Ok(ApprovalCallContext {
+            session_id,
+            run_id,
+            call_id,
+            state,
+        })
     }
 
     pub fn resolve_approval(

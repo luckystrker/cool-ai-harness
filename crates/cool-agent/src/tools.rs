@@ -123,6 +123,11 @@ impl From<std::io::Error> for ToolError {
     }
 }
 
+/// Live policy-rule source (P1.6): invoked per tool call so project-file and
+/// durable-store mutations apply to in-flight runs instead of a run-start
+/// snapshot. Returns rules in match order (project before user).
+pub type RuleSource = Arc<dyn Fn() -> Vec<PolicyRule> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: Workspace,
@@ -138,6 +143,10 @@ pub struct ToolContext {
     /// Live session-scoped policy rules (P1.6) consulted before the rest of
     /// the policy; `approval.resolve {remember: "session"}` mutates the set.
     pub session_rules: Option<Arc<RwLock<Vec<PolicyRule>>>>,
+    /// Live project+user rule source, consulted after session rules and
+    /// before the policy's own rule set (P1.6 — keeps in-flight runs on the
+    /// current rule file/store rather than a run-start snapshot).
+    pub rule_source: Option<RuleSource>,
     pub cancel: Option<CancelSignal>,
     /// Server-derived actor for store-backed tools. Never read from tool
     /// arguments.
@@ -162,6 +171,7 @@ impl ToolContext {
             allowed_secret_environment: BTreeSet::new(),
             launcher: Arc::new(DisabledLauncher),
             session_rules: None,
+            rule_source: None,
             cancel: None,
             actor_id: "local-user".to_owned(),
             conversation_id: None,
@@ -192,6 +202,12 @@ impl ToolContext {
     /// Attaches the run's live session-rule set.
     pub fn with_session_rules(mut self, rules: Arc<RwLock<Vec<PolicyRule>>>) -> Self {
         self.session_rules = Some(rules);
+        self
+    }
+
+    /// Attaches the live project+user rule source.
+    pub fn with_rule_source(mut self, source: RuleSource) -> Self {
+        self.rule_source = Some(source);
         self
     }
 
@@ -1656,6 +1672,19 @@ impl ToolHandler for PythonFallbackTool {
     }
 }
 
+/// The `NetAccess` a launched process gets, derived from the tool's declared
+/// network capability: a `Deny` resolution propagates `NetAccess::None` so a
+/// network that is off-limits to the tool is also off-limits to its child
+/// (`--unshare-net`/seatbelt, or a fail-closed `HostLauncher` refusal).
+/// `Ask`/`Allow` keep `Full` — the tool call itself is already gated by its
+/// own capability decision and approval before it ever spawns a child.
+fn process_net(context: &ToolContext) -> NetAccess {
+    match context.policy.resolve(Capability::Network) {
+        Decision::Deny => NetAccess::None,
+        _ => NetAccess::Full,
+    }
+}
+
 async fn run_bounded_process(
     context: &ToolContext,
     program: &Path,
@@ -1690,7 +1719,7 @@ async fn run_bounded_process(
         cwd: context.workspace.root().to_path_buf(),
         env: environment.into_iter().collect(),
         stdin: stdin.clone(),
-        net: NetAccess::Full,
+        net: process_net(context),
         limits: ResourceLimits {
             timeout: context.timeout,
             max_output_bytes: context.max_output_bytes,
@@ -1953,12 +1982,15 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
             .map(|(name, value)| (name.as_str(), value.as_str())),
         &context.allowed_secret_environment,
     );
-    // Values the sanitizer strips from the child's environment are literal
-    // redaction markers in its output — the generic mask does not cover them.
+    // Literal redaction covers everything the sanitizer stripped AND the
+    // allowed secrets — an allowed value still cannot leak through output a
+    // child chooses to echo back.
     let secret_values: Vec<String> = context
         .environment
         .iter()
-        .filter(|(name, _)| !environment.contains_key(*name))
+        .filter(|(name, _)| {
+            !environment.contains_key(*name) || context.allowed_secret_environment.contains(*name)
+        })
         .map(|(_, value)| value.clone())
         .filter(|value| !value.is_empty())
         .collect();
@@ -1966,7 +1998,7 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
         cwd: context.workspace.root().to_path_buf(),
         env: environment.into_iter().collect(),
         stdin: None,
-        net: NetAccess::Full,
+        net: process_net(context),
         limits: ResourceLimits {
             timeout: DIAGNOSTICS_TIMEOUT,
             max_output_bytes: DIAGNOSTICS_LIMIT,
@@ -1982,13 +2014,31 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
     let stderr = child.stderr().take().map(|stream| {
         tokio::spawn(async move { drain_stream(stream, DIAGNOSTICS_LIMIT, 0).await })
     });
-    let status = match timeout(DIAGNOSTICS_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            let _ = std::pin::Pin::from(child.kill()).await;
-            let _ = child.wait().await;
-            return Some("warning: diagnostics timed out".to_owned());
+    // The file is already written — a cancellation here races the outer
+    // batch abort, so prefer the cancel signal and report quickly instead of
+    // waiting the full timeout on a doomed child.
+    let status = if let Some(mut cancel) = context.cancel.clone() {
+        tokio::select! {
+            waited = timeout(DIAGNOSTICS_TIMEOUT, child.wait()) => match waited {
+                Ok(Ok(status)) => Some(status),
+                _ => None,
+            },
+            _ = cancel.wait() => {
+                let _ = std::pin::Pin::from(child.kill()).await;
+                let _ = child.wait().await;
+                return Some("warning: diagnostics cancelled".to_owned());
+            }
         }
+    } else {
+        match timeout(DIAGNOSTICS_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => None,
+        }
+    };
+    let Some(status) = status else {
+        let _ = std::pin::Pin::from(child.kill()).await;
+        let _ = child.wait().await;
+        return Some("warning: diagnostics timed out".to_owned());
     };
     let mut text = String::new();
     for stream in [stdout, stderr].into_iter().flatten() {
@@ -1997,7 +2047,11 @@ async fn run_diagnostics(context: &ToolContext, requested: &str) -> Option<Strin
         }
     }
     if text.len() > DIAGNOSTICS_LIMIT {
-        text.truncate(DIAGNOSTICS_LIMIT);
+        let mut end = DIAGNOSTICS_LIMIT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
         text.push_str("\n... [diagnostics truncated at 4 KiB] ...");
     }
     for secret in &secret_values {

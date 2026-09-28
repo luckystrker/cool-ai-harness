@@ -590,9 +590,22 @@ impl AgentRuntime {
                 .execute_tool_batch(calls, &request.tool_context, sink, approvals, &mut cancel)
                 .await?;
             for (call, result) in batch.results {
+                // The model sees the same payload the event log does —
+                // including write diagnostics it is expected to react to.
+                let mut output = result.output.clone();
+                if let Some(diagnostics) = &result.diagnostics {
+                    if let Value::Object(map) = &mut output {
+                        map.insert("diagnostics".to_owned(), Value::String(diagnostics.clone()));
+                    } else {
+                        output = serde_json::json!({
+                            "output": output,
+                            "diagnostics": diagnostics,
+                        });
+                    }
+                }
                 let message = Message::tool_result(
                     &call,
-                    serde_json::to_string(&result.output).unwrap_or_else(|_| "null".to_owned()),
+                    serde_json::to_string(&output).unwrap_or_else(|_| "null".to_owned()),
                 );
                 history.push(message);
             }
@@ -631,8 +644,9 @@ impl AgentRuntime {
                 continue;
             };
             // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
-            // session rules first (most local wins), then project + user
-            // rules merged into the policy. First match wins.
+            // session rules first (most local wins), then the live
+            // project+user source, then rules embedded in the policy itself.
+            // First match wins.
             let subject = rule_subject(&call);
             let matched_rule = context
                 .session_rules
@@ -640,6 +654,12 @@ impl AgentRuntime {
                 .and_then(|rules| {
                     let guard = rules.read().unwrap_or_else(|error| error.into_inner());
                     match_rules(guard.iter(), &call.name, &subject).cloned()
+                })
+                .or_else(|| {
+                    context.rule_source.as_ref().and_then(|source| {
+                        let rules = source();
+                        match_rules(rules.iter(), &call.name, &subject).cloned()
+                    })
                 })
                 .or_else(|| context.policy.match_rule(&call.name, &subject).cloned());
             let decision = match matched_rule.as_ref() {
@@ -1251,7 +1271,7 @@ pub fn history_from_event_rows(
 /// The subject a `PolicyRule` is matched against, derived from the call:
 /// `"program args…"` for process tools, the workspace-relative path for file
 /// tools, the host for network tools, `None` otherwise.
-fn rule_subject(call: &ToolCall) -> RuleSubject {
+pub fn rule_subject(call: &ToolCall) -> RuleSubject {
     let arguments = &call.arguments;
     let arg_str = |key: &str| arguments.get(key).and_then(Value::as_str);
     match call.name.as_str() {

@@ -130,17 +130,12 @@ impl SubagentExecutor {
         }
     }
 
-    /// The base policy plus the merged project + user rules (P1.6); the
-    /// child's `capability_policy` narrows the result at `subagent_policy`.
+    /// The base capability policy; the child's `capability_policy` narrows
+    /// it at `subagent_policy`. Project + user rules ride the live
+    /// `rule_source` attached per run instead — for the subagent's own
+    /// working directory, not the server's (P1.6).
     fn merged_policy(&self) -> CapabilityPolicy {
-        let mut policy = self.policy.clone();
-        let mut rules = self.host.rules.project_rules();
-        rules.extend(crate::user_policy_rules(
-            &self.store,
-            &crate::project_key(&self.workspace),
-        ));
-        policy.set_rules(rules);
-        policy
+        self.policy.clone()
     }
 
     /// Launch one subagent run. Idempotent on `(actor, key)`: a replay returns
@@ -497,13 +492,19 @@ impl SubagentExecutor {
             limits,
             tool_names: resolved.tool_names.clone(),
             tool_context: ToolContext::new(
-                workspace,
+                workspace.clone(),
                 subagent_policy(&self.merged_policy(), resolved.capability_policy.as_ref()),
             )
             .with_actor(crate::local_actor().id)
             .with_launcher(launcher)
             .with_environment(self.host.environment.clone())
-            .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string())),
+            .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
+            .with_rule_source(crate::rule_source_for(
+                self.host.rules.clone(),
+                Some(self.store.clone()),
+                self.workspace.clone(),
+                workspace.clone(),
+            )),
         };
         let child_sink = LegacyTranscriptSink {
             store: Arc::clone(&self.store),

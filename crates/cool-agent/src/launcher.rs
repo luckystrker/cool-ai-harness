@@ -38,9 +38,9 @@ pub enum LauncherKind {
 
 /// Network access requested for one launch. `Host` cannot isolate the
 /// network; `SandboxedLauncher` enforces `None` via `--unshare-net` (bwrap) or
-/// by omitting the network clause (seatbelt). `Pinned` is pragmatic v1: the
-/// sandbox keeps shared networking and exports the pin list as
-/// `COOL_NET_PINNED` for observability; a real allowlist proxy is a follow-up.
+/// by omitting the network clause (seatbelt). `Pinned` fails closed in v1:
+/// enforcing a domain allowlist needs a proxy that does not exist yet, so
+/// requesting it is an error rather than silently sharing host networking.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum NetAccess {
     None,
@@ -211,6 +211,11 @@ pub fn sandbox_backend_status() -> Vec<serde_json::Value> {
         serde_json::json!({
             "backend": backend.name(),
             "available": backend.available(),
+            "isolation": match backend {
+                SandboxBackend::Bwrap | SandboxBackend::Seatbelt => "filesystem+network",
+                // v1: JobObject provides process containment only.
+                SandboxBackend::JobObject => "containment-only",
+            },
         })
     })
     .collect()
@@ -255,22 +260,24 @@ impl ProcessLauncher for SandboxedLauncher {
         args: &[String],
         spec: &LaunchSpec,
     ) -> Result<Box<dyn ChildWrapper>, ToolError> {
+        if let NetAccess::Pinned(_) = spec.net {
+            // Fail closed: no backend can enforce a domain allowlist without
+            // an allowlist proxy. Silently sharing host networking would
+            // grant more access than the caller asked for.
+            return Err(ToolError::Security(
+                "NetAccess::Pinned requires an allowlist proxy, unsupported in v1".to_owned(),
+            ));
+        }
         let argv = match self.backend {
             SandboxBackend::Bwrap => bwrap_argv(program, args, spec),
             SandboxBackend::Seatbelt => seatbelt_argv(program, args, spec),
             SandboxBackend::JobObject => {
-                // v1: Job Object containment only (no FS/Net isolation).
+                // v1: Job Object containment only (no FS/Net isolation);
+                // HostLauncher still rejects NetAccess below Full.
                 return HostLauncher.spawn(program, args, spec);
             }
         };
-        let mut spec = spec.clone();
-        if let NetAccess::Pinned(domains) = &spec.net {
-            // Pragmatic v1: no allowlist proxy yet — the pin list is exported
-            // for observability and the sandbox keeps shared networking.
-            spec.env
-                .push(("COOL_NET_PINNED".to_owned(), domains.join(",")));
-        }
-        spawn_wrapped(&argv, &spec)
+        spawn_wrapped(&argv, spec)
     }
 
     fn kind(&self) -> LauncherKind {
@@ -278,28 +285,38 @@ impl ProcessLauncher for SandboxedLauncher {
     }
 }
 
-/// `bwrap` argv: read-only root, workspace bound read-write, private /dev,
-/// /proc, /tmp; `--unshare-net` when the spec denies network access.
+/// `bwrap` argv: only system/toolchain paths bound read-only plus the
+/// workspace bound read-write — the rest of the host filesystem (home dirs,
+/// credentials) is invisible inside the sandbox. `--unshare-net` when the
+/// spec denies network access.
 pub fn bwrap_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<String> {
     let workspace = spec.cwd.to_string_lossy().into_owned();
     let mut argv = vec![
         "bwrap".to_owned(),
         "--die-with-parent".to_owned(),
-        "--ro-bind".to_owned(),
-        "/".to_owned(),
-        "/".to_owned(),
         "--dev".to_owned(),
         "/dev".to_owned(),
         "--proc".to_owned(),
         "/proc".to_owned(),
         "--tmpfs".to_owned(),
         "/tmp".to_owned(),
+    ];
+    // Read-only binds for the paths a toolchain legitimately needs — never
+    // a blanket `/`, which would expose host secrets to the child.
+    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt"] {
+        if std::path::Path::new(dir).is_dir() {
+            argv.push("--ro-bind".to_owned());
+            argv.push(dir.to_owned());
+            argv.push(dir.to_owned());
+        }
+    }
+    argv.extend([
         "--bind".to_owned(),
         workspace.clone(),
         workspace.clone(),
         "--chdir".to_owned(),
         workspace,
-    ];
+    ]);
     if spec.net == NetAccess::None {
         argv.push("--unshare-net".to_owned());
     }
@@ -309,19 +326,24 @@ pub fn bwrap_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<Stri
     argv
 }
 
-/// `sandbox-exec` seatbelt argv: deny-by-default profile with read access to
-/// the host filesystem, writes confined to the workspace (plus /private/tmp
-/// for toolchain scratch), process exec/fork allowed, and a network clause
-/// only when the spec allows network access.
+/// `sandbox-exec` seatbelt argv: deny-by-default profile — reads confined to
+/// system/toolchain subtrees and the workspace (home directories and
+/// credentials stay unreadable), writes confined to the workspace plus
+/// /private/tmp for toolchain scratch, process exec/fork allowed, and a
+/// network clause only when the spec allows network access.
 pub fn seatbelt_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<String> {
     let workspace = spec.cwd.to_string_lossy().replace('\\', "/");
     let network = match spec.net {
-        NetAccess::None => "",
-        NetAccess::Full | NetAccess::Pinned(_) => "(allow network*)",
+        NetAccess::None | NetAccess::Pinned(_) => "",
+        NetAccess::Full => "(allow network*)",
     };
     let profile = format!(
         "(version 1)(deny default)\
-         (allow file-read* (subpath \"/\"))\
+         (allow file-read*\
+           (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\")\
+           (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/opt\")\
+           (subpath \"/private\") (subpath \"/dev\") (subpath \"/Applications\")\
+           (subpath \"{workspace}\"))\
          (allow file-write* (subpath \"{workspace}\") (subpath \"/private/tmp\"))\
          (allow process-exec)(allow process-fork)(allow signal (target self))\
          {network}"
@@ -515,6 +537,33 @@ mod tests {
             .find(|pair| pair[0] == "--bind")
             .expect("workspace rw bind present");
         assert_eq!(bind[1], "/ws/project");
+    }
+
+    #[test]
+    fn bwrap_argv_never_binds_the_whole_root() {
+        let argv = bwrap_argv("echo", &[], &spec(NetAccess::Full));
+        assert!(
+            !argv
+                .windows(3)
+                .any(|triple| triple == ["--ro-bind", "/", "/"]),
+            "no read-only bind of the host root"
+        );
+    }
+
+    #[test]
+    fn pinned_network_fails_closed() {
+        // Every launcher refuses a request it cannot actually enforce.
+        let spec = spec(NetAccess::Pinned(vec!["api.example.com".to_owned()]));
+        assert!(matches!(
+            HostLauncher.spawn("echo", &[], &spec).unwrap_err(),
+            ToolError::Security(_)
+        ));
+        if let Ok(launcher) = SandboxedLauncher::detect() {
+            assert!(matches!(
+                launcher.spawn("echo", &[], &spec).unwrap_err(),
+                ToolError::Security(_)
+            ));
+        }
     }
 
     #[test]

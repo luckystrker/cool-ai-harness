@@ -29,7 +29,7 @@ pub use loop_runtime::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
     CancelSignal, EventSink, RunOutcome, RuntimeError, StoreEventSink, SubagentRequest,
     history_from_event_rows, history_from_events, mask_canonical_event, policy_rule_from_record,
-    policy_rule_record, suggest_policy_rule,
+    policy_rule_record, rule_subject, suggest_policy_rule,
 };
 pub use pricing::{estimate_cost_micro_usd, has_pricing, model_pricing};
 pub use provider::{
@@ -37,7 +37,7 @@ pub use provider::{
     ScriptedDriver, Usage,
 };
 pub use tools::{
-    PythonFallbackTool, Tool, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError,
+    PythonFallbackTool, RuleSource, Tool, ToolCatalogEntry, ToolContext, ToolDefinition, ToolError,
     ToolHandler, ToolRegistry, ToolResult, builtin_registry, capability_name,
 };
 pub use web_tools::{WebToolsConfig, web_tool_registry};

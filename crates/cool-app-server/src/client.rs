@@ -347,6 +347,7 @@ impl AppClient {
 
     /// Prompt with explicit canonical inputs (content parts, planning mode,
     /// long-task mode and an optional caller system prompt).
+    #[allow(clippy::too_many_arguments)]
     pub async fn prompt_with(
         &self,
         key: &str,

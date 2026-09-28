@@ -89,17 +89,13 @@ impl TaskExecutor {
         }
     }
 
-    /// The task's capability policy plus the merged project + user rules
-    /// (P1.6) — `task_policy` narrows the base policy first.
+    /// The task's capability policy — `task_policy` narrows the base
+    /// policy. Project + user rules are not snapshotted here: the run
+    /// attaches a live `rule_source` for ITS workspace (P1.6), so an
+    /// alternate `working_directory` still honours its own
+    /// `.cool/policy.json` and mid-run rule edits apply immediately.
     fn merged_task_policy(&self, task: &ScheduledTask) -> CapabilityPolicy {
-        let mut policy = task_policy(&self.policy, task);
-        let mut rules = self.host.rules.project_rules();
-        rules.extend(crate::user_policy_rules(
-            &self.store,
-            &crate::project_key(&self.workspace),
-        ));
-        policy.set_rules(rules);
-        policy
+        task_policy(&self.policy, task)
     }
 
     /// Engine status for `tasks.scheduler`.
@@ -431,10 +427,16 @@ impl TaskExecutor {
             max_tokens: None,
             limits,
             tool_names,
-            tool_context: ToolContext::new(workspace, self.merged_task_policy(&task))
+            tool_context: ToolContext::new(workspace.clone(), self.merged_task_policy(&task))
                 .with_actor(crate::local_actor().id)
                 .with_launcher(self.host.launcher.clone())
-                .with_environment(self.host.environment.clone()),
+                .with_environment(self.host.environment.clone())
+                .with_rule_source(crate::rule_source_for(
+                    self.host.rules.clone(),
+                    Some(self.store.clone()),
+                    self.workspace.clone(),
+                    workspace.clone(),
+                )),
         };
         // The task's approval policy is enforced by the capability policy: a
         // `deny_external` task denies `send_external`, everything else is
