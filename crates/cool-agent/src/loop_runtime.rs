@@ -651,6 +651,12 @@ impl AgentRuntime {
                     });
                 }
                 history.extend(steers);
+                // A steer on the final allowed iteration costs a turn like
+                // any other — fail with `iteration_limit` rather than falling
+                // out of the loop into the unreachable tail.
+                if iteration == request.limits.max_iterations {
+                    return finish_failed(sink, history, "iteration_limit".to_owned()).await;
+                }
                 continue;
             }
             // The snapshot lets `spawn_subagent(fork_context)` seed a child

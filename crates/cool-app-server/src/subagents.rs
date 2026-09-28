@@ -599,6 +599,10 @@ impl SubagentExecutor {
         let (history, system_prompt) = match spec.fork_context {
             ForkContext::Full => {
                 let mut history = spec.parent_history.clone();
+                // The snapshot ends mid-turn: the assistant message that
+                // spawned this child carries tool calls whose results do not
+                // exist yet — providers reject that transcript.
+                close_open_tool_calls(&mut history);
                 if let Some(prompt) = &resolved.system_prompt {
                     // The forked transcript carries the parent's system
                     // message, so the runtime's "history already has System"
@@ -665,6 +669,9 @@ impl SubagentExecutor {
             .with_launcher(launcher.clone())
             .with_environment(self.host.environment.clone())
             .with_session_rules(self.host.rules.session_rules(&context.run_id.to_string()))
+            // Nested `spawn_subagent` scopes to this child's conversation —
+            // without it `SpawnSubagent` falls back to conversation 1.
+            .with_conversation(Some(context.child_conversation_id))
             .with_spawn_depth(spec.spawn_depth.saturating_add(1))
             .with_rule_source(crate::rule_source_for(
                 Some(self.store.clone()),
@@ -735,10 +742,18 @@ impl SubagentExecutor {
         // and the rule source were consumed by `run`; drop this one before
         // teardown.
         drop(workspace);
-        // Worktree-isolated children leave `.cool/worktrees/{id}` plus a
-        // `cool/sub/{id}` branch behind — remove both best-effort now that
-        // the run is done (P1.7).
-        if spec.isolation == SubagentIsolation::Worktree {
+        // Worktree children edit an isolated checkout — preserve their work
+        // instead of deleting it: commit any dirty state onto `cool/sub/{id}`,
+        // remove only the checkout, and surface the branch name in the run
+        // summary so the parent can merge or cherry-pick (P1.7).
+        let worktree_branch = if spec.isolation == SubagentIsolation::Worktree {
+            commit_worktree_changes(
+                launcher.as_ref(),
+                &parent_workspace,
+                &self.host.environment,
+                context.run_id,
+            )
+            .await;
             remove_worktree(
                 launcher.as_ref(),
                 &parent_workspace,
@@ -746,7 +761,10 @@ impl SubagentExecutor {
                 context.run_id,
             )
             .await;
-        }
+            Some(format!("cool/sub/{}", context.run_id))
+        } else {
+            None
+        };
         let (status, summary, error, usage_json) = match &outcome {
             Ok(RunOutcome::Completed { history, usage }) => (
                 "completed",
@@ -757,6 +775,13 @@ impl SubagentExecutor {
             Ok(RunOutcome::Cancelled { .. }) => ("cancelled", None, None, None),
             Ok(RunOutcome::Failed { code, .. }) => ("failed", None, Some(mask_secrets(code)), None),
             Err(error) => ("failed", None, Some(mask_secrets(&error.to_string())), None),
+        };
+        let summary = match (&summary, &worktree_branch) {
+            (text, Some(branch)) => Some(format!(
+                "{}\n\n[edits preserved on branch `{branch}` — merge or cherry-pick into the parent checkout]",
+                text.as_deref().unwrap_or_default()
+            )),
+            (text, None) => text.clone(),
         };
         let usage = usage_json.as_ref();
         // `finalize_*` preserves an earlier cancellation rather than
@@ -1236,11 +1261,78 @@ async fn create_worktree(
     }
 }
 
+/// `isolation=worktree` handoff: commits the child's dirty state onto its
+/// `cool/sub/{id}` branch so teardown deletes only the checkout, not the
+/// work. Best-effort — a failed commit still keeps whatever the child
+/// committed itself. `--no-verify` skips repo hooks for the same reason the
+/// environment is sanitized.
+async fn commit_worktree_changes(
+    launcher: &dyn cool_agent::ProcessLauncher,
+    workspace: &Workspace,
+    environment: &HashMap<String, String>,
+    run_id: i64,
+) {
+    let directory = workspace
+        .root()
+        .join(".cool")
+        .join("worktrees")
+        .join(run_id.to_string());
+    if !directory.exists() {
+        return;
+    }
+    let env: Vec<(String, String)> = sanitize_environment(
+        environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        &BTreeSet::new(),
+    )
+    .into_iter()
+    .collect();
+    for args in [
+        vec!["add".to_owned(), "-A".to_owned()],
+        vec![
+            "-c".to_owned(),
+            "user.name=cool-subagent".to_owned(),
+            "-c".to_owned(),
+            "user.email=cool-subagent@local".to_owned(),
+            "commit".to_owned(),
+            "--no-verify".to_owned(),
+            "-m".to_owned(),
+            format!("cool subagent {run_id} edits"),
+        ],
+    ] {
+        let spec = LaunchSpec {
+            cwd: directory.clone(),
+            env: env.clone(),
+            stdin: None,
+            net: NetAccess::Full,
+            limits: ResourceLimits {
+                timeout: Duration::from_secs(60),
+                max_output_bytes: 1 << 20,
+            },
+        };
+        if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
+            use tokio::io::AsyncReadExt as _;
+            if let Some(mut stderr) = child.stderr().take() {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes).await;
+            }
+            if let Some(mut stdout) = child.stdout().take() {
+                let mut bytes = Vec::new();
+                let _ = stdout.read_to_end(&mut bytes).await;
+            }
+            let _ = child.wait().await;
+        }
+    }
+}
+
 /// Best-effort teardown of a worktree-isolated child: delete the checkout
 /// (`git worktree remove` is skipped — it path-matches the registration and
 /// 8.3/verbatim spellings of the same directory never match on Windows),
-/// then `git worktree prune` + `git branch -D` for the bookkeeping. Cleanup
-/// failures only leave litter under `.cool/worktrees/` — never fail the run.
+/// then `git worktree prune` for the bookkeeping. The `cool/sub/{id}` branch
+/// is kept deliberately — it carries the child's edits for the parent to
+/// merge or cherry-pick. Cleanup failures only leave litter under
+/// `.cool/worktrees/` — never fail the run.
 async fn remove_worktree(
     launcher: &dyn cool_agent::ProcessLauncher,
     workspace: &Workspace,
@@ -1262,42 +1354,63 @@ async fn remove_worktree(
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    let branch = format!("cool/sub/{run_id}");
-    for args in [
-        vec!["worktree".to_owned(), "prune".to_owned()],
-        vec!["branch".to_owned(), "-D".to_owned(), branch.clone()],
-    ] {
-        let spec = LaunchSpec {
-            cwd: root.to_path_buf(),
-            env: sanitize_environment(
-                environment
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.as_str())),
-                &BTreeSet::new(),
-            )
-            .into_iter()
-            .collect(),
-            stdin: None,
-            net: NetAccess::Full,
-            limits: ResourceLimits {
-                timeout: Duration::from_secs(60),
-                max_output_bytes: 1 << 20,
-            },
-        };
-        if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
-            use tokio::io::AsyncReadExt as _;
-            // Drain both pipes before `wait` so a chatty git cannot deadlock
-            // on a full buffer.
-            if let Some(mut stderr) = child.stderr().take() {
-                let mut bytes = Vec::new();
-                let _ = stderr.read_to_end(&mut bytes).await;
-            }
-            if let Some(mut stdout) = child.stdout().take() {
-                let mut bytes = Vec::new();
-                let _ = stdout.read_to_end(&mut bytes).await;
-            }
-            let _ = child.wait().await;
+    let args = vec!["worktree".to_owned(), "prune".to_owned()];
+    let spec = LaunchSpec {
+        cwd: root.to_path_buf(),
+        env: sanitize_environment(
+            environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            &BTreeSet::new(),
+        )
+        .into_iter()
+        .collect(),
+        stdin: None,
+        net: NetAccess::Full,
+        limits: ResourceLimits {
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1 << 20,
+        },
+    };
+    if let Ok(mut child) = launcher.spawn("git", &args, &spec) {
+        use tokio::io::AsyncReadExt as _;
+        // Drain both pipes before `wait` so a chatty git cannot deadlock
+        // on a full buffer.
+        if let Some(mut stderr) = child.stderr().take() {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes).await;
         }
+        if let Some(mut stdout) = child.stdout().take() {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes).await;
+        }
+        let _ = child.wait().await;
+    }
+}
+
+/// Closes assistant tool calls that have no result message — the
+/// `fork_context=full` snapshot ends mid-batch, while providers reject
+/// transcripts with unanswered calls.
+fn close_open_tool_calls(history: &mut Vec<Message>) {
+    let answered: BTreeSet<&str> = history
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    let pending: Vec<String> = history
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .flat_map(|message| message.tool_calls.iter())
+        .filter(|call| !answered.contains(call.call_id.as_str()))
+        .map(|call| call.call_id.clone())
+        .collect();
+    for call_id in pending {
+        let mut message = Message::text(
+            MessageRole::Tool,
+            "result unavailable — the context forked while this call was in flight",
+        );
+        message.tool_call_id = Some(call_id);
+        history.push(message);
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -358,6 +358,33 @@ fn write_tools(
     tools.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// Rich, deterministic (name-sorted) catalog of a tool map — used by
+/// `ToolRegistry::catalog` and by the meta-tools, which reach the map only
+/// through a `Weak` (see `install_meta_tools`).
+fn catalog_entries(tools: &RwLock<BTreeMap<String, Tool>>) -> Vec<ToolCatalogEntry> {
+    let mut entries = read_tools(tools)
+        .values()
+        .map(|tool| {
+            let mut capabilities = tool
+                .capabilities
+                .iter()
+                .map(|capability| capability_name(*capability).to_owned())
+                .collect::<Vec<_>>();
+            // Match the Python catalog's `sorted(cap.value ...)`.
+            capabilities.sort_unstable();
+            ToolCatalogEntry {
+                name: tool.definition.name.clone(),
+                description: tool.definition.description.clone(),
+                parameters: tool.definition.parameters.clone(),
+                capabilities,
+                dangerous: tool.default_decision == Decision::Ask,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
 impl ToolRegistry {
     pub fn new(tools: impl IntoIterator<Item = Tool>) -> Result<Self, ToolError> {
         let mut registry = BTreeMap::new();
@@ -430,27 +457,7 @@ impl ToolRegistry {
 
     /// Rich, deterministic (name-sorted) catalog for the UI tool pickers.
     pub fn catalog(&self) -> Vec<ToolCatalogEntry> {
-        let mut entries = read_tools(&self.tools)
-            .values()
-            .map(|tool| {
-                let mut capabilities = tool
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability_name(*capability).to_owned())
-                    .collect::<Vec<_>>();
-                // Match the Python catalog's `sorted(cap.value ...)`.
-                capabilities.sort_unstable();
-                ToolCatalogEntry {
-                    name: tool.definition.name.clone(),
-                    description: tool.definition.description.clone(),
-                    parameters: tool.definition.parameters.clone(),
-                    capabilities,
-                    dangerous: tool.default_decision == Decision::Ask,
-                }
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        entries
+        catalog_entries(&self.tools)
     }
 
     /// Returns a new independent registry containing this registry's tools plus
@@ -472,7 +479,9 @@ impl ToolRegistry {
 
     /// Rebinds `search_tools`/`activate_tools` to this registry. Needed after
     /// `extend`: it builds a fresh backing map, and the handlers cloned out of
-    /// the old registry would keep searching the old catalog.
+    /// the old registry would keep searching the old catalog. Handlers hold a
+    /// `Weak` to the map — a strong `Arc` inside the map would cycle and keep
+    /// dropped registries alive forever.
     fn install_meta_tools(&self) {
         let mut tools = write_tools(&self.tools);
         for tool in [
@@ -485,7 +494,7 @@ impl ToolRegistry {
                 [],
                 Decision::Allow,
                 SearchTools {
-                    registry: self.clone(),
+                    tools: Arc::downgrade(&self.tools),
                 },
             ),
             Tool::new(
@@ -497,7 +506,7 @@ impl ToolRegistry {
                 [],
                 Decision::Allow,
                 ActivateTools {
-                    registry: self.clone(),
+                    tools: Arc::downgrade(&self.tools),
                 },
             ),
         ] {
@@ -1939,11 +1948,14 @@ impl ToolHandler for AskUser {
             string_array(&json!({ "options": options.clone() }), "options")?;
         }
         let timeout_secs = match arguments.get("timeout_secs") {
-            Some(value) => match value.as_f64().filter(|value| *value > 0.0) {
+            Some(value) => match value
+                .as_f64()
+                .filter(|value| *value > 0.0 && *value <= 3600.0)
+            {
                 Some(secs) => Some(secs),
                 None => {
                     return Err(ToolError::InvalidArguments(
-                        "timeout_secs must be a positive number".to_owned(),
+                        "timeout_secs must be a positive number no larger than 3600".to_owned(),
                     ));
                 }
             },
@@ -2019,7 +2031,7 @@ impl ToolHandler for AskUser {
 /// the model cannot currently see — by name/description match against the
 /// query and returns the top entries so the agent can `activate_tools` them.
 struct SearchTools {
-    registry: ToolRegistry,
+    tools: Weak<RwLock<BTreeMap<String, Tool>>>,
 }
 
 #[async_trait]
@@ -2031,10 +2043,14 @@ impl ToolHandler for SearchTools {
     ) -> Result<ToolResult, ToolError> {
         reject_unknown(&arguments, &["query"])?;
         let query = required_text(&arguments, "query")?.to_lowercase();
+        let Some(tools) = self.tools.upgrade() else {
+            return Ok(ToolResult::error(
+                "registry_unavailable",
+                "the tool registry was dropped",
+            ));
+        };
 
-        let mut scored: Vec<(i64, ToolCatalogEntry)> = self
-            .registry
-            .catalog()
+        let mut scored: Vec<(i64, ToolCatalogEntry)> = catalog_entries(&tools)
             .into_iter()
             .filter(|entry| {
                 // Search covers the whole catalog except the meta-tools
@@ -2049,15 +2065,19 @@ impl ToolHandler for SearchTools {
                 .cmp(&left.0)
                 .then_with(|| left.1.name.cmp(&right.1.name))
         });
+        let catalog_size = read_tools(&tools).len();
         let tools: Vec<Value> = scored
             .into_iter()
             .take(5)
             .map(|(score, entry)| {
+                let deferred = read_tools(&tools)
+                    .get(&entry.name)
+                    .is_some_and(|tool| ToolRegistry::is_deferred(tool, catalog_size));
                 json!({
                     "name": entry.name,
                     "description": entry.description,
                     "parameters": entry.parameters,
-                    "deferred": self.registry.is_tool_deferred(&entry.name),
+                    "deferred": deferred,
                     "score": score,
                 })
             })
@@ -2096,7 +2116,7 @@ fn tool_match_score(query: &str, entry: &ToolCatalogEntry) -> i64 {
 /// next loop iteration's `visible_definitions` includes them. Activation is
 /// NOT permission — `policy.evaluate` still gates every call.
 struct ActivateTools {
-    registry: ToolRegistry,
+    tools: Weak<RwLock<BTreeMap<String, Tool>>>,
 }
 
 #[async_trait]
@@ -2108,6 +2128,12 @@ impl ToolHandler for ActivateTools {
     ) -> Result<ToolResult, ToolError> {
         reject_unknown(&arguments, &["names"])?;
         let names = string_array(&arguments, "names")?;
+        let Some(tools) = self.tools.upgrade() else {
+            return Ok(ToolResult::error(
+                "registry_unavailable",
+                "the tool registry was dropped",
+            ));
+        };
         let mut activated = Vec::new();
         let mut unknown = Vec::new();
         let mut active = context
@@ -2115,7 +2141,7 @@ impl ToolHandler for ActivateTools {
             .write()
             .unwrap_or_else(|poison| poison.into_inner());
         for name in names {
-            if self.registry.get(&name).is_some() {
+            if read_tools(&tools).contains_key(&name) {
                 active.insert(name.clone());
                 activated.push(name);
             } else {

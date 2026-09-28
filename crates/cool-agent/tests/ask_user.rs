@@ -124,11 +124,16 @@ async fn ask_user_denied_fails_question_denied() {
 async fn ask_user_rejects_a_non_positive_timeout() {
     let context = context();
 
-    let result = ask_user()
-        .execute(&context, json!({"question": "Q", "timeout_secs": -5}))
-        .await;
+    for timeout in [-5.0, 1e100, f64::INFINITY, f64::NAN] {
+        let result = ask_user()
+            .execute(&context, json!({"question": "Q", "timeout_secs": timeout}))
+            .await;
 
-    assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+        assert!(
+            matches!(result, Err(ToolError::InvalidArguments(_))),
+            "timeout_secs={timeout} rejected as invalid arguments"
+        );
+    }
 }
 
 /// Subagents, one-shot CLI runs and scheduled runs install no question gate —

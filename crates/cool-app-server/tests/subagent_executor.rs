@@ -887,8 +887,9 @@ async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
     let row = executor.get_run("local-user", run.id).expect("row");
     assert_eq!(status, "completed", "run failed: {:?}", row.error);
 
-    // Teardown (P1.7): the finished run's worktree and its `cool/sub/*`
-    // branch are reclaimed — `.cool/worktrees/` must not accumulate litter.
+    // Teardown (P1.7): the finished run's checkout is reclaimed — the
+    // `cool/sub/{id}` branch is KEPT so the child's edits are preserved for
+    // the parent to merge or cherry-pick.
     let worktree = directory
         .path()
         .join(".cool")
@@ -914,8 +915,17 @@ async fn isolation_worktree_runs_the_child_in_a_git_worktree() {
         .output()
         .expect("git branch --list");
     assert!(
-        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
-        "cool/sub/* branches cleaned up: {branches:?}"
+        String::from_utf8_lossy(&branches.stdout)
+            .contains(&format!("cool/sub/{}", run.id)),
+        "child edits kept on cool/sub/*: {branches:?}"
+    );
+    assert!(
+        row.result_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cool/sub/"),
+        "result names the preserved branch: {:?}",
+        row.result_summary
     );
 }
 
