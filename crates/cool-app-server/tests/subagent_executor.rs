@@ -930,3 +930,115 @@ async fn isolation_worktree_fails_closed_when_no_launcher_is_configured() {
         row.error
     );
 }
+
+#[tokio::test]
+async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
+    // P2.15: the seeded reviewer profile keeps file reads + git only, and its
+    // exec_rules let `git diff`/`git log` through while `git push` is denied
+    // (a capability `deny` can't be lifted by rules, so `execute` stays ask).
+    let driver = Arc::new(ScriptedDriver::new([
+        Ok(vec![
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "push-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["push", "origin", "main"]),
+                )]),
+            }),
+            ModelEvent::ToolCall(ToolCall {
+                call_id: "diff-call".to_owned(),
+                name: "git".to_owned(),
+                arguments: serde_json::Map::from_iter([(
+                    "args".to_owned(),
+                    json!(["diff", "HEAD"]),
+                )]),
+            }),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+        Ok(vec![
+            ModelEvent::Content("reviewed".to_owned()),
+            ModelEvent::Finish {
+                reason: Some("stop".to_owned()),
+            },
+        ]),
+    ]));
+    let (executor, store, _dir) = direct_executor(driver.clone());
+    store
+        .seed_builtin_profiles()
+        .expect("builtin profiles seed");
+    let reviewer = store
+        .list_profiles(false)
+        .expect("profiles")
+        .into_iter()
+        .find(|profile| profile.slug == "reviewer")
+        .expect("reviewer preset exists");
+    assert!(reviewer.is_builtin, "reviewer is builtin");
+
+    let parent = parent_conversation(&store);
+    let run = executor
+        .launch(
+            "local-user",
+            SubagentLaunchSpec {
+                parent_conversation_id: parent,
+                profile_id: Some(reviewer.id),
+                prompt: "review the diff".to_owned(),
+                ..SubagentLaunchSpec::default()
+            },
+            "reviewer-key",
+            "fingerprint",
+        )
+        .await
+        .expect("launch");
+    assert_eq!(executor_wait_terminal(&executor, run.id).await, "completed");
+
+    let requests = driver.requests().await;
+    assert_eq!(requests.len(), 2);
+    let mut tool_names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    tool_names.sort_unstable();
+    assert_eq!(
+        tool_names,
+        vec![
+            "find_files",
+            "git",
+            "list_files",
+            "read_file",
+            "search_files"
+        ],
+        "reviewer sees the read-only tool set"
+    );
+    // Turn 2's history carries the tool results: `git push` denied by the
+    // exec rule, `git diff` allowed through (fails only because no process
+    // launcher exists in this harness).
+    let tool_results = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        tool_results.contains("denied by policy rule"),
+        "git push denied by the reviewer exec rules: {tool_results}"
+    );
+    let diff_result = requests[1]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some("diff-call")
+        })
+        .map(|message| serde_json::to_string(message).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !diff_result.contains("denied"),
+        "git diff passed the exec rules: {diff_result}"
+    );
+}

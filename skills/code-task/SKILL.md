@@ -29,6 +29,24 @@ You are now operating in **Code Task** mode. Follow a disciplined engineering wo
 - **Never force push** to shared branches (main, master, develop) without explicit user confirmation.
 - **GitHub operations** (PR diff/review, issues, actions) go through the `shell`/`git` tools (e.g. the `gh` CLI) or an attached MCP server — there are no dedicated `github_*` tools in the Rust registry.
 
+## Independent Review Pass (generator–verifier)
+
+For non-trivial diffs, run a fresh read-only review before declaring done: the
+built-in `reviewer` agent profile is a verifier that inspects changes and
+returns a severity-ordered findings list.
+
+```
+spawn_subagent({
+  prompt: "review changes in <files> — look for regressions and convention violations",
+  profile: "reviewer",
+  fork_context: "none"
+})
+```
+
+The reviewer runs read-only (file reads, `git diff`/`git log`) and cannot
+modify the workspace. Treat its blocker findings as required follow-ups;
+report nits honestly rather than fixing silently.
+
 ## PR Review Mode
 
 When asked to review a pull request:

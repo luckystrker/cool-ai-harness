@@ -34,7 +34,7 @@ use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, RunTerminal,
     UsageUpdated, V1Version,
 };
-use cool_security::{CapabilityPolicy, Workspace, mask_json, mask_secrets};
+use cool_security::{CapabilityPolicy, PolicyRule, Workspace, mask_json, mask_secrets};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::StoreError;
@@ -132,6 +132,9 @@ struct ResolvedConfig {
     max_iterations: i64,
     max_cost_usd: Option<f64>,
     capability_policy: Option<Value>,
+    /// Session rules seeded from profile `settings["exec_rules"]` before the
+    /// run starts (P2.15 reviewer preset narrows `git` to diff/log this way).
+    exec_rules: Vec<PolicyRule>,
     working_directory: Option<String>,
     /// Profile-selected process launcher (P0.3): `settings.process_launcher`
     /// + `settings.sandbox_backend`. `COOL_PROCESS_LAUNCHER` and the CLI flag
@@ -476,6 +479,12 @@ impl SubagentExecutor {
                 .and_then(|profile| profile.settings.as_ref()),
         )
         .map_err(cool_store::StoreError::InvalidInput)?;
+        let exec_rules = profile
+            .as_ref()
+            .and_then(|profile| profile.settings.as_ref())
+            .and_then(|settings| settings.get("exec_rules"))
+            .and_then(|value| serde_json::from_value::<Vec<PolicyRule>>(value.clone()).ok())
+            .unwrap_or_default();
         Ok(ResolvedConfig {
             role_name: role
                 .as_ref()
@@ -489,6 +498,7 @@ impl SubagentExecutor {
             max_iterations,
             max_cost_usd,
             capability_policy,
+            exec_rules,
             working_directory: parent.working_directory,
             launcher,
         })
@@ -657,6 +667,14 @@ impl SubagentExecutor {
         } else {
             &disabled
         };
+        // Profile `exec_rules` seed the run's session rules — evaluated
+        // before the capability fallback (P2.15 reviewer keeps `git` to
+        // read-only subcommands this way).
+        for rule in &resolved.exec_rules {
+            self.host
+                .rules
+                .add_session_rule(&context.run_id.to_string(), rule.clone());
+        }
         let subagent_request = SubagentRequest {
             run_id: context.run_id.to_string(),
             role: resolved.role_name.clone(),
