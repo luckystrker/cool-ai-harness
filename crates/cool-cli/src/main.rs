@@ -1,4 +1,5 @@
 mod executor_tools;
+mod jsonl;
 mod mcp_admin;
 mod mcp_store;
 mod memory_extract;
@@ -16,8 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, AnthropicDriver, AutoApprovalGate, CancelSignal,
-    MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink,
-    ToolContext, builtin_registry,
+    EventSink, MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver,
+    StoreEventSink, ToolContext, builtin_registry,
 };
 use cool_app_server::{
     AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
@@ -1727,6 +1728,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
     let mut allow_shell = false;
     let mut process_launcher: Option<String> = None;
     let mut sandbox: Option<String> = None;
+    let mut mode = "text".to_owned();
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
@@ -1734,6 +1736,9 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
         match name {
             "--scripted" => scripted = true,
             "--allow-shell" => allow_shell = true,
+            "--mode" => {
+                mode = flag_value(&inline, &mut arguments, "missing mode value")?;
+            }
             "--process-launcher" => {
                 process_launcher = Some(flag_value(
                     &inline,
@@ -1754,6 +1759,11 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
             _ => prompt_parts.push(argument),
         }
     }
+    let json_mode = match mode.as_str() {
+        "text" => false,
+        "json" => true,
+        _ => return Err(usage("--mode must be text|json")),
+    };
     if prompt_parts.is_empty() {
         return Err(usage("run needs a prompt"));
     }
@@ -1781,9 +1791,13 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
         .start_run("local-user", "cli-run", "cli-run", &session)
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?
         .value;
-    let sink = StoreEventSink::new(store, "local-user", session, run);
+    let store_sink = StoreEventSink::new(store, "local-user", session, run);
+    // P2.14: json mode wraps the store sink — one NDJSON line per event on
+    // stdout, the terminal run.completed carrying the result text.
+    let jsonl_sink = jsonl::JsonlEventSink::new(store_sink.clone());
     let agent = AgentRuntime::new(provider, builtin_registry());
     let (_, cancel) = CancelSignal::channel();
+    let sink: &dyn EventSink = if json_mode { &jsonl_sink } else { &store_sink };
     let outcome = agent
         .run(
             AgentRequest {
@@ -1800,7 +1814,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                     .with_launcher(host.launcher.clone())
                     .with_environment(host.environment.clone()),
             },
-            &sink,
+            sink,
             &AutoApprovalGate {
                 outcome: ApprovalOutcome::Denied,
             },
@@ -1816,7 +1830,11 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 .find(|message| message.role == MessageRole::Assistant)
                 .and_then(|message| message.content.as_deref())
                 .unwrap_or_default();
-            println!("{output}");
+            if json_mode {
+                jsonl_sink.finish(output);
+            } else {
+                println!("{output}");
+            }
             Ok(())
         }
         RunOutcome::Cancelled { reason, .. } => Err(runtime("run_cancelled", &reason)),
@@ -1970,7 +1988,7 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] [--mode text|json] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }
 
