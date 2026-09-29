@@ -66,7 +66,12 @@ export function MessageBubble({
 }: {
   msg: MessageViewModel
   /** Callback to resolve an inline approval (approve/deny + optional rule remember). */
-  onRespondApproval?: (approved: boolean, remember?: RememberScope, answer?: JsonValue) => void
+  onRespondApproval?: (
+    approved: boolean,
+    remember?: RememberScope,
+    answer?: JsonValue,
+    approvalId?: string
+  ) => void
   /** Callback to approve/reject a plan (Фаза 2 §1). */
   onPlanApprove?: (approved: boolean) => void
   /** Callback to execute an approved plan. */
@@ -208,7 +213,9 @@ export function MessageBubble({
         {msg.approval && (
           <ApprovalCard
             approval={msg.approval}
-            onRespond={onRespondApproval ?? (() => {})}
+            onRespond={(approved, remember, answer) =>
+              onRespondApproval?.(approved, remember, answer, msg.approval?.approvalId)
+            }
           />
         )}
 

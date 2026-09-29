@@ -73,6 +73,13 @@
     },
     {
       "file": "conversations.ts",
+      "member": "pendingApprovals",
+      "http": "POST /api/rpc (session.for_conversation + session.runs + run.events)",
+      "status": "sdk",
+      "command": "run.events"
+    },
+    {
+      "file": "conversations.ts",
       "member": "forkFromCursor",
       "http": "POST /api/rpc (session.fork + conversations.create + session.for_conversation)",
       "status": "sdk",

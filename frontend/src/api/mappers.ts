@@ -20,6 +20,7 @@ import type {
   Conversation,
   Entity,
   Episode,
+  InlineApproval,
   IterationDetail,
   LatencyPoint,
   MacroStep,
@@ -352,6 +353,28 @@ export function toLegacyMessage(record: protocol.MessageRecord): Message {
 }
 
 /** `SessionRunSummary` -> legacy `RunOut` (the recorder only reads status). */
+/** `tool.approval_required` payload -> the inline card view model. Shared by
+ * the live stream and the on-load pending-approval restore (B4a). */
+export function toInlineApproval(payload: protocol.ToolApprovalRequired): InlineApproval {
+  return {
+    callId: payload.callId,
+    approvalId: payload.approvalId,
+    revision: payload.revision,
+    // Canonical runs resolve by approval id; the numeric legacy run id is unused.
+    runId: 0,
+    name: payload.name,
+    arguments: payload.arguments as Record<string, unknown>,
+    reason: payload.reason,
+    isBreakpoint: payload.breakpointType != null,
+    breakpointType: payload.breakpointType ?? undefined,
+    resultPreview: payload.resultPreview ?? undefined,
+    currentContent: payload.currentContent ?? undefined,
+    matchedRule: payload.matchedRule ?? undefined,
+    suggestedRule: payload.suggestedRule ?? undefined,
+    status: "pending",
+  }
+}
+
 export function toRun(
   summary: protocol.SessionRunSummary,
   conversationId: number,

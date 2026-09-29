@@ -6,6 +6,7 @@ import {
   toConversation,
   toConversationCreate,
   toConversationUpdate,
+  toInlineApproval,
   toMessage,
   toRun,
 } from "./mappers"
@@ -15,6 +16,7 @@ import type {
   ConversationCreate,
   ConversationDetail,
   ConversationUpdate,
+  InlineApproval,
   Message,
   RunOut,
 } from "./types"
@@ -171,6 +173,39 @@ export const conversationsApi = {
       limit: params?.limit ?? 200,
     })
     return records.map(toApprovalAudit)
+  },
+
+  /**
+   * Approvals still actionable on the conversation's durable session, rebuilt
+   * from the run event log: every `tool.approval_required` with no matching
+   * `tool.approval_resolved` in a run parked in `awaiting_approval` is still
+   * open. The history projection drops approval events, so this is what puts
+   * the card back after a page reload (B4a).
+   */
+  pendingApprovals: async (convId: number): Promise<InlineApproval[]> => {
+    const sessionId = await sessionFor(convId)
+    const { runs } = await sdk.sessionRuns({ sessionId, limit: 50 })
+    const pending: InlineApproval[] = []
+    for (const run of runs) {
+      if (run.status !== "awaiting_approval") continue
+      const open = new Map<string, InlineApproval>()
+      let afterSeq: number | null = null
+      for (let page = 0; page < 40; page += 1) {
+        const result = await sdk.runEvents({ runId: run.runId, afterSeq, limit: 256 })
+        for (const envelope of result.events) {
+          const event = envelope.event
+          if (event.kind === "tool.approval_required") {
+            open.set(event.payload.approvalId, toInlineApproval(event.payload))
+          } else if (event.kind === "tool.approval_resolved") {
+            open.delete(event.payload.approvalId)
+          }
+        }
+        if (!result.hasMore || result.nextCursor?.afterSeq == null) break
+        afterSeq = result.nextCursor.afterSeq
+      }
+      pending.push(...open.values())
+    }
+    return pending
   },
 
   /**

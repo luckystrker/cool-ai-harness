@@ -113,6 +113,7 @@ export function ChatPage() {
     cancel,
     clearPending,
     respondApproval,
+    restoreApprovals,
   } = useConversationStream()
 
   const { data: conversationRuns = [] } = useQuery({
@@ -121,6 +122,25 @@ export function ChatPage() {
     enabled: convId !== null,
     refetchInterval: isStreaming ? 1000 : false,
   })
+
+  // B4a: a run parked in `awaiting_approval` survives a reload but the
+  // history projection drops approval events — re-fetch still-pending
+  // approvals so their card renders again. Live turns carry their own card.
+  const { data: pendingApprovals } = useQuery({
+    queryKey: ["pending-approvals", convId],
+    queryFn: () => conversationsApi.pendingApprovals(convId!),
+    enabled: convId !== null && !isStreaming,
+    // While anything is open, keep reconciling — a server-side timeout flips
+    // the run out of `awaiting_approval` without a click, and the restored
+    // card must disappear with it (expiry handled honestly, not faked).
+    refetchInterval: (query) => (query.state.data?.length ? 4000 : false),
+  })
+
+  useEffect(() => {
+    if (convId !== null && pendingApprovals !== undefined) {
+      restoreApprovals(pendingApprovals, convId)
+    }
+  }, [convId, pendingApprovals, restoreApprovals])
 
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
@@ -688,7 +708,24 @@ export function ChatPage() {
                     <MessageBubble
                       key={m.id}
                       msg={m}
-                      onRespondApproval={respondApproval}
+                      onRespondApproval={(approved, remember, answer, approvalId) => {
+                        void respondApproval(approved, remember, answer, approvalId).then(() =>
+                          // The server is the ground truth for an approval's
+                          // outcome — reconcile after every resolve attempt
+                          // (success or failure) so the card reflects it.
+                          Promise.all([
+                            queryClient.invalidateQueries({
+                              queryKey: ["pending-approvals", convId],
+                            }),
+                            queryClient.invalidateQueries({
+                              queryKey: ["conversation-runs", convId],
+                            }),
+                            queryClient.invalidateQueries({
+                              queryKey: ["conversation", convId],
+                            }),
+                          ])
+                        )
+                      }}
                       onPlanApprove={handlePlanApprove}
                       onPlanExecute={handlePlanExecute}
                     />
