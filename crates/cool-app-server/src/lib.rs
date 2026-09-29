@@ -42,14 +42,15 @@ use cool_protocol::{
     PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
     PromptAcceptedResult, ProtocolError, ProvidersOauthCompleteParams,
     ProvidersOauthCompleteResult, ProvidersOauthStartParams, ProvidersOauthStartResult,
-    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess, RssFetchResult,
-    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
-    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
-    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRewindResult,
-    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
-    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
-    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
-    ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    ReplayParams, ReplayResult, ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest,
+    RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
+    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
+    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
+    SessionLoadedResult, SessionRewindResult, SessionRunSummary, SessionRunsResult, SessionSummary,
+    SkillCreateParams, SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame,
+    SubagentRunCancelResult, SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord,
+    TextDelta, ToolCatalogRecord, ToolCompleted, ToolRequested, TransportLimits, UsageUpdated,
+    V1Version,
 };
 use cool_security::{
     CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, RuleState, SecretKeyring,
@@ -71,6 +72,9 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_RPC_ID_BYTES: usize = 128;
 pub const RPC_METHOD: &str = "cool.command";
 pub const EVENT_METHOD: &str = "run.event";
+/// The milestone label `cool doctor` and `GET /api/health` both report —
+/// single source so the two surfaces cannot drift (B8a).
+pub const PHASE: &str = "M12";
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -530,8 +534,10 @@ impl AppServer {
     }
 
     pub fn with_store(config: ServerConfig, store: DurableStore) -> Result<Self, StoreError> {
-        store.recover_incomplete_runs()?;
-        Ok(Self::build(config, store))
+        let recovered = store.recover_incomplete_runs()?;
+        let server = Self::build(config, store);
+        server.mirror_recovered(&recovered);
+        Ok(server)
     }
 
     fn build(config: ServerConfig, store: DurableStore) -> Self {
@@ -561,15 +567,17 @@ impl AppServer {
         policy: CapabilityPolicy,
         default_model: impl Into<String>,
     ) -> Result<Self, StoreError> {
-        store.recover_incomplete_runs()?;
-        Ok(Self::build_with_runtime(
+        let recovered = store.recover_incomplete_runs()?;
+        let server = Self::build_with_runtime(
             config,
             store,
             runtime,
             workspace,
             policy,
             default_model.into(),
-        ))
+        );
+        server.mirror_recovered(&recovered);
+        Ok(server)
     }
 
     fn build_with_runtime(
@@ -657,7 +665,7 @@ impl AppServer {
             .as_ref()
             .zip(config.artifacts_dir.as_ref())
             .map(|(legacy, root)| BlobStore::new(Arc::clone(legacy), root.clone()));
-        Self {
+        let server = Self {
             inner: Arc::new(Inner {
                 config,
                 store,
@@ -684,7 +692,12 @@ impl AppServer {
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
                 pending_oauth: std::sync::Mutex::new(HashMap::new()),
             }),
-        }
+        };
+        // Backfill/repair pass over every conversation-linked canonical run:
+        // replays events past each row's watermark and closes rows left open
+        // by a crash or by runs that predate the mirror.
+        server.reconcile_legacy_mirror();
+        server
     }
 
     /// The background task executor, if a legacy store is configured. Callers
@@ -1627,6 +1640,7 @@ impl AppServer {
                         }
                     }
                 }
+                self.mirror_rewind(&outcome.value);
                 let _ = self
                     .send(
                         &outbound,
@@ -1739,7 +1753,17 @@ impl AppServer {
                     &history,
                     truncated,
                 ) {
-                    Ok(link) => success(id, session_conversation_payload(link)),
+                    Ok(link) => {
+                        // A session can carry pre-link runs (forks, direct
+                        // durable writes); reconcile now so they do not
+                        // stay invisible until the next restart.
+                        self.reconcile_linked_session(
+                            &actor.id,
+                            params.conversation_id,
+                            &link.session_id,
+                        );
+                        success(id, session_conversation_payload(link))
+                    }
                     Err(error) => failure(id, store_error(error)),
                 };
                 let _ = self.send(&outbound, frame).await;
@@ -1825,14 +1849,22 @@ impl AppServer {
                     extensions,
                 ) {
                     Ok(steer) => {
+                        // The acceptance reports the appended event's seq —
+                        // fetch exactly that one: an interleaved append
+                        // between commit and here would otherwise hand the
+                        // mirror and subscribers the wrong event.
+                        let seq = steer.value.seq;
                         let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
                         if steer.created
-                            && let Ok(events) =
-                                self.inner
-                                    .store
-                                    .events(&params.run_id, &actor.id, None, usize::MAX)
-                            && let Some(event) = events.into_iter().last()
+                            && let Ok(events) = self.inner.store.events(
+                                &params.run_id,
+                                &actor.id,
+                                seq.checked_sub(1),
+                                1,
+                            )
+                            && let Some(event) = events.into_iter().next()
                         {
+                            self.mirror_to_legacy(&event);
                             self.publish_to_subscribers(&event).await;
                             let _ = self.send(&outbound, notification(event)).await;
                         }
@@ -1989,6 +2021,7 @@ impl AppServer {
                         // Subscribers get every event even if the owner's
                         // connection has already failed.
                         for event in &acceptance.events {
+                            self.mirror_to_legacy(event);
                             self.publish_to_subscribers(event).await;
                         }
                         if self.send(&outbound, frame).await {
@@ -3020,6 +3053,20 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
+            // Legacy-surface command handled here rather than in
+            // `legacy::dispatch`: replay actually executes a canonical session
+            // run, so it needs this server's runtime, durable store and run
+            // ownership — not just the legacy store.
+            Command::InspectorReplay(params) => {
+                let frame = match self
+                    .inspector_replay(&local_actor(), &params, &outbound, &connection)
+                    .await
+                {
+                    Ok(result) => success(id, ResponsePayload::InspectorReplayed(result)),
+                    Err(error) => failure(id, error),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
             command => {
                 let frame = match self.inner.config.legacy_store.as_deref() {
                     None => failure(id, error(-32010, "legacy_store_unavailable", false)),
@@ -3772,6 +3819,9 @@ impl AppServer {
                 truncated,
             )
             .map_err(store_error)?;
+        // Same reconciliation as the `session.conversation` arm: runs the
+        // session accumulated before the link mirror now, not on restart.
+        self.reconcile_linked_session(&actor.id, conversation_id, &link.session_id);
         Ok(link.session_id)
     }
 
@@ -3997,7 +4047,10 @@ impl AppServer {
         summary: &str,
         cutoff: u64,
     ) -> Result<(), cool_state::StoreError> {
-        let run_id = self.inner.store.start_auxiliary_run(actor_id, session_id)?;
+        let run_id = self
+            .inner
+            .store
+            .start_auxiliary_run(actor_id, session_id, "compact")?;
         let envelope = |event: CanonicalEvent| EventEnvelope {
             event_id: format!("event-{}", Uuid::new_v4()),
             schema_version: V1Version::VALUE,
@@ -4028,6 +4081,9 @@ impl AppServer {
             error_code: None,
         }));
         self.inner.store.append_event_auto(actor_id, terminal)?;
+        // The compaction aux run is a bookkeeping projection, not a user
+        // turn — mirroring it would drop a `completed` picker row with an
+        // empty timeline into `runs.list` for every compact.
         Ok(())
     }
 
@@ -4482,7 +4538,7 @@ impl AppServer {
         let run_id = self
             .inner
             .store
-            .start_auxiliary_run(&actor.id, &session_id)
+            .start_auxiliary_run(&actor.id, &session_id, "research_exec")
             .map_err(store_error)?;
         self.inner
             .store
@@ -4564,6 +4620,139 @@ impl AppServer {
             pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
         let _ = executor.execute(research_run_id, &sink, cancel_rx).await;
+    }
+
+    /// `inspector.replay` (B2): persist the replay bookkeeping row under the
+    /// `inspector.replay` idempotency key, then — on the first create only —
+    /// spawn the canonical session run whose events mirror into that row.
+    /// Legacy-surface only: returns `legacy_store_unavailable` without one.
+    async fn inspector_replay(
+        &self,
+        actor: &ActorRef,
+        params: &ReplayParams,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) -> Result<ReplayResult, ProtocolError> {
+        let Some(store) = self.inner.config.legacy_store.as_deref() else {
+            return Err(error(-32010, "legacy_store_unavailable", false));
+        };
+        let replay = store
+            .run_idempotent(
+                &actor.id,
+                "inspector.replay",
+                params.idempotency_key.as_str(),
+                &legacy::fingerprint(params),
+                || legacy::replay_execution(store, &actor.id, params),
+            )
+            .map_err(legacy::store_error)?;
+        // Always drive the execution, not only when the bookkeeping row is
+        // new: a spawn that failed after the record committed would
+        // otherwise retry into `created: false` and report a running replay
+        // that nothing executes. The `inspector.replay.exec` key inside
+        // `spawn_replay_execution` is what makes this self-idempotent.
+        self.spawn_replay_execution(actor, &replay.value, outbound, connection)
+            .await?;
+        Ok(replay.value.result)
+    }
+
+    /// Materialize the row `inspector.replay` created: ensure the
+    /// conversation's durable session, start an auxiliary canonical run (a
+    /// replay is not the session's active turn), bind the row to it so the
+    /// event mirror lands there, and drive it like a normal prompt.
+    async fn spawn_replay_execution(
+        &self,
+        actor: &ActorRef,
+        replay: &legacy::ReplayExecution,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) -> Result<(), ProtocolError> {
+        let store = self
+            .inner
+            .config
+            .legacy_store
+            .as_deref()
+            .expect("inspector_replay checked");
+        let session_id = self.ensure_conversation_session(replay.conversation_id)?;
+        // The exec key reserves up front: a retried command (same
+        // `inspector.replay` key) never reaches here twice; a crash after
+        // `start_auxiliary_run` but before `record_idempotent` leaves an
+        // unused aux run row — it stays `running` but owns nothing, matching
+        // the `research.start` convention.
+        let key = format!("inspector.replay.exec:{}", replay.result.new_run_id);
+        if let Some(run_id) = self
+            .inner
+            .store
+            .lookup_idempotent::<String>(&actor.id, "inspector.replay.exec", &key, &key)
+            .map_err(store_error)?
+        {
+            // Rebinding the existing run: cover a caller that re-enters after
+            // the exec idempotency row landed but the mirror binding did not.
+            let _ = store.set_run_durable_id(&actor.id, replay.result.new_run_id, &run_id);
+            // A crash between `record_idempotent` and the driver
+            // registration left the exec run recorded but never spawned —
+            // drive it now instead of reporting `running` on an undriven row.
+            if !self.inner.state.lock().await.runs.contains_key(&run_id) {
+                self.drive_replay_run(run_id, replay, outbound, connection)
+                    .await;
+            }
+            return Ok(());
+        }
+        let run_id = self
+            .inner
+            .store
+            .start_auxiliary_run(&actor.id, &session_id, "replay_exec")
+            .map_err(store_error)?;
+        self.inner
+            .store
+            .record_idempotent(&actor.id, "inspector.replay.exec", &key, &key, &run_id)
+            .map_err(store_error)?;
+        store
+            .set_run_durable_id(&actor.id, replay.result.new_run_id, &run_id)
+            .map_err(legacy::store_error)?;
+        self.drive_replay_run(run_id, replay, outbound, connection)
+            .await;
+        Ok(())
+    }
+
+    /// Register the cancel channel + owner for a replay exec run and drive
+    /// it like a normal prompt. Shared by the fresh spawn and the rebind
+    /// path that finds the run recorded but undriven.
+    async fn drive_replay_run(
+        &self,
+        run_id: String,
+        replay: &legacy::ReplayExecution,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) {
+        let (cancel, receiver) = watch::channel(None);
+        self.inner.state.lock().await.runs.insert(
+            run_id.clone(),
+            RunRecord {
+                cancel,
+                terminal: false,
+            },
+        );
+        let connection_id = connection.lock().await.id.clone();
+        self.inner
+            .run_owners
+            .lock()
+            .await
+            .insert(run_id.clone(), connection_id);
+        let input = replay.input.clone().unwrap_or_default();
+        self.spawn_agent_run(
+            run_id,
+            PromptRequest {
+                content: format!("[Replay] {input}"),
+                model_parts: vec![],
+                replay_parts: vec![],
+                model: replay.model.clone(),
+                system_prompt: replay.system_prompt.clone(),
+                plan_mode: false,
+                long_task_mode: false,
+            },
+            receiver,
+            outbound.clone(),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4755,6 +4944,7 @@ impl AppServer {
         let terminal = match acceptance {
             Ok(acceptance) => {
                 for event in acceptance.events {
+                    self.mirror_to_legacy(&event);
                     if let Some(outbound) = outbound {
                         let _ = self.send(outbound, notification(event.clone())).await;
                     }
@@ -4813,6 +5003,7 @@ impl AppServer {
             .store
             .append_event_auto(&local_actor().id, envelope)
             .ok()?;
+        self.mirror_to_legacy(&envelope);
         if let Some(run) = self.inner.state.lock().await.runs.get_mut(run_id) {
             run.terminal = terminal;
         }

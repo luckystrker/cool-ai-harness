@@ -215,6 +215,9 @@ pub struct SessionRunEntry {
     pub last_seq: u64,
     pub finish_reason: Option<String>,
     pub updated_at: String,
+    /// Why an auxiliary run exists (`compact`, `subagent`, `replay_exec`,
+    /// `research_exec`); `None` for regular user-turn runs.
+    pub purpose: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -941,6 +944,11 @@ impl DurableStore {
             extensions: Default::default(),
         }];
         for (_, source) in &copied {
+            // The copies replay history the superseded run already counted —
+            // the `rewound` tag tells projections (the legacy mirror) to emit
+            // the timeline rows but skip spend/tool/usage accounting.
+            let mut extensions = source.extensions.clone();
+            extensions.insert("rewound".to_owned(), serde_json::Value::Bool(true));
             rewind_events.push(EventEnvelope {
                 event_id: format!("event-{}", Uuid::new_v4()),
                 schema_version: V1Version::VALUE,
@@ -954,7 +962,7 @@ impl DurableStore {
                 causation_id: Some(source.event_id.clone()),
                 correlation_id: source.correlation_id.clone(),
                 event: source.event.clone(),
-                extensions: source.extensions.clone(),
+                extensions,
             });
         }
         rewind_events.push(EventEnvelope {
@@ -1324,6 +1332,17 @@ impl DurableStore {
         }
     }
 
+    /// Every `(session_id, conversation_id)` link this actor owns — the
+    /// startup reconciliation sweep's enumeration surface.
+    pub fn linked_sessions(&self, actor_id: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id, conversation_id FROM rust_conversation_links WHERE actor_id = ?1",
+        )?;
+        let rows = statement.query_map([actor_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Newest-first run summaries of one actor-owned session.
     pub fn list_session_runs(
         &self,
@@ -1344,7 +1363,7 @@ impl DurableStore {
             return Err(StoreError::ActorMismatch);
         }
         let mut statement = connection.prepare(
-            "SELECT id, status, last_seq, finish_reason, updated_at FROM rust_runs \
+            "SELECT id, status, last_seq, finish_reason, updated_at, purpose FROM rust_runs \
              WHERE session_id = ?1 ORDER BY rowid DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![session_id, limit as i64], |row| {
@@ -1354,17 +1373,19 @@ impl DurableStore {
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut runs = Vec::new();
         for row in rows {
-            let (run_id, status, last_seq, finish_reason, updated_at) = row?;
+            let (run_id, status, last_seq, finish_reason, updated_at, purpose) = row?;
             runs.push(SessionRunEntry {
                 run_id,
                 status: RunStatus::parse(&status)?,
                 last_seq: last_seq as u64,
                 finish_reason,
                 updated_at,
+                purpose,
             });
         }
         Ok(runs)
@@ -1514,10 +1535,15 @@ impl DurableStore {
     /// The caller owns the run and must append a terminal event to close it;
     /// unlike [`Self::start_run`] this records no idempotency entry because the
     /// auxiliary run is addressed by its own generated id.
+    /// Start a run that is not the session's active turn. `purpose` says
+    /// why the run exists (`compact`, `subagent`, `replay_exec`,
+    /// `research_exec`) so readers can distinguish bookkeeping runs from
+    /// real user turns while they are still running.
     pub fn start_auxiliary_run(
         &self,
         actor_id: &str,
         session_id: &str,
+        purpose: &str,
     ) -> Result<String, StoreError> {
         let connection = self.connection()?;
         let owner: String = connection
@@ -1533,8 +1559,8 @@ impl DurableStore {
         }
         let run_id = format!("run-{}", Uuid::new_v4());
         connection.execute(
-            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
-            params![run_id, session_id, actor_id, timestamp()],
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at, purpose) VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5)",
+            params![run_id, session_id, actor_id, timestamp(), purpose],
         )?;
         Ok(run_id)
     }
@@ -2473,7 +2499,8 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES rust_sessions(id), actor_id TEXT NOT NULL,
            status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled','rewound')),
            last_seq INTEGER NOT NULL DEFAULT 0, checkpoint_json TEXT, usage_json TEXT,
-           iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL
+           iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL,
+           purpose TEXT
          );
          CREATE UNIQUE INDEX IF NOT EXISTS rust_one_active_run ON rust_sessions(id, active_run_id);
          CREATE TABLE IF NOT EXISTS rust_events(
@@ -2561,6 +2588,16 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
              COMMIT;",
         )?;
         connection.execute_batch("PRAGMA foreign_keys = ON")?;
+    }
+    // Run purpose tags: nullable column appended to databases created
+    // before the DDL above carried it. Auxiliary runs (compaction, subagent
+    // lifecycle) are tagged so readers can tell bookkeeping runs from real
+    // user turns even while they are still running.
+    if connection
+        .prepare("SELECT purpose FROM rust_runs LIMIT 0")
+        .is_err()
+    {
+        connection.execute("ALTER TABLE rust_runs ADD COLUMN purpose TEXT", [])?;
     }
     connection.execute(
         "UPDATE rust_schema_meta SET version = 3 WHERE version < 3",

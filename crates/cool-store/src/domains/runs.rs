@@ -92,6 +92,46 @@ pub struct RunFilter {
     pub limit: Option<usize>,
 }
 
+/// Mid-run progress written by the session-run projection: an optional
+/// non-terminal status transition, a `run.started` model assignment, merged
+/// per-call usage, and an iteration bump.
+#[derive(Clone, Debug, Default)]
+pub struct RunProgress {
+    /// Non-terminal status only — terminal transitions belong to
+    /// [`crate::LegacyStore::finish_run`].
+    pub status: Option<String>,
+    /// Model assignment, applied only while `model` is unset.
+    pub model: Option<String>,
+    /// Per-call usage fragment merged key-wise into the cumulative `usage`.
+    pub usage_delta: Option<Value>,
+    /// Iterations to add (one per completed model call).
+    pub iterations_delta: i64,
+}
+
+/// Numeric-sum merge of a per-call usage fragment into a run's cumulative
+/// `usage` blob.
+fn add_usage(usage: &mut Option<Value>, delta: &Value) {
+    let Some(delta_map) = delta.as_object() else {
+        return;
+    };
+    let merged = usage.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !merged.is_object() {
+        *merged = Value::Object(serde_json::Map::new());
+    }
+    let Some(map) = merged.as_object_mut() else {
+        return;
+    };
+    for (key, value) in delta_map {
+        let current = map.remove(key);
+        let sum = match (current.as_ref().and_then(Value::as_f64), value.as_f64()) {
+            (Some(current), Some(delta)) => Value::from(current + delta),
+            (None, Some(delta)) => Value::from(delta),
+            _ => value.clone(),
+        };
+        map.insert(key.clone(), sum);
+    }
+}
+
 impl crate::LegacyStore {
     pub fn list_runs(
         &self,
@@ -208,6 +248,167 @@ impl crate::LegacyStore {
         )?;
         Ok(())
     }
+
+    /// Non-terminal progress update used by the session-run projection: a
+    /// status transition within `queued`/`running`/`awaiting_approval`, a
+    /// model assignment when unset, merged per-call usage, and an iteration
+    /// bump. Terminal transitions stay with [`Self::finish_run`].
+    pub fn update_run_progress(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        progress: &RunProgress,
+    ) -> Result<AgentRun, StoreError> {
+        if let Some(status) = progress.status.as_deref()
+            && !matches!(status, "queued" | "running" | "awaiting_approval")
+        {
+            return Err(StoreError::InvalidInput(format!(
+                "run status {status:?} is not a progress state"
+            )));
+        }
+        let connection = self.connection()?;
+        let mut run = fetch_run(&connection, actor_id, run_id)?;
+        if let Some(delta) = progress.usage_delta.as_ref() {
+            add_usage(&mut run.usage, delta);
+        }
+        connection.execute(
+            "UPDATE agent_runs SET status = COALESCE(?1, status),
+               model = COALESCE(model, ?2), usage = COALESCE(?3, usage),
+               iterations = iterations + ?4, updated_at = ?5 WHERE id = ?6
+               AND finished_at IS NULL",
+            params![
+                progress.status,
+                progress.model,
+                run.usage.as_ref().map(serde_json::to_string).transpose()?,
+                progress.iterations_delta,
+                now_python(),
+                run_id,
+            ],
+        )?;
+        drop(connection);
+        self.get_run(actor_id, run_id)
+    }
+
+    /// The legacy row the session-run projection bound to a canonical run —
+    /// `config.durableRunId` carries the `run-*` id.
+    pub fn find_run_by_durable_id(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        durable_run_id: &str,
+    ) -> Result<Option<AgentRun>, StoreError> {
+        let connection = self.connection()?;
+        require_conversation(&connection, actor_id, conversation_id)?;
+        query_one(
+            &connection,
+            "SELECT * FROM agent_runs WHERE conversation_id = ?1 \
+             AND json_valid(config) AND json_extract(config, '$.durableRunId') = ?2 \
+             ORDER BY id DESC LIMIT 1",
+            params![conversation_id, durable_run_id],
+            AgentRun::from_row,
+        )
+    }
+
+    /// Stamp `config.durableRunId` — how a pre-created legacy run row (replay
+    /// bookkeeping) binds to the canonical run that later materializes it.
+    pub fn set_run_durable_id(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        durable_run_id: &str,
+    ) -> Result<AgentRun, StoreError> {
+        let connection = self.connection()?;
+        let run = fetch_run(&connection, actor_id, run_id)?;
+        let mut config = run
+            .config
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        if !config.is_object() {
+            config = Value::Object(Default::default());
+        }
+        config["durableRunId"] = Value::String(durable_run_id.to_owned());
+        connection.execute(
+            "UPDATE agent_runs SET config = ?1, updated_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&config)?, now_python(), run_id],
+        )?;
+        drop(connection);
+        self.get_run(actor_id, run_id)
+    }
+
+    /// Find-or-create the run row bound to a canonical durable run id. One
+    /// `INSERT ... WHERE NOT EXISTS` statement, so racing first-events for
+    /// the same durable run cannot duplicate the picker row (and its usage).
+    pub fn ensure_run_by_durable_id(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        durable_run_id: &str,
+        new: &NewRun,
+    ) -> Result<AgentRun, StoreError> {
+        let connection = self.connection()?;
+        let user_id = require_conversation(&connection, actor_id, conversation_id)?;
+        let timestamp = now_python();
+        let status = new.status.as_deref().unwrap_or("running");
+        if !RUN_STATUSES.contains(&status) {
+            return Err(StoreError::InvalidInput(format!(
+                "unknown run status {status:?}"
+            )));
+        }
+        let mut config = new
+            .config
+            .clone()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        config["durableRunId"] = Value::String(durable_run_id.to_owned());
+        connection.execute(
+            "INSERT INTO agent_runs(created_at, updated_at, conversation_id, user_id, status,
+               model, config, iterations, started_at)
+             SELECT ?1, ?1, ?2, ?3, ?4, ?5, ?6, 0, ?1
+             WHERE NOT EXISTS (
+               SELECT 1 FROM agent_runs WHERE conversation_id = ?2
+                 AND json_valid(config)
+                 AND json_extract(config, '$.durableRunId') = ?7)",
+            params![
+                timestamp,
+                conversation_id,
+                user_id,
+                status,
+                new.model,
+                json_text(&Some(config))?,
+                durable_run_id,
+            ],
+        )?;
+        drop(connection);
+        self.find_run_by_durable_id(actor_id, conversation_id, durable_run_id)?
+            .ok_or(StoreError::NotFound("run"))
+    }
+
+    /// Watermark of the last canonical `seq` mirrored into this row. The
+    /// mirror advances it per projected event; the reconciliation sweep
+    /// resumes above it and already-projected events skip, so projection
+    /// stays single-shot across retries and overlapping write paths.
+    pub fn set_run_mirror_cursor(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        seq: u64,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        fetch_run(&connection, actor_id, run_id)?;
+        // MAX keeps the watermark monotonic: an out-of-order lower-seq
+        // projection must not regress it (regression would let a later
+        // sweep re-project already-accounted events).
+        connection.execute(
+            "UPDATE agent_runs SET
+               config = json_set(
+                   COALESCE(config, '{}'), '$.mirroredSeq',
+                   MAX(COALESCE(json_extract(config, '$.mirroredSeq'), 0), ?2)
+               ),
+               updated_at = ?3
+             WHERE id = ?1",
+            params![run_id, seq.min(i64::MAX as u64) as i64, now_python()],
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,9 +448,23 @@ impl crate::LegacyStore {
         kind: &str,
         payload: Option<&Value>,
     ) -> Result<RunEvent, StoreError> {
+        self.append_run_event_at(actor_id, run_id, kind, payload, &now_python())
+    }
+
+    /// `append_run_event` with the event's own timestamp instead of
+    /// wall-clock — the session-run projection preserves the canonical
+    /// `occurred_at` so timelines and spend buckets reflect when the work
+    /// happened, not when it was mirrored.
+    pub fn append_run_event_at(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        kind: &str,
+        payload: Option<&Value>,
+        at: &str,
+    ) -> Result<RunEvent, StoreError> {
         let mut connection = self.connection()?;
         fetch_run(&connection, actor_id, run_id)?;
-        let timestamp = now_python();
         let transaction = connection.transaction()?;
         let next_seq: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM run_events WHERE run_id = ?1",
@@ -260,7 +475,7 @@ impl crate::LegacyStore {
             "INSERT INTO run_events(created_at, updated_at, run_id, seq, kind, payload)
              VALUES (?1, ?1, ?2, ?3, ?4, ?5)",
             params![
-                timestamp,
+                at,
                 run_id,
                 next_seq,
                 kind,
@@ -276,8 +491,46 @@ impl crate::LegacyStore {
             seq: next_seq,
             kind: kind.to_string(),
             payload: payload.cloned(),
-            created_at: timestamp,
+            created_at: at.to_owned(),
         })
+    }
+
+    /// `created_at` of the newest run event, if any — the projection derives
+    /// per-call durations from the gap since the last recorded activity.
+    pub fn last_run_event_created_at(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.connection()?;
+        fetch_run(&connection, actor_id, run_id)?;
+        Ok(connection
+            .query_row(
+                "SELECT created_at FROM run_events WHERE run_id = ?1 \
+                 ORDER BY seq DESC LIMIT 1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The mirrored `tool_call_start` event recorded for `call_id`, if any —
+    /// how the projection recovers a finished call's arguments and start.
+    pub fn tool_call_started(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        call_id: &str,
+    ) -> Result<Option<RunEvent>, StoreError> {
+        let connection = self.connection()?;
+        fetch_run(&connection, actor_id, run_id)?;
+        query_one(
+            &connection,
+            "SELECT * FROM run_events WHERE run_id = ?1 AND kind = 'tool_call_start' \
+             AND json_extract(payload, '$.id') = ?2 ORDER BY seq DESC LIMIT 1",
+            params![run_id, call_id],
+            RunEvent::from_row,
+        )
     }
 
     pub fn list_run_events(
