@@ -128,7 +128,7 @@ export function MessageBubble({
           {/* Fork/rewind points (P2.13): shown on hover for durable
               history rows only — the cursor identifies the event-log row. */}
           {msg.cursor != null && (onForkFromHere || onRewindToHere) && (
-            <span className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <span className="pointer-events-none flex items-center gap-1 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
               {onForkFromHere && (
                 <button
                   type="button"

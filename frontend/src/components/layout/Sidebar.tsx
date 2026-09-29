@@ -230,7 +230,7 @@ export function Sidebar({
               "grid shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100",
               inDrawer
                 ? "h-11 w-11"
-                : "h-7 w-7 opacity-0 group-hover:opacity-100"
+                : "h-7 w-7 opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto"
             )}
             title={`Delete ${c.title || `Conversation #${c.id}`}`}
             aria-label={`Delete ${c.title || `Conversation #${c.id}`}`}
@@ -354,7 +354,7 @@ export function Sidebar({
                       </span>
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:focus-visible:opacity-100 md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:pointer-events-none md:transition-opacity md:focus-visible:opacity-100 md:focus-visible:pointer-events-auto md:group-hover:pointer-events-auto md:group-hover:opacity-100"
                       title="New conversation in this project"
                       aria-label={`New conversation in ${p.name}`}
                       onClick={() => createInProjectMutation.mutate(p)}
@@ -366,7 +366,7 @@ export function Sidebar({
                       )}
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:transition-opacity md:focus-visible:opacity-100 md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:pointer-events-none md:transition-opacity md:focus-visible:opacity-100 md:focus-visible:pointer-events-auto md:group-hover:pointer-events-auto md:group-hover:opacity-100"
                       title="Project settings"
                       aria-label={`Settings for ${p.name}`}
                       onClick={() => setSettingsProject(p)}
@@ -374,7 +374,7 @@ export function Sidebar({
                       <Settings2 className="h-3.5 w-3.5" />
                     </button>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:focus-visible:opacity-100 md:group-hover:opacity-100"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7 md:w-7 md:opacity-0 md:pointer-events-none md:transition-opacity md:focus-visible:opacity-100 md:focus-visible:pointer-events-auto md:group-hover:pointer-events-auto md:group-hover:opacity-100"
                       title="Remove project from the sidebar"
                       aria-label={`Remove project ${p.name}`}
                       onClick={() => setDeleteTarget({ kind: "project", project: p })}

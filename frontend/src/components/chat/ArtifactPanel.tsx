@@ -200,7 +200,7 @@ function ArtifactRow({
           {artifact.version > 1 && ` · v${artifact.version}`}
         </span>
       </div>
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      <div className="pointer-events-none flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
         <a href={downloadHref} download={artifact.filename}>
           <Button
             size="icon"

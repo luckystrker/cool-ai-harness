@@ -54,7 +54,7 @@ function RoleList({
               <p className="truncate text-xs text-muted-foreground">{role.description}</p>
             )}
           </button>
-          <div className="flex shrink-0 gap-0.5 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+          <div className="flex shrink-0 gap-0.5 md:opacity-0 md:pointer-events-none md:transition-opacity md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100">
             {!role.is_builtin && (
               <Button
                 variant="ghost"
