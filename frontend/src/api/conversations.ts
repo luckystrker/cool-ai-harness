@@ -48,7 +48,7 @@ async function fetchEventPage(
   afterSeq: number | null,
   pageSize: { limit: number }
 ) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 9; attempt += 1) {
     try {
       return await sdk.runEvents({ runId, afterSeq, limit: pageSize.limit })
     } catch (error) {
