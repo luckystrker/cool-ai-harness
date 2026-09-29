@@ -3,7 +3,7 @@
 mod common;
 
 use common::{DEFAULT_SEED, create_python_database, temp_database};
-use cool_store::domains::runs::{NewApprovalAudit, NewRun, NewToolCall, RunFilter};
+use cool_store::domains::runs::{NewApprovalAudit, NewRun, NewToolCall, RunFilter, RunProgress};
 use cool_store::{LegacyStore, StoreError};
 use serde_json::json;
 use tempfile::TempDir;
@@ -225,6 +225,128 @@ fn tool_call_reads_are_actor_scoped_and_null_owner_rows_are_hidden() {
         .get_tool_call("local-user", orphan_id)
         .expect_err("null-owner row must stay hidden");
     assert!(matches!(error, StoreError::NotFound("tool call")));
+}
+
+#[test]
+fn run_progress_durable_binding_and_timestamped_events_support_the_mirror() {
+    // The session-run -> legacy mirror needs a few store primitives the
+    // pre-cutover surface never used: binding a row to its canonical run id,
+    // backfilling event timestamps, and non-terminal progress updates.
+    let (_directory, store) = adopted_store();
+    let run = store
+        .create_run("local-user", 1, &NewRun::default())
+        .expect("create");
+
+    let bound = store
+        .set_run_durable_id("local-user", run.id, "run-abc")
+        .expect("bind");
+    assert_eq!(
+        bound.config.as_ref().unwrap()["durableRunId"],
+        json!("run-abc")
+    );
+    let found = store
+        .find_run_by_durable_id("local-user", 1, "run-abc")
+        .expect("find")
+        .expect("row");
+    assert_eq!(found.id, run.id);
+    assert!(
+        store
+            .find_run_by_durable_id("local-user", 1, "run-other")
+            .expect("miss")
+            .is_none()
+    );
+
+    let first = store
+        .append_run_event_at(
+            "local-user",
+            run.id,
+            "start",
+            Some(&json!({"model": "gpt-5"})),
+            "2026-01-01 10:00:00.000000",
+        )
+        .expect("start");
+    assert_eq!(first.seq, 0);
+    assert_eq!(first.created_at, "2026-01-01 10:00:00.000000");
+    let second = store
+        .append_run_event_at(
+            "local-user",
+            run.id,
+            "tool_call_start",
+            Some(&json!({"id": "call-1", "name": "read_file", "arguments": {"path": "a.txt"}})),
+            "2026-01-01 10:00:02.000000",
+        )
+        .expect("tool start");
+    assert_eq!(second.seq, 1);
+    assert_eq!(
+        store
+            .last_run_event_created_at("local-user", run.id)
+            .expect("last"),
+        Some("2026-01-01 10:00:02.000000".to_owned())
+    );
+    let started = store
+        .tool_call_started("local-user", run.id, "call-1")
+        .expect("lookup")
+        .expect("row");
+    assert_eq!(
+        started.payload.as_ref().unwrap()["name"],
+        json!("read_file")
+    );
+
+    let progressed = store
+        .update_run_progress(
+            "local-user",
+            run.id,
+            &RunProgress {
+                status: Some("awaiting_approval".to_owned()),
+                model: Some("gpt-5".to_owned()),
+                usage_delta: Some(json!({
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "cost_usd": 0.001
+                })),
+                iterations_delta: 1,
+            },
+        )
+        .expect("progress");
+    assert_eq!(progressed.status, "awaiting_approval");
+    assert_eq!(progressed.model.as_deref(), Some("gpt-5"));
+    assert_eq!(progressed.iterations, 1);
+
+    let again = store
+        .update_run_progress(
+            "local-user",
+            run.id,
+            &RunProgress {
+                usage_delta: Some(json!({
+                    "prompt_tokens": 2,
+                    "total_tokens": 2,
+                    "cost_usd": 0.001
+                })),
+                iterations_delta: 1,
+                ..RunProgress::default()
+            },
+        )
+        .expect("progress 2");
+    assert_eq!(again.iterations, 2);
+    let usage = again.usage.expect("usage merges");
+    assert_eq!(usage["prompt_tokens"].as_f64(), Some(12.0));
+    assert_eq!(usage["total_tokens"].as_f64(), Some(17.0));
+    assert!((usage["cost_usd"].as_f64().unwrap() - 0.002).abs() < 1e-9);
+    // Fields absent from the delta survive untouched.
+    assert_eq!(usage["completion_tokens"].as_f64(), Some(5.0));
+
+    let error = store
+        .update_run_progress(
+            "local-user",
+            run.id,
+            &RunProgress {
+                status: Some("completed".to_owned()),
+                ..RunProgress::default()
+            },
+        )
+        .expect_err("terminal status must go through finish_run");
+    assert!(matches!(error, StoreError::InvalidInput(_)));
 }
 
 #[test]

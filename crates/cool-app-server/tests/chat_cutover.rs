@@ -15,6 +15,7 @@ use cool_security::{CapabilityPolicy, Decision, Workspace};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::domains::conversations::{NewConversation, NewMessage};
+use cool_store::domains::runs::RunFilter;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::timeout;
@@ -33,6 +34,29 @@ fn legacy_server() -> (AppServer, Arc<LegacyStore>) {
     };
     let server =
         AppServer::with_store(config, DurableStore::in_memory().expect("durable")).expect("server");
+    (server, store)
+}
+
+fn scripted_legacy_server(
+    provider: Arc<ScriptedDriver>,
+    workspace: &std::path::Path,
+) -> (AppServer, Arc<LegacyStore>) {
+    let store = LegacyStore::in_memory().expect("in-memory legacy store");
+    store.ensure_actor("local-user").expect("actor");
+    let store = Arc::new(store);
+    let config = ServerConfig {
+        legacy_store: Some(store.clone()),
+        ..ServerConfig::default()
+    };
+    let server = AppServer::with_agent_runtime(
+        config,
+        DurableStore::in_memory().expect("durable"),
+        AgentRuntime::new(provider, builtin_registry()),
+        Workspace::new(workspace).expect("workspace"),
+        CapabilityPolicy::new(Some(Decision::Allow)),
+        "scripted",
+    )
+    .expect("server");
     (server, store)
 }
 
@@ -132,6 +156,28 @@ async fn drain_run(
                 | CanonicalEvent::RunCancelled(_)
         );
         collected.push(envelope.event);
+        if terminal {
+            return collected;
+        }
+    }
+}
+
+async fn drain_terminal(
+    mut events: tokio::sync::broadcast::Receiver<EventEnvelope>,
+) -> Vec<EventEnvelope> {
+    let mut collected = Vec::new();
+    loop {
+        let envelope = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("event arrival timeout")
+            .expect("event channel open");
+        let terminal = matches!(
+            envelope.event,
+            CanonicalEvent::RunCompleted(_)
+                | CanonicalEvent::RunFailed(_)
+                | CanonicalEvent::RunCancelled(_)
+        );
+        collected.push(envelope);
         if terminal {
             return collected;
         }
@@ -613,4 +659,242 @@ async fn session_runs_lists_import_and_prompt_runs_newest_first() {
     let last = history.items.last().expect("assistant reply");
     assert_eq!(last.role, "assistant");
     assert_eq!(last.content.as_deref(), Some("canonical reply"));
+}
+
+#[tokio::test]
+async fn session_run_mirrors_into_legacy_inspector_and_analytics() {
+    // B2/B7 regression: a canonical session run on a conversation-linked
+    // session projects into the legacy run/event/spend tables, so the
+    // Inspector run picker and timeline plus the Analytics/Budgets pages see
+    // the real data instead of empty rows.
+    let directory = tempdir().unwrap();
+    let provider = Arc::new(ScriptedDriver::new([Ok(vec![
+        ModelEvent::Content("done".to_owned()),
+        ModelEvent::Usage(cool_agent::Usage {
+            prompt_tokens: 12,
+            completion_tokens: 8,
+            total_tokens: 20,
+            cost_micro_usd: Some(42_000),
+            ..Default::default()
+        }),
+        ModelEvent::Finish { reason: None },
+    ])]));
+    let (server, store) = scripted_legacy_server(provider, directory.path());
+    let (client, _task) = connected_client(server).await;
+
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Mirrored run".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let linked = request(&client, link_command(conversation.id)).await;
+    let ResponsePayload::SessionForConversation(link) = linked else {
+        panic!("unexpected payload: {linked:?}");
+    };
+
+    let events = client.subscribe();
+    let run_id = client
+        .prompt("mirror-prompt", &link.session_id, "do the thing", None)
+        .await
+        .expect("prompt")
+        .run_id;
+    drain_run(events, &run_id).await;
+
+    let session_runs = request(
+        &client,
+        Command::SessionRuns(SessionRunsParams {
+            session_id: link.session_id.clone(),
+            limit: 10,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionRuns(session_runs) = session_runs else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(session_runs.runs.len(), 2);
+    assert_eq!(session_runs.runs[0].run_id, run_id);
+    assert_eq!(
+        session_runs.runs[1].finish_reason.as_deref(),
+        Some("import")
+    );
+
+    let listed = request(
+        &client,
+        Command::RunsList(RunListParams {
+            conversation_id: conversation.id,
+            before_id: None,
+            limit: 10,
+        }),
+    )
+    .await;
+    let ResponsePayload::RunsListed(runs) = listed else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(runs.len(), 1);
+    let mirrored = &runs[0];
+    assert_eq!(mirrored.status, "completed");
+    assert_eq!(
+        mirrored
+            .config
+            .as_ref()
+            .and_then(|config| config["durableRunId"].as_str()),
+        Some(run_id.as_str())
+    );
+    let usage = mirrored.usage.clone().expect("run usage recorded");
+    assert_eq!(usage["total_tokens"].as_f64(), Some(20.0));
+
+    let timeline = request(
+        &client,
+        Command::InspectorTimeline(LegacyIdParams { id: mirrored.id }),
+    )
+    .await;
+    let ResponsePayload::InspectorTimeline(timeline) = timeline else {
+        panic!("unexpected payload");
+    };
+    let kinds = timeline
+        .entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["start", "message", "llm_call_complete", "finish"] {
+        assert!(
+            kinds.contains(&expected),
+            "timeline missing {expected}: {kinds:?}"
+        );
+    }
+
+    let summary = request(
+        &client,
+        Command::AnalyticsSummary(AnalyticsDaysParams { days: 30 }),
+    )
+    .await;
+    assert!(matches!(
+        summary,
+        ResponsePayload::AnalyticsSummary(summary)
+            if summary.total_llm_calls == 1 && summary.total_tokens == 20
+    ));
+
+    let spend = request(
+        &client,
+        Command::BudgetsSpend(BudgetSpendParams {
+            since: None,
+            limit: 10,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        spend,
+        ResponsePayload::BudgetsSpend(rows)
+            if rows.len() == 1 && rows[0].total_tokens == 20 && rows[0].model == "scripted"
+    ));
+}
+
+#[tokio::test]
+async fn inspector_replay_spawns_a_mirrored_agent_run() {
+    // The legacy `inspector.replay` bookkeeping creates the replacement run
+    // row; the canonical pipeline then executes it and the mirror fills the
+    // row in — matching what the Inspector Replay button drives.
+    let directory = tempdir().unwrap();
+    let script = || {
+        Ok(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Finish { reason: None },
+        ])
+    };
+    let provider = Arc::new(ScriptedDriver::new([script(), script()]));
+    let (server, store) = scripted_legacy_server(provider, directory.path());
+    let (client, _task) = connected_client(server).await;
+
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Replay source".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let linked = request(&client, link_command(conversation.id)).await;
+    let ResponsePayload::SessionForConversation(link) = linked else {
+        panic!("unexpected payload: {linked:?}");
+    };
+
+    let events = client.subscribe();
+    let run_id = client
+        .prompt("replay-source", &link.session_id, "original prompt", None)
+        .await
+        .expect("prompt")
+        .run_id;
+    drain_run(events, &run_id).await;
+    let original = store
+        .find_run_by_durable_id("local-user", conversation.id, &run_id)
+        .expect("lookup")
+        .expect("mirrored original");
+
+    let events = client.subscribe();
+    let replayed = request(
+        &client,
+        Command::InspectorReplay(ReplayParams {
+            idempotency_key: key("replay-mirror-1"),
+            run_id: original.id,
+            model: None,
+            system_prompt: None,
+            temperature: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::InspectorReplayed(replay) = replayed else {
+        panic!("unexpected payload: {replayed:?}");
+    };
+    assert_eq!(replay.original_run_id, original.id);
+    assert_ne!(replay.new_run_id, original.id);
+    assert_eq!(replay.status, "running");
+
+    // The canonical replay run executes on its own durable run id; the
+    // mirror binds the pre-created legacy row to it and drives it to a
+    // terminal status.
+    let envelopes = drain_terminal(events).await;
+    let aux_run_id = envelopes
+        .last()
+        .map(|envelope| envelope.run_id.clone())
+        .expect("terminal envelope");
+    let row = store
+        .get_run("local-user", replay.new_run_id)
+        .expect("replay row");
+    assert_eq!(row.status, "completed");
+    assert_eq!(
+        row.config
+            .as_ref()
+            .and_then(|config| config["durableRunId"].as_str()),
+        Some(aux_run_id.as_str())
+    );
+
+    // Repeating the call replays the stored idempotent record instead of
+    // spawning a second execution.
+    let again = request(
+        &client,
+        Command::InspectorReplay(ReplayParams {
+            idempotency_key: key("replay-mirror-1"),
+            run_id: original.id,
+            model: None,
+            system_prompt: None,
+            temperature: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::InspectorReplayed(again) = again else {
+        panic!("unexpected payload: {again:?}");
+    };
+    assert_eq!(again.new_run_id, replay.new_run_id);
+    assert_eq!(
+        store
+            .list_runs("local-user", conversation.id, &RunFilter::default())
+            .expect("runs")
+            .len(),
+        2
+    );
 }

@@ -11,6 +11,7 @@
 
 mod admin;
 mod memory;
+pub(crate) mod mirror;
 
 pub(crate) use admin::provider_record;
 
@@ -37,8 +38,8 @@ use cool_store::domains::conversations::{
 };
 use cool_store::domains::runs::{NewRun, RunFilter};
 use cool_store::{LegacyStore, StoreError, observability};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Command as ProcessCommand;
 use tokio::time::timeout;
@@ -281,17 +282,6 @@ pub(crate) async fn dispatch(
             .map_err(store_error)?;
             Ok(ResponsePayload::InspectorCompared(convert(comparison)?))
         }
-        Command::InspectorReplay(params) => {
-            let replay = idempotent(
-                store,
-                actor,
-                "inspector.replay",
-                &params.idempotency_key,
-                &fingerprint(&params),
-                || replay_run(store, &actor.id, &params),
-            )?;
-            Ok(ResponsePayload::InspectorReplayed(replay))
-        }
         Command::WorkspaceGitInfo(params) => Ok(ResponsePayload::WorkspaceGitInfo(
             git_info(&params.path).await?,
         )),
@@ -346,11 +336,26 @@ pub(crate) async fn dispatch(
     }
 }
 
-fn replay_run(
+/// The legacy row plus the prompt material the dispatch layer needs to
+/// actually run a replay — `ReplayResult` is the wire shape and stays minimal
+/// (B2: `inspector.replay` used to persist a row that never executed).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReplayExecution {
+    pub result: ReplayResult,
+    pub conversation_id: i64,
+    /// The source run's last user prompt; `None` when the conversation has no
+    /// user message to replay.
+    pub input: Option<String>,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+}
+
+pub(crate) fn replay_execution(
     store: &LegacyStore,
     actor_id: &str,
     params: &ReplayParams,
-) -> Result<ReplayResult, StoreError> {
+) -> Result<ReplayExecution, StoreError> {
     let run = store.get_run(actor_id, params.run_id)?;
     let page = MessagePage {
         before_id: None,
@@ -363,7 +368,7 @@ fn replay_run(
         .filter(|message| message.role == "user" && message.created_at <= run.started_at)
         .max_by(|left, right| left.created_at.cmp(&right.created_at))
         .and_then(|message| message.content.clone());
-    if let Some(input) = user_input {
+    if let Some(input) = user_input.as_deref() {
         store.add_message(
             actor_id,
             run.conversation_id,
@@ -388,10 +393,16 @@ fn replay_run(
             ..NewRun::default()
         },
     )?;
-    Ok(ReplayResult {
-        new_run_id: new_run.id,
-        original_run_id: params.run_id,
-        status: new_run.status,
+    Ok(ReplayExecution {
+        result: ReplayResult {
+            new_run_id: new_run.id,
+            original_run_id: params.run_id,
+            status: new_run.status,
+        },
+        conversation_id: run.conversation_id,
+        input: user_input,
+        model: new_run.model,
+        system_prompt: params.system_prompt.clone(),
     })
 }
 
