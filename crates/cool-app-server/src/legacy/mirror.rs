@@ -33,7 +33,7 @@
 //! them once.
 
 use cool_protocol::{CanonicalEvent, EventEnvelope};
-use cool_state::{DurableStore, RunStatus, SessionRewindOutcome};
+use cool_state::{DurableStore, RunStatus, SessionRewindOutcome, SessionRunEntry};
 use cool_store::LegacyStore;
 use cool_store::domains::budgets::NewSpendEntry;
 use cool_store::domains::runs::{AgentRun, NewRun, NewToolCall, RunProgress};
@@ -116,12 +116,12 @@ impl AppServer {
     /// row's `config.mirroredSeq` watermark — backfilling runs that predate
     /// the mirror (or missed a write mid-crash) — then closes rows still
     /// open whose canonical run is already terminal. `import` runs (the
-    /// link-time transcript projection) and compaction pseudo-runs are not
-    /// picker material and stay unmirrored.
+    /// link-time transcript projection), compaction and subagent-lifecycle
+    /// pseudo-runs are not picker material and stay unmirrored.
     pub(crate) fn reconcile_legacy_mirror(&self) {
-        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+        if self.inner.config.legacy_store.is_none() {
             return;
-        };
+        }
         let actor = local_actor();
         let links = match self.inner.store.linked_sessions(&actor.id) {
             Ok(links) => links,
@@ -131,65 +131,110 @@ impl AppServer {
             }
         };
         for (session_id, conversation_id) in links {
-            let runs = match self
-                .inner
-                .store
-                .list_session_runs(&actor.id, &session_id, usize::MAX)
-            {
-                Ok(runs) => runs,
-                Err(error) => {
-                    warn!(
-                        session_id = %session_id,
-                        "legacy mirror sweep could not list runs: {error}"
-                    );
-                    continue;
-                }
-            };
-            for run in runs {
-                if run.finish_reason.as_deref() == Some("import") {
-                    continue;
-                }
-                let cursor = legacy
-                    .find_run_by_durable_id(&actor.id, conversation_id, &run.run_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|row| mirror_cursor(&row));
-                match self
-                    .inner
-                    .store
-                    .events(&run.run_id, &actor.id, cursor, usize::MAX)
-                {
-                    Ok(events) => {
-                        for envelope in &events {
-                            self.mirror_to_legacy(envelope);
-                        }
+            self.reconcile_linked_session(&actor.id, conversation_id, &session_id);
+        }
+    }
+
+    /// Per-conversation half of `reconcile_legacy_mirror`, also invoked when
+    /// a conversation binds its durable session after startup: pre-link
+    /// runs of that session mirror now rather than on the next restart.
+    /// Replays at most `MIRROR_SWEEP_EVENTS_PER_RUN` events per run — the
+    /// watermark makes the sweep resumable, so a deeper backlog finishes on
+    /// the next restart instead of blocking this boot (or link).
+    pub(crate) fn reconcile_linked_session(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        session_id: &str,
+    ) {
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return;
+        };
+        let runs = match self
+            .inner
+            .store
+            .list_session_runs(actor_id, session_id, usize::MAX)
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                warn!(
+                    session_id = %session_id,
+                    "legacy mirror sweep could not list runs: {error}"
+                );
+                return;
+            }
+        };
+        for run in runs {
+            if is_auxiliary_run(&run) {
+                continue;
+            }
+            let cursor = legacy
+                .find_run_by_durable_id(actor_id, conversation_id, &run.run_id)
+                .ok()
+                .flatten()
+                .and_then(|row| mirror_cursor(&row));
+            match self.inner.store.events(
+                &run.run_id,
+                actor_id,
+                cursor,
+                MIRROR_SWEEP_EVENTS_PER_RUN,
+            ) {
+                Ok(events) => {
+                    for envelope in &events {
+                        self.mirror_to_legacy(envelope);
                     }
-                    Err(error) => warn!(
-                        run_id = %run.run_id,
-                        "legacy mirror sweep could not read events: {error}"
-                    ),
                 }
-                // A canonical run already terminal whose mirrored row never
-                // closed (crash between the writes, or pre-mirror drift).
-                if run.status.is_terminal()
-                    && let Err(error) = close_terminal_run(
-                        legacy,
-                        &self.inner.store,
-                        &actor.id,
-                        &run.run_id,
-                        legacy_status(run.status),
-                        run.finish_reason.as_deref(),
-                        None,
-                    )
-                {
-                    warn!(
-                        run_id = %run.run_id,
-                        "legacy mirror sweep could not close run: {error}"
-                    );
-                }
+                Err(error) => warn!(
+                    run_id = %run.run_id,
+                    "legacy mirror sweep could not read events: {error}"
+                ),
+            }
+            // A canonical run already terminal whose mirrored row never
+            // closed (crash between the writes, or pre-mirror drift).
+            if run.status.is_terminal()
+                && let Err(error) = close_terminal_run(
+                    legacy,
+                    &self.inner.store,
+                    actor_id,
+                    &run.run_id,
+                    legacy_status(run.status),
+                    run.finish_reason.as_deref(),
+                    None,
+                )
+            {
+                warn!(
+                    run_id = %run.run_id,
+                    "legacy mirror sweep could not close run: {error}"
+                );
             }
         }
     }
+}
+
+/// Per-run replay budget for a single reconciliation pass; the
+/// `mirroredSeq` watermark makes the sweep resumable, so capping each run
+/// bounds first-boot (and link-time) latency on large stores — a deeper
+/// backlog resumes where it stopped on the next pass rather than needing
+/// an unbounded replay here.
+const MIRROR_SWEEP_EVENTS_PER_RUN: usize = 4096;
+
+/// Runs that exist only to host bookkeeping events are not picker or
+/// Analytics material: compaction projections and subagent lifecycle rows
+/// have their own domains, and the link-time `import` run is a transcript
+/// projection, not an execution. `purpose` covers runs still in flight;
+/// `finish_reason` covers rows written before the purpose column existed.
+/// User-facing aux runs (`replay_exec`, `research_exec`) and crash-recovered
+/// real runs (`core_restarted`) keep mirroring.
+fn is_auxiliary_run(run: &SessionRunEntry) -> bool {
+    matches!(run.purpose.as_deref(), Some("compact") | Some("subagent"))
+        || matches!(
+            run.finish_reason.as_deref(),
+            Some("import") | Some("compact")
+        )
+        || run
+            .finish_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("subagent_"))
 }
 
 /// Anything the projection can hit — the mirror is best-effort and swallows

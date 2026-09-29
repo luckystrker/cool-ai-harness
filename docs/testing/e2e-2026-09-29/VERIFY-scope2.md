@@ -1,7 +1,7 @@
 # Scope 2 verification — Inspector + Analytics/Budgets data paths (B2, B7, B8a)
 
-Branch: `fix/scope2-data-paths` (iteration-1 review fixes added on top of
-`a2b50cb`, `79a8157`).
+Branch: `fix/scope2-data-paths` (iteration-2 review fixes added on top of
+`a2b50cb`, `79a8157` + iteration-1).
 
 ## What changed and why
 
@@ -53,12 +53,25 @@ Correctness guards added in the review iteration:
   build: it walks every conversation-linked session's canonical runs, replays
   events above each row's `mirroredSeq` watermark (backfilling runs that
   predate the mirror), and force-closes mirrored rows still open whose
-  canonical run is terminal. `import` runs (the link-time transcript
-  projection) and `session.compact` pseudo-runs are deliberately not mirrored —
-  neither is picker material.
-- **Watermark dedupe.** `project()` skips any envelope with `seq <=
-  mirroredSeq`, so overlapping write paths (live hook ↔ sweep ↔ recovery
-  mirror) can't double-project an event.
+  canonical run is terminal. The same per-session reconcile
+  (`reconcile_linked_session`) also runs when a conversation binds its
+  durable session after startup, so pre-link runs do not wait for a restart.
+- **Auxiliary runs never mirror.** Every canonical run carries a `purpose`
+  tag at creation (`rust_runs.purpose`): `compact` and `subagent`
+  bookkeeping runs are skipped by the sweep even while still running
+  (`finish_reason` `import`/`compact`/`subagent_*` covers rows written
+  before the column existed); `replay_exec` and `research_exec` runs are
+  user-facing and keep mirroring, as do crash-recovered real runs
+  (`core_restarted`). Pre-purpose running aux rows can not be told apart
+  from real runs — that window is tiny and self-heals at terminal.
+- **Bounded sweep.** Each run replays at most 4096 events per pass
+  (`MIRROR_SWEEP_EVENTS_PER_RUN`) — a deeper backlog resumes from
+  `mirroredSeq` on the next pass instead of blocking boot or link.
+- **Watermark dedupe is monotonic.** `project()` skips any envelope with
+  `seq <= mirroredSeq`, so overlapping write paths (live hook ↔ sweep ↔
+  recovery mirror) can't double-project an event, and
+  `set_run_mirror_cursor` uses `MAX(existing, new)` so an out-of-order
+  projection can't regress the watermark.
 - **Projection errors warn, never silently drop.** `tracing::warn!` on every
   mirror failure; the canonical append is unaffected either way.
 - **Atomic row creation.** `ensure_run_by_durable_id` uses
@@ -106,7 +119,13 @@ Every path above is covered by in-process tests on `ScriptedDriver` + two
 - `startup_sweep_backfills_unmirrored_runs` — a completed canonical run
   written straight to `DurableStore` (no mirror hook) is fully backfilled by
   the startup sweep: row, usage, spend, and the
-  start/message/llm_call_complete/finish timeline.
+  start/message/llm_call_complete/finish timeline. It also seeds
+  `rewound`-tagged `usage.updated`/`tool.completed` copies and asserts they
+  add no `spend_log`/`tool_calls`/`usage` rows — the copied-usage invariant
+  locked directly (copied kinds are unconstrained by `is_history_event`).
+- `startup_sweep_skips_auxiliary_runs` — `subagent` and `compact` purpose
+  runs (with usage events) produce no `agent_runs` row and no spend;
+  a `replay_exec` purpose run mirrors normally.
 - `inspector_replay_spawns_a_mirrored_agent_run` — replay bookkeeping +
   spawn; a repeat call replays the idempotent record and still reaches the
   self-idempotent exec gate (no zombie `running` bookkeeping rows).
@@ -117,7 +136,7 @@ Every path above is covered by in-process tests on `ScriptedDriver` + two
 
 ## Automated evidence
 
-- `cargo test -p cool-app-server --test chat_cutover` — 13/13, incl.:
+- `cargo test -p cool-app-server --test chat_cutover` — all pass, incl.:
   - `session_run_mirrors_into_legacy_inspector_and_analytics`: prompt →
     `session.runs` has the canonical run, `runs.list` returns the mirrored
     `completed` row with `config.durableRunId` = canonical run id and merged

@@ -394,9 +394,15 @@ impl crate::LegacyStore {
     ) -> Result<(), StoreError> {
         let connection = self.connection()?;
         fetch_run(&connection, actor_id, run_id)?;
+        // MAX keeps the watermark monotonic: an out-of-order lower-seq
+        // projection must not regress it (regression would let a later
+        // sweep re-project already-accounted events).
         connection.execute(
             "UPDATE agent_runs SET
-               config = json_set(COALESCE(config, '{}'), '$.mirroredSeq', ?2),
+               config = json_set(
+                   COALESCE(config, '{}'), '$.mirroredSeq',
+                   MAX(COALESCE(json_extract(config, '$.mirroredSeq'), 0), ?2)
+               ),
                updated_at = ?3
              WHERE id = ?1",
             params![run_id, seq.min(i64::MAX as u64) as i64, now_python()],

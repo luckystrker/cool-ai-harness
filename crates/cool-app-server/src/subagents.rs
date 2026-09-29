@@ -838,7 +838,7 @@ impl SubagentExecutor {
             .ok()??;
         let run_id = self
             .durable
-            .start_auxiliary_run(actor_id, &session_id)
+            .start_auxiliary_run(actor_id, &session_id, "subagent")
             .ok()?;
         Some((session_id, run_id))
     }

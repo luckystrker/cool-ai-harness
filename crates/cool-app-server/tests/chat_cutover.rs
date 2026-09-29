@@ -991,16 +991,18 @@ async fn rewind_mirrors_copied_history_without_double_counting() {
         1
     );
 
-    // Rewind to just after the tool call: the copied `tool.completed` and
-    // `item.completed` history events are tagged and must not re-count.
+    // Rewind to just before `run.completed`: the retained window holds the
+    // `usage.updated` event too. It is not in `is_history_event`'s copied
+    // set today, so it stays un-copied — the tagged-copy assertions below
+    // still lock the accounting side for the copied window it sits in.
     let window = durable
         .session_event_window(&link.session_id, "local-user", None, usize::MAX)
         .expect("window");
     let cursor = window
         .iter()
-        .find(|(_, envelope)| matches!(envelope.event, CanonicalEvent::ToolCompleted(_)))
+        .find(|(_, envelope)| matches!(envelope.event, CanonicalEvent::UsageUpdated(_)))
         .map(|(rowid, _)| *rowid)
-        .expect("tool.completed cursor");
+        .expect("usage.updated cursor");
     let rewound = request(
         &client,
         Command::SessionRewind(SessionRewindParams {
@@ -1169,35 +1171,73 @@ fn startup_sweep_backfills_unmirrored_runs() {
         .start_run("local-user", "run", "fp", &link.session_id)
         .expect("run")
         .value;
-    for (seq, event) in [
-        CanonicalEvent::RunStarted(RunStarted {
-            model: Some("scripted".to_owned()),
-            mode: None,
-        }),
-        CanonicalEvent::ItemCompleted(ItemEvent {
-            role: Some("assistant".to_owned()),
-            content: Some("backfilled".to_owned()),
-            tool_calls: Vec::new(),
-        }),
-        CanonicalEvent::UsageUpdated(UsageUpdated {
-            prompt_tokens: 4,
-            completion_tokens: 6,
-            total_tokens: 10,
-            cost_usd: Some(0.001),
-        }),
-        CanonicalEvent::RunCompleted(RunTerminal {
-            reason: "stop".to_owned(),
-            error_code: None,
-        }),
+    // `rewound` marks the envelope as a retained-history copy (what
+    // `rewind_session` stamps on cloned events): it projects only its
+    // timeline row, never spend/tool/usage accounting. Exercised here
+    // directly because `usage.updated` is not in the copied set
+    // `is_history_event` uses today — this locks the invariant for any
+    // copy, whatever the set becomes.
+    for (seq, (event, rewound)) in [
+        (
+            CanonicalEvent::RunStarted(RunStarted {
+                model: Some("scripted".to_owned()),
+                mode: None,
+            }),
+            false,
+        ),
+        (
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("assistant".to_owned()),
+                content: Some("backfilled".to_owned()),
+                tool_calls: Vec::new(),
+            }),
+            false,
+        ),
+        (
+            CanonicalEvent::UsageUpdated(UsageUpdated {
+                prompt_tokens: 4,
+                completion_tokens: 6,
+                total_tokens: 10,
+                cost_usd: Some(0.001),
+            }),
+            false,
+        ),
+        (
+            CanonicalEvent::ToolCompleted(ToolCompleted {
+                call_id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                result: json!({"bytes": 8}),
+            }),
+            true,
+        ),
+        (
+            CanonicalEvent::UsageUpdated(UsageUpdated {
+                prompt_tokens: 60,
+                completion_tokens: 39,
+                total_tokens: 99,
+                cost_usd: Some(0.009),
+            }),
+            true,
+        ),
+        (
+            CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "stop".to_owned(),
+                error_code: None,
+            }),
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
     {
+        let mut envelope = durable_event(&link.session_id, &run_id, seq as u64 + 1, event);
+        if rewound {
+            envelope
+                .extensions
+                .insert("rewound".to_owned(), json!(true));
+        }
         durable
-            .append_event(
-                "local-user",
-                &durable_event(&link.session_id, &run_id, seq as u64 + 1, event),
-            )
+            .append_event("local-user", &envelope)
             .expect("append");
     }
 
@@ -1219,14 +1259,23 @@ fn startup_sweep_backfills_unmirrored_runs() {
         row.usage
             .as_ref()
             .and_then(|usage| usage["total_tokens"].as_f64()),
-        Some(10.0)
+        Some(10.0),
+        "the tagged usage copy must not add to run usage"
     );
     assert_eq!(
         store
             .list_spend("local-user", None, None)
             .expect("spend")
             .len(),
-        1
+        1,
+        "the tagged usage copy must not add a spend_log row"
+    );
+    assert!(
+        store
+            .list_tool_calls("local-user", Some(conversation.id), None)
+            .expect("tool calls")
+            .is_empty(),
+        "the tagged tool.completed copy must not add a tool_calls row"
     );
     let kinds: Vec<String> = store
         .list_run_events("local-user", row.id, None, Some(100))
@@ -1234,10 +1283,113 @@ fn startup_sweep_backfills_unmirrored_runs() {
         .iter()
         .map(|event| event.kind.clone())
         .collect();
-    for expected in ["start", "message", "llm_call_complete", "finish"] {
+    for expected in [
+        "start",
+        "message",
+        "llm_call_complete",
+        "tool_result",
+        "finish",
+    ] {
         assert!(
             kinds.iter().any(|kind| kind == expected),
             "{expected} in {kinds:?}"
         );
     }
+}
+
+/// The sweep must not resurrect the aux-run noise the mirror deliberately
+/// skips: compaction and subagent-lifecycle bookkeeping runs belong to
+/// their own domains — a restart must not change what the picker or
+/// Analytics show. `replay_exec` runs stay user-facing and keep mirroring.
+#[test]
+fn startup_sweep_skips_auxiliary_runs() {
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Aux sweep".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let durable = DurableStore::in_memory().expect("durable");
+    let link = durable
+        .link_conversation(
+            "local-user",
+            "link",
+            "fp",
+            conversation.id,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("link");
+    let terminal = |reason: &str| {
+        CanonicalEvent::RunCompleted(RunTerminal {
+            reason: reason.to_owned(),
+            error_code: None,
+        })
+    };
+    let usage = || {
+        CanonicalEvent::UsageUpdated(UsageUpdated {
+            prompt_tokens: 2,
+            completion_tokens: 1,
+            total_tokens: 3,
+            cost_usd: Some(0.001),
+        })
+    };
+    let seed_aux = |purpose: &str, reason: &str| {
+        let run_id = durable
+            .start_auxiliary_run("local-user", &link.session_id, purpose)
+            .expect("aux run");
+        for (seq, event) in [usage(), terminal(reason)].into_iter().enumerate() {
+            durable
+                .append_event(
+                    "local-user",
+                    &durable_event(&link.session_id, &run_id, seq as u64 + 1, event),
+                )
+                .expect("append");
+        }
+        run_id
+    };
+    let subagent_run = seed_aux("subagent", "subagent_completed");
+    let compact_run = seed_aux("compact", "compact");
+    let replay_run = seed_aux("replay_exec", "stop");
+
+    let _server = AppServer::with_store(
+        ServerConfig {
+            legacy_store: Some(store.clone()),
+            ..ServerConfig::default()
+        },
+        durable,
+    )
+    .expect("server");
+
+    for run_id in [&subagent_run, &compact_run] {
+        assert!(
+            store
+                .find_run_by_durable_id("local-user", conversation.id, run_id)
+                .expect("find")
+                .is_none(),
+            "aux run {run_id} must not produce a picker row"
+        );
+    }
+    assert!(
+        store
+            .find_run_by_durable_id("local-user", conversation.id, &replay_run)
+            .expect("find")
+            .is_some(),
+        "replay exec runs are user-facing and must still mirror"
+    );
+    assert_eq!(
+        store
+            .list_spend("local-user", None, None)
+            .expect("spend")
+            .len(),
+        1,
+        "only the replay exec run's usage may reach spend_log"
+    );
 }

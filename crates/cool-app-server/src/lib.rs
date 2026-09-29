@@ -1753,7 +1753,17 @@ impl AppServer {
                     &history,
                     truncated,
                 ) {
-                    Ok(link) => success(id, session_conversation_payload(link)),
+                    Ok(link) => {
+                        // A session can carry pre-link runs (forks, direct
+                        // durable writes); reconcile now so they do not
+                        // stay invisible until the next restart.
+                        self.reconcile_linked_session(
+                            &actor.id,
+                            params.conversation_id,
+                            &link.session_id,
+                        );
+                        success(id, session_conversation_payload(link))
+                    }
                     Err(error) => failure(id, store_error(error)),
                 };
                 let _ = self.send(&outbound, frame).await;
@@ -3809,6 +3819,9 @@ impl AppServer {
                 truncated,
             )
             .map_err(store_error)?;
+        // Same reconciliation as the `session.conversation` arm: runs the
+        // session accumulated before the link mirror now, not on restart.
+        self.reconcile_linked_session(&actor.id, conversation_id, &link.session_id);
         Ok(link.session_id)
     }
 
@@ -4034,7 +4047,10 @@ impl AppServer {
         summary: &str,
         cutoff: u64,
     ) -> Result<(), cool_state::StoreError> {
-        let run_id = self.inner.store.start_auxiliary_run(actor_id, session_id)?;
+        let run_id = self
+            .inner
+            .store
+            .start_auxiliary_run(actor_id, session_id, "compact")?;
         let envelope = |event: CanonicalEvent| EventEnvelope {
             event_id: format!("event-{}", Uuid::new_v4()),
             schema_version: V1Version::VALUE,
@@ -4522,7 +4538,7 @@ impl AppServer {
         let run_id = self
             .inner
             .store
-            .start_auxiliary_run(&actor.id, &session_id)
+            .start_auxiliary_run(&actor.id, &session_id, "research_exec")
             .map_err(store_error)?;
         self.inner
             .store
@@ -4672,12 +4688,19 @@ impl AppServer {
             // Rebinding the existing run: cover a caller that re-enters after
             // the exec idempotency row landed but the mirror binding did not.
             let _ = store.set_run_durable_id(&actor.id, replay.result.new_run_id, &run_id);
+            // A crash between `record_idempotent` and the driver
+            // registration left the exec run recorded but never spawned —
+            // drive it now instead of reporting `running` on an undriven row.
+            if !self.inner.state.lock().await.runs.contains_key(&run_id) {
+                self.drive_replay_run(run_id, replay, outbound, connection)
+                    .await;
+            }
             return Ok(());
         }
         let run_id = self
             .inner
             .store
-            .start_auxiliary_run(&actor.id, &session_id)
+            .start_auxiliary_run(&actor.id, &session_id, "replay_exec")
             .map_err(store_error)?;
         self.inner
             .store
@@ -4686,6 +4709,21 @@ impl AppServer {
         store
             .set_run_durable_id(&actor.id, replay.result.new_run_id, &run_id)
             .map_err(legacy::store_error)?;
+        self.drive_replay_run(run_id, replay, outbound, connection)
+            .await;
+        Ok(())
+    }
+
+    /// Register the cancel channel + owner for a replay exec run and drive
+    /// it like a normal prompt. Shared by the fresh spawn and the rebind
+    /// path that finds the run recorded but undriven.
+    async fn drive_replay_run(
+        &self,
+        run_id: String,
+        replay: &legacy::ReplayExecution,
+        outbound: &Outbound,
+        connection: &Arc<Mutex<ConnectionState>>,
+    ) {
         let (cancel, receiver) = watch::channel(None);
         self.inner.state.lock().await.runs.insert(
             run_id.clone(),
@@ -4715,7 +4753,6 @@ impl AppServer {
             receiver,
             outbound.clone(),
         );
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

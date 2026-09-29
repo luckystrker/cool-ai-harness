@@ -358,6 +358,25 @@ fn run_progress_durable_binding_and_timestamped_events_support_the_mirror() {
         .expect("row");
     assert_eq!(cursor.config.as_ref().unwrap()["mirroredSeq"], json!(7));
 
+    // The watermark is monotonic: a lower-seq projection must not regress
+    // it (regression would let a sweep re-project accounted events).
+    store
+        .set_run_mirror_cursor("local-user", run.id, 3)
+        .expect("lower cursor");
+    let cursor = store
+        .find_run_by_durable_id("local-user", 1, "run-abc")
+        .expect("find")
+        .expect("row");
+    assert_eq!(cursor.config.as_ref().unwrap()["mirroredSeq"], json!(7));
+    store
+        .set_run_mirror_cursor("local-user", run.id, 9)
+        .expect("higher cursor");
+    let cursor = store
+        .find_run_by_durable_id("local-user", 1, "run-abc")
+        .expect("find")
+        .expect("row");
+    assert_eq!(cursor.config.as_ref().unwrap()["mirroredSeq"], json!(9));
+
     // `ensure_run_by_durable_id` is find-or-create in one statement: the
     // second call for the same durable id returns the same row instead of
     // duplicating the picker entry.
