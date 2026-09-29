@@ -228,6 +228,22 @@ export function MessageBubble({
           </div>
         )}
 
+        {/* Finished assistant turn with nothing rendered (empty model reply:
+            finishReason stop, zero content) — mark it so a blank bubble can't
+            be mistaken for a still-running turn. */}
+        {isAssistant &&
+          !msg.streaming &&
+          !msg.content &&
+          !msg.blocks?.length &&
+          !(msg.toolCalls?.length) &&
+          !msg.thinking &&
+          !msg.approval &&
+          !msg.plan && (
+            <div className="rounded-lg bg-muted/50 px-3 py-2 text-xs italic text-muted-foreground">
+              (no output)
+            </div>
+          )}
+
         {showFootnote && (
           <div className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground/70">
             {msg.elapsedMs != null && <span>{formatDuration(msg.elapsedMs)}</span>}

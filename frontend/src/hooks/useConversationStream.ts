@@ -323,15 +323,29 @@ export function useConversationStream() {
         break
       }
       case "run.cancelled": {
-        acc.finishReason = canonical.payload.reason ?? "cancelled"
+        const reason = canonical.payload.reason
+        acc.finishReason = reason ?? "cancelled"
+        // A client disconnect ends the stream, not the run — the durable
+        // projection skips it too, so rendering a marker here would diverge.
+        if (reason !== "disconnect") {
+          // Same marker `session.history` appends to the run's last assistant
+          // item — keep live and reloaded transcripts identical.
+          const note = `\n\n🛑 **Run cancelled:** ${reason ?? "cancelled"}`
+          acc.content += note
+          pushTextDelta(acc, note)
+        }
         flush(acc)
         break
       }
       case "run.failed": {
-        const message = canonical.payload.errorCode ?? canonical.payload.reason
-        // Notices go into both `content` (persisted-history path) and `blocks`
-        // (live interleaved render path) — content is hidden once text blocks exist.
-        const note = `\n\n⚠️ **Error:** ${message}`
+        const { reason, errorCode } = canonical.payload
+        const message =
+          errorCode && reason && errorCode !== reason
+            ? `${errorCode}: ${reason}`
+            : (errorCode ?? reason)
+        // Same marker `session.history` appends to the run's last assistant
+        // item — keep live and reloaded transcripts identical.
+        const note = `\n\n⚠️ **Run failed:** ${message}`
         acc.content += note
         pushTextDelta(acc, note)
         acc.finishReason = acc.finishReason ?? "error"

@@ -780,6 +780,78 @@ impl AppServer {
             .unwrap_or_else(|| self.inner.workspace.clone())
     }
 
+    /// Bind a fresh fork to a clone of the source session's legacy
+    /// conversation so it keeps the parent's model, permissions and
+    /// capability policy — a bare conversation row renders "Set model" and
+    /// silently drops the safety posture (the capability map lives on the
+    /// conversation row via `run_policy_for_conversation`).
+    ///
+    /// Returns `None` when the deployment has no legacy store or the source
+    /// session was never bound; the caller then falls back to creating and
+    /// binding a conversation itself. Idempotent: a replayed fork (or a
+    /// retry after the first bind committed) resolves the already-linked
+    /// conversation instead of cloning a second row.
+    fn fork_conversation_binding(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        source_session_id: &str,
+        forked_session_id: &str,
+        title: Option<&str>,
+    ) -> Result<Option<i64>, ProtocolError> {
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return Ok(None);
+        };
+        if let Some(existing) = self
+            .inner
+            .store
+            .conversation_id_for_session(actor_id, forked_session_id)
+            .map_err(store_error)?
+        {
+            return Ok(Some(existing));
+        }
+        let Some(source_conversation_id) = self
+            .inner
+            .store
+            .conversation_id_for_session(actor_id, source_session_id)
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let source = legacy
+            .get_conversation(actor_id, source_conversation_id)
+            .map_err(legacy::store_error)?;
+        let cloned = legacy
+            .create_conversation(
+                actor_id,
+                &cool_store::domains::conversations::NewConversation {
+                    title: title.map(str::to_owned).or(source.title),
+                    provider: source.provider,
+                    model: source.model,
+                    working_directory: source.working_directory,
+                    permissions: source.permissions,
+                    capability_policy: source.capability_policy,
+                    profile_id: source.profile_id,
+                    tags: source.tags,
+                    folder: source.folder,
+                    metadata: source.metadata,
+                },
+            )
+            .map_err(legacy::store_error)?;
+        self.inner
+            .store
+            .bind_session_to_conversation(
+                actor_id,
+                &format!("{key}:fork-conversation"),
+                &format!("{fingerprint}:fork-conversation"),
+                cloned.id,
+                forked_session_id,
+            )
+            .map_err(store_error)?;
+        Ok(Some(cloned.id))
+    }
+
     /// The workspace a RUN executes in — resolved through its session.
     /// Falls back to the server workspace for unknown/missing runs.
     fn run_workspace_for_run(&self, run_id: &str) -> Workspace {
@@ -1563,13 +1635,24 @@ impl AppServer {
                     params.up_to_cursor,
                     params.up_to_event_seq,
                 ) {
-                    Ok(forked) => success(
-                        id,
-                        ResponsePayload::SessionForked(SessionForkedResult {
-                            session_id: forked.value,
-                            forked_from: params.session_id,
-                        }),
-                    ),
+                    Ok(forked) => match self.fork_conversation_binding(
+                        &actor.id,
+                        params.idempotency_key.as_str(),
+                        &fingerprint,
+                        &params.session_id,
+                        &forked.value,
+                        params.title.as_deref(),
+                    ) {
+                        Ok(conversation_id) => success(
+                            id,
+                            ResponsePayload::SessionForked(SessionForkedResult {
+                                session_id: forked.value,
+                                forked_from: params.session_id,
+                                conversation_id,
+                            }),
+                        ),
+                        Err(err) => failure(id, err),
+                    },
                     Err(store) => failure(id, store_error(store)),
                 };
                 let _ = self.send(&outbound, frame).await;
@@ -6516,9 +6599,34 @@ fn history_entries_from_window(
                 // Usage never crosses a run boundary.
                 pending_usage = None;
             }
-            CanonicalEvent::RunCompleted(_)
-            | CanonicalEvent::RunFailed(_)
-            | CanonicalEvent::RunCancelled(_) => {
+            CanonicalEvent::RunCompleted(_) => {
+                pending_usage = None;
+            }
+            CanonicalEvent::RunFailed(terminal) => {
+                pending_usage = None;
+                push_terminal_marker(
+                    &mut entries,
+                    envelope,
+                    *cursor,
+                    terminal_marker_text(
+                        "failed",
+                        &terminal.reason,
+                        terminal.error_code.as_deref(),
+                    ),
+                );
+            }
+            // A disconnect-cancelled run is transport noise, not a user-visible
+            // outcome — the legacy mirror already filters it the same way.
+            CanonicalEvent::RunCancelled(terminal) if terminal.reason != "disconnect" => {
+                pending_usage = None;
+                push_terminal_marker(
+                    &mut entries,
+                    envelope,
+                    *cursor,
+                    terminal_marker_text("cancelled", &terminal.reason, None),
+                );
+            }
+            CanonicalEvent::RunCancelled(_) => {
                 pending_usage = None;
             }
             CanonicalEvent::UsageUpdated(usage) => {
@@ -6651,6 +6759,63 @@ fn history_entries_from_window(
         }
     }
     entries
+}
+
+/// Markdown note a terminal run gets in the transcript, matching the inline
+/// note the live stream appends to the assistant bubble (`run.failed` /
+/// `run.cancelled` carry no items of their own, so without a marker the
+/// reason would be invisible once the transcript reloads).
+fn terminal_marker_text(kind: &str, reason: &str, error_code: Option<&str>) -> String {
+    match (kind, error_code) {
+        ("failed", Some(code)) if code != reason => {
+            format!("⚠️ **Run failed:** {code}: {reason}")
+        }
+        ("failed", _) => format!("⚠️ **Run failed:** {}", error_code.unwrap_or(reason)),
+        _ => format!("🛑 **Run cancelled:** {reason}"),
+    }
+}
+
+/// Attach the terminal marker where the live stream puts it — appended to the
+/// run's last assistant item in this window — or emit a standalone assistant
+/// item when the failed/cancelled turn produced no items at all.
+fn push_terminal_marker(
+    entries: &mut Vec<HistoryEntry>,
+    envelope: &EventEnvelope,
+    cursor: u64,
+    marker: String,
+) {
+    if let Some(entry) = entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.item.run_id == envelope.run_id && entry.item.role == "assistant")
+    {
+        entry.item.content = Some(match entry.item.content.take() {
+            Some(mut content) => {
+                content.push_str("\n\n");
+                content.push_str(&marker);
+                content
+            }
+            None => marker,
+        });
+        return;
+    }
+    entries.push(HistoryEntry {
+        start_cursor: cursor,
+        item: HistoryItem {
+            cursor,
+            occurred_at: envelope.occurred_at.clone(),
+            run_id: envelope.run_id.clone(),
+            role: "assistant".to_owned(),
+            content: Some(marker),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            model: None,
+            usage: None,
+            compact_up_to_cursor: None,
+        },
+    });
 }
 
 fn bounded_history(

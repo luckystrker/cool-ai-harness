@@ -13653,6 +13653,15 @@
     "SessionForkedResult": {
       "type": "object",
       "properties": {
+        "conversationId": {
+          "description": "Legacy conversation the forked session was bound to, cloned from the\nsource session's conversation so the fork keeps its\nmodel/permissions/capability posture. `None` when the deployment has\nno legacy store or the source session was never bound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
         "forkedFrom": {
           "type": "string"
         },

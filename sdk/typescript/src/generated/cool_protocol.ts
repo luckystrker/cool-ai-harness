@@ -295,7 +295,14 @@ usage: UsageUpdated | null,
  */
 compactUpToCursor: number | null, };
 
-export type SessionForkedResult = { sessionId: string, forkedFrom: string, };
+export type SessionForkedResult = { sessionId: string, forkedFrom: string, 
+/**
+ * Legacy conversation the forked session was bound to, cloned from the
+ * source session's conversation so the fork keeps its
+ * model/permissions/capability posture. `None` when the deployment has
+ * no legacy store or the source session was never bound.
+ */
+conversationId: number | null, };
 
 export type SessionRewindResult = { sessionId: string, 
 /**
