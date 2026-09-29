@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "cool-acp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cool-agent",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "cool-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "cool-app-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "cool-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cool-acp",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "cool-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cool-security",
  "cool-state",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "cool-extensions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "cool-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "cool-app-server",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cool-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "schemars",
  "serde",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "cool-security"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "cap-std",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "cool-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cool-protocol",
  "cool-security",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "cool-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "rusqlite",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "cool-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cool-agent",
