@@ -22,7 +22,7 @@ fn write_plugin_fixture(root: &std::path::Path) {
 }
 
 #[test]
-fn doctor_reports_the_m11_runtime_boundary() {
+fn doctor_reports_the_m12_runtime_boundary() {
     let temporary = tempfile::tempdir().unwrap();
     let output = cool()
         .arg("doctor")
@@ -33,7 +33,7 @@ fn doctor_reports_the_m11_runtime_boundary() {
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(report["status"], "ok");
-    assert_eq!(report["phase"], "M11");
+    assert_eq!(report["phase"], "M12");
     assert_eq!(report["webFacade"], true);
     assert_eq!(report["serveProfiles"], json!(["local", "server"]));
     assert_eq!(report["durableState"], true);

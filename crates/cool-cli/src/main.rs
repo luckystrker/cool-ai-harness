@@ -160,7 +160,7 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "status": "ok",
-                    "phase": "M11",
+                    "phase": cool_app_server::PHASE,
                     "runtime": "rust-trusted-core",
                     "protocolVersion": 1,
                     "capabilities": capabilities(),
