@@ -150,6 +150,12 @@ export function ProfilesPage() {
             onRetry={() => void refetch()}
             className="h-64 justify-center"
           />
+        ) : profiles.length === 0 ? (
+          <Card>
+            <CardContent className="py-8 text-center text-sm text-muted-foreground">
+              No agent blueprints yet. Create one to reuse a set of instructions, models, tools, and limits.
+            </CardContent>
+          </Card>
         ) : null}
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {profiles.map((profile) => (

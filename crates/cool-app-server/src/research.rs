@@ -38,6 +38,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 use crate::AppServerEventSink;
+use crate::scheduler::legacy_usage_json;
 use crate::subagents::{SubagentExecutor, SubagentLaunchSpec};
 
 /// Python `RESEARCH_MAX_CONCURRENT_SUBAGENTS`.
@@ -360,7 +361,7 @@ impl ResearchExecutor {
 
         // --- Stage 5: persist -----------------------------------------------
         let artifact_id = self.persist_report(&actor.id, run, &report, &model);
-        let usage_json = usage_json(&usage);
+        let usage_json = legacy_usage_json(&usage);
         // A concurrent `research.cancel` wins over this completion.
         let current = self.store.get_research_run(&actor.id, run.id).ok();
         if current
@@ -1144,15 +1145,6 @@ fn accumulate(total: &mut Usage, usage: &Usage) {
     total.total_tokens += usage.total_tokens;
     let micro = total.cost_micro_usd.unwrap_or(0) + usage.cost_micro_usd.unwrap_or(0);
     total.cost_micro_usd = Some(micro);
-}
-
-fn usage_json(usage: &Usage) -> Value {
-    json!({
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-        "cost_usd": usage.cost_micro_usd.unwrap_or(0) as f64 / 1_000_000.0,
-    })
 }
 
 #[cfg(test)]

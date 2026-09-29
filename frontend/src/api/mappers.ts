@@ -87,6 +87,25 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return null
 }
 
+/** Run/message usage columns use snake_case (`total_tokens`, `cost_usd` in
+ * dollars), but rows written before the M11 writer fix may hold the agent
+ * `Usage` serde (`totalTokens`, `costMicroUsd` micro-dollars). Read either. */
+function toRunUsage(value: unknown): Record<string, unknown> | null {
+  const object = asObject(value)
+  if (!object) return null
+  const costUsd =
+    object.cost_usd ??
+    object.costUsd ??
+    (typeof object.costMicroUsd === "number" ? object.costMicroUsd / 1e6 : undefined)
+  return {
+    ...object,
+    prompt_tokens: object.prompt_tokens ?? object.promptTokens,
+    completion_tokens: object.completion_tokens ?? object.completionTokens,
+    total_tokens: object.total_tokens ?? object.totalTokens,
+    cost_usd: costUsd,
+  }
+}
+
 function asArray(value: unknown): protocol.JsonValue[] {
   return Array.isArray(value) ? (value as protocol.JsonValue[]) : []
 }
@@ -344,7 +363,7 @@ export function toLegacyMessage(record: protocol.MessageRecord): Message {
     content: record.content,
     tool_calls: calls,
     tool_result: (record.toolResult as unknown as Message["tool_result"]) ?? null,
-    usage: asObject(record.usage),
+    usage: toRunUsage(record.usage),
     thinking: record.thinking,
     model: record.model,
     duration_ms: record.durationMs,
@@ -921,7 +940,7 @@ export function toSubagentRun(record: protocol.SubagentRunRecord): SubagentRun {
     prompt: record.prompt,
     status: record.status as SubagentRun["status"],
     result_summary: record.resultSummary,
-    usage: asObject(record.usage),
+    usage: toRunUsage(record.usage),
     error: record.error,
     started_at: record.startedAt,
     finished_at: record.finishedAt,
@@ -993,7 +1012,7 @@ export function toTaskRun(record: protocol.TaskRunRecord): TaskRun {
     skip_reason: record.skipReason,
     approval_policy: record.approvalPolicy as TaskRun["approval_policy"],
     approval_reason: record.approvalReason,
-    usage: asObject(record.usage),
+    usage: toRunUsage(record.usage),
     duration_ms: record.durationMs,
     delivery_status: asObject(record.deliveryStatus) as Record<string, string> | null,
     delivered_at: record.deliveredAt,
