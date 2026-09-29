@@ -175,9 +175,10 @@ export const conversationsApi = {
 
   /**
    * Fork the conversation's durable session at a history cursor (P2.13):
-   * copies only events up to the cursor into a new session, creates a fresh
-   * conversation and binds the forked session to it. Returns the new
-   * conversation for navigation.
+   * copies only events up to the cursor into a new session. The server clones
+   * the source conversation — model, permissions, capability policy — and
+   * binds the forked session to the clone. Returns the new conversation for
+   * navigation.
    */
   forkFromCursor: async (convId: number, cursor: number): Promise<Conversation> => {
     const [sessionId, source] = await Promise.all([
@@ -191,11 +192,29 @@ export const conversationsApi = {
       upToCursor: cursor,
       upToEventSeq: null,
     })
+    if (forked.conversationId != null) {
+      return toConversation(await sdk.conversationsGet({ id: forked.conversationId }))
+    }
+    // Fallback for deployments where the fork couldn't bind a conversation
+    // (no legacy store / unbound source session): create + bind client-side,
+    // still carrying the parent's posture fields over.
     const conversation = await sdk.conversationsCreate(
       toConversationCreate(
-        // Carry the workspace binding over — a fork without the source's
-        // working directory can't share its checkpoint refs or files.
-        { working_directory: source.workingDirectory ?? undefined },
+        {
+          title: source.title ?? undefined,
+          provider: source.provider ?? undefined,
+          working_directory: source.workingDirectory ?? undefined,
+          model: source.model ?? undefined,
+          permissions:
+            (source.permissions as unknown as Conversation["permissions"] | undefined) ?? undefined,
+          capability_policy:
+            (source.capabilityPolicy as unknown as Conversation["capability_policy"] | undefined) ??
+            undefined,
+          profile_id: source.profileId ?? undefined,
+          tags: (source.tags as string[] | null) ?? undefined,
+          folder: source.folder ?? undefined,
+          metadata: (source.metadata as Record<string, JsonValue> | null) ?? undefined,
+        },
         idempotencyKey()
       )
     )

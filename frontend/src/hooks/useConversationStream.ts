@@ -51,6 +51,13 @@ interface Accumulator {
   model?: string
   /** Set when the run emitted a failure event (turn failed). */
   errored?: boolean
+  /**
+   * Set when a terminal event arrived over the stream — the same marker the
+   * server projects into `session.history`, so the refetched transcript
+   * already carries the failure/cancel note and the pending bubble would
+   * duplicate it.
+   */
+  persistedTerminal?: boolean
   /** Plan generated during this turn (Фаза 2 §1 Planning Mode). */
   plan?: Plan
 }
@@ -323,19 +330,35 @@ export function useConversationStream() {
         break
       }
       case "run.cancelled": {
-        acc.finishReason = canonical.payload.reason ?? "cancelled"
+        const reason = canonical.payload.reason
+        acc.finishReason = reason ?? "cancelled"
+        // A client disconnect ends the stream, not the run — the durable
+        // projection skips it too, so rendering a marker here would diverge.
+        if (reason !== "disconnect") {
+          // Same marker `session.history` appends to the run's last assistant
+          // item — keep live and reloaded transcripts identical.
+          const note = `\n\n🛑 **Run cancelled:** ${reason ?? "cancelled"}`
+          acc.content += note
+          pushTextDelta(acc, note)
+          acc.persistedTerminal = true
+        }
         flush(acc)
         break
       }
       case "run.failed": {
-        const message = canonical.payload.errorCode ?? canonical.payload.reason
-        // Notices go into both `content` (persisted-history path) and `blocks`
-        // (live interleaved render path) — content is hidden once text blocks exist.
-        const note = `\n\n⚠️ **Error:** ${message}`
+        const { reason, errorCode } = canonical.payload
+        const message =
+          errorCode && reason && errorCode !== reason
+            ? `${errorCode}: ${reason}`
+            : (errorCode ?? reason)
+        // Same marker `session.history` appends to the run's last assistant
+        // item — keep live and reloaded transcripts identical.
+        const note = `\n\n⚠️ **Run failed:** ${message}`
         acc.content += note
         pushTextDelta(acc, note)
         acc.finishReason = acc.finishReason ?? "error"
         acc.errored = true
+        acc.persistedTerminal = true
         toast.error(message)
         flush(acc)
         break
@@ -525,7 +548,11 @@ export function useConversationStream() {
             ? Math.max(0, Math.round(performance.now() - startedAtRef.current))
             : undefined
         startedAtRef.current = null
-        const errored = Boolean(acc.errored)
+        // A persisted terminal event is re-rendered from refetched history —
+        // keeping the pending bubble would draw the same marker twice. Only
+        // the client-catch path (stream dropped with no server event) keeps
+        // the local "Reply interrupted" bubble.
+        const errored = Boolean(acc.errored) && !acc.persistedTerminal
         setPendingMsgs((cur) =>
           cur
             // On a failed turn the user message is already persisted (the
@@ -545,7 +572,7 @@ export function useConversationStream() {
         accRef.current = null
         runIdRef.current = null
       }
-      return Boolean(acc.errored)
+      return Boolean(acc.errored) && !acc.persistedTerminal
     },
     []
   )

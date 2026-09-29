@@ -66,6 +66,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWrite
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
+use tracing::warn;
 use uuid::Uuid;
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
@@ -778,6 +779,104 @@ impl AppServer {
             })
             .and_then(|path| Workspace::new(path).ok())
             .unwrap_or_else(|| self.inner.workspace.clone())
+    }
+
+    /// Bind a fresh fork to a clone of the source session's legacy
+    /// conversation so it keeps the parent's model, permissions and
+    /// capability policy — a bare conversation row renders "Set model" and
+    /// silently drops the safety posture (the capability map lives on the
+    /// conversation row via `run_policy_for_conversation`).
+    ///
+    /// `session.fork` has already committed the new session when this runs,
+    /// so a clone/bind problem must not fail the RPC — a failure would leave
+    /// an orphan forked session, and a retry would spawn another. Every fault
+    /// degrades to `None`: the client already falls back to creating and
+    /// binding a conversation itself when `conversation_id` is absent.
+    /// Idempotent: a replayed fork (or a retry after the first bind
+    /// committed) resolves the already-linked conversation instead of
+    /// cloning a second row.
+    fn fork_conversation_binding(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        source_session_id: &str,
+        forked_session_id: &str,
+        title: Option<&str>,
+    ) -> Option<i64> {
+        let legacy = self.inner.config.legacy_store.as_deref()?;
+        match self
+            .inner
+            .store
+            .conversation_id_for_session(actor_id, forked_session_id)
+        {
+            Ok(Some(existing)) => return Some(existing),
+            Ok(None) => {}
+            Err(error) => {
+                warn!("session.fork: forked session link lookup failed: {error}");
+                return None;
+            }
+        }
+        let source_conversation_id = match self
+            .inner
+            .store
+            .conversation_id_for_session(actor_id, source_session_id)
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(error) => {
+                warn!("session.fork: source session link lookup failed: {error}");
+                return None;
+            }
+        };
+        let source = match legacy.get_conversation(actor_id, source_conversation_id) {
+            Ok(source) => source,
+            Err(error) => {
+                // A deleted bound conversation leaves a dangling link —
+                // degrade instead of failing every fork of that session.
+                warn!(
+                    "session.fork: source conversation {source_conversation_id} unreadable: {error}"
+                );
+                return None;
+            }
+        };
+        let cloned = match legacy.create_conversation(
+            actor_id,
+            &cool_store::domains::conversations::NewConversation {
+                title: title.map(str::to_owned).or(source.title),
+                provider: source.provider,
+                model: source.model,
+                working_directory: source.working_directory,
+                permissions: source.permissions,
+                capability_policy: source.capability_policy,
+                profile_id: source.profile_id,
+                tags: source.tags,
+                folder: source.folder,
+                metadata: source.metadata,
+            },
+        ) {
+            Ok(cloned) => cloned,
+            Err(error) => {
+                warn!("session.fork: conversation clone failed: {error}");
+                return None;
+            }
+        };
+        // Failing to bind leaves a duplicate orphan row on the next retry —
+        // unavoidable without folding clone+bind into the fork transaction,
+        // and strictly better than failing the RPC on a committed fork.
+        match self.inner.store.bind_session_to_conversation(
+            actor_id,
+            &format!("{key}:fork-conversation"),
+            &format!("{fingerprint}:fork-conversation"),
+            cloned.id,
+            forked_session_id,
+        ) {
+            Ok(link) => Some(link.conversation_id),
+            Err(error) => {
+                warn!("session.fork: binding clone {} failed: {error}", cloned.id);
+                None
+            }
+        }
     }
 
     /// The workspace a RUN executes in — resolved through its session.
@@ -1566,8 +1665,16 @@ impl AppServer {
                     Ok(forked) => success(
                         id,
                         ResponsePayload::SessionForked(SessionForkedResult {
-                            session_id: forked.value,
-                            forked_from: params.session_id,
+                            session_id: forked.value.clone(),
+                            forked_from: params.session_id.clone(),
+                            conversation_id: self.fork_conversation_binding(
+                                &actor.id,
+                                params.idempotency_key.as_str(),
+                                &fingerprint,
+                                &params.session_id,
+                                &forked.value,
+                                params.title.as_deref(),
+                            ),
                         }),
                     ),
                     Err(store) => failure(id, store_error(store)),
@@ -6516,9 +6623,34 @@ fn history_entries_from_window(
                 // Usage never crosses a run boundary.
                 pending_usage = None;
             }
-            CanonicalEvent::RunCompleted(_)
-            | CanonicalEvent::RunFailed(_)
-            | CanonicalEvent::RunCancelled(_) => {
+            CanonicalEvent::RunCompleted(_) => {
+                pending_usage = None;
+            }
+            CanonicalEvent::RunFailed(terminal) => {
+                pending_usage = None;
+                push_terminal_marker(
+                    &mut entries,
+                    envelope,
+                    *cursor,
+                    terminal_marker_text(
+                        "failed",
+                        &terminal.reason,
+                        terminal.error_code.as_deref(),
+                    ),
+                );
+            }
+            // A disconnect-cancelled run is transport noise, not a user-visible
+            // outcome — `mirror_to_legacy` filters it the same way above.
+            CanonicalEvent::RunCancelled(terminal) if terminal.reason != "disconnect" => {
+                pending_usage = None;
+                push_terminal_marker(
+                    &mut entries,
+                    envelope,
+                    *cursor,
+                    terminal_marker_text("cancelled", &terminal.reason, None),
+                );
+            }
+            CanonicalEvent::RunCancelled(_) => {
                 pending_usage = None;
             }
             CanonicalEvent::UsageUpdated(usage) => {
@@ -6651,6 +6783,63 @@ fn history_entries_from_window(
         }
     }
     entries
+}
+
+/// Markdown note a terminal run gets in the transcript, matching the inline
+/// note the live stream appends to the assistant bubble (`run.failed` /
+/// `run.cancelled` carry no items of their own, so without a marker the
+/// reason would be invisible once the transcript reloads).
+fn terminal_marker_text(kind: &str, reason: &str, error_code: Option<&str>) -> String {
+    match (kind, error_code) {
+        ("failed", Some(code)) if code != reason && !reason.is_empty() => {
+            format!("⚠️ **Run failed:** {code}: {reason}")
+        }
+        ("failed", _) => format!("⚠️ **Run failed:** {}", error_code.unwrap_or(reason)),
+        _ => format!("🛑 **Run cancelled:** {reason}"),
+    }
+}
+
+/// Attach the terminal marker where the live stream puts it — appended to the
+/// run's last assistant item in this window — or emit a standalone assistant
+/// item when the failed/cancelled turn produced no items at all.
+fn push_terminal_marker(
+    entries: &mut Vec<HistoryEntry>,
+    envelope: &EventEnvelope,
+    cursor: u64,
+    marker: String,
+) {
+    if let Some(entry) = entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.item.run_id == envelope.run_id && entry.item.role == "assistant")
+    {
+        entry.item.content = Some(match entry.item.content.take() {
+            Some(mut content) => {
+                content.push_str("\n\n");
+                content.push_str(&marker);
+                content
+            }
+            None => marker,
+        });
+        return;
+    }
+    entries.push(HistoryEntry {
+        start_cursor: cursor,
+        item: HistoryItem {
+            cursor,
+            occurred_at: envelope.occurred_at.clone(),
+            run_id: envelope.run_id.clone(),
+            role: "assistant".to_owned(),
+            content: Some(marker),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            model: None,
+            usage: None,
+            compact_up_to_cursor: None,
+        },
+    });
 }
 
 fn bounded_history(

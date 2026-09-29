@@ -13,6 +13,7 @@ use cool_security::{SecretKey, SecretKeyring};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::domains::conversations::{NewConversation, NewMessage};
+use cool_store::domains::profiles::NewAgentProfile;
 use cool_store::domains::runs::NewRun;
 use cool_store::domains::webhooks::NewWebhookEvent;
 use serde_json::json;
@@ -2520,4 +2521,149 @@ async fn webhook_replay_respects_task_quiet_hours() {
         .get_task_run("local-user", row.task_run_id.expect("skipped run id"))
         .expect("run");
     assert_eq!(run.status, "skipped");
+}
+
+/// `session.fork` must clone the bound conversation's posture — model,
+/// permissions and capability policy — into the fork's own conversation and
+/// report it on `SessionForkedResult.conversation_id`, so clients stop
+/// creating a bare row that renders "Set model" and drops the safety policy.
+#[tokio::test]
+async fn session_fork_clones_the_bound_conversations_settings() {
+    let (server, store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let profile = store
+        .create_profile(&NewAgentProfile {
+            name: "reviewer".to_owned(),
+            slug: "reviewer".to_owned(),
+            ..NewAgentProfile::default()
+        })
+        .expect("profile");
+
+    let created = request(
+        &client,
+        Command::ConversationsCreate(ConversationCreateParams {
+            idempotency_key: key("fork-parent"),
+            title: Some("parent".to_owned()),
+            provider: Some("scripted".to_owned()),
+            model: Some("scripted-large".to_owned()),
+            working_directory: Some("C:/work".to_owned()),
+            permissions: Some(json!({"bash": "ask"})),
+            capability_policy: Some(json!({"net_access": "deny"})),
+            profile_id: Some(profile.id),
+            tags: Some(json!(["team"])),
+            folder: Some("proj".to_owned()),
+            metadata: Some(json!({"breakpoints": [{"type": "before_write"}]})),
+        }),
+    )
+    .await;
+    let ResponsePayload::ConversationsCreated(source) = created else {
+        panic!("unexpected payload: {created:?}");
+    };
+
+    let linked = request(
+        &client,
+        Command::SessionForConversation(SessionForConversationParams {
+            idempotency_key: key("fork-link"),
+            conversation_id: source.id,
+            session_id: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionForConversation(link) = linked else {
+        panic!("unexpected payload: {linked:?}");
+    };
+
+    let forked = request(
+        &client,
+        Command::SessionFork(SessionForkParams {
+            idempotency_key: key("fork-1"),
+            session_id: link.session_id.clone(),
+            title: None,
+            up_to_cursor: None,
+            up_to_event_seq: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionForked(fork) = forked else {
+        panic!("unexpected payload: {forked:?}");
+    };
+    let clone_id = fork
+        .conversation_id
+        .expect("fork of a bound session reports its cloned conversation");
+    assert_ne!(clone_id, source.id);
+
+    let fetched = request(
+        &client,
+        Command::ConversationsGet(LegacyIdParams { id: clone_id }),
+    )
+    .await;
+    let ResponsePayload::ConversationsGot(clone) = fetched else {
+        panic!("unexpected payload: {fetched:?}");
+    };
+    assert_eq!(clone.title.as_deref(), source.title.as_deref());
+    assert_eq!(clone.provider.as_deref(), Some("scripted"));
+    assert_eq!(clone.model.as_deref(), Some("scripted-large"));
+    assert_eq!(clone.working_directory.as_deref(), Some("C:/work"));
+    assert_eq!(clone.permissions, source.permissions);
+    assert_eq!(clone.capability_policy, source.capability_policy);
+    assert_eq!(clone.profile_id, Some(profile.id));
+    assert_eq!(clone.tags, source.tags);
+    assert_eq!(clone.folder.as_deref(), Some("proj"));
+    assert_eq!(clone.metadata, source.metadata);
+
+    // The fork resolves back to the clone through the normal link lookup, and
+    // an idempotent replay returns the same ids instead of cloning again.
+    let rebound = request(
+        &client,
+        Command::SessionForConversation(SessionForConversationParams {
+            idempotency_key: key("fork-rebind-check"),
+            conversation_id: clone_id,
+            session_id: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionForConversation(rebound) = rebound else {
+        panic!("unexpected payload: {rebound:?}");
+    };
+    assert_eq!(rebound.session_id, fork.session_id);
+
+    let replayed = request(
+        &client,
+        Command::SessionFork(SessionForkParams {
+            idempotency_key: key("fork-1"),
+            session_id: link.session_id,
+            title: None,
+            up_to_cursor: None,
+            up_to_event_seq: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionForked(replay) = replayed else {
+        panic!("unexpected payload: {replayed:?}");
+    };
+    assert_eq!(replay.session_id, fork.session_id);
+    assert_eq!(replay.conversation_id, Some(clone_id));
+
+    let listed = request(
+        &client,
+        Command::ConversationsList(ConversationListParams {
+            include_machine_owned: false,
+            archived: None,
+            pinned: None,
+            folder: None,
+            search: None,
+            limit: 10,
+            offset: 0,
+        }),
+    )
+    .await;
+    let ResponsePayload::ConversationsList(rows) = listed else {
+        panic!("unexpected payload: {listed:?}");
+    };
+    assert_eq!(
+        rows.len(),
+        2,
+        "the replay must not clone a second conversation"
+    );
 }

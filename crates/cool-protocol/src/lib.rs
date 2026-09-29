@@ -1756,6 +1756,12 @@ pub struct SessionHistoryResult {
 pub struct SessionForkedResult {
     pub session_id: String,
     pub forked_from: String,
+    /// Legacy conversation the forked session was bound to, cloned from the
+    /// source session's conversation so the fork keeps its
+    /// model/permissions/capability posture. `None` when the deployment has
+    /// no legacy store or the source session was never bound.
+    #[serde(default)]
+    pub conversation_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]

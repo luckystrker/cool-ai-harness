@@ -350,8 +350,10 @@ export function ChatPage() {
     setPlanMode(false)
     // Persisted history is now the source of truth — refetch and drop pending
     // only after the fresh data is in the cache (avoids a blank flash between
-    // the stream ending and the history arriving). On a failed turn, keep the
-    // assistant error bubble so the user sees why there was no reply.
+    // the stream ending and the history arriving). On a failed turn that never
+    // reached a persisted terminal event, keep the assistant error bubble so
+    // the user sees why there was no reply — persisted run.failed/cancelled
+    // markers already render from history.
     // When plan mode was active, keep the pending PlanCard visible so the user
     // can approve/reject the plan.
     await Promise.all([
