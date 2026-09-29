@@ -12,6 +12,8 @@
 mod admin;
 mod memory;
 
+pub(crate) use admin::provider_record;
+
 /// Outcome of a family dispatcher that does not own every command variant.
 pub(crate) enum Unhandled {
     NotHandled(Box<Command>),

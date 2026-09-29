@@ -26,6 +26,16 @@ pub struct Provider {
     pub is_fallback: bool,
     pub is_default: bool,
     pub chat_models: Option<Value>,
+    /// `api_key` (default) or `oauth` (P2.11). Tolerates pre-migration rows.
+    #[serde(default = "default_auth_kind")]
+    pub auth_kind: String,
+    /// Fernet-encrypted OAuth token bundle (`provider:{id}:oauth` in the
+    /// SecretKeyring sense) — access/refresh/expiry JSON, never plaintext.
+    pub oauth_tokens_encrypted: Option<String>,
+}
+
+fn default_auth_kind() -> String {
+    "api_key".to_owned()
 }
 
 /// Redacts the encrypted API key so provider rows are safe to log.
@@ -47,6 +57,11 @@ impl std::fmt::Debug for Provider {
             .field("is_fallback", &self.is_fallback)
             .field("is_default", &self.is_default)
             .field("chat_models", &self.chat_models)
+            .field("auth_kind", &self.auth_kind)
+            .field(
+                "oauth_tokens_encrypted",
+                &self.oauth_tokens_encrypted.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -65,6 +80,17 @@ impl Provider {
             is_fallback: row.get::<_, i64>("is_fallback")? != 0,
             is_default: row.get::<_, i64>("is_default")? != 0,
             chat_models: parse_json(row.get("chat_models")?)?,
+            // Columns from migration v4 — absent in pre-migration DBs opened
+            // read-only, so missing columns degrade to the api_key default.
+            auth_kind: row
+                .get::<_, Option<String>>("auth_kind")
+                .ok()
+                .flatten()
+                .unwrap_or_else(default_auth_kind),
+            oauth_tokens_encrypted: row
+                .get::<_, Option<String>>("oauth_tokens_encrypted")
+                .ok()
+                .flatten(),
         })
     }
 }
@@ -81,6 +107,8 @@ pub struct NewProvider {
     pub is_subscription: bool,
     pub is_fallback: bool,
     pub chat_models: Option<Value>,
+    /// `api_key` (default) or `oauth` (P2.11).
+    pub auth_kind: Option<String>,
 }
 
 /// Redacts the encrypted API key so request payloads are safe to log.
@@ -100,6 +128,7 @@ impl std::fmt::Debug for NewProvider {
             .field("is_subscription", &self.is_subscription)
             .field("is_fallback", &self.is_fallback)
             .field("chat_models", &self.chat_models)
+            .field("auth_kind", &self.auth_kind)
             .finish()
     }
 }
@@ -115,6 +144,10 @@ pub struct ProviderPatch {
     pub is_fallback: Option<bool>,
     pub chat_models: Option<Value>,
     pub is_default: Option<bool>,
+    pub auth_kind: Option<String>,
+    /// Replacement for the `provider:{id}:oauth` token bundle (Fernet
+    /// SecretKeyring ciphertext written by oauth_complete / token refresh).
+    pub oauth_tokens_encrypted: Option<String>,
 }
 
 /// Redacts the encrypted API key so request payloads are safe to log.
@@ -133,7 +166,24 @@ impl std::fmt::Debug for ProviderPatch {
             .field("is_fallback", &self.is_fallback)
             .field("chat_models", &self.chat_models)
             .field("is_default", &self.is_default)
+            .field("auth_kind", &self.auth_kind)
+            .field(
+                "oauth_tokens_encrypted",
+                &self.oauth_tokens_encrypted.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
+    }
+}
+
+/// `auth_kind` is a closed vocabulary (`api_key` | `oauth`) — a misspelled
+/// value must fail closed at the store boundary rather than disabling
+/// authentication handling for the row.
+fn validate_auth_kind(auth_kind: &str) -> Result<(), StoreError> {
+    match auth_kind {
+        "api_key" | "oauth" => Ok(()),
+        other => Err(StoreError::InvalidInput(format!(
+            "unsupported auth_kind '{other}' (expected api_key|oauth)"
+        ))),
     }
 }
 
@@ -178,14 +228,17 @@ impl crate::LegacyStore {
         actor_id: &str,
         new: &NewProvider,
     ) -> Result<Provider, StoreError> {
+        if let Some(auth_kind) = new.auth_kind.as_deref() {
+            validate_auth_kind(auth_kind)?;
+        }
         let connection = self.connection()?;
         let user_id = user_id_for(&connection, actor_id)?;
         let timestamp = now_python();
         connection.execute(
             "INSERT INTO providers(created_at, updated_at, user_id, name, label, base_url,
                api_key_encrypted, default_model, is_active, is_subscription, is_fallback,
-               is_default, chat_models)
-             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)",
+               is_default, chat_models, auth_kind)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12)",
             params![
                 timestamp,
                 user_id,
@@ -198,6 +251,7 @@ impl crate::LegacyStore {
                 i64::from(new.is_subscription),
                 i64::from(new.is_fallback),
                 json_text(&new.chat_models)?,
+                new.auth_kind.as_deref().unwrap_or("api_key"),
             ],
         )?;
         let id = connection.last_insert_rowid();
@@ -211,6 +265,9 @@ impl crate::LegacyStore {
         provider_id: i64,
         patch: &ProviderPatch,
     ) -> Result<Provider, StoreError> {
+        if let Some(auth_kind) = patch.auth_kind.as_deref() {
+            validate_auth_kind(auth_kind)?;
+        }
         let connection = self.connection()?;
         let user_id = user_id_for(&connection, actor_id)?;
         fetch_provider(&connection, user_id, provider_id)?
@@ -254,6 +311,14 @@ impl crate::LegacyStore {
         if let Some(is_default) = patch.is_default {
             assignments.push("is_default = ?");
             values.push(Box::new(i64::from(is_default)));
+        }
+        if let Some(auth_kind) = &patch.auth_kind {
+            assignments.push("auth_kind = ?");
+            values.push(Box::new(auth_kind.clone()));
+        }
+        if let Some(tokens) = &patch.oauth_tokens_encrypted {
+            assignments.push("oauth_tokens_encrypted = ?");
+            values.push(Box::new(tokens.clone()));
         }
         assignments.push("updated_at = ?");
         values.push(Box::new(now_python()));
@@ -303,6 +368,28 @@ impl crate::LegacyStore {
             params![timestamp, provider_id, user_id],
         )?;
         transaction.commit()?;
+        drop(connection);
+        self.get_provider(actor_id, provider_id)
+    }
+
+    /// Persist an OAuth token bundle for `provider_id` and mark the row
+    /// `auth_kind = 'oauth'` (P2.11). The ciphertext is the Fernet-encrypted
+    /// `provider:{id}:oauth` JSON produced by the app-server OAuth flow.
+    pub fn set_provider_oauth_tokens(
+        &self,
+        actor_id: &str,
+        provider_id: i64,
+        tokens_encrypted: &str,
+    ) -> Result<Provider, StoreError> {
+        let connection = self.connection()?;
+        let user_id = user_id_for(&connection, actor_id)?;
+        fetch_provider(&connection, user_id, provider_id)?
+            .ok_or(StoreError::NotFound("provider"))?;
+        connection.execute(
+            "UPDATE providers SET auth_kind = 'oauth', oauth_tokens_encrypted = ?1, \
+             updated_at = ?2 WHERE id = ?3 AND user_id = ?4",
+            params![tokens_encrypted, now_python(), provider_id, user_id],
+        )?;
         drop(connection);
         self.get_provider(actor_id, provider_id)
     }

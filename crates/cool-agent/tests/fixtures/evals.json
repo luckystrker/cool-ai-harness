@@ -189,5 +189,35 @@
     "approval": "approved",
     "expectedEvents": ["tool.failed", "run.completed"],
     "expectedFile": false
+  },
+  {
+    "id": "view_image_missing_file",
+    "calls": [
+      {
+        "callId": "view-missing",
+        "name": "view_image",
+        "arguments": {"path": "eval.png"}
+      }
+    ],
+    "capability": "read",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "view_image_read_denied",
+    "calls": [
+      {
+        "callId": "view-denied",
+        "name": "view_image",
+        "arguments": {"path": "eval.png"}
+      }
+    ],
+    "capability": "read",
+    "decision": "deny",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
   }
 ]

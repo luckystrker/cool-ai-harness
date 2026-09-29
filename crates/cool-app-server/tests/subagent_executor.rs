@@ -318,6 +318,7 @@ async fn lifecycle_events_reach_the_linked_parent_session() {
             SessionForConversationParams {
                 idempotency_key: key("link"),
                 conversation_id: parent,
+                session_id: None,
             },
         ))
         .await
@@ -1074,7 +1075,8 @@ async fn reviewer_profile_is_builtin_read_only_with_git_restricted() {
             "git",
             "list_files",
             "read_file",
-            "search_files"
+            "search_files",
+            "view_image"
         ],
         "reviewer sees the read-only tool set"
     );

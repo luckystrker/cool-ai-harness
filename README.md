@@ -80,6 +80,31 @@ cp .env.example .env
 openssl rand -base64 32
 ```
 
+#### OAuth sign-in (P2.11)
+
+`cool auth <provider>` runs a local PKCE flow and stores the tokens
+Fernet-encrypted on the provider row (`auth_kind=oauth`, requires
+`SECRET_KEY`); drivers refresh on expiry and retry once on 401:
+
+- `cool auth claude` — Anthropic's manual flow: the console shows
+  `code#state`, paste it back. Off-label use; an API key stays the
+  supported credential.
+- `cool auth chatgpt` — OpenAI device-authorization flow (code + URL,
+  polls until issued). **Codex tokens authenticate the Codex backend
+  (Responses API), not chat/completions** — stored ChatGPT tokens make
+  the OpenAI driver report `oauth_wire_not_supported`; use
+  `OPENAI_API_KEY` for that wire.
+- `cool auth gemini` — Google loopback OAuth (`--device`/`--manual`
+  variants exist). Requires `COOL_GOOGLE_CLIENT_ID`/
+  `COOL_GOOGLE_CLIENT_SECRET` — the public desktop client Google ships
+  with gemini-cli, kept out of this repo (secret scanning); without it
+  the flow returns `oauth_client_unconfigured`. Powers
+  `COOL_PROVIDER=gemini` when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is unset.
+
+The same flow is exposed to the app over `providers.oauth_start` /
+`providers.oauth_complete`; unsupported providers return
+`oauth_provider_unsupported`.
+
 ### 2. Run the packaged app (recommended)
 
 ```bash

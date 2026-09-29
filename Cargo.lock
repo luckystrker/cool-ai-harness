@@ -347,6 +347,7 @@ name = "cool-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "cap-std",
  "cool-protocol",
  "cool-security",
@@ -370,6 +371,7 @@ name = "cool-app-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "cool-agent",
  "cool-protocol",
  "cool-security",
@@ -377,6 +379,7 @@ dependencies = [
  "cool-store",
  "futures-util",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

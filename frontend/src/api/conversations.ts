@@ -43,6 +43,7 @@ async function sessionFor(convId: number): Promise<string> {
   const link = await sdk.sessionForConversation({
     idempotencyKey: `session-for-conversation-${convId}`,
     conversationId: convId,
+    sessionId: null,
   })
   return link.sessionId
 }
@@ -170,6 +171,57 @@ export const conversationsApi = {
       limit: params?.limit ?? 200,
     })
     return records.map(toApprovalAudit)
+  },
+
+  /**
+   * Fork the conversation's durable session at a history cursor (P2.13):
+   * copies only events up to the cursor into a new session, creates a fresh
+   * conversation and binds the forked session to it. Returns the new
+   * conversation for navigation.
+   */
+  forkFromCursor: async (convId: number, cursor: number): Promise<Conversation> => {
+    const [sessionId, source] = await Promise.all([
+      sessionFor(convId),
+      sdk.conversationsGet({ id: convId }),
+    ])
+    const forked = await sdk.sessionFork({
+      idempotencyKey: idempotencyKey(),
+      sessionId,
+      title: null,
+      upToCursor: cursor,
+      upToEventSeq: null,
+    })
+    const conversation = await sdk.conversationsCreate(
+      toConversationCreate(
+        // Carry the workspace binding over — a fork without the source's
+        // working directory can't share its checkpoint refs or files.
+        { working_directory: source.workingDirectory ?? undefined },
+        idempotencyKey()
+      )
+    )
+    await sdk.sessionForConversation({
+      idempotencyKey: idempotencyKey(),
+      conversationId: conversation.id,
+      sessionId: forked.sessionId,
+    })
+    return toConversation(conversation)
+  },
+
+  /**
+   * Rewind the conversation's durable session to a history cursor (P2.13):
+   * all runs are marked `rewound` and a new run carries the history prefix.
+   * `restoreWorkspace` rolls the working tree back to the newest recorded
+   * filesystem checkpoint at or before the cursor (P2.18).
+   */
+  rewindToCursor: async (convId: number, cursor: number) => {
+    const sessionId = await sessionFor(convId)
+    return sdk.sessionRewind({
+      idempotencyKey: idempotencyKey(),
+      sessionId,
+      toCursor: cursor,
+      reason: "rewind from chat",
+      restoreWorkspace: true,
+    })
   },
 
   /** Durable runs for the conversation's canonical session (newest first). */

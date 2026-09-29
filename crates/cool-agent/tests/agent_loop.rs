@@ -97,6 +97,8 @@ fn request(workspace: &std::path::Path) -> AgentRequest {
         model: "scripted".to_owned(),
         history: Vec::new(),
         user_input: "hello".to_owned(),
+        user_parts: Vec::new(),
+        user_replay_parts: Vec::new(),
         system_prompt: Some("be precise".to_owned()),
         mode: None,
         temperature: 0.0,
@@ -864,6 +866,7 @@ fn project_instructions_and_compaction_keep_security_and_tool_groups() {
         Message {
             role: cool_agent::MessageRole::Assistant,
             content: None,
+            parts: None,
             tool_calls: vec![call.clone()],
             tool_call_id: None,
             name: None,

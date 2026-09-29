@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::context::{Message, ToolCall};
+use crate::context::{Message, ModelContentPart, ToolCall};
 use crate::launcher::{
     DisabledLauncher, LaunchSpec, LauncherKind, NetAccess, ProcessLauncher, ResourceLimits,
 };
@@ -60,6 +60,10 @@ pub struct ToolResult {
     /// `output` carries the bounded (possibly head/tail-trimmed) view; `truncated`
     /// marks that a fuller body was left behind, e.g. spilled to `.cool/spill/`.
     pub output: Value,
+    /// Model-visible media a text `output` cannot carry (P2.12 `view_image`):
+    /// providers that support images receive these alongside the JSON
+    /// summary; `output` still contains the `[image]` marker fallback.
+    pub output_parts: Option<Vec<ModelContentPart>>,
     pub is_error: bool,
     pub error_code: Option<String>,
     pub truncated: bool,
@@ -72,6 +76,7 @@ impl ToolResult {
     pub fn ok(output: Value) -> Self {
         Self {
             output,
+            output_parts: None,
             is_error: false,
             error_code: None,
             truncated: false,
@@ -83,11 +88,17 @@ impl ToolResult {
         let code = code.into();
         Self {
             output: json!({"error": message.into()}),
+            output_parts: None,
             is_error: true,
             error_code: Some(code),
             truncated: false,
             diagnostics: None,
         }
+    }
+
+    pub fn with_output_parts(mut self, parts: Vec<ModelContentPart>) -> Self {
+        self.output_parts = (!parts.is_empty()).then_some(parts);
+        self
     }
 
     pub fn masked(mut self) -> Self {
@@ -177,6 +188,20 @@ pub struct ToolContext {
     /// Tools `activate_tools` has enabled for this run (P1.10): the loop
     /// unions it into the deferred filter each iteration.
     pub active_tools: Arc<RwLock<BTreeSet<String>>>,
+    /// Durable session the run belongs to (P2.18): names checkpoint refs
+    /// `refs/cool/checkpoints/{session_id}/{seq}`. `None` outside session
+    /// runs (tests, direct tool calls) — checkpoints use a neutral ref.
+    pub session_id: Option<String>,
+    /// Reads artifact bytes for multimodal tools (`view_image`, P2.12):
+    /// resolves an artifact id to `(media_type, bytes)`.
+    /// `None` outside the app server — artifact-backed calls fail closed.
+    pub artifact_reader: Option<Arc<dyn ArtifactReader>>,
+}
+
+/// Artifact bytes for multimodal tools — implemented by the app server
+/// over `BlobStore` (P2.12). Returns `(media_type, bytes)`.
+pub trait ArtifactReader: Send + Sync + fmt::Debug {
+    fn read_artifact(&self, artifact_id: &str) -> Result<(String, Vec<u8>), String>;
 }
 
 impl ToolContext {
@@ -199,7 +224,22 @@ impl ToolContext {
             spawn_depth: 0,
             history_snapshot: None,
             active_tools: Arc::new(RwLock::new(BTreeSet::new())),
+            session_id: None,
+            artifact_reader: None,
         }
+    }
+
+    /// Binds the durable session so checkpoint refs name it (P2.18).
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Installs the artifact reader multimodal tools resolve artifacts
+    /// through (P2.12).
+    pub fn with_artifact_reader(mut self, reader: Arc<dyn ArtifactReader>) -> Self {
+        self.artifact_reader = Some(reader);
+        self
     }
 
     /// Sets the server-derived actor that store-backed tools scope their reads
@@ -591,6 +631,12 @@ pub fn builtin_registry() -> ToolRegistry {
             ProcessTool { git_only: true },
         ),
         Tool::new(
+            definition("view_image", "View an image: either a workspace file (`path`) or a chat artifact (`artifactId`). The pixels reach vision-capable providers as an image block; the JSON result still reports only mediaType/bytes.", json!({"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to the image"},"artifactId":{"type":"string","description":"Artifact id of a chat attachment"}},"additionalProperties":false})),
+            [Capability::Read],
+            Decision::Allow,
+            ViewImage,
+        ),
+        Tool::new(
             definition("update_plan", "Create or update a run plan", json!({"type":"object","properties":{"planId":{"type":"string"},"title":{"type":["string","null"]},"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"status":{"type":"string"}},"required":["title","status"],"additionalProperties":false}}},"required":["planId","steps"],"additionalProperties":false})),
             [],
             Decision::Allow,
@@ -840,11 +886,122 @@ impl ToolHandler for ReadFile {
         }
         Ok(ToolResult {
             output,
+            output_parts: None,
             is_error: false,
             error_code: None,
             truncated,
             diagnostics: None,
         })
+    }
+}
+
+struct ViewImage;
+
+/// Provider image-input ceiling (Anthropic caps a base64 source at ~5 MB);
+/// a workspace read above this is rejected rather than truncated silently.
+const VIEW_IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+fn image_media_type_from_ext(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+#[async_trait]
+impl ToolHandler for ViewImage {
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolResult, ToolError> {
+        use base64::Engine as _;
+        reject_unknown(&arguments, &["path", "artifactId"])?;
+        let path_arg = arguments.get("path").and_then(Value::as_str);
+        let artifact_arg = arguments.get("artifactId").and_then(Value::as_str);
+        if path_arg.is_some() == artifact_arg.is_some() {
+            return Err(ToolError::InvalidArguments(
+                "exactly one of `path` or `artifactId` is required".to_owned(),
+            ));
+        }
+        let (media_type, bytes, label, artifact_ref) = if let Some(path) = path_arg {
+            let relative = workspace_path(context, path)?;
+            let media_type = image_media_type_from_ext(&relative).ok_or_else(|| {
+                ToolError::InvalidArguments(format!("unsupported image extension for '{path}'"))
+            })?;
+            let metadata = match context.workspace.dir().metadata(&relative) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(ToolResult::error("file_not_found", "path is not a file"));
+                }
+                Err(error) => return Err(confinement_io(error)),
+            };
+            if !metadata.is_file() {
+                return Ok(ToolResult::error("file_not_found", "path is not a file"));
+            }
+            if metadata.len() > VIEW_IMAGE_MAX_BYTES {
+                return Ok(ToolResult::error(
+                    "image_too_large",
+                    format!("image exceeds {} bytes", VIEW_IMAGE_MAX_BYTES),
+                ));
+            }
+            let bytes = context
+                .workspace
+                .dir()
+                .read(&relative)
+                .map_err(confinement_io)?;
+            (media_type.to_owned(), bytes, path.to_owned(), None)
+        } else {
+            let artifact_id = artifact_arg.unwrap_or_default();
+            let reader = context.artifact_reader.as_ref().ok_or_else(|| {
+                ToolError::InvalidArguments(
+                    "artifact-backed view_image is unavailable in this runtime".to_owned(),
+                )
+            })?;
+            let (media_type, bytes) = reader.read_artifact(artifact_id).map_err(|error| {
+                ToolError::InvalidArguments(format!("cannot read artifact: {error}"))
+            })?;
+            if !media_type.starts_with("image/") {
+                return Err(ToolError::InvalidArguments(format!(
+                    "artifact {artifact_id} is not an image ({media_type})"
+                )));
+            }
+            if bytes.len() as u64 > VIEW_IMAGE_MAX_BYTES {
+                return Ok(ToolResult::error(
+                    "image_too_large",
+                    format!("image exceeds {} bytes", VIEW_IMAGE_MAX_BYTES),
+                ));
+            }
+            (
+                media_type,
+                bytes,
+                format!("artifact {artifact_id}"),
+                Some(Value::String(artifact_id.to_owned())),
+            )
+        };
+        let mut output = json!({
+            "image": label,
+            "mediaType": media_type,
+            "bytes": bytes.len(),
+        });
+        if let Some(artifact_ref) = artifact_ref {
+            output["artifactId"] = artifact_ref;
+        }
+        Ok(
+            ToolResult::ok(output).with_output_parts(vec![ModelContentPart::Image {
+                media_type,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }]),
+        )
     }
 }
 
@@ -1232,6 +1389,7 @@ impl ToolHandler for SearchFiles {
         let truncated = spilled || output["truncated"].as_bool().unwrap_or(false);
         Ok(ToolResult {
             output,
+            output_parts: None,
             is_error: false,
             error_code: None,
             truncated,
@@ -1295,6 +1453,7 @@ impl ToolHandler for FindFiles {
         let truncated = spilled || output["truncated"].as_bool().unwrap_or(false);
         Ok(ToolResult {
             output,
+            output_parts: None,
             is_error: false,
             error_code: None,
             truncated,
@@ -1422,6 +1581,7 @@ fn edit_error(code: &str, message: impl Into<String>, extra: Value) -> ToolResul
     output["errorCode"] = json!(code);
     ToolResult {
         output,
+        output_parts: None,
         is_error: true,
         error_code: Some(code.to_owned()),
         truncated: false,
@@ -2384,6 +2544,7 @@ async fn run_bounded_process(
     output["truncated"] = json!(truncated);
     Ok(ToolResult {
         output,
+        output_parts: None,
         is_error: !status.success(),
         error_code: (!status.success()).then(|| "process_failed".to_owned()),
         truncated,

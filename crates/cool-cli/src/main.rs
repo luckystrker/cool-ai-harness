@@ -1,3 +1,4 @@
+mod auth;
 mod executor_tools;
 mod jsonl;
 mod mcp_admin;
@@ -17,12 +18,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, AnthropicDriver, AutoApprovalGate, CancelSignal,
-    EventSink, MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver,
-    StoreEventSink, ToolContext, builtin_registry,
+    EventSink, GeminiDriver, MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome,
+    ScriptedDriver, StoreEventSink, ToolContext, builtin_registry,
 };
 use cool_app_server::{
     AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
-    capabilities,
+    capabilities, oauth,
 };
 use cool_extensions::{
     CompatibilityAdapter, ExtensionRuntime, HookDeclaration, InstalledPlugin, McpToolPolicy,
@@ -186,6 +187,39 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 .expect("doctor JSON serializes")
             );
             Ok(())
+        }
+        "auth" => {
+            let mut provider: Option<String> = None;
+            let mut data_dir = default_data_dir();
+            let mut device = false;
+            let mut manual = false;
+            while let Some(argument) = args.next() {
+                let (name, inline) = inline_flag(&argument);
+                match name {
+                    "--data-dir" => {
+                        data_dir = PathBuf::from(flag_value(
+                            &inline,
+                            &mut args,
+                            "missing data directory",
+                        )?);
+                    }
+                    "--device" => device = true,
+                    "--manual" => manual = true,
+                    _ if !argument.starts_with('-') => {
+                        if provider.is_some() {
+                            return Err(usage("extra auth argument"));
+                        }
+                        provider = Some(argument);
+                    }
+                    _ => return Err(usage("unknown auth argument")),
+                }
+            }
+            let Some(provider) = provider else {
+                return Err(usage(
+                    "usage: cool auth <claude|chatgpt|gemini> [--device] [--manual]",
+                ));
+            };
+            auth::auth_command(&provider, &data_dir, device, manual).await
         }
         "plugin" => plugin_command(args.collect()),
         "mcp" => mcp_command(args.collect()),
@@ -391,7 +425,7 @@ async fn build_server(
         host,
         ..ServerConfig::default()
     };
-    let (provider, model) = configured_provider(config.event_delay, true)?;
+    let (provider, model) = configured_provider(config.event_delay, true, data_dir)?;
     let extraction_provider = provider.clone();
     let extraction_model = model.clone();
     let workspace = current_workspace()?;
@@ -1773,7 +1807,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
     let (provider, model): (Arc<dyn ModelDriver>, String) = if scripted {
         (Arc::new(ScriptedDriver::echo()), "scripted-echo".to_owned())
     } else {
-        configured_provider(std::time::Duration::ZERO, false)?
+        configured_provider(std::time::Duration::ZERO, false, &default_data_dir())?
     };
     let store = DurableStore::in_memory()
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
@@ -1804,6 +1838,8 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 model,
                 history: Vec::new(),
                 user_input: prompt,
+                user_parts: Vec::new(),
+                user_replay_parts: Vec::new(),
                 system_prompt: None,
                 mode: None,
                 temperature: 0.7,
@@ -1845,11 +1881,18 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
 fn configured_provider(
     echo_delay: std::time::Duration,
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let provider_kind = env::var("COOL_PROVIDER").unwrap_or_default().to_lowercase();
     match provider_kind.as_str() {
-        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback),
-        "" | "openai" | "openai-compatible" | "openai_compatible" => {}
+        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback, data_dir),
+        "gemini" | "google" => {
+            return configured_gemini_provider(allow_scripted_fallback, data_dir);
+        }
+        // `chatgpt`/`codex` alias the OpenAI-compatible path; stored OAuth
+        // tokens get a clear unsupported-wire error below rather than a
+        // silent fallback.
+        "" | "openai" | "openai-compatible" | "openai_compatible" | "chatgpt" | "codex" => {}
         // An explicit but unknown provider must fail closed — never silently
         // fall back to a different backend than the operator asked for.
         other => {
@@ -1864,13 +1907,19 @@ fn configured_provider(
     if provider_kind.is_empty()
         && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty())
     {
-        return configured_anthropic_provider(allow_scripted_fallback);
+        return configured_anthropic_provider(allow_scripted_fallback, data_dir);
     }
     let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let configured_base_url = env::var("OPENAI_BASE_URL")
         .ok()
         .filter(|value| !value.is_empty());
     if api_key.is_empty() && configured_base_url.is_none() {
+        if stored_oauth_source(&["openai", "chatgpt", "codex"], "chatgpt", data_dir).is_some() {
+            return Err(runtime(
+                "oauth_wire_not_supported",
+                "stored ChatGPT OAuth tokens authenticate OpenAI's Codex backend (Responses API), which the OpenAI-compatible chat/completions driver does not implement — set OPENAI_API_KEY",
+            ));
+        }
         if allow_scripted_fallback {
             return Ok((
                 Arc::new(ScriptedDriver::echo_with_delay(echo_delay)),
@@ -1911,9 +1960,15 @@ fn configured_provider(
 /// `ANTHROPIC_MODEL`/`COOL_MODEL` or the current Claude default.
 fn configured_anthropic_provider(
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
+    let oauth_source = if api_key.is_empty() {
+        stored_oauth_source(&["anthropic", "claude"], "claude", data_dir)
+    } else {
+        None
+    };
+    if api_key.is_empty() && oauth_source.is_none() {
         if allow_scripted_fallback {
             return Ok((
                 Arc::new(ScriptedDriver::echo_with_delay(std::time::Duration::ZERO)),
@@ -1922,7 +1977,7 @@ fn configured_anthropic_provider(
         }
         return Err(runtime(
             "provider_credentials_missing",
-            "COOL_PROVIDER=anthropic requires ANTHROPIC_API_KEY",
+            "COOL_PROVIDER=anthropic requires ANTHROPIC_API_KEY or `cool auth claude`",
         ));
     }
     let base_url = env::var("ANTHROPIC_BASE_URL")
@@ -1943,12 +1998,115 @@ fn configured_anthropic_provider(
     } else {
         NetworkPolicy::new([host.to_owned()])
     };
-    let provider = AnthropicDriver::new(&base_url, api_key, policy)
-        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let provider: Arc<dyn ModelDriver> = match oauth_source {
+        Some(source) => Arc::new(
+            AnthropicDriver::for_oauth(&base_url, source, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+        None => Arc::new(
+            AnthropicDriver::new(&base_url, api_key, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+    };
     let model = env::var("ANTHROPIC_MODEL")
         .or_else(|_| env::var("COOL_MODEL"))
         .unwrap_or_else(|_| "claude-sonnet-4-5".to_owned());
-    Ok((Arc::new(provider), model))
+    Ok((provider, model))
+}
+
+/// Stored OAuth credentials for a CLI provider fallback (P2.11): the first
+/// provider row matching `names` with `auth_kind=oauth` and stored tokens,
+/// wrapped as an `AccessTokenSource` that refreshes through the keyring.
+/// `data_dir` must match where `cool auth` stored the login — a custom
+/// `--data-dir` makes the default path see no tokens.
+fn stored_oauth_source(
+    names: &[&str],
+    flow_name: &str,
+    data_dir: &std::path::Path,
+) -> Option<Arc<oauth::ProviderTokenSource>> {
+    let flow = oauth::oauth_flow(flow_name)?;
+    let store = Arc::new(open_legacy_store(&data_dir.join("harness.db")).ok()?);
+    let secrets = configured_secrets()?;
+    let actor = "local-user";
+    let provider = store
+        .list_providers(actor, true)
+        .ok()?
+        .into_iter()
+        .find(|provider| {
+            provider.auth_kind == "oauth"
+                && provider.oauth_tokens_encrypted.is_some()
+                && names
+                    .iter()
+                    .any(|name| provider.name.eq_ignore_ascii_case(name))
+        })?;
+    Some(Arc::new(oauth::ProviderTokenSource::new(
+        flow,
+        provider.id,
+        actor.to_owned(),
+        store,
+        secrets,
+    )))
+}
+
+/// Gemini provider wiring (P2.11): `GEMINI_API_KEY`/`GOOGLE_API_KEY` +
+/// optional `GEMINI_BASE_URL`; stored OAuth from `cool auth gemini` when no
+/// key is set. Model from `GEMINI_MODEL`/`COOL_MODEL`.
+fn configured_gemini_provider(
+    allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
+) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
+    let api_key = env::var("GEMINI_API_KEY")
+        .or_else(|_| env::var("GOOGLE_API_KEY"))
+        .unwrap_or_default();
+    let oauth_source = if api_key.is_empty() {
+        stored_oauth_source(&["gemini", "google"], "gemini", data_dir)
+    } else {
+        None
+    };
+    if api_key.is_empty() && oauth_source.is_none() {
+        if allow_scripted_fallback {
+            return Ok((
+                Arc::new(ScriptedDriver::echo_with_delay(std::time::Duration::ZERO)),
+                "scripted-echo".to_owned(),
+            ));
+        }
+        return Err(runtime(
+            "provider_credentials_missing",
+            "COOL_PROVIDER=gemini requires GEMINI_API_KEY or `cool auth gemini`",
+        ));
+    }
+    let base_url = env::var("GEMINI_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_owned());
+    let parsed = url::Url::parse(&base_url)
+        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| runtime("provider_config_invalid", "provider URL has no host"))?;
+    let allow_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let policy = if allow_loopback {
+        NetworkPolicy::new([host.to_owned()]).loopback_only()
+    } else {
+        NetworkPolicy::new([host.to_owned()])
+    };
+    let provider: Arc<dyn ModelDriver> = match oauth_source {
+        Some(source) => Arc::new(
+            GeminiDriver::for_oauth(&base_url, source, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+        None => Arc::new(
+            GeminiDriver::new(&base_url, api_key, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+    };
+    let model = env::var("GEMINI_MODEL")
+        .or_else(|_| env::var("COOL_MODEL"))
+        .unwrap_or_else(|_| "gemini-2.5-flash".to_owned());
+    Ok((provider, model))
 }
 
 /// Splits `--flag=value` into the flag name and its inline value; arguments

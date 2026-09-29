@@ -316,6 +316,8 @@ impl AppClient {
                 idempotency_key: idempotency(key)?,
                 session_id: session_id.to_owned(),
                 title: title.map(str::to_owned),
+                up_to_cursor: None,
+                up_to_event_seq: None,
             }))
             .await?;
         match response {

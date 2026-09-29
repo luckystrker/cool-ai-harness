@@ -1,14 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, PlanCreated,
-    PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal, SessionCompacted,
-    SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
-    ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, ContentPart, EventEnvelope, Extensions,
+    ItemEvent, PlanCreated, PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal,
+    SessionCompacted, SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved,
+    ToolCompleted, ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
 use cool_security::{
     Decision, PolicyRule, RulePatternKind, RuleScope, RuleSubject, mask_json, mask_secrets,
@@ -23,8 +23,8 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::context::{
-    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens, is_summary_message,
-    load_project_instructions, load_task_progress, summary_drop_candidates,
+    Message, MessageRole, ModelContentPart, ToolCall, compact_history, estimate_history_tokens,
+    is_summary_message, load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
@@ -72,6 +72,14 @@ pub struct AgentRequest {
     pub model: String,
     pub history: Vec<Message>,
     pub user_input: String,
+    /// Resolved model-visible parts for the first user message (P2.12):
+    /// base64 image data lives here, `user_input` keeps the degraded
+    /// `[image: <id>]` marker text that durable history carries.
+    pub user_parts: Vec<ModelContentPart>,
+    /// The protocol parts as the client sent them — recorded on the user
+    /// `ItemCompleted` envelope under `extensions.content_parts` so the UI
+    /// can replay attachment refs without the bytes (P2.12).
+    pub user_replay_parts: Vec<ContentPart>,
     pub system_prompt: Option<String>,
     /// Optional run-mode marker surfaced on `run.started` (`plan` for planning
     /// turns). `None` keeps the default agent mode.
@@ -173,6 +181,17 @@ impl From<StoreError> for RuntimeError {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError>;
+    /// Emit with envelope `extensions` attached (P2.18 checkpoint refs,
+    /// P2.12 replay parts). Sinks that persist envelopes store the map;
+    /// observing sinks ignore it.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let _ = extensions;
+        self.emit(event).await
+    }
     async fn before_compaction(&self, _history: &[Message]) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -426,12 +445,22 @@ impl AgentRuntime {
             ),
         }))
         .await?;
-        let user_message = Message::text(MessageRole::User, request.user_input);
-        sink.emit(CanonicalEvent::ItemCompleted(ItemEvent {
-            role: Some("user".to_owned()),
-            content: user_message.content.clone(),
-            tool_calls: Vec::new(),
-        }))
+        let user_message =
+            Message::with_parts(MessageRole::User, request.user_input, request.user_parts);
+        let mut user_extensions = Extensions::default();
+        if !request.user_replay_parts.is_empty()
+            && let Ok(value) = serde_json::to_value(&request.user_replay_parts)
+        {
+            user_extensions.insert("content_parts".to_owned(), value);
+        }
+        sink.emit_with_extensions(
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: user_message.content.clone(),
+                tool_calls: Vec::new(),
+            }),
+            user_extensions,
+        )
         .await?;
         history.push(user_message);
         let mut total_usage = Usage::default();
@@ -616,6 +645,7 @@ impl AgentRuntime {
             let assistant_message = Message {
                 role: MessageRole::Assistant,
                 content: (!content.is_empty()).then_some(content),
+                parts: None,
                 tool_calls: calls.clone(),
                 tool_call_id: None,
                 name: None,
@@ -688,10 +718,11 @@ impl AgentRuntime {
                         });
                     }
                 }
-                let message = Message::tool_result(
+                let mut message = Message::tool_result(
                     &call,
                     serde_json::to_string(&output).unwrap_or_else(|_| "null".to_owned()),
                 );
+                message.parts = result.output_parts.clone();
                 history.push(message);
             }
             if let Some(reason) = batch.cancelled {
@@ -716,13 +747,19 @@ impl AgentRuntime {
     ) -> Result<ToolBatchOutcome, RuntimeError> {
         let mut immediate = HashMap::new();
         let mut runnable = Vec::new();
+        // The ToolRequested seq names each call's checkpoint ref
+        // (`refs/cool/checkpoints/{session}/{seq}`, P2.18): deterministic and
+        // durable before the snapshot runs.
+        let mut requested_seqs = HashMap::new();
         for (index, call) in calls.iter().cloned().enumerate() {
-            sink.emit(CanonicalEvent::ToolRequested(ToolRequested {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone().into_iter().collect(),
-            }))
-            .await?;
+            let requested = sink
+                .emit(CanonicalEvent::ToolRequested(ToolRequested {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone().into_iter().collect(),
+                }))
+                .await?;
+            requested_seqs.insert(call.call_id.clone(), requested.seq);
             let Some(tool) = self.tools.get(&call.name) else {
                 let result = ToolResult::error("tool_not_found", "tool is not registered");
                 emit_tool_result(sink, &call, &result).await?;
@@ -833,12 +870,48 @@ impl AgentRuntime {
             runnable.push((index, call, tool));
         }
         let mut join_set = JoinSet::new();
+        // P2.18: pre-dispatch filesystem checkpoints run for EVERY mutating
+        // call before any tool in the batch starts — otherwise a spawned
+        // call's in-flight writes would land in a later call's "pre-dispatch"
+        // snapshot (torn checkpoint). A failed snapshot never blocks the
+        // call — the error lands on ToolStarted.extensions.checkpoint_error.
+        let mut prepared = Vec::with_capacity(runnable.len());
         for (index, call, tool) in runnable {
-            sink.emit(CanonicalEvent::ToolStarted(ToolLifecycle {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-            }))
+            let mut extensions = Extensions::new();
+            match crate::checkpoints::snapshot_before_tool(
+                context,
+                &call.name,
+                &call.call_id,
+                requested_seqs.get(&call.call_id).copied().unwrap_or(0),
+                &call.arguments,
+            )
+            .await
+            {
+                Ok(Some(reference)) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_EXTENSION_KEY.to_owned(),
+                        Value::String(reference),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_ERROR_EXTENSION_KEY.to_owned(),
+                        Value::String(error),
+                    );
+                }
+            }
+            sink.emit_with_extensions(
+                CanonicalEvent::ToolStarted(ToolLifecycle {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                }),
+                extensions,
+            )
             .await?;
+            prepared.push((index, call, tool));
+        }
+        for (index, call, tool) in prepared {
             let mut context = context.clone();
             context.cancel = Some(cancel.clone());
             context.call_id = Some(call.call_id.clone());
@@ -1185,6 +1258,14 @@ impl StoreEventSink {
 #[async_trait]
 impl EventSink for StoreEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_with_extensions(event, Extensions::new()).await
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let event = mask_canonical_event(event)?;
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
             let run = self.store.run(&self.run_id, &self.owner_actor_id)?;
@@ -1230,7 +1311,7 @@ impl EventSink for StoreEventSink {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         Ok(self
             .store
@@ -1311,6 +1392,10 @@ pub fn history_from_event_rows(
                     Message {
                         role,
                         content: item.content.clone(),
+                        // Image bytes are never re-fetched for history —
+                        // rebuilt messages degrade to the `[image: id]`
+                        // marker text (P2.12).
+                        parts: None,
                         tool_calls: item
                             .tool_calls
                             .iter()
@@ -1333,6 +1418,7 @@ pub fn history_from_event_rows(
                         serde_json::to_string(&tool.result)
                             .map_err(|error| RuntimeError::Sink(error.to_string()))?,
                     ),
+                    parts: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(tool.call_id.clone()),
                     name: Some(tool.name.clone()),
@@ -1349,6 +1435,7 @@ pub fn history_from_event_rows(
                         }))
                         .map_err(|error| RuntimeError::Sink(error.to_string()))?,
                     ),
+                    parts: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(tool.call_id.clone()),
                     name: Some(tool.name.clone()),

@@ -89,6 +89,7 @@ async fn link(client: &AppClient, conversation_id: i64) -> String {
             SessionForConversationParams {
                 idempotency_key: key(&format!("link-{conversation_id}")),
                 conversation_id,
+                session_id: None,
             },
         ))
         .await

@@ -85,6 +85,8 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     model: "scripted".to_owned(),
                     history: Vec::new(),
                     user_input: scenario.id.clone(),
+                    user_parts: Vec::new(),
+                    user_replay_parts: Vec::new(),
                     system_prompt: None,
                     mode: None,
                     temperature: 0.0,
@@ -97,6 +99,7 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                         "search_files".to_owned(),
                         "find_files".to_owned(),
                         "shell".to_owned(),
+                        "view_image".to_owned(),
                     ])),
                     tool_context: ToolContext::new(
                         Workspace::new(directory.path()).unwrap(),

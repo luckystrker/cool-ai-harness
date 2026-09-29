@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cool_security::NetworkPolicy;
@@ -25,7 +26,7 @@ use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::context::{Message, MessageRole, ToolCall};
+use crate::context::{Message, MessageRole, ModelContentPart, ToolCall};
 use crate::pricing::estimate_cost_micro_usd;
 use crate::provider::{
     ModelDriver, ModelEvent, ModelRequest, ModelStream, ProviderError, Usage, decode_sse_lines,
@@ -39,7 +40,11 @@ const API_VERSION: &str = "2023-06-01";
 #[derive(Clone)]
 pub struct AnthropicDriver {
     base_url: Url,
-    api_key: String,
+    api_key: Option<String>,
+    /// OAuth bearer source (P2.11): set for Claude subscription logins, where
+    /// the credential rides `Authorization: Bearer` + `anthropic-beta:
+    /// oauth-2025-04-20` instead of `x-api-key`.
+    token_source: Option<Arc<dyn crate::provider::AccessTokenSource>>,
     network_policy: NetworkPolicy,
 }
 
@@ -66,15 +71,65 @@ impl AnthropicDriver {
         }
         Ok(Self {
             base_url,
-            api_key,
+            api_key: Some(api_key),
+            token_source: None,
             network_policy,
         })
+    }
+
+    /// OAuth-backed driver (P2.11): bearer token from the source; a 401
+    /// triggers one refresh + retry.
+    pub fn for_oauth(
+        base_url: &str,
+        token_source: Arc<dyn crate::provider::AccessTokenSource>,
+        network_policy: NetworkPolicy,
+    ) -> Result<Self, ProviderError> {
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/")
+        };
+        let base_url = Url::parse(&normalized)
+            .map_err(|error| ProviderError::new("invalid_base_url", error.to_string(), false))?;
+        Ok(Self {
+            base_url,
+            api_key: None,
+            token_source: Some(token_source),
+            network_policy,
+        })
+    }
+
+    async fn credential(&self) -> Result<String, ProviderError> {
+        match &self.token_source {
+            Some(source) => source.access_token().await,
+            None => Ok(self.api_key.clone().unwrap_or_default()),
+        }
     }
 }
 
 #[async_trait]
 impl ModelDriver for AnthropicDriver {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        let credential = self.credential().await?;
+        match self.stream_once(request.clone(), credential).await {
+            Err(error)
+                if crate::provider::is_unauthorized(&error) && self.token_source.is_some() =>
+            {
+                let source = self.token_source.as_ref().expect("checked above");
+                let refreshed = source.refresh().await?;
+                self.stream_once(request, refreshed).await
+            }
+            result => result,
+        }
+    }
+}
+
+impl AnthropicDriver {
+    async fn stream_once(
+        &self,
+        request: ModelRequest,
+        credential: String,
+    ) -> Result<ModelStream, ProviderError> {
         let url = self.base_url.join("v1/messages").map_err(|error| {
             ProviderError::new("invalid_provider_url", error.to_string(), false)
         })?;
@@ -107,10 +162,17 @@ impl ModelDriver for AnthropicDriver {
             .map_err(|error| ProviderError::new("provider_client", error.to_string(), false))?;
         let model = request.model.clone();
         let payload = anthropic_payload(&request);
-        let response = client
-            .post(url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
+        let mut request_builder = client.post(url).header("anthropic-version", API_VERSION);
+        if self.token_source.is_some() {
+            // OAuth access tokens ride Bearer + the oauth beta flag (Claude
+            // Code's subscription flow); API keys keep x-api-key.
+            request_builder = request_builder
+                .bearer_auth(&credential)
+                .header("anthropic-beta", "oauth-2025-04-20");
+        } else {
+            request_builder = request_builder.header("x-api-key", &credential);
+        }
+        let response = request_builder
             .json(&payload)
             .send()
             .await
@@ -126,7 +188,11 @@ impl ModelDriver for AnthropicDriver {
             let status = response.status();
             let retryable = status.as_u16() == 429 || status.is_server_error();
             return Err(ProviderError::new(
-                "provider_http",
+                if status.as_u16() == 401 {
+                    "provider_unauthorized"
+                } else {
+                    "provider_http"
+                },
                 format!("provider returned {status}"),
                 retryable,
             ));
@@ -240,12 +306,31 @@ fn anthropic_payload(request: &ModelRequest) -> Value {
 /// become `tool_use` blocks appended after any text.
 fn anthropic_message(message: &Message) -> Value {
     if message.role == MessageRole::Tool {
+        // `tool_result.content` may be a string or a block array — vision
+        // parts (`view_image`) travel as image blocks (P2.12).
+        let content = match message.parts.as_deref().filter(|parts| !parts.is_empty()) {
+            Some(parts) => {
+                let mut blocks = Vec::new();
+                if let Some(text) = message.content.as_ref().filter(|text| !text.is_empty()) {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+                for block in parts.iter().filter_map(anthropic_part_block) {
+                    blocks.push(block);
+                }
+                Value::Array(blocks)
+            }
+            None => message
+                .content
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        };
         return json!({
             "role": "user",
             "content": [{
                 "type": "tool_result",
                 "tool_use_id": message.tool_call_id,
-                "content": message.content,
+                "content": content,
             }],
         });
     }
@@ -265,10 +350,29 @@ fn anthropic_message(message: &Message) -> Value {
             "input": Value::Object(call.arguments.clone()),
         }));
     }
+    if let Some(parts) = message.parts.as_deref().filter(|parts| !parts.is_empty()) {
+        for block in parts.iter().filter_map(anthropic_part_block) {
+            blocks.push(block);
+        }
+    }
     if blocks.is_empty() {
         blocks.push(json!({"type": "text", "text": ""}));
     }
     json!({"role": role, "content": blocks})
+}
+
+/// One `ModelContentPart` → an Anthropic `{type:"text"|"image"}` block.
+fn anthropic_part_block(part: &ModelContentPart) -> Option<Value> {
+    match part {
+        ModelContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
+        ModelContentPart::Image {
+            media_type,
+            data_base64,
+        } => Some(json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data_base64}
+        })),
+    }
 }
 
 #[derive(Default)]
@@ -497,6 +601,7 @@ mod tests {
         Message {
             role,
             content: content.map(str::to_owned),
+            parts: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -622,5 +727,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "provider_overloaded_error");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn message_serializes_image_parts_as_base64_blocks() {
+        let user = anthropic_message(&Message::with_parts(
+            MessageRole::User,
+            "look\n[image: artifact-1]",
+            vec![ModelContentPart::Image {
+                media_type: "image/png".to_owned(),
+                data_base64: "aGk=".to_owned(),
+            }],
+        ));
+        assert_eq!(user["role"], "user");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"type": "text", "text": "look\n[image: artifact-1]"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}
+                },
+            ])
+        );
+
+        // A tool result carrying view_image output parts serializes the same
+        // blocks inside its tool_result content.
+        let mut tool = message(MessageRole::Tool, Some("{\"image\": \"shot.png\"}"));
+        tool.tool_call_id = Some("call_1".to_owned());
+        tool.parts = Some(vec![ModelContentPart::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "aGk=".to_owned(),
+        }]);
+        let value = anthropic_message(&tool);
+        assert_eq!(value["content"][0]["type"], "tool_result");
+        assert_eq!(value["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(
+            value["content"][0]["content"],
+            json!([
+                {"type": "text", "text": "{\"image\": \"shot.png\"}"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}
+                },
+            ])
+        );
     }
 }

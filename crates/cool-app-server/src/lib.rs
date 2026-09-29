@@ -6,6 +6,7 @@
 pub mod blobs;
 pub mod client;
 mod legacy;
+pub mod oauth;
 mod research;
 mod scheduler;
 mod subagents;
@@ -26,9 +27,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
-    CancelSignal, EventSink, GateOutcome, Message, MessageRole, RunOutcome, RuntimeError,
-    ScriptedDriver, ToolContext, Usage, builtin_registry, default_agent_system_prompt,
-    history_from_event_rows, load_task_progress, mask_canonical_event, planning_system_prompt,
+    CancelSignal, EventSink, GateOutcome, Message, MessageRole, ModelContentPart, RunOutcome,
+    RuntimeError, ScriptedDriver, ToolContext, Usage, builtin_registry,
+    default_agent_system_prompt, history_from_event_rows, load_task_progress, mask_canonical_event,
+    planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -38,14 +40,16 @@ use cool_protocol::{
     McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
     McpUpdateServerParams, MemoryExtractResult, ModelInfoRecord, PlanCreated, PlanExecuteResult,
     PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
-    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
-    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
-    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
-    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
-    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    PromptAcceptedResult, ProtocolError, ProvidersOauthCompleteParams,
+    ProvidersOauthCompleteResult, ProvidersOauthStartParams, ProvidersOauthStartResult,
+    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess, RssFetchResult,
+    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
+    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRewindResult,
+    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
+    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
 use cool_security::{
     CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, RuleState, SecretKeyring,
@@ -192,6 +196,8 @@ struct Inner {
     /// Durable plan id persisted for each run's first `plan.created`, so one
     /// run's repeated `update_plan` calls do not create duplicate drafts.
     planned_runs: std::sync::Mutex<HashMap<String, i64>>,
+    /// In-flight `providers.oauth_start` handshakes keyed by `state` (P2.11).
+    pending_oauth: std::sync::Mutex<HashMap<String, oauth::PendingOAuth>>,
 }
 
 #[async_trait]
@@ -449,11 +455,32 @@ struct RunRecord {
 /// the spawned run does not retain the whole request envelope.
 struct PromptRequest {
     content: String,
+    /// Resolved image bytes for the model's first turn (P2.12); `content`
+    /// carries the durable `[image: <artifact_id>]` markers instead.
+    model_parts: Vec<ModelContentPart>,
+    /// Attachment refs for the `ItemCompleted` `content_parts` extension —
+    /// the UI replays chips from these, never from bytes (P2.12).
+    replay_parts: Vec<ContentPart>,
     model: Option<String>,
     system_prompt: Option<String>,
     plan_mode: bool,
     long_task_mode: bool,
 }
+
+/// `expand_prompt_parts` result (P2.12): `text` is what durable history and
+/// model `content` keep (with `[image: <artifact_id>]` markers), `model_parts`
+/// carries the resolved image bytes for this turn only, `replay_parts` is the
+/// attachment-ref list persisted on the `ItemCompleted` `content_parts`
+/// envelope extension so the UI can replay attachments without bytes.
+struct ExpandedContent {
+    text: String,
+    model_parts: Vec<ModelContentPart>,
+    replay_parts: Vec<ContentPart>,
+}
+
+/// Largest image attachment decoded into a model part (P2.12) — matches the
+/// `view_image` tool ceiling; bigger blobs degrade to the marker only.
+const MAX_IMAGE_PART_BYTES: u64 = 10 * 1024 * 1024;
 
 struct ConnectionState {
     initialized: bool,
@@ -655,6 +682,7 @@ impl AppServer {
                 research_executor,
                 blob_store,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
+                pending_oauth: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1488,6 +1516,8 @@ impl AppServer {
                     &fingerprint,
                     &params.session_id,
                     params.title.as_deref(),
+                    params.up_to_cursor,
+                    params.up_to_event_seq,
                 ) {
                     Ok(forked) => success(
                         id,
@@ -1499,6 +1529,90 @@ impl AppServer {
                     Err(store) => failure(id, store_error(store)),
                 };
                 let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionRewind(params) => {
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let outcome = match self.inner.store.rewind_session(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.session_id,
+                    params.to_cursor,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                // Workspace restore happens after the durable rewind commits:
+                // the event log already carries the rewound marker, so a failed
+                // restore is reported on the result, not rolled back (P2.18).
+                // `!outcome.created` is an idempotent replay of an earlier
+                // rewind — restoring again would overwrite workspace work
+                // done since the first response.
+                let mut workspace_restored = false;
+                let mut restore_error = None;
+                if params.restore_workspace.unwrap_or(false) && outcome.created {
+                    match outcome.value.checkpoint_ref.clone() {
+                        Some(checkpoint_ref) => {
+                            let workspace = self.run_workspace_for_session(&params.session_id);
+                            // A manifest checkpoint covers only the file its
+                            // own call touched — replay every discarded
+                            // manifest newest-first so each file lands at the
+                            // pre-first-call state; a git tree snapshot covers
+                            // the whole workspace and restores once.
+                            let refs: Vec<&String> =
+                                if checkpoint_ref.starts_with(cool_agent::MANIFEST_PREFIX) {
+                                    outcome.value.checkpoint_refs.iter().rev().collect()
+                                } else {
+                                    vec![&checkpoint_ref]
+                                };
+                            for reference in refs {
+                                match cool_agent::restore_checkpoint(
+                                    &workspace,
+                                    &self.inner.config.host.launcher,
+                                    &self.inner.config.host.environment,
+                                    reference,
+                                    &outcome.value.discarded_paths,
+                                )
+                                .await
+                                {
+                                    Ok(()) => workspace_restored = true,
+                                    Err(error) => {
+                                        restore_error = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            restore_error = Some(
+                                "no mutating-tool checkpoint beyond the cursor — nothing to undo"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(
+                            id,
+                            ResponsePayload::SessionRewound(SessionRewindResult {
+                                session_id: params.session_id,
+                                run_id: outcome.value.run_id,
+                                rewound_run_ids: outcome.value.rewound_run_ids,
+                                to_cursor: params.to_cursor,
+                                checkpoint_ref: outcome.value.checkpoint_ref,
+                                workspace_restored,
+                                restore_error,
+                            }),
+                        ),
+                    )
+                    .await;
             }
             Command::SessionForConversation(params) => {
                 let actor = local_actor();
@@ -1534,6 +1648,9 @@ impl AppServer {
                         .await;
                     return;
                 };
+                // The conversation must exist and belong to the actor before
+                // ANY link is written — the bind path below must not attach a
+                // session to a foreign or nonexistent conversation id.
                 let conversation = match legacy.get_conversation(&actor.id, params.conversation_id)
                 {
                     Ok(conversation) => conversation,
@@ -1544,6 +1661,23 @@ impl AppServer {
                         return;
                     }
                 };
+                // Fork flow: bind an existing actor-owned session to the
+                // conversation instead of creating one and importing the
+                // legacy transcript.
+                if let Some(session_id) = params.session_id.as_deref() {
+                    let frame = match self.inner.store.bind_session_to_conversation(
+                        &actor.id,
+                        params.idempotency_key.as_str(),
+                        &fingerprint,
+                        params.conversation_id,
+                        session_id,
+                    ) {
+                        Ok(link) => success(id, session_conversation_payload(link)),
+                        Err(error) => failure(id, store_error(error)),
+                    };
+                    let _ = self.send(&outbound, frame).await;
+                    return;
+                }
                 let window = match legacy.recent_messages(
                     &actor.id,
                     params.conversation_id,
@@ -1615,29 +1749,27 @@ impl AppServer {
                 let _ = self.send(&outbound, frame).await;
             }
             Command::SessionSteer(params) => {
-                if params
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32602, "unsupported_content_part", false)),
-                        )
-                        .await;
-                    return;
-                }
-                let content = params
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if content.trim().is_empty() {
+                let actor = local_actor();
+                // Image/artifact parts are expanded like prompt parts (P2.12):
+                // the steered item's `content` keeps the marker text and its
+                // envelope `extensions.content_parts` carries the refs
+                // `drain_steers` resolves into model image parts.
+                let run = match self.inner.store.run(&params.run_id, &actor.id) {
+                    Ok(run) => run,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                let expanded =
+                    match self.expand_prompt_parts(&actor, &run.session_id, &params.content) {
+                        Ok(expanded) => expanded,
+                        Err(error) => {
+                            let _ = self.send(&outbound, failure(id, error)).await;
+                            return;
+                        }
+                    };
+                if expanded.text.trim().is_empty() {
                     let _ = self
                         .send(
                             &outbound,
@@ -1646,14 +1778,20 @@ impl AppServer {
                         .await;
                     return;
                 }
-                let actor = local_actor();
+                let mut extensions = cool_protocol::Extensions::default();
+                if !expanded.replay_parts.is_empty()
+                    && let Ok(value) = serde_json::to_value(&expanded.replay_parts)
+                {
+                    extensions.insert("content_parts".to_owned(), value);
+                }
                 let fingerprint = fingerprint(&params);
                 let frame = match self.inner.store.steer_run(
                     &actor.id,
                     params.idempotency_key.as_str(),
                     &fingerprint,
                     &params.run_id,
-                    &mask_secrets(&content),
+                    &mask_secrets(&expanded.text),
+                    extensions,
                 ) {
                     Ok(steer) => {
                         let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
@@ -1700,9 +1838,9 @@ impl AppServer {
                         return;
                     }
                 }
-                let content =
+                let expanded =
                     match self.expand_prompt_parts(&actor, &params.session_id, &params.content) {
-                        Ok(content) => content,
+                        Ok(expanded) => expanded,
                         Err(error) => {
                             let _ = self.send(&outbound, failure(id, error)).await;
                             return;
@@ -1710,7 +1848,7 @@ impl AppServer {
                     };
                 if !self.prompt_start_frames_fit(
                     &params.session_id,
-                    &content,
+                    &expanded.text,
                     params.model.as_deref(),
                 ) {
                     let _ = self
@@ -1749,7 +1887,9 @@ impl AppServer {
                             self.spawn_agent_run(
                                 run_id,
                                 PromptRequest {
-                                    content,
+                                    content: expanded.text,
+                                    model_parts: expanded.model_parts,
+                                    replay_parts: expanded.replay_parts,
                                     model: params.model,
                                     system_prompt: params.system_prompt,
                                     plan_mode: params.plan_mode,
@@ -2533,6 +2673,14 @@ impl AppServer {
                     },
                     None => failure(id, error(-32025, "provider_probe_unavailable", false)),
                 };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersOauthStart(params) => {
+                let frame = self.handle_oauth_start(id, params).await;
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersOauthComplete(params) => {
+                let frame = self.handle_oauth_complete(id, params).await;
                 let _ = self.send(&outbound, frame).await;
             }
             Command::RssFetchNow(params) => {
@@ -3362,27 +3510,35 @@ impl AppServer {
                     .unwrap_or_else(|| server.inner.default_model.clone()),
                 history: Vec::<Message>::new(),
                 user_input: prompt.content,
+                user_parts: prompt.model_parts,
+                user_replay_parts: prompt.replay_parts,
                 system_prompt,
                 mode,
                 temperature: 0.0,
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(workspace.clone(), server.merged_policy())
-                    .with_actor(local_actor().id)
-                    .with_launcher(server.inner.config.host.launcher.clone())
-                    .with_environment(server.inner.config.host.environment.clone())
-                    .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
-                    .with_rule_source(server.rule_source(&workspace))
-                    .with_conversation(
-                        server
-                            .inner
-                            .store
-                            .conversation_id_for_session(&local_actor().id, &run.session_id)
-                            .ok()
-                            .flatten(),
-                    )
-                    .with_question_gate(approvals.clone()),
+                tool_context: {
+                    let conversation_id = server
+                        .inner
+                        .store
+                        .conversation_id_for_session(&local_actor().id, &run.session_id)
+                        .ok()
+                        .flatten();
+                    ToolContext::new(workspace.clone(), server.merged_policy())
+                        .with_actor(local_actor().id)
+                        .with_launcher(server.inner.config.host.launcher.clone())
+                        .with_environment(server.inner.config.host.environment.clone())
+                        .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                        .with_rule_source(server.rule_source(&workspace))
+                        .with_session_id(run.session_id.clone())
+                        .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                            server: server.clone(),
+                            conversation_id,
+                        }))
+                        .with_conversation(conversation_id)
+                        .with_question_gate(approvals.clone())
+                },
             };
             let lifecycle_sink =
                 server
@@ -3762,6 +3918,8 @@ impl AppServer {
             model: model.to_owned(),
             history: Vec::new(),
             user_input: input,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
             mode: Some("compact".to_owned()),
             temperature: 0.0,
@@ -4101,31 +4259,37 @@ impl AppServer {
         Ok(())
     }
 
-    /// Expand `ContentPart`s into the text-only user input the Rust runtime
-    /// accepts (Python `build_multimodal_content`, `backend/app/multimodal.py`):
-    /// extracted text is inlined as `[Attachment: name]`, supported images get
-    /// a marker pointing at `image_analyze` (the Rust `Message` has no vision
-    /// parts — tracked as an M12 checkpoint gap), opaque files get the
+    /// Expand `ContentPart`s (Python `build_multimodal_content`,
+    /// `backend/app/multimodal.py`): extracted text is inlined as
+    /// `[Attachment: name]`, supported images become model image parts plus a
+    /// `[image: <id>]` marker (P2.12), opaque files get the
     /// `no text extracted` marker. Ownership matches Python: when the session
     /// is linked to a conversation, artifacts must belong to it.
+    /// `expand_prompt_parts` output (P2.12): the durable marker text, the
+    /// model-facing image parts (base64, this turn only), and the attachment
+    /// refs that land on the `ItemCompleted` `content_parts` extension.
     fn expand_prompt_parts(
         &self,
         actor: &ActorRef,
         session_id: &str,
         parts: &[ContentPart],
-    ) -> Result<String, ProtocolError> {
+    ) -> Result<ExpandedContent, ProtocolError> {
         if parts
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
         {
-            return Ok(parts
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"));
+            return Ok(ExpandedContent {
+                text: parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                model_parts: Vec::new(),
+                replay_parts: Vec::new(),
+            });
         }
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return Err(error(-32010, "legacy_store_unavailable", false));
@@ -4160,7 +4324,9 @@ impl AppServer {
             .ok_or_else(|| {
                 legacy::invalid_input("Artifact attachments require a linked conversation")
             })?;
+        let blobs = self.inner.blob_store.as_ref();
         let mut out = String::new();
+        let mut model_parts = Vec::new();
         let mut emitted = HashSet::new();
         for part in parts {
             match part {
@@ -4187,16 +4353,31 @@ impl AppServer {
                             "Artifact {id} not found in this conversation"
                         )));
                     }
-                    if artifact.kind == "image"
-                        && blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str())
-                    {
-                        // Rust messages are text-only and there is no vision
-                        // tool; the attachment is acknowledged but its pixels
-                        // cannot be inspected (parity gap, tracked in M12).
-                        out.push_str(&format!(
-                            "\n[Attached image: {} — artifact #{}; image content is not visible to this runtime]",
-                            artifact.filename, artifact.id
-                        ));
+                    if blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str()) {
+                        // Image parts resolve to base64 for this turn; the
+                        // durable text keeps only the marker (P2.12). The
+                        // marker must say WHY pixels are missing — a bare
+                        // marker would have the model answer questions about
+                        // an image it never received.
+                        let mut note = " (image unavailable)";
+                        if let Some(blobs) = blobs {
+                            match blobs.read_artifact(&actor.id, id) {
+                                Ok((_, bytes)) if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES => {
+                                    use base64::Engine as _;
+                                    model_parts.push(ModelContentPart::Image {
+                                        media_type: artifact.media_type.clone(),
+                                        data_base64: base64::engine::general_purpose::STANDARD
+                                            .encode(bytes),
+                                    });
+                                    note = "";
+                                }
+                                Ok(..) | Err(blobs::BlobError::TooLarge(_)) => {
+                                    note = " (image too large to attach)";
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        out.push_str(&format!("\n[image: {id}{note}]"));
                     } else if let Some(text) = artifact.extracted_text.as_deref() {
                         out.push_str(&format!("\n[Attachment: {}]\n{text}", artifact.filename));
                     } else {
@@ -4208,7 +4389,22 @@ impl AppServer {
                 }
             }
         }
-        Ok(out)
+        Ok(ExpandedContent {
+            text: out,
+            model_parts,
+            // The extension replays the prompt — its text parts must carry
+            // the same secret masking as the durable content, not the raw
+            // input.
+            replay_parts: parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => ContentPart::Text {
+                        text: mask_secrets(text),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        })
     }
 
     /// Kick off a canonical run for a research row created by `research.create`
@@ -4366,6 +4562,8 @@ impl AppServer {
             model: model.to_owned(),
             history: history.to_vec(),
             user_input: prompt,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: None,
             mode: Some("plan_step".to_owned()),
             temperature: 0.0,
@@ -4536,6 +4734,7 @@ impl AppServer {
         run_id: &str,
         event: CanonicalEvent,
         terminal: bool,
+        extensions: cool_protocol::Extensions,
     ) -> Option<EventEnvelope> {
         let durable_run = self.inner.store.run(run_id, &local_actor().id).ok()?;
         if durable_run.status.is_terminal() {
@@ -4560,7 +4759,7 @@ impl AppServer {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         let envelope = self
             .inner
@@ -4700,60 +4899,18 @@ struct LifecycleEventSink {
 #[async_trait]
 impl EventSink for LifecycleEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
-        let payload = lifecycle_payload(&event);
-        match &event {
-            CanonicalEvent::RunStarted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SessionStart", payload.clone()).await;
-                self.dispatch(
-                    "UserPromptSubmit",
-                    serde_json::json!({"content": self.prompt}),
-                )
-                .await;
-                Ok(envelope)
-            }
-            CanonicalEvent::ToolStarted(_) => {
-                self.dispatch("PreToolUse", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolApprovalRequired(_) => {
-                self.dispatch("PermissionRequest", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::SessionCompacted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostCompact", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentStarted(_) => {
-                self.dispatch("SubagentStart", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostToolUse", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SubagentStop", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::RunCompleted(_)
-            | CanonicalEvent::RunFailed(_)
-            | CanonicalEvent::RunCancelled(_) => {
-                if self.terminal_already_recorded() {
-                    return self.inner.emit(event).await;
-                }
-                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
-                let envelope = self.inner.emit(event).await?;
-                let hook = if cancelled { "Interrupt" } else { "Stop" };
-                self.dispatch(hook, payload.clone()).await;
-                self.dispatch("SessionEnd", payload).await;
-                Ok(envelope)
-            }
-            _ => self.inner.emit(event).await,
-        }
+        self.emit_routed(event, None).await
+    }
+
+    /// Lifecycle hooks fire on the same routing as `emit`; envelope
+    /// extensions (checkpoint refs, replay parts) must reach the persisting
+    /// sink rather than being dropped by the trait default.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_routed(event, Some(extensions)).await
     }
 
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
@@ -4787,6 +4944,78 @@ impl EventSink for LifecycleEventSink {
 }
 
 impl LifecycleEventSink {
+    async fn forward(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        match extensions {
+            Some(extensions) => self.inner.emit_with_extensions(event, extensions).await,
+            None => self.inner.emit(event).await,
+        }
+    }
+
+    async fn emit_routed(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let payload = lifecycle_payload(&event);
+        match &event {
+            CanonicalEvent::RunStarted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SessionStart", payload.clone()).await;
+                self.dispatch(
+                    "UserPromptSubmit",
+                    serde_json::json!({"content": self.prompt}),
+                )
+                .await;
+                Ok(envelope)
+            }
+            CanonicalEvent::ToolStarted(_) => {
+                self.dispatch("PreToolUse", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolApprovalRequired(_) => {
+                self.dispatch("PermissionRequest", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::SessionCompacted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostCompact", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentStarted(_) => {
+                self.dispatch("SubagentStart", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostToolUse", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SubagentStop", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::RunCompleted(_)
+            | CanonicalEvent::RunFailed(_)
+            | CanonicalEvent::RunCancelled(_) => {
+                if self.terminal_already_recorded() {
+                    return self.forward(event, extensions).await;
+                }
+                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
+                let envelope = self.forward(event, extensions).await?;
+                let hook = if cancelled { "Interrupt" } else { "Stop" };
+                self.dispatch(hook, payload.clone()).await;
+                self.dispatch("SessionEnd", payload).await;
+                Ok(envelope)
+            }
+            _ => self.forward(event, extensions).await,
+        }
+    }
+
     async fn dispatch(&self, event: &str, payload: serde_json::Value) {
         let events = self.lifecycle.on_event(event, payload, &self.policy).await;
         for lifecycle_event in events {
@@ -4857,6 +5086,46 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
     }
 }
 
+/// P2.12: resolves artifact ids to `(media_type, bytes)` for multimodal
+/// tools and prompt expansion — `BlobStore`-backed, scoped to the
+/// conversation the run is bound to (same rule as prompt attachments;
+/// without a linked conversation reads fail closed).
+#[derive(Clone)]
+struct ServerArtifactReader {
+    server: AppServer,
+    conversation_id: Option<i64>,
+}
+
+impl std::fmt::Debug for ServerArtifactReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ServerArtifactReader")
+    }
+}
+
+impl cool_agent::ArtifactReader for ServerArtifactReader {
+    fn read_artifact(&self, artifact_id: &str) -> Result<(String, Vec<u8>), String> {
+        let artifact_id: i64 = artifact_id
+            .parse()
+            .map_err(|_| format!("invalid artifact id '{artifact_id}'"))?;
+        let Some(legacy) = self.server.inner.config.legacy_store.as_deref() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let artifact = legacy
+            .get_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        if Some(artifact.conversation_id) != self.conversation_id {
+            return Err(format!("artifact {artifact_id}: not in this conversation"));
+        }
+        let Some(blobs) = self.server.blob_store() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let (_, body) = blobs
+            .read_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        Ok((artifact.media_type, body))
+    }
+}
+
 #[async_trait]
 impl EventSink for AppServerEventSink {
     async fn emit(&self, mut event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
@@ -4869,16 +5138,28 @@ impl EventSink for AppServerEventSink {
                 compacted.compact_up_to_cursor = Some(cursor);
             }
         }
-        let envelope = self.emit_once(event).await?;
-        if matches!(
-            &envelope.event,
-            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
-        ) {
-            self.own_user_items
-                .lock()
-                .await
-                .insert(envelope.event_id.clone());
+        let envelope = self.emit_once(event, Default::default()).await?;
+        self.track_user_item(&envelope).await;
+        Ok(envelope)
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let mut event = event;
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
         }
+        let envelope = self.emit_once(event, extensions).await?;
+        self.track_user_item(&envelope).await;
         Ok(envelope)
     }
 
@@ -5022,7 +5303,12 @@ impl EventSink for AppServerEventSink {
                     continue;
                 }
                 if let Some(content) = item.content.clone() {
-                    messages.push(Message::text(MessageRole::User, content));
+                    // Steered attachments: the envelope's content_parts refs
+                    // resolve to image parts for this turn only — the item's
+                    // text already carries the `[image: <id>]` markers any
+                    // rebuilt history will keep (P2.12).
+                    let parts = self.steer_model_parts(envelope);
+                    messages.push(Message::with_parts(MessageRole::User, content, parts));
                 }
             }
         }
@@ -5033,7 +5319,79 @@ impl EventSink for AppServerEventSink {
 }
 
 impl AppServerEventSink {
-    async fn emit_once(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+    /// A steered user item's `content_parts` envelope refs → this-turn model
+    /// image parts (P2.12). Bytes come from the blob store fresh; anything
+    /// unreadable or oversized just degrades to the marker already in
+    /// `content`.
+    fn steer_model_parts(&self, envelope: &EventEnvelope) -> Vec<ModelContentPart> {
+        let Some(blobs) = self.server.blob_store() else {
+            return Vec::new();
+        };
+        let Some(value) = envelope.extensions.get("content_parts") else {
+            return Vec::new();
+        };
+        let Ok(parts) = serde_json::from_value::<Vec<ContentPart>>(value.clone()) else {
+            return Vec::new();
+        };
+        use base64::Engine as _;
+        let actor = local_actor();
+        // Same conversation boundary as `view_image`/prompt attachments — a
+        // steer must not smuggle another conversation's artifact to the model.
+        let conversation_id = self
+            .server
+            .inner
+            .store
+            .conversation_id_for_session(&actor.id, &envelope.session_id)
+            .ok()
+            .flatten();
+        parts
+            .iter()
+            .filter_map(|part| {
+                let (artifact_id, declared_media_type) = match part {
+                    ContentPart::Image {
+                        artifact_id,
+                        media_type,
+                    } => (artifact_id, Some(media_type.clone())),
+                    ContentPart::Artifact { artifact_id } => (artifact_id, None),
+                    _ => return None,
+                };
+                let id = artifact_id.parse::<i64>().ok()?;
+                let (artifact, bytes) = blobs.read_artifact(&actor.id, id).ok()?;
+                if Some(artifact.conversation_id) != conversation_id {
+                    return None;
+                }
+                let media_type = declared_media_type.unwrap_or(artifact.media_type);
+                if !media_type.starts_with("image/") || (bytes.len() as u64) > MAX_IMAGE_PART_BYTES
+                {
+                    return None;
+                }
+                Some(ModelContentPart::Image {
+                    media_type,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+            })
+            .collect()
+    }
+
+    /// User items this loop emitted itself are already in its history —
+    /// `drain_steers` must not deliver them a second time.
+    async fn track_user_item(&self, envelope: &EventEnvelope) {
+        if matches!(
+            &envelope.event,
+            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
+        ) {
+            self.own_user_items
+                .lock()
+                .await
+                .insert(envelope.event_id.clone());
+        }
+    }
+
+    async fn emit_once(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let mut event = mask_canonical_event(event)?;
         self.persist_plan_created(&mut event);
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
@@ -5100,7 +5458,7 @@ impl AppServerEventSink {
         );
         let envelope = self
             .server
-            .append_event(&self.run_id, event, terminal)
+            .append_event(&self.run_id, event, terminal, extensions)
             .await
             .ok_or_else(|| RuntimeError::Sink("run no longer accepts events".to_owned()))?;
         // Fan out to subscribers before the owner send: the event is already
@@ -6277,6 +6635,10 @@ fn store_error(value: StoreError) -> ProtocolError {
         StoreError::InvalidTransition { .. } => error(-32007, "session_run_active", true),
         StoreError::BudgetExceeded(_) => error(-32014, "budget_exceeded", false),
         StoreError::NotFound(_) => error(-32004, "resource_not_found", false),
+        StoreError::RewindRejected(reason) => match reason {
+            "session_has_live_run" => error(-32007, "session_run_active", true),
+            _ => error(-32602, "rewind_rejected", false),
+        },
         StoreError::Sqlite(_)
         | StoreError::Json(_)
         | StoreError::Io(_)
@@ -6779,6 +7141,210 @@ fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// `providers.oauth_start` / `providers.oauth_complete` handlers (P2.11).
+/// The pending map is connection-independent: any connection may finish a
+/// login any connection started (same as the CLI's `cool auth`, which uses
+/// its own loopback listener instead of these commands).
+impl AppServer {
+    async fn handle_oauth_start(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthStartParams,
+    ) -> ServerFrame {
+        let Some(flow) = oauth::oauth_flow(&params.provider) else {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32030,
+                    "oauth_provider_unsupported",
+                    "no verified OAuth flow for this provider (supported: claude, chatgpt, gemini)",
+                ),
+            );
+        };
+        if let Err(oauth_error) = oauth::flow_ready(&flow) {
+            return failure(
+                id,
+                masked_detail_error(-32036, oauth_error.code, &oauth_error.message),
+            );
+        }
+        if let Some(uri) = params.redirect_uri.as_deref()
+            && !oauth::redirect_uri_allowed(&flow, uri)
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32037,
+                    "oauth_redirect_invalid",
+                    "redirect_uri must be the flow's manual callback or an http://localhost|127.0.0.1 loopback URI",
+                ),
+            );
+        }
+        let pkce = oauth::pkce_pair();
+        let state = flow.state(&pkce);
+        // Without an explicit redirect_uri the flow must have a usable
+        // default — a fixed loopback port or a manual callback. Otherwise the
+        // authorize URL would carry a literal `:0` placeholder no provider
+        // accepts: tell the caller to bind its own loopback listener.
+        if params.redirect_uri.is_none()
+            && flow.loopback_port.is_none()
+            && flow.manual_redirect.is_none()
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32038,
+                    "oauth_redirect_required",
+                    "provider has no default callback — bind a loopback listener and pass redirect_uri",
+                ),
+            );
+        }
+        // Claude defaults to Anthropic's manual paste-the-code callback — the
+        // only redirect verified against the console app. Callers that bound
+        // their own listener pass `redirect_uri` explicitly.
+        let manual = flow.manual_redirect.is_some() && params.redirect_uri.is_none();
+        let redirect_uri = match &params.redirect_uri {
+            Some(uri) => uri.clone(),
+            None if manual => flow.manual_redirect.map(str::to_owned).unwrap_or_default(),
+            None => oauth::redirect_uri(flow.clone(), None),
+        };
+        let notice = match flow.name {
+            "claude" => Some(
+                "Anthropic subscription OAuth is off-label use; an API key remains the supported credential."
+                    .to_owned(),
+            ),
+            "chatgpt" => Some(
+                "Codex OAuth tokens authenticate OpenAI's Codex backend; the chat/completions driver reports `oauth_wire_not_supported`."
+                    .to_owned(),
+            ),
+            _ => None,
+        };
+        let auth_url = oauth::authorize_url(flow.clone(), &redirect_uri, &pkce.challenge, &state);
+        let pending = oauth::PendingOAuth {
+            flow,
+            verifier: pkce.verifier.clone(),
+            redirect_uri: redirect_uri.clone(),
+            created: Instant::now(),
+        };
+        if let Ok(mut map) = self.inner.pending_oauth.lock() {
+            map.retain(|_, entry| !entry.is_expired());
+            map.insert(state.clone(), pending);
+        }
+        success(
+            id,
+            ResponsePayload::ProvidersOauthStarted(ProvidersOauthStartResult {
+                auth_url,
+                state,
+                completion: if manual {
+                    "manual".to_owned()
+                } else {
+                    "loopback".to_owned()
+                },
+                redirect_uri,
+                notice,
+            }),
+        )
+    }
+
+    async fn handle_oauth_complete(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthCompleteParams,
+    ) -> ServerFrame {
+        let pending = match self.inner.pending_oauth.lock() {
+            Ok(mut map) => map.remove(&params.state),
+            Err(_) => None,
+        };
+        let Some(pending) = pending else {
+            return failure(id, error(-32032, "oauth_state_unknown", false));
+        };
+        if pending.is_expired() {
+            return failure(id, error(-32033, "oauth_state_expired", false));
+        }
+        let Some(secrets) = self.inner.config.secrets.as_deref() else {
+            return failure(id, error(-32034, "oauth_secrets_unavailable", false));
+        };
+        let Some(store) = self.inner.config.legacy_store.as_deref() else {
+            return failure(id, error(-32010, "legacy_store_unavailable", false));
+        };
+        // Anthropic's manual callback renders `code#state` — the code is the
+        // first half; whitespace defensiveness for pasted input. The fragment
+        // is the provider's state echo: it must bind to THIS handshake, or a
+        // stray/unrelated callback could be exchanged under it.
+        let code = params
+            .code
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if code.is_empty() {
+            return failure(id, error(-32035, "oauth_code_missing", false));
+        }
+        if let Some(pasted_state) = params.code.split('#').nth(1)
+            && pasted_state.trim() != params.state
+        {
+            return failure(id, error(-32039, "oauth_state_mismatch", false));
+        }
+        let http = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(build_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, "oauth_http_client", &build_error.to_string()),
+                );
+            }
+        };
+        let tokens = match oauth::exchange_code(&http, pending.flow.clone(), &pending, &code).await
+        {
+            Ok(tokens) => tokens,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        let actor = local_actor().id;
+        let provider = match oauth::oauth_provider_row(store, &actor, pending.flow) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
+        let encrypted = match oauth::encrypt_tokens(secrets, &tokens) {
+            Ok(encrypted) => encrypted,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        if let Err(store_error) = store.set_provider_oauth_tokens(&actor, provider.id, &encrypted) {
+            return failure(id, legacy::store_error(store_error));
+        }
+        // Refetch — the row fetched before `set_provider_oauth_tokens` still
+        // shows hasOauthTokens:false.
+        let provider = match store.get_provider(&actor, provider.id) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
+        let record = match legacy::provider_record(provider, Some(secrets)) {
+            Ok(record) => record,
+            Err(protocol_error) => return failure(id, protocol_error),
+        };
+        success(
+            id,
+            ResponsePayload::ProvidersOauthCompleted(ProvidersOauthCompleteResult {
+                provider: record,
+                expires_at: tokens.expires_at,
+            }),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -6883,6 +7449,7 @@ mod tests {
                     }],
                 }),
                 false,
+                Default::default(),
             )
             .await
             .unwrap();

@@ -75,6 +75,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
               );
               CREATE INDEX ix_policy_rules_scope ON policy_rules(scope, tool);",
     },
+    Migration {
+        version: 4,
+        name: "provider_oauth",
+        sql: "ALTER TABLE providers ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'api_key';
+              ALTER TABLE providers ADD COLUMN oauth_tokens_encrypted TEXT;",
+    },
 ];
 
 #[cfg(test)]

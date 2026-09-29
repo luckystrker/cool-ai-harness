@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use cool_agent::{EventSink, RuntimeError, StoreEventSink};
 use cool_agent::{Message, Usage};
-use cool_protocol::{CanonicalEvent, EventEnvelope};
+use cool_protocol::{CanonicalEvent, EventEnvelope, Extensions};
 use serde_json::json;
 
 pub struct JsonlEventSink {
@@ -28,6 +28,20 @@ impl JsonlEventSink {
             out: Mutex::new(()),
             pending_completed: Mutex::new(None),
         }
+    }
+
+    /// The shared post-emit step: hold `run.completed` back for `finish`,
+    /// print every other envelope as one NDJSON line.
+    fn render(&self, envelope: EventEnvelope) -> Result<EventEnvelope, RuntimeError> {
+        if matches!(envelope.event, CanonicalEvent::RunCompleted(_)) {
+            *self
+                .pending_completed
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(envelope.clone());
+        } else {
+            self.write_line(&envelope);
+        }
+        Ok(envelope)
     }
 
     fn write_line(&self, envelope: &EventEnvelope) {
@@ -85,15 +99,19 @@ impl JsonlEventSink {
 impl EventSink for JsonlEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
         let envelope = self.inner.emit(event).await?;
-        if matches!(envelope.event, CanonicalEvent::RunCompleted(_)) {
-            *self
-                .pending_completed
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = Some(envelope.clone());
-        } else {
-            self.write_line(&envelope);
-        }
-        Ok(envelope)
+        self.render(envelope)
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        // Forward the extensions — the trait default drops them, which would
+        // lose checkpoint refs (P2.18) and replay parts (P2.12) from the
+        // durable log the inner sink writes.
+        let envelope = self.inner.emit_with_extensions(event, extensions).await?;
+        self.render(envelope)
     }
 
     async fn before_compaction(&self, history: &[Message]) -> Result<(), RuntimeError> {

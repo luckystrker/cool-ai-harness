@@ -62,6 +62,7 @@ export function ChatPage() {
   const [searchParams] = useSearchParams()
   const convId = conversationId ? Number(conversationId) : null
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const { data: detail, isLoading, isError, refetch } = useQuery({
@@ -225,6 +226,43 @@ export function ChatPage() {
     onError: (error) =>
       toast.error("Working directory was not changed", {
         description: getErrorDescription(error, "Choose an accessible folder and try again."),
+      }),
+  })
+
+  // P2.13: fork the durable session at a history cursor and open the new
+  // conversation bound to the fork.
+  const forkFromHere = useMutation({
+    mutationFn: (cursor: number) => conversationsApi.forkFromCursor(convId!, cursor),
+    onSuccess: (conversation) => {
+      queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      navigate(`/chat/${conversation.id}`)
+    },
+    onError: (error) =>
+      toast.error("Conversation was not forked", {
+        description: getErrorDescription(error, "Try again."),
+      }),
+  })
+
+  // P2.13/P2.18: rewind the session to a history cursor; the workspace rolls
+  // back to the newest recorded checkpoint when one exists.
+  const rewindToHere = useMutation({
+    mutationFn: (cursor: number) => conversationsApi.rewindToCursor(convId!, cursor),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+      queryClient.invalidateQueries({ queryKey: ["conversation-runs", convId] })
+      queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      toast.success("Conversation rewound", {
+        description: result.workspaceRestored
+          ? "History and workspace restored."
+          : (result.restoreError ?? "History rewound."),
+      })
+    },
+    onError: (error) =>
+      toast.error("Could not rewind", {
+        description: getErrorDescription(
+          error,
+          "A run may still be active — try again when it finishes."
+        ),
       }),
   })
 
@@ -629,7 +667,20 @@ export function ChatPage() {
                     <CompactedHistory messages={compactedMsgs} />
                   )}
                   {historyMsgs.map((m) => (
-                    <MessageBubble key={m.id} msg={m} />
+                    <MessageBubble
+                      key={m.id}
+                      msg={m}
+                      onForkFromHere={
+                        m.cursor != null
+                          ? () => forkFromHere.mutate(m.cursor!)
+                          : undefined
+                      }
+                      onRewindToHere={
+                        m.cursor != null && !isStreaming
+                          ? () => rewindToHere.mutate(m.cursor!)
+                          : undefined
+                      }
+                    />
                   ))}
                   {pendingMsgs.map((m) => (
                     <MessageBubble
@@ -902,6 +953,7 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
       id: `db-${m.id}`,
       role: m.role,
       content: m.content ?? "",
+      cursor: m.id,
       toolCalls,
       thinking: m.thinking ?? undefined,
       usage: (m.usage as MessageViewModel["usage"]) ?? undefined,

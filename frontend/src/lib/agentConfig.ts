@@ -26,6 +26,7 @@ export const TOOL_NAMES = [
   "list_files",
   "search_files",
   "find_files",
+  "view_image",
   // Execution
   "shell",
   "git",
