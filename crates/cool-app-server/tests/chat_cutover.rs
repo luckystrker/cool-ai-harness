@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cool_agent::{AgentRuntime, ModelEvent, ScriptedDriver, builtin_registry};
+use cool_agent::{AgentRuntime, ModelEvent, ScriptedDriver, ToolCall, builtin_registry};
 use cool_app_server::{AppClient, AppServer, ServerConfig};
 use cool_protocol::*;
 use cool_security::{CapabilityPolicy, Decision, Workspace};
@@ -40,24 +40,48 @@ fn legacy_server() -> (AppServer, Arc<LegacyStore>) {
 fn scripted_legacy_server(
     provider: Arc<ScriptedDriver>,
     workspace: &std::path::Path,
-) -> (AppServer, Arc<LegacyStore>) {
+) -> (AppServer, Arc<LegacyStore>, DurableStore) {
     let store = LegacyStore::in_memory().expect("in-memory legacy store");
     store.ensure_actor("local-user").expect("actor");
     let store = Arc::new(store);
+    let durable = DurableStore::in_memory().expect("durable");
     let config = ServerConfig {
         legacy_store: Some(store.clone()),
         ..ServerConfig::default()
     };
     let server = AppServer::with_agent_runtime(
         config,
-        DurableStore::in_memory().expect("durable"),
+        durable.clone(),
         AgentRuntime::new(provider, builtin_registry()),
         Workspace::new(workspace).expect("workspace"),
         CapabilityPolicy::new(Some(Decision::Allow)),
         "scripted",
     )
     .expect("server");
-    (server, store)
+    (server, store, durable)
+}
+
+/// One canonical envelope for direct `DurableStore` appends — mirrors the
+/// `durable.rs` helper so tests can seed runs the mirror never saw.
+fn durable_event(session_id: &str, run_id: &str, seq: u64, event: CanonicalEvent) -> EventEnvelope {
+    EventEnvelope {
+        event_id: format!("{run_id}-event-{seq}"),
+        schema_version: V1Version::VALUE,
+        session_id: session_id.to_owned(),
+        run_id: run_id.to_owned(),
+        item_id: None,
+        seq,
+        occurred_at: "2026-09-01T00:00:00Z".to_owned(),
+        actor: ActorRef {
+            id: "local-user".to_owned(),
+            kind: ActorKind::LocalUser,
+        },
+        source: "test".to_owned(),
+        causation_id: None,
+        correlation_id: None,
+        event,
+        extensions: Default::default(),
+    }
 }
 
 async fn connected_client(
@@ -679,7 +703,7 @@ async fn session_run_mirrors_into_legacy_inspector_and_analytics() {
         }),
         ModelEvent::Finish { reason: None },
     ])]));
-    let (server, store) = scripted_legacy_server(provider, directory.path());
+    let (server, store, _durable) = scripted_legacy_server(provider, directory.path());
     let (client, _task) = connected_client(server).await;
 
     let conversation = store
@@ -806,7 +830,7 @@ async fn inspector_replay_spawns_a_mirrored_agent_run() {
         ])
     };
     let provider = Arc::new(ScriptedDriver::new([script(), script()]));
-    let (server, store) = scripted_legacy_server(provider, directory.path());
+    let (server, store, _durable) = scripted_legacy_server(provider, directory.path());
     let (client, _task) = connected_client(server).await;
 
     let conversation = store
@@ -897,4 +921,323 @@ async fn inspector_replay_spawns_a_mirrored_agent_run() {
             .len(),
         2
     );
+}
+
+/// `session.rewind` copies the retained history into the seed run with a
+/// `rewound` extension; the mirror emits those copies' timeline rows but
+/// must not re-run the spend/tool/usage accounting the superseded run
+/// already recorded.
+#[tokio::test]
+async fn rewind_mirrors_copied_history_without_double_counting() {
+    let directory = tempdir().expect("tempdir");
+    std::fs::write(directory.path().join("note.txt"), "contents").expect("fixture file");
+    let provider = Arc::new(ScriptedDriver::new([
+        Ok(vec![ModelEvent::ToolCall(ToolCall {
+            call_id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: json!({"path": "note.txt"})
+                .as_object()
+                .expect("arguments")
+                .clone(),
+        })]),
+        Ok(vec![
+            ModelEvent::Content("done".to_owned()),
+            ModelEvent::Usage(cool_agent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cost_micro_usd: Some(30_000),
+                ..Default::default()
+            }),
+            ModelEvent::Finish { reason: None },
+        ]),
+    ]));
+    let (server, store, durable) = scripted_legacy_server(provider, directory.path());
+    let (client, _task) = connected_client(server).await;
+
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Rewind".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let linked = request(&client, link_command(conversation.id)).await;
+    let ResponsePayload::SessionForConversation(link) = linked else {
+        panic!("unexpected payload: {linked:?}");
+    };
+
+    let events = client.subscribe();
+    let run_id = client
+        .prompt("rewind-prompt", &link.session_id, "read the note", None)
+        .await
+        .expect("prompt")
+        .run_id;
+    drain_run(events, &run_id).await;
+    assert_eq!(
+        store
+            .list_tool_calls("local-user", Some(conversation.id), None)
+            .expect("tool calls")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_spend("local-user", None, None)
+            .expect("spend")
+            .len(),
+        1
+    );
+
+    // Rewind to just after the tool call: the copied `tool.completed` and
+    // `item.completed` history events are tagged and must not re-count.
+    let window = durable
+        .session_event_window(&link.session_id, "local-user", None, usize::MAX)
+        .expect("window");
+    let cursor = window
+        .iter()
+        .find(|(_, envelope)| matches!(envelope.event, CanonicalEvent::ToolCompleted(_)))
+        .map(|(rowid, _)| *rowid)
+        .expect("tool.completed cursor");
+    let rewound = request(
+        &client,
+        Command::SessionRewind(SessionRewindParams {
+            idempotency_key: key("rewind-1"),
+            session_id: link.session_id.clone(),
+            to_cursor: cursor,
+            reason: None,
+            restore_workspace: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::SessionRewound(rewind) = rewound else {
+        panic!("unexpected payload: {rewound:?}");
+    };
+    assert!(rewind.rewound_run_ids.contains(&run_id));
+
+    // The superseded row keeps its recorded terminal state — it genuinely
+    // completed in history; the close path exists to repair rows left open.
+    let old = store
+        .find_run_by_durable_id("local-user", conversation.id, &run_id)
+        .expect("find")
+        .expect("old row");
+    assert_eq!(old.status, "completed");
+    assert_eq!(
+        old.usage
+            .as_ref()
+            .and_then(|usage| usage["total_tokens"].as_f64()),
+        Some(15.0)
+    );
+
+    let seed = store
+        .find_run_by_durable_id("local-user", conversation.id, &rewind.run_id)
+        .expect("find")
+        .expect("seed row");
+    assert_eq!(seed.status, "completed");
+    assert_eq!(seed.usage, None, "copied usage must not re-count");
+
+    let timeline = store
+        .list_run_events("local-user", seed.id, None, Some(100))
+        .expect("timeline");
+    let kinds: Vec<&str> = timeline.iter().map(|event| event.kind.as_str()).collect();
+    assert!(
+        kinds.contains(&"tool_result"),
+        "the tagged tool.completed copy still mirrors its timeline row: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"message"),
+        "the tagged message copies still mirror: {kinds:?}"
+    );
+    assert_eq!(
+        store
+            .list_tool_calls("local-user", Some(conversation.id), None)
+            .expect("tool calls")
+            .len(),
+        1,
+        "rewind must not duplicate the tool_calls row"
+    );
+    assert_eq!(
+        store
+            .list_spend("local-user", None, None)
+            .expect("spend")
+            .len(),
+        1,
+        "rewind must not duplicate the spend_log row"
+    );
+}
+
+/// A run abandoned mid-`running` by a restart is failed by
+/// `recover_incomplete_runs`; the envelopes it emits reach the mirror
+/// through `with_store` so the legacy row closes instead of staying a
+/// zombie `running` picker entry.
+#[test]
+fn recovered_crash_run_closes_its_mirrored_row() {
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Crash".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let durable = DurableStore::in_memory().expect("durable");
+    let link = durable
+        .link_conversation(
+            "local-user",
+            "link",
+            "fp",
+            conversation.id,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("link");
+    let run_id = durable
+        .start_run("local-user", "run", "fp", &link.session_id)
+        .expect("run")
+        .value;
+    durable
+        .append_event(
+            "local-user",
+            &durable_event(
+                &link.session_id,
+                &run_id,
+                1,
+                CanonicalEvent::RunStarted(RunStarted {
+                    model: Some("scripted".to_owned()),
+                    mode: None,
+                }),
+            ),
+        )
+        .expect("started");
+
+    // Server construction runs crash recovery: the run is failed and the
+    // failure envelope is mirrored.
+    let _server = AppServer::with_store(
+        ServerConfig {
+            legacy_store: Some(store.clone()),
+            ..ServerConfig::default()
+        },
+        durable,
+    )
+    .expect("server");
+
+    let row = store
+        .find_run_by_durable_id("local-user", conversation.id, &run_id)
+        .expect("find")
+        .expect("mirrored row");
+    assert_eq!(row.status, "failed");
+    assert!(row.finished_at.is_some(), "recovered run must close");
+}
+
+/// Canonical runs that predate the mirror (or missed a projection) are
+/// backfilled by the startup reconciliation sweep — the picker and the
+/// analytics rows appear without replaying the prompt.
+#[test]
+fn startup_sweep_backfills_unmirrored_runs() {
+    let store = Arc::new(LegacyStore::in_memory().expect("store"));
+    store.ensure_actor("local-user").expect("actor");
+    let conversation = store
+        .create_conversation(
+            "local-user",
+            &NewConversation {
+                title: Some("Sweep".to_owned()),
+                ..NewConversation::default()
+            },
+        )
+        .expect("conversation");
+    let durable = DurableStore::in_memory().expect("durable");
+    let link = durable
+        .link_conversation(
+            "local-user",
+            "link",
+            "fp",
+            conversation.id,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("link");
+    let run_id = durable
+        .start_run("local-user", "run", "fp", &link.session_id)
+        .expect("run")
+        .value;
+    for (seq, event) in [
+        CanonicalEvent::RunStarted(RunStarted {
+            model: Some("scripted".to_owned()),
+            mode: None,
+        }),
+        CanonicalEvent::ItemCompleted(ItemEvent {
+            role: Some("assistant".to_owned()),
+            content: Some("backfilled".to_owned()),
+            tool_calls: Vec::new(),
+        }),
+        CanonicalEvent::UsageUpdated(UsageUpdated {
+            prompt_tokens: 4,
+            completion_tokens: 6,
+            total_tokens: 10,
+            cost_usd: Some(0.001),
+        }),
+        CanonicalEvent::RunCompleted(RunTerminal {
+            reason: "stop".to_owned(),
+            error_code: None,
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        durable
+            .append_event(
+                "local-user",
+                &durable_event(&link.session_id, &run_id, seq as u64 + 1, event),
+            )
+            .expect("append");
+    }
+
+    let _server = AppServer::with_store(
+        ServerConfig {
+            legacy_store: Some(store.clone()),
+            ..ServerConfig::default()
+        },
+        durable,
+    )
+    .expect("server");
+
+    let row = store
+        .find_run_by_durable_id("local-user", conversation.id, &run_id)
+        .expect("find")
+        .expect("swept row");
+    assert_eq!(row.status, "completed");
+    assert_eq!(
+        row.usage
+            .as_ref()
+            .and_then(|usage| usage["total_tokens"].as_f64()),
+        Some(10.0)
+    );
+    assert_eq!(
+        store
+            .list_spend("local-user", None, None)
+            .expect("spend")
+            .len(),
+        1
+    );
+    let kinds: Vec<String> = store
+        .list_run_events("local-user", row.id, None, Some(100))
+        .expect("timeline")
+        .iter()
+        .map(|event| event.kind.clone())
+        .collect();
+    for expected in ["start", "message", "llm_call_complete", "finish"] {
+        assert!(
+            kinds.iter().any(|kind| kind == expected),
+            "{expected} in {kinds:?}"
+        );
+    }
 }

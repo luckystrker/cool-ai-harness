@@ -941,6 +941,11 @@ impl DurableStore {
             extensions: Default::default(),
         }];
         for (_, source) in &copied {
+            // The copies replay history the superseded run already counted —
+            // the `rewound` tag tells projections (the legacy mirror) to emit
+            // the timeline rows but skip spend/tool/usage accounting.
+            let mut extensions = source.extensions.clone();
+            extensions.insert("rewound".to_owned(), serde_json::Value::Bool(true));
             rewind_events.push(EventEnvelope {
                 event_id: format!("event-{}", Uuid::new_v4()),
                 schema_version: V1Version::VALUE,
@@ -954,7 +959,7 @@ impl DurableStore {
                 causation_id: Some(source.event_id.clone()),
                 correlation_id: source.correlation_id.clone(),
                 event: source.event.clone(),
-                extensions: source.extensions.clone(),
+                extensions,
             });
         }
         rewind_events.push(EventEnvelope {
@@ -1322,6 +1327,17 @@ impl DurableStore {
             Some(_) => Err(StoreError::ActorMismatch),
             None => Ok(None),
         }
+    }
+
+    /// Every `(session_id, conversation_id)` link this actor owns — the
+    /// startup reconciliation sweep's enumeration surface.
+    pub fn linked_sessions(&self, actor_id: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id, conversation_id FROM rust_conversation_links WHERE actor_id = ?1",
+        )?;
+        let rows = statement.query_map([actor_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Newest-first run summaries of one actor-owned session.

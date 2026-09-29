@@ -534,8 +534,10 @@ impl AppServer {
     }
 
     pub fn with_store(config: ServerConfig, store: DurableStore) -> Result<Self, StoreError> {
-        store.recover_incomplete_runs()?;
-        Ok(Self::build(config, store))
+        let recovered = store.recover_incomplete_runs()?;
+        let server = Self::build(config, store);
+        server.mirror_recovered(&recovered);
+        Ok(server)
     }
 
     fn build(config: ServerConfig, store: DurableStore) -> Self {
@@ -565,15 +567,17 @@ impl AppServer {
         policy: CapabilityPolicy,
         default_model: impl Into<String>,
     ) -> Result<Self, StoreError> {
-        store.recover_incomplete_runs()?;
-        Ok(Self::build_with_runtime(
+        let recovered = store.recover_incomplete_runs()?;
+        let server = Self::build_with_runtime(
             config,
             store,
             runtime,
             workspace,
             policy,
             default_model.into(),
-        ))
+        );
+        server.mirror_recovered(&recovered);
+        Ok(server)
     }
 
     fn build_with_runtime(
@@ -661,7 +665,7 @@ impl AppServer {
             .as_ref()
             .zip(config.artifacts_dir.as_ref())
             .map(|(legacy, root)| BlobStore::new(Arc::clone(legacy), root.clone()));
-        Self {
+        let server = Self {
             inner: Arc::new(Inner {
                 config,
                 store,
@@ -688,7 +692,12 @@ impl AppServer {
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
                 pending_oauth: std::sync::Mutex::new(HashMap::new()),
             }),
-        }
+        };
+        // Backfill/repair pass over every conversation-linked canonical run:
+        // replays events past each row's watermark and closes rows left open
+        // by a crash or by runs that predate the mirror.
+        server.reconcile_legacy_mirror();
+        server
     }
 
     /// The background task executor, if a legacy store is configured. Callers
@@ -1830,13 +1839,20 @@ impl AppServer {
                     extensions,
                 ) {
                     Ok(steer) => {
+                        // The acceptance reports the appended event's seq —
+                        // fetch exactly that one: an interleaved append
+                        // between commit and here would otherwise hand the
+                        // mirror and subscribers the wrong event.
+                        let seq = steer.value.seq;
                         let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
                         if steer.created
-                            && let Ok(events) =
-                                self.inner
-                                    .store
-                                    .events(&params.run_id, &actor.id, None, usize::MAX)
-                            && let Some(event) = events.into_iter().last()
+                            && let Ok(events) = self.inner.store.events(
+                                &params.run_id,
+                                &actor.id,
+                                seq.checked_sub(1),
+                                1,
+                            )
+                            && let Some(event) = events.into_iter().next()
                         {
                             self.mirror_to_legacy(&event);
                             self.publish_to_subscribers(&event).await;
@@ -4043,14 +4059,15 @@ impl AppServer {
             summary: Some(summary.to_owned()),
             compact_up_to_cursor: Some(cutoff),
         }));
-        let compacted = self.inner.store.append_event_auto(actor_id, compacted)?;
-        self.mirror_to_legacy(&compacted);
+        self.inner.store.append_event_auto(actor_id, compacted)?;
         let terminal = envelope(CanonicalEvent::RunCompleted(RunTerminal {
             reason: "compact".to_owned(),
             error_code: None,
         }));
-        let terminal = self.inner.store.append_event_auto(actor_id, terminal)?;
-        self.mirror_to_legacy(&terminal);
+        self.inner.store.append_event_auto(actor_id, terminal)?;
+        // The compaction aux run is a bookkeeping projection, not a user
+        // turn — mirroring it would drop a `completed` picker row with an
+        // empty timeline into `runs.list` for every compact.
         Ok(())
     }
 
@@ -4612,10 +4629,13 @@ impl AppServer {
                 || legacy::replay_execution(store, &actor.id, params),
             )
             .map_err(legacy::store_error)?;
-        if replay.created {
-            self.spawn_replay_execution(actor, &replay.value, outbound, connection)
-                .await?;
-        }
+        // Always drive the execution, not only when the bookkeeping row is
+        // new: a spawn that failed after the record committed would
+        // otherwise retry into `created: false` and report a running replay
+        // that nothing executes. The `inspector.replay.exec` key inside
+        // `spawn_replay_execution` is what makes this self-idempotent.
+        self.spawn_replay_execution(actor, &replay.value, outbound, connection)
+            .await?;
         Ok(replay.value.result)
     }
 

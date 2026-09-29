@@ -347,6 +347,70 @@ fn run_progress_durable_binding_and_timestamped_events_support_the_mirror() {
         )
         .expect_err("terminal status must go through finish_run");
     assert!(matches!(error, StoreError::InvalidInput(_)));
+
+    // The mirror's seq watermark round-trips through config.
+    store
+        .set_run_mirror_cursor("local-user", run.id, 7)
+        .expect("cursor");
+    let cursor = store
+        .find_run_by_durable_id("local-user", 1, "run-abc")
+        .expect("find")
+        .expect("row");
+    assert_eq!(cursor.config.as_ref().unwrap()["mirroredSeq"], json!(7));
+
+    // `ensure_run_by_durable_id` is find-or-create in one statement: the
+    // second call for the same durable id returns the same row instead of
+    // duplicating the picker entry.
+    let ensured = store
+        .ensure_run_by_durable_id("local-user", 1, "run-xyz", &NewRun::default())
+        .expect("ensure");
+    let reensured = store
+        .ensure_run_by_durable_id(
+            "local-user",
+            1,
+            "run-xyz",
+            &NewRun {
+                model: Some("other".to_owned()),
+                ..NewRun::default()
+            },
+        )
+        .expect("ensure again");
+    assert_eq!(ensured.id, reensured.id);
+    assert_eq!(ensured.status, "running");
+    assert_eq!(
+        ensured.config.as_ref().unwrap()["durableRunId"],
+        json!("run-xyz")
+    );
+    assert!(
+        ensured.model.is_none(),
+        "the second ensure must not clobber"
+    );
+
+    // Progress updates on a finished row are inert: a stray `running`
+    // write can't reopen it.
+    let finished = store
+        .finish_run(
+            "local-user",
+            run.id,
+            "completed",
+            None,
+            Some(2),
+            Some("stop"),
+            None,
+        )
+        .expect("finish");
+    assert_eq!(finished.status, "completed");
+    let after = store
+        .update_run_progress(
+            "local-user",
+            run.id,
+            &RunProgress {
+                status: Some("running".to_owned()),
+                ..RunProgress::default()
+            },
+        )
+        .expect("progress on finished row");
+    assert_eq!(after.status, "completed", "finished row must not reopen");
 }
 
 #[test]

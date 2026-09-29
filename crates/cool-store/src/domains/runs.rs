@@ -274,7 +274,8 @@ impl crate::LegacyStore {
         connection.execute(
             "UPDATE agent_runs SET status = COALESCE(?1, status),
                model = COALESCE(model, ?2), usage = COALESCE(?3, usage),
-               iterations = iterations + ?4, updated_at = ?5 WHERE id = ?6",
+               iterations = iterations + ?4, updated_at = ?5 WHERE id = ?6
+               AND finished_at IS NULL",
             params![
                 progress.status,
                 progress.model,
@@ -331,6 +332,76 @@ impl crate::LegacyStore {
         )?;
         drop(connection);
         self.get_run(actor_id, run_id)
+    }
+
+    /// Find-or-create the run row bound to a canonical durable run id. One
+    /// `INSERT ... WHERE NOT EXISTS` statement, so racing first-events for
+    /// the same durable run cannot duplicate the picker row (and its usage).
+    pub fn ensure_run_by_durable_id(
+        &self,
+        actor_id: &str,
+        conversation_id: i64,
+        durable_run_id: &str,
+        new: &NewRun,
+    ) -> Result<AgentRun, StoreError> {
+        let connection = self.connection()?;
+        let user_id = require_conversation(&connection, actor_id, conversation_id)?;
+        let timestamp = now_python();
+        let status = new.status.as_deref().unwrap_or("running");
+        if !RUN_STATUSES.contains(&status) {
+            return Err(StoreError::InvalidInput(format!(
+                "unknown run status {status:?}"
+            )));
+        }
+        let mut config = new
+            .config
+            .clone()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        config["durableRunId"] = Value::String(durable_run_id.to_owned());
+        connection.execute(
+            "INSERT INTO agent_runs(created_at, updated_at, conversation_id, user_id, status,
+               model, config, iterations, started_at)
+             SELECT ?1, ?1, ?2, ?3, ?4, ?5, ?6, 0, ?1
+             WHERE NOT EXISTS (
+               SELECT 1 FROM agent_runs WHERE conversation_id = ?2
+                 AND json_valid(config)
+                 AND json_extract(config, '$.durableRunId') = ?7)",
+            params![
+                timestamp,
+                conversation_id,
+                user_id,
+                status,
+                new.model,
+                json_text(&Some(config))?,
+                durable_run_id,
+            ],
+        )?;
+        drop(connection);
+        self.find_run_by_durable_id(actor_id, conversation_id, durable_run_id)?
+            .ok_or(StoreError::NotFound("run"))
+    }
+
+    /// Watermark of the last canonical `seq` mirrored into this row. The
+    /// mirror advances it per projected event; the reconciliation sweep
+    /// resumes above it and already-projected events skip, so projection
+    /// stays single-shot across retries and overlapping write paths.
+    pub fn set_run_mirror_cursor(
+        &self,
+        actor_id: &str,
+        run_id: i64,
+        seq: u64,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        fetch_run(&connection, actor_id, run_id)?;
+        connection.execute(
+            "UPDATE agent_runs SET
+               config = json_set(COALESCE(config, '{}'), '$.mirroredSeq', ?2),
+               updated_at = ?3
+             WHERE id = ?1",
+            params![run_id, seq.min(i64::MAX as u64) as i64, now_python()],
+        )?;
+        Ok(())
     }
 }
 

@@ -7,37 +7,66 @@
 //! conversation lands here, so `runs.list`, `inspector.timeline`/`compare` and
 //! the analytics aggregations see the session runs the chat pipeline actually
 //! executed. Projection is best-effort: a mirror failure never rejects the
-//! canonical write that produced it.
+//! canonical write that produced it — it logs a warning and leaves the row's
+//! `config.mirroredSeq` watermark behind, which the startup reconciliation
+//! sweep (`reconcile_legacy_mirror`) resumes above.
 //!
 //! # Vocabulary mapping
 //!
 //! The mirrored `run_events` use the Python inspector vocabulary from
 //! `crates/cool-store/tests/fixtures/timeline_parity.json` (`start`,
-//! `message`, `llm_call_complete`, `tool_call_start`, `tool_result`, `error`,
-//! `finish`) so the Inspector grouping semantics hold; canonical kinds with no
-//! Python analogue pass through under their `kind` name. `usage.updated` is
+//! `message`, `llm_call_complete`, `tool_call_start`, `tool_result`,
+//! `tool_approval_request`, `tool_approval_resolved`, `error`, `finish`) so
+//! the Inspector grouping semantics hold; canonical kinds with no legacy
+//! analogue pass through under their `kind` name (`item.started`,
+//! `tool.started`, `plan.*`, `subagent.*`, ...). `usage.updated` is
 //! per-model-call, so each one records an `llm_call_complete` entry, an
 //! `iterations` bump and a `spend_log` row.
+//!
+//! # `rewound` copies
+//!
+//! `session.rewind` clones the retained history prefix into the seed run with
+//! `extensions.rewound = true`. Those copies still project their timeline
+//! `run_events` rows (the canonical log contains them again) but skip every
+//! accounting write — `spend_log`, `tool_calls`, `usage`/`iterations` and
+//! terminal `finish_run` — since the superseded run's rows already recorded
+//! them once.
 
 use cool_protocol::{CanonicalEvent, EventEnvelope};
-use cool_state::{DurableStore, SessionRewindOutcome};
+use cool_state::{DurableStore, RunStatus, SessionRewindOutcome};
 use cool_store::LegacyStore;
 use cool_store::domains::budgets::NewSpendEntry;
 use cool_store::domains::runs::{AgentRun, NewRun, NewToolCall, RunProgress};
 use cool_store::time::{now_python, parse_python_datetime, python_datetime};
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::{AppServer, local_actor};
 
 impl AppServer {
     /// Mirror one appended durable event into the legacy read models when the
     /// run's session is bound to a conversation. Called from every append
-    /// path (the sink funnel, cancel acceptance, steer, compaction).
+    /// path (the sink funnel, cancel acceptance, steer, rewind, recovery).
     pub(crate) fn mirror_to_legacy(&self, envelope: &EventEnvelope) {
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return;
         };
-        let _ = project(legacy, &self.inner.store, &local_actor().id, envelope);
+        if let Err(error) = project(legacy, &self.inner.store, &local_actor().id, envelope) {
+            warn!(
+                run_id = %envelope.run_id,
+                seq = envelope.seq,
+                "legacy mirror projection failed: {error}"
+            );
+        }
+    }
+
+    /// Mirror the envelopes `recover_incomplete_runs` emitted while marking
+    /// crashed runs terminal — the rows they touch would otherwise stay
+    /// `running` forever (zombie picker entries).
+    pub(crate) fn mirror_recovered(&self, recovered: &[EventEnvelope]) {
+        for envelope in recovered {
+            self.mirror_to_legacy(envelope);
+        }
     }
 
     /// Reconcile the mirror after `session.rewind`: close the mirrored rows of
@@ -49,17 +78,116 @@ impl AppServer {
             return;
         };
         let actor = local_actor();
-        if let Ok(events) = self
+        match self
             .inner
             .store
             .events(&outcome.run_id, &actor.id, None, usize::MAX)
         {
-            for envelope in &events {
-                self.mirror_to_legacy(envelope);
+            Ok(events) => {
+                for envelope in &events {
+                    self.mirror_to_legacy(envelope);
+                }
             }
+            Err(error) => warn!(
+                run_id = %outcome.run_id,
+                "legacy mirror could not read rewind seed events: {error}"
+            ),
         }
         for durable_run_id in &outcome.rewound_run_ids {
-            let _ = close_rewound_run(legacy, &self.inner.store, &actor.id, durable_run_id);
+            if let Err(error) = close_terminal_run(
+                legacy,
+                &self.inner.store,
+                &actor.id,
+                durable_run_id,
+                "cancelled",
+                Some("rewound"),
+                None,
+            ) {
+                warn!(
+                    run_id = %durable_run_id,
+                    "legacy mirror could not close rewound run: {error}"
+                );
+            }
+        }
+    }
+
+    /// Startup reconciliation sweep. Enumerates every conversation-linked
+    /// session's canonical runs and replays the events past each mirrored
+    /// row's `config.mirroredSeq` watermark — backfilling runs that predate
+    /// the mirror (or missed a write mid-crash) — then closes rows still
+    /// open whose canonical run is already terminal. `import` runs (the
+    /// link-time transcript projection) and compaction pseudo-runs are not
+    /// picker material and stay unmirrored.
+    pub(crate) fn reconcile_legacy_mirror(&self) {
+        let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
+            return;
+        };
+        let actor = local_actor();
+        let links = match self.inner.store.linked_sessions(&actor.id) {
+            Ok(links) => links,
+            Err(error) => {
+                warn!("legacy mirror sweep could not list linked sessions: {error}");
+                return;
+            }
+        };
+        for (session_id, conversation_id) in links {
+            let runs = match self
+                .inner
+                .store
+                .list_session_runs(&actor.id, &session_id, usize::MAX)
+            {
+                Ok(runs) => runs,
+                Err(error) => {
+                    warn!(
+                        session_id = %session_id,
+                        "legacy mirror sweep could not list runs: {error}"
+                    );
+                    continue;
+                }
+            };
+            for run in runs {
+                if run.finish_reason.as_deref() == Some("import") {
+                    continue;
+                }
+                let cursor = legacy
+                    .find_run_by_durable_id(&actor.id, conversation_id, &run.run_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|row| mirror_cursor(&row));
+                match self
+                    .inner
+                    .store
+                    .events(&run.run_id, &actor.id, cursor, usize::MAX)
+                {
+                    Ok(events) => {
+                        for envelope in &events {
+                            self.mirror_to_legacy(envelope);
+                        }
+                    }
+                    Err(error) => warn!(
+                        run_id = %run.run_id,
+                        "legacy mirror sweep could not read events: {error}"
+                    ),
+                }
+                // A canonical run already terminal whose mirrored row never
+                // closed (crash between the writes, or pre-mirror drift).
+                if run.status.is_terminal()
+                    && let Err(error) = close_terminal_run(
+                        legacy,
+                        &self.inner.store,
+                        &actor.id,
+                        &run.run_id,
+                        legacy_status(run.status),
+                        run.finish_reason.as_deref(),
+                        None,
+                    )
+                {
+                    warn!(
+                        run_id = %run.run_id,
+                        "legacy mirror sweep could not close run: {error}"
+                    );
+                }
+            }
         }
     }
 }
@@ -70,7 +198,8 @@ type MirrorResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Project `envelope` into the legacy read models. A no-op when the run's
 /// session is not conversation-bound — the React surfaces only ever read
-/// conversations.
+/// conversations. Events already covered by the row's `mirroredSeq`
+/// watermark skip outright, making projection single-shot.
 fn project(
     legacy: &LegacyStore,
     durable: &DurableStore,
@@ -84,6 +213,16 @@ fn project(
     };
     let at = occurred_at_python(&envelope.occurred_at);
     let mut row = ensure_run(legacy, actor_id, conversation_id, envelope)?;
+    if mirror_cursor(&row).is_some_and(|cursor| envelope.seq <= cursor) {
+        return Ok(());
+    }
+    // Rewind-copied events emit only their timeline row — the superseded
+    // run's rows already recorded the accounting side.
+    let accounting = !envelope
+        .extensions
+        .get("rewound")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match &envelope.event {
         // Streaming noise the legacy vocabulary never carried.
         CanonicalEvent::ContentDelta(_) | CanonicalEvent::ItemUpdated(_) => {}
@@ -99,15 +238,17 @@ fn project(
                 })),
                 &at,
             )?;
-            legacy.update_run_progress(
-                actor_id,
-                row.id,
-                &RunProgress {
-                    status: Some("running".to_owned()),
-                    model: started.model.clone(),
-                    ..RunProgress::default()
-                },
-            )?;
+            if accounting {
+                row = legacy.update_run_progress(
+                    actor_id,
+                    row.id,
+                    &RunProgress {
+                        status: Some("running".to_owned()),
+                        model: started.model.clone(),
+                        ..RunProgress::default()
+                    },
+                )?;
+            }
         }
         CanonicalEvent::ItemCompleted(item) => {
             let role = item.role.as_deref().unwrap_or("assistant");
@@ -171,40 +312,60 @@ fn project(
             )?;
         }
         CanonicalEvent::ToolApprovalRequired(ask) => {
-            record(
-                legacy,
-                actor_id,
-                &row,
-                "tool.approval_required",
-                serde_json::to_value(ask)?,
-                &at,
-            )?;
-            legacy.update_run_progress(
+            legacy.append_run_event_at(
                 actor_id,
                 row.id,
-                &RunProgress {
-                    status: Some("awaiting_approval".to_owned()),
-                    ..RunProgress::default()
-                },
+                "tool_approval_request",
+                Some(&json!({
+                    "id": ask.call_id,
+                    "name": ask.name,
+                    "arguments": ask.arguments,
+                    "reason": ask.reason,
+                    "requires_decision": true,
+                    "approval_id": ask.approval_id,
+                    "revision": ask.revision,
+                    "run_id": row.id,
+                    "is_breakpoint": ask.breakpoint_type.is_some(),
+                    "breakpoint_type": ask.breakpoint_type,
+                    "result_preview": ask.result_preview,
+                    "current_content": ask.current_content,
+                })),
+                &at,
             )?;
+            if accounting {
+                row = legacy.update_run_progress(
+                    actor_id,
+                    row.id,
+                    &RunProgress {
+                        status: Some("awaiting_approval".to_owned()),
+                        ..RunProgress::default()
+                    },
+                )?;
+            }
         }
         CanonicalEvent::ToolApprovalResolved(resolution) => {
-            record(
-                legacy,
-                actor_id,
-                &row,
-                "tool.approval_resolved",
-                serde_json::to_value(resolution)?,
-                &at,
-            )?;
-            legacy.update_run_progress(
+            legacy.append_run_event_at(
                 actor_id,
                 row.id,
-                &RunProgress {
-                    status: Some("running".to_owned()),
-                    ..RunProgress::default()
-                },
+                "tool_approval_resolved",
+                Some(&json!({
+                    "id": resolution.call_id,
+                    "approval_id": resolution.approval_id,
+                    "revision": resolution.revision,
+                    "decision": resolution.decision,
+                })),
+                &at,
             )?;
+            if accounting {
+                row = legacy.update_run_progress(
+                    actor_id,
+                    row.id,
+                    &RunProgress {
+                        status: Some("running".to_owned()),
+                        ..RunProgress::default()
+                    },
+                )?;
+            }
         }
         CanonicalEvent::ToolCompleted(completed) => {
             record_tool_result(
@@ -212,6 +373,7 @@ fn project(
                 actor_id,
                 conversation_id,
                 &row,
+                accounting,
                 &completed.call_id,
                 &completed.name,
                 false,
@@ -226,6 +388,7 @@ fn project(
                 actor_id,
                 conversation_id,
                 &row,
+                accounting,
                 &failed.call_id,
                 &failed.name,
                 true,
@@ -267,29 +430,31 @@ fn project(
                 })),
                 &at,
             )?;
-            row = legacy.update_run_progress(
-                actor_id,
-                row.id,
-                &RunProgress {
-                    usage_delta: Some(delta),
-                    iterations_delta: 1,
-                    ..RunProgress::default()
-                },
-            )?;
-            legacy.log_spend(
-                actor_id,
-                &NewSpendEntry {
-                    run_id: Some(row.id),
-                    conversation_id: Some(conversation_id),
-                    provider_name: provider_name(legacy, actor_id, row.model.as_deref()),
-                    model: row.model.clone().unwrap_or_else(|| "unknown".to_owned()),
-                    prompt_tokens: usage.prompt_tokens as i64,
-                    completion_tokens: usage.completion_tokens as i64,
-                    total_tokens: usage.total_tokens as i64,
-                    cost_usd: usage.cost_usd.unwrap_or(0.0),
-                    ts: Some(at.clone()),
-                },
-            )?;
+            if accounting {
+                row = legacy.update_run_progress(
+                    actor_id,
+                    row.id,
+                    &RunProgress {
+                        usage_delta: Some(delta),
+                        iterations_delta: 1,
+                        ..RunProgress::default()
+                    },
+                )?;
+                legacy.log_spend(
+                    actor_id,
+                    &NewSpendEntry {
+                        run_id: Some(row.id),
+                        conversation_id: Some(conversation_id),
+                        provider_name: provider_name(legacy, actor_id, row.model.as_deref()),
+                        model: row.model.clone().unwrap_or_else(|| "unknown".to_owned()),
+                        prompt_tokens: usage.prompt_tokens as i64,
+                        completion_tokens: usage.completion_tokens as i64,
+                        total_tokens: usage.total_tokens as i64,
+                        cost_usd: usage.cost_usd.unwrap_or(0.0),
+                        ts: Some(at.clone()),
+                    },
+                )?;
+            }
         }
         CanonicalEvent::BudgetWarning(budget) | CanonicalEvent::BudgetExceeded(budget) => {
             legacy.append_run_event_at(
@@ -301,7 +466,16 @@ fn project(
             )?;
         }
         CanonicalEvent::RunCompleted(terminal) => {
-            finish(legacy, actor_id, &row, "completed", terminal, None, &at)?;
+            finish(
+                legacy,
+                actor_id,
+                &row,
+                "completed",
+                &terminal.reason,
+                None,
+                accounting,
+                &at,
+            )?;
         }
         CanonicalEvent::RunFailed(terminal) => {
             let detail = terminal.error_code.as_deref().unwrap_or(&terminal.reason);
@@ -317,13 +491,23 @@ fn project(
                 actor_id,
                 &row,
                 "failed",
-                terminal,
+                &terminal.reason,
                 Some(&terminal.reason),
+                accounting,
                 &at,
             )?;
         }
         CanonicalEvent::RunCancelled(terminal) => {
-            finish(legacy, actor_id, &row, "cancelled", terminal, None, &at)?;
+            finish(
+                legacy,
+                actor_id,
+                &row,
+                "cancelled",
+                &terminal.reason,
+                None,
+                accounting,
+                &at,
+            )?;
         }
         other => {
             // Faithful passthrough under the canonical kind name (`plan.*`,
@@ -338,30 +522,37 @@ fn project(
             legacy.append_run_event_at(actor_id, row.id, kind, payload.as_ref(), &at)?;
         }
     }
+    legacy.set_run_mirror_cursor(actor_id, row.id, envelope.seq)?;
     Ok(())
 }
 
-/// Find-or-create the legacy run row bound to `envelope.run_id`.
+/// Find-or-create the legacy run row bound to `envelope.run_id` — atomic in
+/// the store layer so racing first-events can't duplicate the row.
 fn ensure_run(
     legacy: &LegacyStore,
     actor_id: &str,
     conversation_id: i64,
     envelope: &EventEnvelope,
 ) -> MirrorResult<AgentRun> {
-    if let Some(row) = legacy.find_run_by_durable_id(actor_id, conversation_id, &envelope.run_id)? {
-        return Ok(row);
-    }
-    Ok(legacy.create_run(
+    Ok(legacy.ensure_run_by_durable_id(
         actor_id,
         conversation_id,
+        &envelope.run_id,
         &NewRun {
             config: Some(json!({
-                "durableRunId": envelope.run_id,
                 "source": "session-run",
             })),
             ..NewRun::default()
         },
     )?)
+}
+
+/// The canonical `seq` the row already mirrored, from `config.mirroredSeq`.
+fn mirror_cursor(row: &AgentRun) -> Option<u64> {
+    row.config
+        .as_ref()
+        .and_then(|config| config.get("mirroredSeq"))
+        .and_then(Value::as_u64)
 }
 
 /// Append one entry under the run — shorthand for the passthrough arms.
@@ -377,14 +568,16 @@ fn record(
     Ok(())
 }
 
-/// `tool_result` run entry plus the `tool_calls` analytics row. The call's
-/// arguments and start time come back from the mirrored `tool_call_start`.
+/// `tool_result` run entry plus — unless this is a rewound copy — the
+/// `tool_calls` analytics row. The call's arguments and start time come back
+/// from the mirrored `tool_call_start`.
 #[allow(clippy::too_many_arguments)]
 fn record_tool_result(
     legacy: &LegacyStore,
     actor_id: &str,
     conversation_id: i64,
     row: &AgentRun,
+    accounting: bool,
     call_id: &str,
     name: &str,
     is_error: bool,
@@ -416,6 +609,9 @@ fn record_tool_result(
         })),
         at,
     )?;
+    if !accounting {
+        return Ok(());
+    }
     legacy.record_tool_call(
         actor_id,
         &NewToolCall {
@@ -432,15 +628,18 @@ fn record_tool_result(
     Ok(())
 }
 
-/// Append the `finish` entry and close the legacy row (`elapsed_ms` is the
-/// wall-clock gap since the row's `started_at`, matching the Python runner).
+/// Append the `finish` entry and — unless this is a rewound copy — close the
+/// legacy row (`elapsed_ms` is the wall-clock gap since the row's
+/// `started_at`, matching the Python runner).
+#[allow(clippy::too_many_arguments)]
 fn finish(
     legacy: &LegacyStore,
     actor_id: &str,
     row: &AgentRun,
     status: &str,
-    terminal: &cool_protocol::RunTerminal,
+    reason: &str,
     error: Option<&str>,
+    accounting: bool,
     at: &str,
 ) -> MirrorResult<()> {
     let elapsed_ms = parse_python_datetime(at)
@@ -453,31 +652,51 @@ fn finish(
         Some(&json!({
             "elapsed_ms": elapsed_ms,
             "iterations": row.iterations,
-            "reason": terminal.reason,
+            "reason": reason,
             "usage": row.usage,
         })),
         at,
     )?;
+    if !accounting {
+        return Ok(());
+    }
     legacy.finish_run(
         actor_id,
         row.id,
         status,
         row.usage.as_ref(),
         Some(row.iterations),
-        Some(&terminal.reason),
+        Some(reason),
         error,
     )?;
     Ok(())
 }
 
-/// Close the mirrored row of a run `session.rewind` superseded. Durable
-/// `rewound` has no legacy status equivalent, so the row ends `cancelled`
-/// with `finish_reason = "rewound"`.
-fn close_rewound_run(
+/// The legacy status word for a terminal canonical `RunStatus` (`rewound`
+/// has no legacy equivalent — the row ends `cancelled` with the reason
+/// preserved as `finish_reason`).
+fn legacy_status(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Completed => "completed",
+        RunStatus::Failed => "failed",
+        RunStatus::Cancelled | RunStatus::Rewound => "cancelled",
+        RunStatus::Queued | RunStatus::Running | RunStatus::AwaitingApproval => "running",
+    }
+}
+
+/// Close the mirrored row of a canonical run that already finished — used by
+/// the rewind path (`cancelled`/`rewound`) and the startup sweep (whichever
+/// terminal status the canonical run carries). No-op when the row never
+/// existed or already finished.
+#[allow(clippy::too_many_arguments)]
+fn close_terminal_run(
     legacy: &LegacyStore,
     durable: &DurableStore,
     actor_id: &str,
     durable_run_id: &str,
+    status: &str,
+    finish_reason: Option<&str>,
+    error: Option<&str>,
 ) -> MirrorResult<()> {
     let run = durable.run(durable_run_id, actor_id)?;
     let Some(conversation_id) = durable.conversation_id_for_session(actor_id, &run.session_id)?
@@ -498,7 +717,7 @@ fn close_rewound_run(
         Some(&json!({
             "elapsed_ms": null,
             "iterations": row.iterations,
-            "reason": "rewound",
+            "reason": finish_reason,
             "usage": row.usage,
         })),
         &now_python(),
@@ -506,11 +725,11 @@ fn close_rewound_run(
     legacy.finish_run(
         actor_id,
         row.id,
-        "cancelled",
+        status,
         row.usage.as_ref(),
         Some(row.iterations),
-        Some("rewound"),
-        None,
+        finish_reason,
+        error,
     )?;
     Ok(())
 }
