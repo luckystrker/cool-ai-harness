@@ -11,16 +11,16 @@ name = "cool"
 path = "src/main.rs"
 
 [dependencies]
-cool-acp = { path = "../cool-acp", version = "0.2.0" }
-cool-agent = { path = "../cool-agent", version = "0.2.0" }
-cool-app-server = { path = "../cool-app-server", version = "0.2.0" }
-cool-extensions = { path = "../cool-extensions", version = "0.2.0" }
-cool-http = { path = "../cool-http", version = "0.2.0" }
-cool-protocol = { path = "../cool-protocol", version = "0.2.0" }
-cool-security = { path = "../cool-security", version = "0.2.0" }
-cool-state = { path = "../cool-state", version = "0.2.0" }
-cool-store = { path = "../cool-store", version = "0.2.0" }
-cool-tui = { path = "../cool-tui", version = "0.2.0" }
+cool-acp = { path = "../cool-acp", version = "0.2.1" }
+cool-agent = { path = "../cool-agent", version = "0.2.1" }
+cool-app-server = { path = "../cool-app-server", version = "0.2.1" }
+cool-extensions = { path = "../cool-extensions", version = "0.2.1" }
+cool-http = { path = "../cool-http", version = "0.2.1" }
+cool-protocol = { path = "../cool-protocol", version = "0.2.1" }
+cool-security = { path = "../cool-security", version = "0.2.1" }
+cool-state = { path = "../cool-state", version = "0.2.1" }
+cool-store = { path = "../cool-store", version = "0.2.1" }
+cool-tui = { path = "../cool-tui", version = "0.2.1" }
 async-trait.workspace = true
 futures-util.workspace = true
 quick-xml.workspace = true
