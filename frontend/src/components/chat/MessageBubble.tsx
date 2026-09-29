@@ -233,7 +233,7 @@ export function MessageBubble({
             be mistaken for a still-running turn. */}
         {isAssistant &&
           !msg.streaming &&
-          !msg.content &&
+          !msg.content?.trim() &&
           !msg.blocks?.length &&
           !(msg.toolCalls?.length) &&
           !msg.thinking &&

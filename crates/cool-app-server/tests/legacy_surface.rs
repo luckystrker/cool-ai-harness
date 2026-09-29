@@ -13,6 +13,7 @@ use cool_security::{SecretKey, SecretKeyring};
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
 use cool_store::domains::conversations::{NewConversation, NewMessage};
+use cool_store::domains::profiles::NewAgentProfile;
 use cool_store::domains::runs::NewRun;
 use cool_store::domains::webhooks::NewWebhookEvent;
 use serde_json::json;
@@ -2528,20 +2529,28 @@ async fn webhook_replay_respects_task_quiet_hours() {
 /// creating a bare row that renders "Set model" and drops the safety policy.
 #[tokio::test]
 async fn session_fork_clones_the_bound_conversations_settings() {
-    let (server, _store) = legacy_server();
+    let (server, store) = legacy_server();
     let (client, _task) = connected_client(server).await;
+
+    let profile = store
+        .create_profile(&NewAgentProfile {
+            name: "reviewer".to_owned(),
+            slug: "reviewer".to_owned(),
+            ..NewAgentProfile::default()
+        })
+        .expect("profile");
 
     let created = request(
         &client,
         Command::ConversationsCreate(ConversationCreateParams {
             idempotency_key: key("fork-parent"),
             title: Some("parent".to_owned()),
-            provider: None,
+            provider: Some("scripted".to_owned()),
             model: Some("scripted-large".to_owned()),
             working_directory: Some("C:/work".to_owned()),
             permissions: Some(json!({"bash": "ask"})),
             capability_policy: Some(json!({"net_access": "deny"})),
-            profile_id: None,
+            profile_id: Some(profile.id),
             tags: Some(json!(["team"])),
             folder: Some("proj".to_owned()),
             metadata: Some(json!({"breakpoints": [{"type": "before_write"}]})),
@@ -2593,10 +2602,12 @@ async fn session_fork_clones_the_bound_conversations_settings() {
         panic!("unexpected payload: {fetched:?}");
     };
     assert_eq!(clone.title.as_deref(), source.title.as_deref());
+    assert_eq!(clone.provider.as_deref(), Some("scripted"));
     assert_eq!(clone.model.as_deref(), Some("scripted-large"));
     assert_eq!(clone.working_directory.as_deref(), Some("C:/work"));
     assert_eq!(clone.permissions, source.permissions);
     assert_eq!(clone.capability_policy, source.capability_policy);
+    assert_eq!(clone.profile_id, Some(profile.id));
     assert_eq!(clone.tags, source.tags);
     assert_eq!(clone.folder.as_deref(), Some("proj"));
     assert_eq!(clone.metadata, source.metadata);

@@ -211,27 +211,35 @@ export function toConversation(record: protocol.ConversationRecord): Conversatio
 export function toConversationCreate(
   body: {
     title?: string
+    provider?: string
     model?: string
     working_directory?: string
     permissions?: ToolPermissions
     capability_policy?: CapabilityPolicy
     breakpoints?: Conversation["breakpoints"]
     profile_id?: number
+    tags?: string[]
+    folder?: string
+    metadata?: Record<string, protocol.JsonValue>
   },
   idempotencyKey: string
 ): protocol.ConversationCreateParams {
   return {
     idempotencyKey,
     title: body.title ?? null,
-    provider: null,
+    provider: body.provider ?? null,
     model: body.model ?? null,
     workingDirectory: body.working_directory ?? null,
     permissions: (body.permissions as unknown as protocol.JsonValue | undefined) ?? null,
     capabilityPolicy: (body.capability_policy as unknown as protocol.JsonValue | undefined) ?? null,
     profileId: body.profile_id ?? null,
-    tags: null,
-    folder: null,
-    metadata: body.breakpoints ? { breakpoints: body.breakpoints as unknown as protocol.JsonValue } : null,
+    tags: (body.tags as unknown as protocol.JsonValue | undefined) ?? null,
+    folder: body.folder ?? null,
+    metadata:
+      (body.metadata as protocol.JsonValue | undefined) ??
+      (body.breakpoints
+        ? { breakpoints: body.breakpoints as unknown as protocol.JsonValue }
+        : null),
   }
 }
 

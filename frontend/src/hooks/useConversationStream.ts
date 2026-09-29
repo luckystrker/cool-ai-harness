@@ -51,6 +51,13 @@ interface Accumulator {
   model?: string
   /** Set when the run emitted a failure event (turn failed). */
   errored?: boolean
+  /**
+   * Set when a terminal event arrived over the stream — the same marker the
+   * server projects into `session.history`, so the refetched transcript
+   * already carries the failure/cancel note and the pending bubble would
+   * duplicate it.
+   */
+  persistedTerminal?: boolean
   /** Plan generated during this turn (Фаза 2 §1 Planning Mode). */
   plan?: Plan
 }
@@ -333,6 +340,7 @@ export function useConversationStream() {
           const note = `\n\n🛑 **Run cancelled:** ${reason ?? "cancelled"}`
           acc.content += note
           pushTextDelta(acc, note)
+          acc.persistedTerminal = true
         }
         flush(acc)
         break
@@ -350,6 +358,7 @@ export function useConversationStream() {
         pushTextDelta(acc, note)
         acc.finishReason = acc.finishReason ?? "error"
         acc.errored = true
+        acc.persistedTerminal = true
         toast.error(message)
         flush(acc)
         break
@@ -539,7 +548,11 @@ export function useConversationStream() {
             ? Math.max(0, Math.round(performance.now() - startedAtRef.current))
             : undefined
         startedAtRef.current = null
-        const errored = Boolean(acc.errored)
+        // A persisted terminal event is re-rendered from refetched history —
+        // keeping the pending bubble would draw the same marker twice. Only
+        // the client-catch path (stream dropped with no server event) keeps
+        // the local "Reply interrupted" bubble.
+        const errored = Boolean(acc.errored) && !acc.persistedTerminal
         setPendingMsgs((cur) =>
           cur
             // On a failed turn the user message is already persisted (the
@@ -559,7 +572,7 @@ export function useConversationStream() {
         accRef.current = null
         runIdRef.current = null
       }
-      return Boolean(acc.errored)
+      return Boolean(acc.errored) && !acc.persistedTerminal
     },
     []
   )

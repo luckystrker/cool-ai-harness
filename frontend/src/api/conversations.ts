@@ -201,6 +201,8 @@ export const conversationsApi = {
     const conversation = await sdk.conversationsCreate(
       toConversationCreate(
         {
+          title: source.title ?? undefined,
+          provider: source.provider ?? undefined,
           working_directory: source.workingDirectory ?? undefined,
           model: source.model ?? undefined,
           permissions:
@@ -209,6 +211,9 @@ export const conversationsApi = {
             (source.capabilityPolicy as unknown as Conversation["capability_policy"] | undefined) ??
             undefined,
           profile_id: source.profileId ?? undefined,
+          tags: (source.tags as string[] | null) ?? undefined,
+          folder: source.folder ?? undefined,
+          metadata: (source.metadata as Record<string, JsonValue> | null) ?? undefined,
         },
         idempotencyKey()
       )
