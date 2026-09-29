@@ -3,6 +3,8 @@
  * Keep in sync with `crates/cool-protocol` and the generated SDK types in
  * `sdk/typescript/src` — `npm run protocol:check` enforces the mapping. */
 
+import type { PolicyRuleRecord } from "./generated/cool_protocol"
+
 export interface HealthResponse {
   status: string
   version: string
@@ -1481,4 +1483,34 @@ export type ResearchProgressEventType =
 export interface ResearchProgressEvent {
   type: ResearchProgressEventType
   payload: Record<string, unknown>
+}
+
+// --- inline tool approvals (chat flow) ---
+
+/** Policy-rule persistence scope sent as `remember` on approval.resolve. */
+export type RememberScope = "session" | "project" | "user"
+
+/** Approval request rendered inline in the chat flow (replaces the modal dialog). */
+export interface InlineApproval {
+  callId: string
+  approvalId: string
+  revision: number
+  runId: number
+  name: string
+  arguments: Record<string, unknown>
+  reason: string
+  /** True when triggered by a breakpoint (vs a regular "ask" tool). */
+  isBreakpoint?: boolean
+  /** Breakpoint type, when isBreakpoint is true. */
+  breakpointType?: string
+  /** Result preview (for after_tool_result breakpoints). */
+  resultPreview?: string
+  /** Current file content before the write (for diff/preview). */
+  currentContent?: string
+  /** The policy rule that matched this call, when a rule produced the ask (P1.6). */
+  matchedRule?: string
+  /** Server-suggested rule for "don't ask again" persistence (P1.6). */
+  suggestedRule?: PolicyRuleRecord
+  /** Lifecycle: waiting for the user -> resolving -> resolved outcome. */
+  status: "pending" | "resolving" | "approved" | "denied" | "timed_out"
 }

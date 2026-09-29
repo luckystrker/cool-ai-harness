@@ -4,8 +4,10 @@ import { toast } from "sonner"
 import { conversationsApi } from "@/api/conversations"
 import { streamConversationMessage } from "@/api/streaming"
 import { idempotencyKey, sdk } from "@/api/sdk"
+import { toInlineApproval } from "@/api/mappers"
 import type { EventEnvelope } from "@/api/generated/cool_protocol"
 import type {
+  InlineApproval,
   Plan,
   PlanStep,
   PlanStepStatus,
@@ -16,7 +18,6 @@ import type {
   AssistantStreamBlock,
   MessageViewModel,
 } from "@/components/chat/MessageBubble"
-import type { InlineApproval } from "@/components/chat/ApprovalCard"
 import type { JsonValue } from "@/api/generated/cool_protocol"
 
 /**
@@ -133,6 +134,13 @@ export function useConversationStream() {
   const startedAtRef = useRef<number | null>(null)
   /** Live accumulator ref so respondApproval can mutate approval status. */
   const accRef = useRef<Accumulator | null>(null)
+  /**
+   * Approvals restored from the server (still pending but not owned by the
+   * live accumulator): approvalId -> the card's latest view model. The
+   * history projection drops approval events, so a run parked in
+   * `awaiting_approval` would otherwise be unresolvable after a reload (B4a).
+   */
+  const restoredRef = useRef(new Map<string, InlineApproval>())
   /** rAF throttle: avoids per-token React re-renders (batches to ~60fps). */
   const rafRef = useRef<number | null>(null)
   const flushScheduledRef = useRef(false)
@@ -196,7 +204,24 @@ export function useConversationStream() {
       plan: acc.plan,
     }
     const msgs = acc.user ? [acc.user, assistant] : [assistant]
-    setPendingMsgs(msgs)
+    setPendingMsgs([...msgs, ...restoredMsgs()])
+  }
+
+  /**
+   * Restored approvals render as tail assistant messages carrying only the
+   * card. An approval owned by the live accumulator is skipped — the same
+   * card must never render twice.
+   */
+  const restoredMsgs = (): MessageViewModel[] => {
+    const liveId = accRef.current?.approval?.approvalId
+    return [...restoredRef.current.entries()]
+      .filter(([id]) => id !== liveId)
+      .map(([id, approval]) => ({
+        id: `approval-restored-${id}`,
+        role: "assistant" as const,
+        content: "",
+        approval,
+      }))
   }
 
   /** Apply one canonical event envelope to the live accumulator. */
@@ -255,24 +280,7 @@ export function useConversationStream() {
           })
           pushToolCall(acc, p.callId)
         }
-        acc.approval = {
-          callId: p.callId,
-          approvalId: p.approvalId,
-          revision: p.revision,
-          // Canonical runs are addressed by string id; the resolve command
-          // ignores the numeric legacy run id.
-          runId: 0,
-          name: p.name,
-          arguments: p.arguments as Record<string, unknown>,
-          reason: p.reason,
-          isBreakpoint: p.breakpointType != null,
-          breakpointType: p.breakpointType ?? undefined,
-          resultPreview: p.resultPreview ?? undefined,
-          currentContent: p.currentContent ?? undefined,
-          matchedRule: p.matchedRule ?? undefined,
-          suggestedRule: p.suggestedRule ?? undefined,
-          status: "pending",
-        }
+        acc.approval = toInlineApproval(p)
         flush(acc)
         break
       }
@@ -562,7 +570,25 @@ export function useConversationStream() {
             .filter((m) => (errored ? m.role === "assistant" : true))
             .map((m) =>
               m.role === "assistant"
-                ? { ...m, streaming: false, elapsedMs: m.elapsedMs ?? elapsedMs }
+                ? {
+                    ...m,
+                    streaming: false,
+                    elapsedMs: m.elapsedMs ?? elapsedMs,
+                    // Once the stream ends nothing owns the live accumulator's
+                    // unresolved card: left attached it would render a
+                    // duplicate beside the restored tail card (SSE drop while
+                    // parked) or a stale forever-"pending" card that errors
+                    // on every click (cancel while parked). Resolved badges
+                    // stay as history. Restored tail cards are owned by
+                    // restoredRef and must keep their approval — strip only
+                    // the accumulator's own.
+                    approval:
+                      m.approval != null &&
+                      m.approval.approvalId === acc.approval?.approvalId &&
+                      (m.approval.status === "pending" || m.approval.status === "resolving")
+                        ? undefined
+                        : m.approval,
+                  }
                 : m
             )
         )
@@ -578,47 +604,97 @@ export function useConversationStream() {
   )
 
   /**
+   * Bring back the actionable approval cards the server still holds open.
+   * Called with `conversationsApi.pendingApprovals` results on conversation
+   * load and whenever they are refetched. A `complete` scan reconciles
+   * wholesale — resolved/expired approvals drop their restored card; an
+   * incomplete scan (a run's event read failed or hit the scan cap) proves
+   * nothing about unlisted approvals, so their cards are kept.
+   */
+  const restoreApprovals = useCallback(
+    (approvals: InlineApproval[], conversationId: number, complete: boolean) => {
+      // A live stream owns its own approval card — its accumulator wins.
+      if (convIdRef.current !== null && convIdRef.current !== conversationId) return
+      const liveId = accRef.current?.approval?.approvalId
+      const next = new Map(approvals.filter((a) => a.approvalId !== liveId).map((a) => [a.approvalId, a]))
+      if (complete) {
+        restoredRef.current.forEach((_approval, id) => {
+          if (!next.has(id)) restoredRef.current.delete(id)
+        })
+      }
+      next.forEach((incoming, id) => {
+        // While the user is mid-click the card is locally "resolving"; the
+        // refetched snapshot still reports it pending — don't flicker back.
+        if (restoredRef.current.get(id)?.status !== "resolving") {
+          restoredRef.current.set(id, incoming)
+        }
+      })
+      setPendingMsgs((cur) => [
+        ...cur.filter((m) => !m.id.startsWith("approval-restored-")),
+        ...restoredMsgs(),
+      ])
+    },
+    []
+  )
+
+  /**
    * Resolve the inline approval shown in the chat flow.
    * Updates the card status (resolving → approved/denied) and calls the
    * canonical `approval.resolve` command; the agent loop resumes server-side.
+   * `approvalId` selects a restored card; without it the live pending
+   * approval (or the first restored one) is resolved.
    */
-  const respondApproval = useCallback(async (approved: boolean, remember?: "session" | "project" | "user", answer?: JsonValue) => {
-    const acc = accRef.current
-    const pending = acc?.approval
+  const respondApproval = useCallback(async (approved: boolean, remember?: "session" | "project" | "user", answer?: JsonValue, approvalId?: string) => {
+    const live = accRef.current?.approval
+    const pending =
+      approvalId != null && approvalId !== live?.approvalId
+        ? restoredRef.current.get(approvalId)
+        : (live ?? (approvalId == null
+            ? [...restoredRef.current.values()].find((a) => a.status === "pending")
+            : undefined))
     if (!pending || pending.status !== "pending") return
 
-    const resolvedApprovalId = pending.approvalId
+    const setStatus = (status: InlineApproval["status"]) => {
+      const next = { ...pending, status }
+      if (accRef.current?.approval?.approvalId === pending.approvalId) {
+        accRef.current.approval = next
+        flush(accRef.current)
+      }
+      if (restoredRef.current.has(pending.approvalId)) {
+        restoredRef.current.set(pending.approvalId, next)
+        setPendingMsgs((cur) =>
+          cur.map((m) =>
+            m.approval?.approvalId === pending.approvalId ? { ...m, approval: next } : m
+          )
+        )
+      }
+    }
 
     // Optimistically flip the card to "resolving".
-    acc!.approval = { ...pending, status: "resolving" }
-    flush(acc!)
+    setStatus("resolving")
 
     try {
       await conversationsApi.approveToolCall(
-        convIdRef.current!,
-        resolvedApprovalId,
+        // Canonical resolves address the approval id; the legacy numeric
+        // conversation/run ids are unused by the RPC.
+        convIdRef.current ?? 0,
+        pending.approvalId,
         approved,
         pending.revision,
         pending.runId,
         remember,
         answer
       )
-      // Only update if the current approval still refers to the same call.
-      // A newer tool_approval_request may have arrived while we awaited the
-      // API response (multiple tool calls in one batch); overwriting it would
-      // hide the new approval card from the user.
-      if (accRef.current?.approval?.approvalId === resolvedApprovalId) {
-        accRef.current.approval = { ...pending, status: approved ? "approved" : "denied" }
-      }
-    } catch {
-      // If the resolve fails (e.g. already timed out), the server-side
-      // timeout/auto-deny handles the loop. Show denied so the card doesn't
-      // stay stuck in "resolving" — but only if still current.
-      if (accRef.current?.approval?.approvalId === resolvedApprovalId) {
-        accRef.current.approval = { ...pending, status: "denied" }
-      }
+      setStatus(approved ? "approved" : "denied")
+    } catch (error) {
+      // The backend never received a decision — the card must stay honest
+      // and actionable so the user can retry (B4b). A failed resolve never
+      // marks the card "Denied": the server still holds it pending.
+      setStatus("pending")
+      toast.error("Could not submit the approval decision", {
+        description: getErrorDescription(error, "Check the connection and try again."),
+      })
     }
-    if (accRef.current) flush(accRef.current)
   }, [])
 
   const cancel = useCallback(() => {
@@ -633,7 +709,10 @@ export function useConversationStream() {
     }
   }, [])
 
-  const clearPending = useCallback(() => setPendingMsgs([]), [])
+  const clearPending = useCallback(() => {
+    restoredRef.current.clear()
+    setPendingMsgs([])
+  }, [])
 
   return {
     pendingMsgs,
@@ -643,5 +722,6 @@ export function useConversationStream() {
     cancel,
     clearPending,
     respondApproval,
+    restoreApprovals,
   }
 }

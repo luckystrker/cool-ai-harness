@@ -1,4 +1,5 @@
 import { idempotencyKey, sdk } from "./sdk"
+import { CoolProtocolError } from "@cool-sdk/client"
 import type { JsonValue } from "./generated/cool_protocol"
 import {
   toApprovalAudit,
@@ -6,6 +7,7 @@ import {
   toConversation,
   toConversationCreate,
   toConversationUpdate,
+  toInlineApproval,
   toMessage,
   toRun,
 } from "./mappers"
@@ -15,6 +17,7 @@ import type {
   ConversationCreate,
   ConversationDetail,
   ConversationUpdate,
+  InlineApproval,
   Message,
   RunOut,
 } from "./types"
@@ -31,6 +34,34 @@ export interface CompactResponse {
 /** Bounded page size for the canonical transcript read. */
 const HISTORY_PAGE_LIMIT = 100
 const MAX_HISTORY_PAGES = 100
+
+/** Total `run.events` an approval restore scans per run before truncating. */
+const MAX_APPROVAL_SCAN_EVENTS = 20480
+
+/**
+ * Call an RPC whose `limit` param is validated against a configured server
+ * ceiling (`invalid_*_limit` errors): retry with the limit halved until the
+ * server accepts it. Deployments may configure a lower ceiling than the 256
+ * default and the SPA cannot read the advertised value — its pooled HTTP
+ * transport connection is already initialized.
+ */
+async function withLimitRetry<T>(
+  pageSize: { limit: number },
+  call: (limit: number) => Promise<T>
+): Promise<T> {
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    try {
+      return await call(pageSize.limit)
+    } catch (error) {
+      const code = error instanceof CoolProtocolError ? error.protocol.coolCode : null
+      if (code == null || !code.startsWith("invalid_") || !code.endsWith("_limit") || pageSize.limit <= 1) {
+        throw error
+      }
+      pageSize.limit = Math.max(1, Math.floor(pageSize.limit / 2))
+    }
+  }
+  throw new Error("unreachable")
+}
 
 /**
  * Find-or-create the durable Rust session bound to a legacy conversation.
@@ -171,6 +202,74 @@ export const conversationsApi = {
       limit: params?.limit ?? 200,
     })
     return records.map(toApprovalAudit)
+  },
+
+  /**
+   * Approvals still actionable on the conversation's durable session, rebuilt
+   * from the run event log: every `tool.approval_required` with no matching
+   * `tool.approval_resolved` in a run parked in `awaiting_approval` is still
+   * open. The history projection drops approval events, so this is what puts
+   * the card back after a page reload (B4a).
+   *
+   * The scan is bounded by total events read (not pages — the page size can
+   * shrink under `withLimitRetry`): past MAX_APPROVAL_SCAN_EVENTS a run's
+   * scan is truncated and its opens are DROPPED — surfacing one could
+   * resurrect a resolved approval whose `resolved` event sits beyond the
+   * cap. `complete` is false when any run's scan failed or truncated; the
+   * caller must then merge instead of deleting unlisted restored cards —
+   * a failed scan proves nothing about their state.
+   */
+  pendingApprovals: async (
+    convId: number
+  ): Promise<{ approvals: InlineApproval[]; complete: boolean }> => {
+    const sessionId = await sessionFor(convId)
+    const pageSize = { limit: 256 }
+    const { runs } = await withLimitRetry(pageSize, (limit) =>
+      sdk.sessionRuns({ sessionId, limit })
+    )
+    const pending: InlineApproval[] = []
+    let complete = true
+    for (const run of runs) {
+      if (run.status !== "awaiting_approval") continue
+      const open = new Map<string, InlineApproval>()
+      let afterSeq: number | null = null
+      let scanned = 0
+      let truncated = false
+      try {
+        for (;;) {
+          const result = await withLimitRetry(pageSize, (limit) =>
+            sdk.runEvents({ runId: run.runId, afterSeq, limit })
+          )
+          scanned += result.events.length
+          for (const envelope of result.events) {
+            const event = envelope.event
+            if (event.kind === "tool.approval_required") {
+              open.set(event.payload.approvalId, toInlineApproval(event.payload))
+            } else if (event.kind === "tool.approval_resolved") {
+              open.delete(event.payload.approvalId)
+            }
+          }
+          if (!result.hasMore || result.nextCursor?.afterSeq == null) break
+          if (scanned >= MAX_APPROVAL_SCAN_EVENTS) {
+            truncated = true
+            break
+          }
+          afterSeq = result.nextCursor.afterSeq
+        }
+      } catch {
+        // One run's scan failing (closed run, transport error) must not
+        // kill the restore for every other run — but the failed run proves
+        // nothing about its approvals, so the caller merges, not deletes.
+        complete = false
+        continue
+      }
+      if (truncated) {
+        complete = false
+        continue
+      }
+      pending.push(...open.values())
+    }
+    return { approvals: pending, complete }
   },
 
   /**

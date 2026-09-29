@@ -2,35 +2,10 @@ import { useState } from "react"
 import { ShieldAlert, ShieldCheck, ShieldX, Bug, HelpCircle, Loader2, FileDiff, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import type { JsonValue, PolicyRuleRecord } from "@/api/generated/cool_protocol"
+import type { JsonValue } from "@/api/generated/cool_protocol"
+import type { InlineApproval, RememberScope } from "@/api/types"
 
-/** Policy-rule persistence scope sent as `remember` on approval.resolve. */
-export type RememberScope = "session" | "project" | "user"
-
-/** Approval request rendered inline in the chat flow (replaces the modal dialog). */
-export interface InlineApproval {
-  callId: string
-  approvalId: string
-  revision: number
-  runId: number
-  name: string
-  arguments: Record<string, unknown>
-  reason: string
-  /** True when triggered by a breakpoint (vs a regular "ask" tool). */
-  isBreakpoint?: boolean
-  /** Breakpoint type, when isBreakpoint is true. */
-  breakpointType?: string
-  /** Result preview (for after_tool_result breakpoints). */
-  resultPreview?: string
-  /** Current file content before the write (for diff/preview). */
-  currentContent?: string
-  /** The policy rule that matched this call, when a rule produced the ask (P1.6). */
-  matchedRule?: string
-  /** Server-suggested rule for "don't ask again" persistence (P1.6). */
-  suggestedRule?: PolicyRuleRecord
-  /** Lifecycle: waiting for the user → resolving → resolved outcome. */
-  status: "pending" | "resolving" | "approved" | "denied" | "timed_out"
-}
+export type { InlineApproval, RememberScope }
 
 interface ApprovalCardProps {
   approval: InlineApproval

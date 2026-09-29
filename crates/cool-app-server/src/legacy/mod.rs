@@ -293,8 +293,11 @@ pub(crate) async fn dispatch(
                 .recent_working_directories(&actor.id, 10)
                 .map_err(store_error)?;
             Ok(ResponsePayload::WorkspaceRecent(RecentDirectoriesRecord {
-                recent,
-                default: workspace_root.to_string_lossy().into_owned(),
+                recent: recent
+                    .iter()
+                    .map(|dir| display_dir_path(Path::new(dir)))
+                    .collect(),
+                default: display_dir_path(workspace_root),
             }))
         }
         Command::WorkspaceGitStatus(params) => Ok(ResponsePayload::WorkspaceGitStatus(
@@ -408,12 +411,60 @@ pub(crate) fn replay_execution(
 
 // --- Workspace (filesystem + git capability) --------------------------------
 
+/// Clients pass a directory as text and build child paths by joining the
+/// `current` string we return with `/`. On Windows a `\\?\` verbatim prefix
+/// (which `Workspace::root()` gains from canonicalization) disables the OS's
+/// separator normalization, so `\\?\C:\root/child` does not resolve; strip
+/// the prefix (UNC keeps a plain `\\server\share` root) and unify separators
+/// so either slash resolves. Only verbatim input that also carries `/` gets
+/// rewritten — a plain `\\?\C:\…` may rely on verbatim semantics (paths past
+/// MAX_PATH, trailing-dot names) and must pass through untouched.
+fn normalize_dir_path(path: &str) -> std::path::PathBuf {
+    let trimmed = path.trim();
+    #[cfg(windows)]
+    {
+        if trimmed.starts_with(r"\\?\") && trimmed.contains('/') {
+            let stripped = if let Some(rest) = trimmed.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{rest}")
+            } else {
+                trimmed
+                    .strip_prefix(r"\\?\")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| trimmed.to_owned())
+            };
+            return std::path::PathBuf::from(stripped.replace('/', r"\"));
+        }
+        std::path::PathBuf::from(trimmed)
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from(trimmed)
+    }
+}
+
+/// Client-facing rendering of a directory path: verbatim prefixes are
+/// stripped so a naive `current + "/" + name` join on the client stays a
+/// valid path for the next `workspace.directories` call.
+fn display_dir_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = rendered.strip_prefix(r"\\?\") {
+            return rest.to_owned();
+        }
+    }
+    rendered.into_owned()
+}
+
 fn list_directories(
     path: Option<&str>,
     workspace_root: &Path,
 ) -> Result<DirectoryListingRecord, ProtocolError> {
     let target = match path {
-        Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
+        Some(path) if !path.trim().is_empty() => normalize_dir_path(path),
         _ => workspace_root.to_path_buf(),
     };
     if !target.is_dir() {
@@ -436,17 +487,17 @@ fn list_directories(
     let parent = target
         .parent()
         .filter(|parent| *parent != target)
-        .map(|parent| parent.to_string_lossy().into_owned());
+        .map(display_dir_path);
     Ok(DirectoryListingRecord {
-        current: target.to_string_lossy().into_owned(),
+        current: display_dir_path(&target),
         parent,
         directories,
-        default: workspace_root.to_string_lossy().into_owned(),
+        default: display_dir_path(workspace_root),
     })
 }
 
 async fn git_output(path: &str, args: &[&str]) -> Result<(bool, String, String), ProtocolError> {
-    let target = Path::new(path);
+    let target = normalize_dir_path(path);
     if !target.is_dir() {
         return Err(invalid_input("path is not a directory"));
     }
@@ -454,7 +505,7 @@ async fn git_output(path: &str, args: &[&str]) -> Result<(bool, String, String),
         GIT_TIMEOUT,
         ProcessCommand::new("git")
             .args(args)
-            .current_dir(target)
+            .current_dir(&target)
             .output(),
     )
     .await
@@ -470,7 +521,7 @@ async fn git_output(path: &str, args: &[&str]) -> Result<(bool, String, String),
 async fn git_info(path: &str) -> Result<GitInfoRecord, ProtocolError> {
     let (ok, stdout, _) = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     Ok(GitInfoRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         is_git: ok,
         branch: ok.then(|| stdout.trim().to_owned()),
     })
@@ -480,7 +531,7 @@ async fn git_status(path: &str) -> Result<GitStatusRecord, ProtocolError> {
     let (ok, stdout, _) = git_output(path, &["status", "--porcelain=v1", "--branch"]).await?;
     if !ok {
         return Ok(GitStatusRecord {
-            path: path.to_owned(),
+            path: display_dir_path(&normalize_dir_path(path)),
             is_git: false,
             branch: None,
             staged: Vec::new(),
@@ -510,7 +561,7 @@ async fn git_status(path: &str) -> Result<GitStatusRecord, ProtocolError> {
         }
     }
     Ok(GitStatusRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         is_git: branch.is_some(),
         branch,
         staged,
@@ -552,7 +603,7 @@ async fn git_log(path: &str, limit: u16) -> Result<GitLogRecord, ProtocolError> 
         })
         .collect();
     Ok(GitLogRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         commits,
     })
 }
@@ -575,7 +626,7 @@ async fn git_branches(path: &str) -> Result<GitBranchesRecord, ProtocolError> {
         .collect::<Vec<_>>();
     let (head_ok, head, _) = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     Ok(GitBranchesRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         branches,
         current: head_ok.then(|| head.trim().to_owned()),
     })
@@ -609,7 +660,7 @@ async fn git_checkout(path: &str, branch: &str) -> Result<GitCheckoutResult, Sto
         ));
     }
     Ok(GitCheckoutResult {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         branch: branch.to_owned(),
         status: "checked_out".to_owned(),
     })
@@ -753,4 +804,58 @@ pub(crate) fn now_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_dir_path_passes_through_plain_paths() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let rendered = directory.path().to_string_lossy().into_owned();
+        assert_eq!(normalize_dir_path(&rendered), directory.path());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_dir_path_strips_verbatim_prefix_and_unifies_separators() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(directory.path().join("child")).expect("child");
+        let root = directory.path().to_string_lossy().replace('\\', "/");
+
+        // The report's failing shape: verbatim prefix plus a `/`-joined child.
+        let verbatim_mixed = format!(r"\\?\{root}/child");
+        let normalized = normalize_dir_path(&verbatim_mixed);
+        assert!(normalized.is_dir(), "{normalized:?} must resolve");
+        assert!(!normalized.to_string_lossy().starts_with(r"\\?\"));
+        assert!(!normalized.to_string_lossy().contains('/'));
+
+        // UNC verbatim collapses to the plain `\\server\share` root.
+        let unc = normalize_dir_path(r"\\?\UNC\server\share/child");
+        assert_eq!(unc, std::path::PathBuf::from(r"\\server\share\child"));
+
+        // Whitespace around a pasted path is ignored.
+        assert_eq!(
+            normalize_dir_path("  C:/tmp  "),
+            std::path::PathBuf::from(r"C:\tmp")
+        );
+
+        // A verbatim path WITHOUT mixed separators keeps the prefix —
+        // it may rely on verbatim semantics (MAX_PATH+, trailing dots).
+        let verbatim_only = normalize_dir_path(r"\\?\C:\very\deep\path");
+        assert_eq!(
+            verbatim_only,
+            std::path::PathBuf::from(r"\\?\C:\very\deep\path")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_dir_path_never_emits_verbatim_prefixes() {
+        let rendered = display_dir_path(Path::new(r"\\?\C:\work\child"));
+        assert_eq!(rendered, r"C:\work\child");
+        let rendered = display_dir_path(Path::new(r"\\?\UNC\server\share"));
+        assert_eq!(rendered, r"\\server\share");
+    }
 }
