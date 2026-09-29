@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, AutoApprovalGate, CancelSignal, EventSink,
-    HostContext, Message, MessageRole, RunOutcome, RuntimeError, ToolContext,
+    HostContext, Message, MessageRole, RunOutcome, RuntimeError, ToolContext, Usage,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, SchedulerJobRecord,
@@ -476,7 +476,7 @@ impl TaskExecutor {
             Ok(RunOutcome::Failed { code, .. }) => (TASK_RUN_FAILED, None, Some(code), None),
             Err(error) => (TASK_RUN_FAILED, None, Some(error.to_string()), None),
         };
-        let usage_json = usage.and_then(|usage| serde_json::to_value(usage).ok());
+        let usage_json = usage.as_ref().map(legacy_usage_json);
         let _ = self.store.finish_task_run(
             &actor.id,
             run_id,
@@ -658,6 +658,21 @@ pub(crate) fn policy_from_json(value: Option<&Value>) -> CapabilityPolicy {
         policy.set(capability, decision);
     }
     policy
+}
+
+/// Serialize a run's token usage into the legacy store shape (`snake_case`,
+/// micro-USD converted to dollars) — the convention `rust_usage`/`spend_log`
+/// readers and the UI's `total_tokens`/`cost_usd` lookups expect.
+pub(crate) fn legacy_usage_json(usage: &Usage) -> Value {
+    json!({
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cost_usd": usage
+            .cost_micro_usd
+            .map(|micros| micros as f64 / 1e6)
+            .unwrap_or(0.0),
+    })
 }
 
 pub(crate) fn capability_from_name(name: &str) -> Option<Capability> {

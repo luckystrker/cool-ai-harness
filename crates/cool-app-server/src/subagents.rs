@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::scheduler::policy_from_json;
+use crate::scheduler::{legacy_usage_json, policy_from_json};
 
 /// How much of the spawning run's context a child inherits (P1.7).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -784,7 +784,7 @@ impl SubagentExecutor {
                 "completed",
                 last_assistant(history).map(|text| mask_secrets(&text)),
                 None,
-                serde_json::to_value(usage).ok(),
+                Some(legacy_usage_json(usage)),
             ),
             Ok(RunOutcome::Cancelled { .. }) => ("cancelled", None, None, None),
             Ok(RunOutcome::Failed { code, .. }) => ("failed", None, Some(mask_secrets(code)), None),
@@ -1020,9 +1020,14 @@ impl EventSink for LegacyTranscriptSink {
                     tool_calls: (!tool_calls.is_empty()).then(|| masked_value(json!(tool_calls))),
                     thinking: thinking.map(|text| mask_secrets(&text)),
                     model: Some(self.model.clone()),
-                    usage: usage
-                        .as_ref()
-                        .and_then(|usage| serde_json::to_value(usage).ok()),
+                    usage: usage.as_ref().map(|usage| {
+                        json!({
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens,
+                            "cost_usd": usage.cost_usd.unwrap_or(0.0),
+                        })
+                    }),
                     ..NewMessage::default()
                 })?;
             }

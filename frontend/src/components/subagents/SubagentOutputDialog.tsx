@@ -10,6 +10,19 @@ import {
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Markdown } from "@/components/chat/Markdown"
+import type { Message } from "@/api/types"
+
+/** Text for a `role="tool"` transcript row when `content` is null — the
+ * persisted result lives in `tool_result.result` (a `ToolResultPayload` or
+ * the raw tool output JSON). */
+function toolResultText(result: Message["tool_result"]): string | null {
+  if (!result) return null
+  const payload = result.result
+  const text =
+    payload?.output ?? payload?.error ?? (payload ? JSON.stringify(payload) : null)
+  const name = result.name ?? "tool"
+  return text ? `${name}: ${text}` : `${name}: (no result recorded)`
+}
 
 interface SubagentOutputDialogProps {
   open: boolean
@@ -100,29 +113,45 @@ export function SubagentOutputDialog({
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                     Conversation ({run.messages.length} messages)
                   </p>
-                  {run.messages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={
-                        msg.role === "assistant"
-                          ? "rounded-md border p-2"
-                          : msg.role === "tool"
-                          ? "rounded-md bg-muted/30 p-2 font-mono text-xs"
-                          : "rounded-md bg-muted/50 p-2"
-                      }
-                    >
-                      <span className="mb-0.5 block text-[10px] font-semibold uppercase text-muted-foreground">
-                        {msg.role}
-                      </span>
-                      {msg.content && msg.role === "assistant" ? (
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <Markdown content={msg.content} />
-                        </div>
-                      ) : (
-                        <p className="whitespace-pre-wrap text-xs">{msg.content ?? "(empty)"}</p>
-                      )}
-                    </div>
-                  ))}
+                  {run.messages.map((msg) => {
+                    const text = msg.content ?? toolResultText(msg.tool_result)
+                    const calls = msg.tool_calls ?? []
+                    return (
+                      <div
+                        key={msg.id}
+                        className={
+                          msg.role === "assistant"
+                            ? "rounded-md border p-2"
+                            : msg.role === "tool"
+                            ? "rounded-md bg-muted/30 p-2 font-mono text-xs"
+                            : "rounded-md bg-muted/50 p-2"
+                        }
+                      >
+                        <span className="mb-0.5 block text-[10px] font-semibold uppercase text-muted-foreground">
+                          {msg.role}
+                        </span>
+                        {msg.content && msg.role === "assistant" ? (
+                          <div className="prose prose-sm dark:prose-invert max-w-none">
+                            <Markdown content={msg.content} />
+                          </div>
+                        ) : (
+                          (text !== null || calls.length === 0) && (
+                            <p className="whitespace-pre-wrap text-xs">{text ?? "(empty)"}</p>
+                          )
+                        )}
+                        {calls.length > 0 && (
+                          <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
+                            {calls
+                              .map(
+                                (call) =>
+                                  `${call.name}(${JSON.stringify(call.arguments)})`
+                              )
+                              .join("\n")}
+                          </pre>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
