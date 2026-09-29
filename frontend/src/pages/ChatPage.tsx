@@ -536,11 +536,12 @@ export function ChatPage() {
     Date.parse(latestRun.started_at) >= latestIntentTime - 1000
       ? latestRun
       : null
+  // Tool events are counted across the whole active run — every message
+  // after the latest user turn — not just the final assistant segment.
+  const lastUserIndex = recorderMessages.findLastIndex((message) => message.role === "user")
   const currentTurnMessages = isStreaming
     ? pendingMsgs
-    : latestAssistant
-      ? [latestAssistant]
-      : []
+    : recorderMessages.slice(lastUserIndex + 1)
   const toolEventCount = currentTurnMessages.reduce(
     (total, message) => total + (message.toolCalls?.length ?? 0),
     0
@@ -847,6 +848,8 @@ export function ChatPage() {
               <ArtifactPanel
                 conversationId={convId}
                 onClose={() => setArtifactsOpen(false)}
+                pendingFiles={pendingFiles}
+                onRemovePending={handleRemoveFile}
               />
             </div>
           </>

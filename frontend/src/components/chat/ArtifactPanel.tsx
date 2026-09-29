@@ -44,10 +44,19 @@ interface ArtifactPanelProps {
   conversationId: number
   /** When set, shows an X button in the header (the panel is an overlay on mobile). */
   onClose?: () => void
+  /** Files staged in the composer that have not been sent yet. */
+  pendingFiles?: File[]
+  /** Removes a staged file by index (same ordering as `pendingFiles`). */
+  onRemovePending?: (index: number) => void
 }
 
 /** Side panel listing all artifacts for a conversation with download/delete actions. */
-export function ArtifactPanel({ conversationId, onClose }: ArtifactPanelProps) {
+export function ArtifactPanel({
+  conversationId,
+  onClose,
+  pendingFiles = [],
+  onRemovePending,
+}: ArtifactPanelProps) {
   const queryClient = useQueryClient()
   const [deleteTarget, setDeleteTarget] = useState<Artifact | null>(null)
 
@@ -73,7 +82,7 @@ export function ArtifactPanel({ conversationId, onClose }: ArtifactPanelProps) {
       <div className="flex h-14 items-center border-b px-4">
         <h2 className="text-sm font-medium">Attachments</h2>
         <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-          {artifacts.length}
+          {artifacts.length + pendingFiles.length}
         </span>
         {onClose && (
           <button
@@ -89,6 +98,24 @@ export function ArtifactPanel({ conversationId, onClose }: ArtifactPanelProps) {
       </div>
 
       <ScrollArea className="flex-1">
+        {pendingFiles.length > 0 && (
+          <div className="border-b">
+            <p className="px-4 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Staged — sends with your next message
+            </p>
+            <ul className="space-y-1 p-2">
+              {pendingFiles.map((file, index) => (
+                <PendingFileRow
+                  key={`${file.name}-${index}`}
+                  file={file}
+                  onRemove={
+                    onRemovePending ? () => onRemovePending(index) : undefined
+                  }
+                />
+              ))}
+            </ul>
+          </div>
+        )}
         {isError ? (
           <QueryErrorState
             compact
@@ -99,9 +126,11 @@ export function ArtifactPanel({ conversationId, onClose }: ArtifactPanelProps) {
         ) : isLoading ? (
           <div className="py-8 text-center text-sm text-muted-foreground">Loading attachments…</div>
         ) : artifacts.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No attachments yet. Use “Attach files” in the composer to add context.
-          </div>
+          pendingFiles.length === 0 && (
+            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+              No attachments yet. Use “Attach files” in the composer to add context.
+            </div>
+          )
         ) : (
           <ul className="space-y-1 p-2">
             {artifacts.map((a) => (
@@ -193,6 +222,39 @@ function ArtifactRow({
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
+    </li>
+  )
+}
+
+function PendingFileRow({
+  file,
+  onRemove,
+}: {
+  file: File
+  onRemove?: () => void
+}) {
+  const Icon = file.type.startsWith("image/") ? FileImage : File
+  return (
+    <li className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/60">
+      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <span className="block truncate text-sm" title={file.name}>
+          {file.name}
+        </span>
+        <span className="text-[11px] text-muted-foreground">{formatSize(file.size)}</span>
+      </div>
+      {onRemove && (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+          title="Remove staged file"
+          aria-label={`Remove staged file ${file.name}`}
+          onClick={onRemove}
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      )}
     </li>
   )
 }
