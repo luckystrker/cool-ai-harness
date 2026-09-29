@@ -136,12 +136,6 @@ export function ChatPage() {
     refetchInterval: (query) => (query.state.data?.length ? 4000 : false),
   })
 
-  useEffect(() => {
-    if (convId !== null && pendingApprovals !== undefined) {
-      restoreApprovals(pendingApprovals, convId)
-    }
-  }, [convId, pendingApprovals, restoreApprovals])
-
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [planMode, setPlanMode] = useState(false)
@@ -160,6 +154,16 @@ export function ChatPage() {
     setPlanMode(false)
     setLongTaskMode(false)
   }, [convId, clearPending])
+
+  // Must run after the clearPending effect above: on a convId switch the
+  // wipe clears the restored map first, then this repopulates from the
+  // (possibly cached) query — otherwise a cached result would be restored
+  // and immediately wiped, never to re-fire (structural sharing).
+  useEffect(() => {
+    if (convId !== null && pendingApprovals !== undefined) {
+      restoreApprovals(pendingApprovals, convId)
+    }
+  }, [convId, pendingApprovals, restoreApprovals])
 
   // Compaction: messages covered by the working-memory rolling summary are
   // collapsed into a summary block (expandable); the rest renders normally.

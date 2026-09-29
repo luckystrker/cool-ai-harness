@@ -293,8 +293,11 @@ pub(crate) async fn dispatch(
                 .recent_working_directories(&actor.id, 10)
                 .map_err(store_error)?;
             Ok(ResponsePayload::WorkspaceRecent(RecentDirectoriesRecord {
-                recent,
-                default: workspace_root.to_string_lossy().into_owned(),
+                recent: recent
+                    .iter()
+                    .map(|dir| display_dir_path(Path::new(dir)))
+                    .collect(),
+                default: display_dir_path(workspace_root),
             }))
         }
         Command::WorkspaceGitStatus(params) => Ok(ResponsePayload::WorkspaceGitStatus(
@@ -513,7 +516,7 @@ async fn git_output(path: &str, args: &[&str]) -> Result<(bool, String, String),
 async fn git_info(path: &str) -> Result<GitInfoRecord, ProtocolError> {
     let (ok, stdout, _) = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     Ok(GitInfoRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         is_git: ok,
         branch: ok.then(|| stdout.trim().to_owned()),
     })
@@ -523,7 +526,7 @@ async fn git_status(path: &str) -> Result<GitStatusRecord, ProtocolError> {
     let (ok, stdout, _) = git_output(path, &["status", "--porcelain=v1", "--branch"]).await?;
     if !ok {
         return Ok(GitStatusRecord {
-            path: path.to_owned(),
+            path: display_dir_path(&normalize_dir_path(path)),
             is_git: false,
             branch: None,
             staged: Vec::new(),
@@ -553,7 +556,7 @@ async fn git_status(path: &str) -> Result<GitStatusRecord, ProtocolError> {
         }
     }
     Ok(GitStatusRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         is_git: branch.is_some(),
         branch,
         staged,
@@ -595,7 +598,7 @@ async fn git_log(path: &str, limit: u16) -> Result<GitLogRecord, ProtocolError> 
         })
         .collect();
     Ok(GitLogRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         commits,
     })
 }
@@ -618,7 +621,7 @@ async fn git_branches(path: &str) -> Result<GitBranchesRecord, ProtocolError> {
         .collect::<Vec<_>>();
     let (head_ok, head, _) = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     Ok(GitBranchesRecord {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         branches,
         current: head_ok.then(|| head.trim().to_owned()),
     })
@@ -652,7 +655,7 @@ async fn git_checkout(path: &str, branch: &str) -> Result<GitCheckoutResult, Sto
         ));
     }
     Ok(GitCheckoutResult {
-        path: path.to_owned(),
+        path: display_dir_path(&normalize_dir_path(path)),
         branch: branch.to_owned(),
         status: "checked_out".to_owned(),
     })

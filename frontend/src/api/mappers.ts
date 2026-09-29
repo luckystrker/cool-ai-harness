@@ -352,7 +352,6 @@ export function toLegacyMessage(record: protocol.MessageRecord): Message {
   }
 }
 
-/** `SessionRunSummary` -> legacy `RunOut` (the recorder only reads status). */
 /** `tool.approval_required` payload -> the inline card view model. Shared by
  * the live stream and the on-load pending-approval restore (B4a). */
 export function toInlineApproval(payload: protocol.ToolApprovalRequired): InlineApproval {
@@ -375,6 +374,7 @@ export function toInlineApproval(payload: protocol.ToolApprovalRequired): Inline
   }
 }
 
+/** `SessionRunSummary` -> legacy `RunOut` (the recorder only reads status). */
 export function toRun(
   summary: protocol.SessionRunSummary,
   conversationId: number,

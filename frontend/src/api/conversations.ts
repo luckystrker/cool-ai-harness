@@ -1,4 +1,5 @@
 import { idempotencyKey, sdk } from "./sdk"
+import { CoolProtocolError } from "@cool-sdk/client"
 import type { JsonValue } from "./generated/cool_protocol"
 import {
   toApprovalAudit,
@@ -33,6 +34,27 @@ export interface CompactResponse {
 /** Bounded page size for the canonical transcript read. */
 const HISTORY_PAGE_LIMIT = 100
 const MAX_HISTORY_PAGES = 100
+
+/**
+ * Fetch one `run.events` page, shrinking the page size when the server
+ * rejects it (`invalid_event_page_limit`: deployments may configure a lower
+ * `event_page_limit` than the 256 default — the SPA cannot read the
+ * advertised value because its pooled transport connection is already
+ * initialized).
+ */
+async function fetchEventPage(runId: string, afterSeq: number | null) {
+  let limit = 256
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      return await sdk.runEvents({ runId, afterSeq, limit })
+    } catch (error) {
+      const code = error instanceof CoolProtocolError ? error.protocol.coolCode : null
+      if (code !== "invalid_event_page_limit" || limit <= 1) throw error
+      limit = Math.max(1, Math.floor(limit / 2))
+    }
+  }
+  throw new Error("unreachable")
+}
 
 /**
  * Find-or-create the durable Rust session bound to a legacy conversation.
@@ -181,6 +203,11 @@ export const conversationsApi = {
    * `tool.approval_resolved` in a run parked in `awaiting_approval` is still
    * open. The history projection drops approval events, so this is what puts
    * the card back after a page reload (B4a).
+   *
+   * The scan is bounded: 50 newest runs, 40 pages per run (≥10k events even
+   * under a reduced server page limit). A pathological session past those
+   * bounds silently yields fewer approvals — the worst outcome is a missing
+   * card, never a wrong one.
    */
   pendingApprovals: async (convId: number): Promise<InlineApproval[]> => {
     const sessionId = await sessionFor(convId)
@@ -190,18 +217,24 @@ export const conversationsApi = {
       if (run.status !== "awaiting_approval") continue
       const open = new Map<string, InlineApproval>()
       let afterSeq: number | null = null
-      for (let page = 0; page < 40; page += 1) {
-        const result = await sdk.runEvents({ runId: run.runId, afterSeq, limit: 256 })
-        for (const envelope of result.events) {
-          const event = envelope.event
-          if (event.kind === "tool.approval_required") {
-            open.set(event.payload.approvalId, toInlineApproval(event.payload))
-          } else if (event.kind === "tool.approval_resolved") {
-            open.delete(event.payload.approvalId)
+      try {
+        for (let page = 0; page < 40; page += 1) {
+          const result = await fetchEventPage(run.runId, afterSeq)
+          for (const envelope of result.events) {
+            const event = envelope.event
+            if (event.kind === "tool.approval_required") {
+              open.set(event.payload.approvalId, toInlineApproval(event.payload))
+            } else if (event.kind === "tool.approval_resolved") {
+              open.delete(event.payload.approvalId)
+            }
           }
+          if (!result.hasMore || result.nextCursor?.afterSeq == null) break
+          afterSeq = result.nextCursor.afterSeq
         }
-        if (!result.hasMore || result.nextCursor?.afterSeq == null) break
-        afterSeq = result.nextCursor.afterSeq
+      } catch {
+        // One run's scan failing (closed run, transport error) must not
+        // kill the restore for every other run.
+        continue
       }
       pending.push(...open.values())
     }

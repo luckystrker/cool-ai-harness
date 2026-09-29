@@ -570,7 +570,23 @@ export function useConversationStream() {
             .filter((m) => (errored ? m.role === "assistant" : true))
             .map((m) =>
               m.role === "assistant"
-                ? { ...m, streaming: false, elapsedMs: m.elapsedMs ?? elapsedMs }
+                ? {
+                    ...m,
+                    streaming: false,
+                    elapsedMs: m.elapsedMs ?? elapsedMs,
+                    // Once the stream ends nothing owns an unresolved card:
+                    // left attached it would render a duplicate beside the
+                    // restored tail card (SSE drop while parked) or a stale
+                    // forever-"pending" card that errors on every click
+                    // (cancel while parked). Resolved badges stay as
+                    // history; actionable cards come back only through the
+                    // pending-approvals restore.
+                    approval:
+                      m.approval != null &&
+                      (m.approval.status === "pending" || m.approval.status === "resolving")
+                        ? undefined
+                        : m.approval,
+                  }
                 : m
             )
         )
