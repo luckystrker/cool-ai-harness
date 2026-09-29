@@ -10,10 +10,10 @@ Python/FastAPI backend was removed under
 [`docs/backlog/python-workers.md`](docs/backlog/python-workers.md), and rollback
 for pre-removal installs is documented in
 [`docs/migration/M12_ROLLBACK.md`](docs/migration/M12_ROLLBACK.md). The product
-roadmap lives in [`docs/PLAN.md`](docs/PLAN.md) and
-[`docs/phases/`](docs/phases/). Phases 0–3b and **Фаза 4** (Deep Research,
-Code/Git, multimodal, browser automation, Agent Constructor) are done.
-Telegram (Фаза 5) is still an empty placeholder.
+roadmap lives in [`docs/PLAN.md`](docs/PLAN.md). Phases 0–4 (foundation,
+agent loop, reliability/security, skills/MCP/subagents, memory/personalities/
+tasks, workflows/multimodal/code tools) plus the 0.2 hardening track are
+done. Telegram (Phase 5) is still an empty placeholder.
 
 The completed architecture-migration roadmap is
 [`docs/RUST_CORE_MIGRATION_PLAN.md`](docs/RUST_CORE_MIGRATION_PLAN.md): a Rust trusted core,
@@ -53,13 +53,13 @@ worker (`crates/cool-extensions/src/opencode.rs`) is opt-in via
 
 Supporting roots: `sdk/typescript` (generated typed client), `schemas/`
 (protocol JSON schemas), `skills/` (bundled SKILL.md skills), `docs/` (roadmap,
-per-phase specs, migration evidence). Run the command for **every root you
+migration evidence, backlog). Run the command for **every root you
 touched** before declaring a task done (see [Definition of done](#definition-of-done)).
 
 ## Cross-cutting architecture constraints
 
-These come from [`docs/PLAN.md`](docs/PLAN.md) "Архитектурные принципы" and the
-phase specs; do not violate them without an explicit decision:
+These come from [`docs/PLAN.md`](docs/PLAN.md) "Architectural principles";
+do not violate them without an explicit decision:
 
 - **Provider abstraction.** All LLM access goes through the single provider
   interface in `crates/cool-agent` (`ModelProvider`/`ScriptedDriver`). Never

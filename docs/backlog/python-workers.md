@@ -1,7 +1,7 @@
 # Backlog — optional Python OCR/document/ML workers (moved out of M11)
 
 Status: **planned / not scheduled**. This workstream was removed from
-`M11 — Web cutover и compatibility workers` on 2026-09-20 and parked here. M11
+`M11 — Web cutover and compatibility workers` on 2026-09-20 and parked here. M11
 keeps the Rust HTTP/App Protocol cutover, the Rust executors and the isolated
 **compatibility worker protocol** (OpenCode Bun), but the optional Python
 workers are deferred so the M11 definition of done stays credential-free and
@@ -47,6 +47,9 @@ does not depend on a heavy Python/ML toolchain.
   so the workers live out-of-process in their own package/repo and talk to the
   core over the compatibility-worker protocol.
 - `crates/cool-extensions/` / the compatibility-worker protocol and the
-  `docs/RUST_CORE_MIGRATION_PLAN.md` §M11 compatibility-worker deliverables.
-- `docs/RUST_CORE_MIGRATION_PLAN.md` §14 items 11–12 (base product without
-  Python/Node/Bun; Python/TypeScript only as optional worker/client deps).
+  M11 compatibility-worker deliverables recorded in
+  [`docs/migration/checkpoints/M11.md`](../migration/checkpoints/M11.md).
+- The migration's completion criteria (see
+  [`docs/RUST_CORE_MIGRATION_PLAN.md`](../RUST_CORE_MIGRATION_PLAN.md)):
+  the base product runs without Python/Node/Bun; Python/TypeScript appear
+  only as optional worker/client deps.

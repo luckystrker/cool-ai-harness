@@ -1,7 +1,7 @@
 # Backlog — Telegram adapter (moved out of M11)
 
 Status: **planned / not scheduled**. This workstream was removed from
-`M11 — Web cutover и compatibility workers` on 2026-09-20 and parked here. M11
+`M11 — Web cutover and compatibility workers` on 2026-09-20 and parked here. M11
 now covers only the local Web cutover and the compatibility workers/executors
 that do not require external credentials or infrastructure.
 
@@ -44,5 +44,6 @@ so they do not belong in the M11 definition of done.
 
 - A new Rust adapter crate over `cool-http` — `backend/` was removed under
   ADR-0003, so this is now the only option.
-- `docs/RUST_CORE_MIGRATION_PLAN.md` §5.1 `telegram` profile.
-- `docs/PLAN.md` Фаза 5 (Telegram + Voice).
+- The `telegram` profile deferred in the M11 scope cut — see
+  [`docs/migration/checkpoints/M11.md`](../migration/checkpoints/M11.md).
+- `docs/PLAN.md` Phase 5 (Telegram + Voice).
