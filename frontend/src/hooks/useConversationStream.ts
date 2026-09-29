@@ -606,29 +606,36 @@ export function useConversationStream() {
   /**
    * Bring back the actionable approval cards the server still holds open.
    * Called with `conversationsApi.pendingApprovals` results on conversation
-   * load and whenever they are refetched; the map is reconciled wholesale so
-   * resolved/expired approvals drop their restored card on the next result.
+   * load and whenever they are refetched. A `complete` scan reconciles
+   * wholesale — resolved/expired approvals drop their restored card; an
+   * incomplete scan (a run's event read failed or hit the scan cap) proves
+   * nothing about unlisted approvals, so their cards are kept.
    */
-  const restoreApprovals = useCallback((approvals: InlineApproval[], conversationId: number) => {
-    // A live stream owns its own approval card — its accumulator wins.
-    if (convIdRef.current !== null && convIdRef.current !== conversationId) return
-    const liveId = accRef.current?.approval?.approvalId
-    const next = new Map(approvals.filter((a) => a.approvalId !== liveId).map((a) => [a.approvalId, a]))
-    restoredRef.current.forEach((_approval, id) => {
-      if (!next.has(id)) restoredRef.current.delete(id)
-    })
-    next.forEach((incoming, id) => {
-      // While the user is mid-click the card is locally "resolving"; the
-      // refetched snapshot still reports it pending — don't flicker back.
-      if (restoredRef.current.get(id)?.status !== "resolving") {
-        restoredRef.current.set(id, incoming)
+  const restoreApprovals = useCallback(
+    (approvals: InlineApproval[], conversationId: number, complete: boolean) => {
+      // A live stream owns its own approval card — its accumulator wins.
+      if (convIdRef.current !== null && convIdRef.current !== conversationId) return
+      const liveId = accRef.current?.approval?.approvalId
+      const next = new Map(approvals.filter((a) => a.approvalId !== liveId).map((a) => [a.approvalId, a]))
+      if (complete) {
+        restoredRef.current.forEach((_approval, id) => {
+          if (!next.has(id)) restoredRef.current.delete(id)
+        })
       }
-    })
-    setPendingMsgs((cur) => [
-      ...cur.filter((m) => !m.id.startsWith("approval-restored-")),
-      ...restoredMsgs(),
-    ])
-  }, [])
+      next.forEach((incoming, id) => {
+        // While the user is mid-click the card is locally "resolving"; the
+        // refetched snapshot still reports it pending — don't flicker back.
+        if (restoredRef.current.get(id)?.status !== "resolving") {
+          restoredRef.current.set(id, incoming)
+        }
+      })
+      setPendingMsgs((cur) => [
+        ...cur.filter((m) => !m.id.startsWith("approval-restored-")),
+        ...restoredMsgs(),
+      ])
+    },
+    []
+  )
 
   /**
    * Resolve the inline approval shown in the chat flow.

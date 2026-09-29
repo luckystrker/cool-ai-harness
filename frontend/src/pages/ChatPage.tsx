@@ -129,11 +129,16 @@ export function ChatPage() {
   const { data: pendingApprovals } = useQuery({
     queryKey: ["pending-approvals", convId],
     queryFn: () => conversationsApi.pendingApprovals(convId!),
-    enabled: convId !== null && !isStreaming,
+    // Fetch even while another conversation streams — the restore itself
+    // guards on the live convIdRef, and the stream-end transition is exactly
+    // when a parked approval needs re-surfacing.
+    enabled: convId !== null,
     // While anything is open, keep reconciling — a server-side timeout flips
     // the run out of `awaiting_approval` without a click, and the restored
-    // card must disappear with it (expiry handled honestly, not faked).
-    refetchInterval: (query) => (query.state.data?.length ? 4000 : false),
+    // card must disappear with it (expiry handled honestly, not faked). A
+    // slower heartbeat runs when empty so an approval parked from another
+    // client still surfaces.
+    refetchInterval: (query) => (query.state.data?.approvals.length ? 4000 : 15000),
   })
 
   const [artifactsOpen, setArtifactsOpen] = useState(false)
@@ -158,12 +163,14 @@ export function ChatPage() {
   // Must run after the clearPending effect above: on a convId switch the
   // wipe clears the restored map first, then this repopulates from the
   // (possibly cached) query — otherwise a cached result would be restored
-  // and immediately wiped, never to re-fire (structural sharing).
+  // and immediately wiped, never to re-fire (structural sharing). `isStreaming`
+  // is a dep so a stream teardown re-reconciles (the live accumulator had
+  // owned the card while running).
   useEffect(() => {
     if (convId !== null && pendingApprovals !== undefined) {
-      restoreApprovals(pendingApprovals, convId)
+      restoreApprovals(pendingApprovals.approvals, convId, pendingApprovals.complete)
     }
-  }, [convId, pendingApprovals, restoreApprovals])
+  }, [convId, pendingApprovals, isStreaming, restoreApprovals])
 
   // Compaction: messages covered by the working-memory rolling summary are
   // collapsed into a summary block (expandable); the rest renders normally.

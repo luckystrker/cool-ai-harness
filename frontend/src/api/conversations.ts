@@ -35,25 +35,28 @@ export interface CompactResponse {
 const HISTORY_PAGE_LIMIT = 100
 const MAX_HISTORY_PAGES = 100
 
+/** Total `run.events` an approval restore scans per run before truncating. */
+const MAX_APPROVAL_SCAN_EVENTS = 20480
+
 /**
- * Fetch one `run.events` page, shrinking the page size when the server
- * rejects it (`invalid_event_page_limit`: deployments may configure a lower
- * `event_page_limit` than the 256 default — the SPA cannot read the
- * advertised value because its pooled transport connection is already
- * initialized). The learned limit is shared through `pageSize` so later
- * pages and runs don't re-pay the failed RPC.
+ * Call an RPC whose `limit` param is validated against a configured server
+ * ceiling (`invalid_*_limit` errors): retry with the limit halved until the
+ * server accepts it. Deployments may configure a lower ceiling than the 256
+ * default and the SPA cannot read the advertised value — its pooled HTTP
+ * transport connection is already initialized.
  */
-async function fetchEventPage(
-  runId: string,
-  afterSeq: number | null,
-  pageSize: { limit: number }
-) {
+async function withLimitRetry<T>(
+  pageSize: { limit: number },
+  call: (limit: number) => Promise<T>
+): Promise<T> {
   for (let attempt = 0; attempt < 9; attempt += 1) {
     try {
-      return await sdk.runEvents({ runId, afterSeq, limit: pageSize.limit })
+      return await call(pageSize.limit)
     } catch (error) {
       const code = error instanceof CoolProtocolError ? error.protocol.coolCode : null
-      if (code !== "invalid_event_page_limit" || pageSize.limit <= 1) throw error
+      if (code == null || !code.startsWith("invalid_") || !code.endsWith("_limit") || pageSize.limit <= 1) {
+        throw error
+      }
       pageSize.limit = Math.max(1, Math.floor(pageSize.limit / 2))
     }
   }
@@ -208,23 +211,36 @@ export const conversationsApi = {
    * open. The history projection drops approval events, so this is what puts
    * the card back after a page reload (B4a).
    *
-   * The scan is bounded: 50 newest runs, 40 pages per run (≥10k events even
-   * under a reduced server page limit). A pathological session past those
-   * bounds silently yields fewer approvals — the worst outcome is a missing
-   * card, never a wrong one.
+   * The scan is bounded by total events read (not pages — the page size can
+   * shrink under `withLimitRetry`): past MAX_APPROVAL_SCAN_EVENTS a run's
+   * scan is truncated and its opens are DROPPED — surfacing one could
+   * resurrect a resolved approval whose `resolved` event sits beyond the
+   * cap. `complete` is false when any run's scan failed or truncated; the
+   * caller must then merge instead of deleting unlisted restored cards —
+   * a failed scan proves nothing about their state.
    */
-  pendingApprovals: async (convId: number): Promise<InlineApproval[]> => {
+  pendingApprovals: async (
+    convId: number
+  ): Promise<{ approvals: InlineApproval[]; complete: boolean }> => {
     const sessionId = await sessionFor(convId)
-    const { runs } = await sdk.sessionRuns({ sessionId, limit: 50 })
     const pageSize = { limit: 256 }
+    const { runs } = await withLimitRetry(pageSize, (limit) =>
+      sdk.sessionRuns({ sessionId, limit })
+    )
     const pending: InlineApproval[] = []
+    let complete = true
     for (const run of runs) {
       if (run.status !== "awaiting_approval") continue
       const open = new Map<string, InlineApproval>()
       let afterSeq: number | null = null
+      let scanned = 0
+      let truncated = false
       try {
-        for (let page = 0; page < 40; page += 1) {
-          const result = await fetchEventPage(run.runId, afterSeq, pageSize)
+        for (;;) {
+          const result = await withLimitRetry(pageSize, (limit) =>
+            sdk.runEvents({ runId: run.runId, afterSeq, limit })
+          )
+          scanned += result.events.length
           for (const envelope of result.events) {
             const event = envelope.event
             if (event.kind === "tool.approval_required") {
@@ -234,16 +250,26 @@ export const conversationsApi = {
             }
           }
           if (!result.hasMore || result.nextCursor?.afterSeq == null) break
+          if (scanned >= MAX_APPROVAL_SCAN_EVENTS) {
+            truncated = true
+            break
+          }
           afterSeq = result.nextCursor.afterSeq
         }
       } catch {
         // One run's scan failing (closed run, transport error) must not
-        // kill the restore for every other run.
+        // kill the restore for every other run — but the failed run proves
+        // nothing about its approvals, so the caller merges, not deletes.
+        complete = false
+        continue
+      }
+      if (truncated) {
+        complete = false
         continue
       }
       pending.push(...open.values())
     }
-    return pending
+    return { approvals: pending, complete }
   },
 
   /**

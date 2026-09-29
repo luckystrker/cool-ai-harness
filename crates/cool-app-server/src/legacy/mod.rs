@@ -416,20 +416,25 @@ pub(crate) fn replay_execution(
 /// (which `Workspace::root()` gains from canonicalization) disables the OS's
 /// separator normalization, so `\\?\C:\root/child` does not resolve; strip
 /// the prefix (UNC keeps a plain `\\server\share` root) and unify separators
-/// so either slash resolves.
+/// so either slash resolves. Only verbatim input that also carries `/` gets
+/// rewritten — a plain `\\?\C:\…` may rely on verbatim semantics (paths past
+/// MAX_PATH, trailing-dot names) and must pass through untouched.
 fn normalize_dir_path(path: &str) -> std::path::PathBuf {
     let trimmed = path.trim();
     #[cfg(windows)]
     {
-        let stripped = if let Some(rest) = trimmed.strip_prefix(r"\\?\UNC\") {
-            format!(r"\\{rest}")
-        } else {
-            trimmed
-                .strip_prefix(r"\\?\")
-                .map(str::to_owned)
-                .unwrap_or_else(|| trimmed.to_owned())
-        };
-        std::path::PathBuf::from(stripped.replace('/', r"\"))
+        if trimmed.starts_with(r"\\?\") && trimmed.contains('/') {
+            let stripped = if let Some(rest) = trimmed.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{rest}")
+            } else {
+                trimmed
+                    .strip_prefix(r"\\?\")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| trimmed.to_owned())
+            };
+            return std::path::PathBuf::from(stripped.replace('/', r"\"));
+        }
+        std::path::PathBuf::from(trimmed)
     }
     #[cfg(not(windows))]
     {
@@ -834,6 +839,14 @@ mod tests {
         assert_eq!(
             normalize_dir_path("  C:/tmp  "),
             std::path::PathBuf::from(r"C:\tmp")
+        );
+
+        // A verbatim path WITHOUT mixed separators keeps the prefix —
+        // it may rely on verbatim semantics (MAX_PATH+, trailing dots).
+        let verbatim_only = normalize_dir_path(r"\\?\C:\very\deep\path");
+        assert_eq!(
+            verbatim_only,
+            std::path::PathBuf::from(r"\\?\C:\very\deep\path")
         );
     }
 
