@@ -255,6 +255,14 @@ Beyond the core agent loop, these subsystems are implemented:
   forms supported). A `network` capability `deny` propagates
   `NetAccess::None` into spawned processes; `NetAccess::Pinned` is refused
   in v1 (needs an allowlist proxy — fail closed, no silent full access).
+  Granting `network` (`NetAccess::Full`) is per-run configuration, not a
+  rule: `cool run --allow-network` for one-shot runs, and for `cool serve`
+  the conversation's capability matrix (Settings → Agent) or
+  `AgentProfile.settings["capability_policy"]` — profile entries apply
+  first, the conversation map wins per capability. `host`/`jobobject`
+  spawns refuse anything below `Full`, so shell/git tools need that grant
+  plus a `shell`/`git` allow rule or interactive approval; `bwrap`/`seatbelt`
+  can isolate and spawn with `None`.
 - **Policy rules** — exec rules (`tool` + glob on `program args`, or
   `path_glob`/`domain` patterns) are evaluated *before* the capability
   policy, first match wins, strictest on ties. Scopes: `session`

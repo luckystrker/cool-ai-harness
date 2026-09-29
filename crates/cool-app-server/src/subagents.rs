@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::scheduler::{capability_from_name, decision_from_name};
+use crate::scheduler::policy_from_json;
 
 /// How much of the spawning run's context a child inherits (P1.7).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -947,27 +947,7 @@ impl Drop for LiveGuard {
 /// Narrow the core policy with a role/profile capability policy (a subagent may
 /// only restrict, never widen).
 fn subagent_policy(base: &CapabilityPolicy, policy: Option<&Value>) -> CapabilityPolicy {
-    let Some(Value::Object(entries)) = policy else {
-        return base.clone();
-    };
-    let mut wildcard = None;
-    let mut per_capability = Vec::new();
-    for (name, value) in entries {
-        let Some(decision) = value.as_str().and_then(decision_from_name) else {
-            continue;
-        };
-        let name = name.trim().to_ascii_lowercase();
-        if name == "*" {
-            wildcard = Some(decision);
-        } else if let Some(capability) = capability_from_name(&name) {
-            per_capability.push((capability, decision));
-        }
-    }
-    let mut child = CapabilityPolicy::new(wildcard);
-    for (capability, decision) in per_capability {
-        child.set(capability, decision);
-    }
-    base.narrow_with(&child)
+    base.narrow_with(&policy_from_json(policy))
 }
 
 /// Mask secrets inside a JSON value before it reaches the legacy store.
