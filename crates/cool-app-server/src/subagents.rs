@@ -14,7 +14,9 @@
 //! conversation's canonical session when that session is linked.
 //!
 //! Capability policy: a role/profile policy is applied as a narrowing child of
-//! the core policy (it can only restrict, never widen). Approval-gated tools
+//! the PARENT conversation's effective policy — the server base plus its
+//! operator-configured grant layers — so a launched child inherits grants
+//! while its own map can only restrict, never widen. Approval-gated tools
 //! are auto-approved because a launched subagent has no interactive approval
 //! channel, matching the background-run semantics.
 
@@ -200,10 +202,12 @@ impl SubagentExecutor {
         }
     }
 
-    /// The base capability policy; the child's `capability_policy` narrows
-    /// it at `subagent_policy`. Project + user rules ride the live
-    /// `rule_source` attached per run instead — for the subagent's own
-    /// working directory, not the server's (P1.6).
+    /// The server base capability policy. The child's `capability_policy`
+    /// narrows the PARENT conversation's effective policy — this base plus
+    /// its profile/conversation grant layers — at `subagent_policy`, so a
+    /// configured `network: allow` reaches delegated runs. Project + user
+    /// rules ride the live `rule_source` attached per run instead — for the
+    /// subagent's own working directory, not the server's (P1.6).
     fn merged_policy(&self) -> CapabilityPolicy {
         self.policy.clone()
     }
@@ -665,7 +669,15 @@ impl SubagentExecutor {
             tool_names: resolved.tool_names.clone(),
             tool_context: ToolContext::new(
                 workspace.clone(),
-                subagent_policy(&self.merged_policy(), resolved.capability_policy.as_ref()),
+                subagent_policy(
+                    &crate::conversation_run_grants(
+                        Some(self.store.as_ref()),
+                        self.merged_policy(),
+                        Some(context.parent_conversation_id),
+                    )
+                    .0,
+                    resolved.capability_policy.as_ref(),
+                ),
             )
             .with_actor(crate::local_actor().id)
             .with_launcher(launcher.clone())
@@ -1526,5 +1538,37 @@ impl SubagentExecutor {
         }
         let text = mask_secrets(sink.text().trim());
         (!text.is_empty()).then_some(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child map narrows, never widens: `network: allow` on an `ask` base
+    /// stays `ask` — but a base that already carries a configured grant
+    /// passes it through (operator grants DO reach children), and the child
+    /// may still tighten below the grant.
+    #[test]
+    fn subagent_policy_narrows_but_inherits_parent_grants() {
+        use cool_security::{Capability, Decision};
+        let base = CapabilityPolicy::new(Some(Decision::Ask));
+        let child = json!({"network": "allow"});
+        assert_eq!(
+            subagent_policy(&base, Some(&child)).resolve(Capability::Network),
+            Decision::Ask
+        );
+
+        let mut granted = CapabilityPolicy::new(Some(Decision::Ask));
+        granted.set(Capability::Network, Decision::Allow);
+        assert_eq!(
+            subagent_policy(&granted, Some(&child)).resolve(Capability::Network),
+            Decision::Allow
+        );
+        assert_eq!(
+            subagent_policy(&granted, Some(&json!({"network": "deny"})))
+                .resolve(Capability::Network),
+            Decision::Deny
+        );
     }
 }

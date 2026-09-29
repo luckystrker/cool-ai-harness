@@ -700,35 +700,18 @@ impl AppServer {
         self.inner.policy.clone()
     }
 
-    /// The capability policy a conversation's runs execute under: the server
-    /// base with the conversation's profile then conversation capability
-    /// maps applied as grant layers (`apply_overrides` — most specific
-    /// wins), so a stored `network: allow` reaches the launcher's
-    /// `NetAccess` check. This is operator/user configuration, not a child
-    /// policy — subagent/task maps still only narrow via `narrow_with`.
-    fn run_policy_for_conversation(&self, conversation_id: Option<i64>) -> CapabilityPolicy {
-        let mut policy = self.merged_policy();
-        let (Some(legacy), Some(conversation_id)) =
-            (self.inner.config.legacy_store.as_deref(), conversation_id)
-        else {
-            return policy;
-        };
-        let actor = local_actor();
-        let Ok(conversation) = legacy.get_conversation(&actor.id, conversation_id) else {
-            return policy;
-        };
-        if let Some(profile_map) = conversation
-            .profile_id
-            .and_then(|profile_id| legacy.get_profile(profile_id).ok())
-            .and_then(|profile| profile.settings)
-            .and_then(|settings| settings.get("capability_policy").cloned())
-        {
-            policy = policy.apply_overrides(&scheduler::policy_from_json(Some(&profile_map)));
-        }
-        if let Some(map) = conversation.capability_policy.as_ref() {
-            policy = policy.apply_overrides(&scheduler::policy_from_json(Some(map)));
-        }
-        policy
+    /// The capability policy a conversation's runs execute under, plus the
+    /// profile `exec_rules` to seed as the run's session rules — see
+    /// [`conversation_run_grants`].
+    fn run_policy_for_conversation(
+        &self,
+        conversation_id: Option<i64>,
+    ) -> (CapabilityPolicy, Vec<PolicyRule>) {
+        conversation_run_grants(
+            self.inner.config.legacy_store.as_deref(),
+            self.merged_policy(),
+            conversation_id,
+        )
     }
 
     /// Live project+user rule source for a run's workspace (P1.6): every
@@ -3494,6 +3477,24 @@ impl AppServer {
             // linked conversation sets one (matching the plan executor);
             // everything else falls back to the server workspace.
             let workspace = server.run_workspace_for_session(&run.session_id);
+            let conversation_id = server
+                .inner
+                .store
+                .conversation_id_for_session(&local_actor().id, &run.session_id)
+                .ok()
+                .flatten();
+            // Grant layers resolved once at run start (see
+            // `conversation_run_grants`); the profile's `exec_rules` ride
+            // the run's session-rule set and are dropped with it below.
+            let (run_policy, profile_rules) = server.run_policy_for_conversation(conversation_id);
+            for rule in &profile_rules {
+                server
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .add_session_rule(&run_id, rule.clone());
+            }
             let sink = AppServerEventSink {
                 server: server.clone(),
                 run_id: run_id.clone(),
@@ -3550,28 +3551,19 @@ impl AppServer {
                 limits: AgentLimits::default(),
                 tool_names: None,
                 tool_context: {
-                    let conversation_id = server
-                        .inner
-                        .store
-                        .conversation_id_for_session(&local_actor().id, &run.session_id)
-                        .ok()
-                        .flatten();
-                    ToolContext::new(
-                        workspace.clone(),
-                        server.run_policy_for_conversation(conversation_id),
-                    )
-                    .with_actor(local_actor().id)
-                    .with_launcher(server.inner.config.host.launcher.clone())
-                    .with_environment(server.inner.config.host.environment.clone())
-                    .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
-                    .with_rule_source(server.rule_source(&workspace))
-                    .with_session_id(run.session_id.clone())
-                    .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
-                        server: server.clone(),
-                        conversation_id,
-                    }))
-                    .with_conversation(conversation_id)
-                    .with_question_gate(approvals.clone())
+                    ToolContext::new(workspace.clone(), run_policy.clone())
+                        .with_actor(local_actor().id)
+                        .with_launcher(server.inner.config.host.launcher.clone())
+                        .with_environment(server.inner.config.host.environment.clone())
+                        .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                        .with_rule_source(server.rule_source(&workspace))
+                        .with_session_id(run.session_id.clone())
+                        .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                            server: server.clone(),
+                            conversation_id,
+                        }))
+                        .with_conversation(conversation_id)
+                        .with_question_gate(approvals.clone())
                 },
             };
             let lifecycle_sink =
@@ -3582,7 +3574,7 @@ impl AppServer {
                     .map(|lifecycle| LifecycleEventSink {
                         inner: sink.clone(),
                         lifecycle: lifecycle.clone(),
-                        policy: server.inner.policy.clone(),
+                        policy: run_policy.clone(),
                         prompt: masked_prompt,
                     });
             let event_sink: &dyn EventSink = lifecycle_sink
@@ -4063,7 +4055,8 @@ impl AppServer {
             .as_ref()
             .and_then(|conversation| conversation.model.clone())
             .unwrap_or_else(|| self.inner.default_model.clone());
-        let run_policy = self.run_policy_for_conversation(Some(plan.conversation_id));
+        let (run_policy, profile_rules) =
+            self.run_policy_for_conversation(Some(plan.conversation_id));
         let workspace = match conversation
             .as_ref()
             .and_then(|conversation| conversation.working_directory.as_deref())
@@ -4080,6 +4073,17 @@ impl AppServer {
             },
             None => self.inner.workspace.clone(),
         };
+        // Profile `exec_rules` apply to the plan run's direct steps as
+        // session rules (delegated steps resolve their own profile's rules
+        // inside the subagent executor); dropped when the plan settles.
+        for rule in &profile_rules {
+            self.inner
+                .config
+                .host
+                .rules
+                .add_session_rule(&run_id, rule.clone());
+        }
+        let session_rules = self.inner.config.host.rules.session_rules(&run_id);
         let sink = make_sink(workspace.clone());
         let _ = sink
             .emit(CanonicalEvent::RunStarted(RunStarted {
@@ -4155,6 +4159,7 @@ impl AppServer {
                     &workspace,
                     &model,
                     &run_policy,
+                    &session_rules,
                     &cancel_rx,
                 )
                 .await;
@@ -4216,6 +4221,8 @@ impl AppServer {
                 }))
                 .await;
         }
+        // Settled — drop the seeded profile rules for this run.
+        self.inner.config.host.rules.remove_session(&run_id);
         let final_status = if cancelled {
             "cancelled"
         } else if failed {
@@ -4575,6 +4582,7 @@ impl AppServer {
         workspace: &Workspace,
         model: &str,
         run_policy: &CapabilityPolicy,
+        session_rules: &Arc<std::sync::RwLock<Vec<PolicyRule>>>,
         cancel_rx: &watch::Receiver<Option<String>>,
     ) -> (String, bool) {
         let prompt = plan_step_prompt(step);
@@ -4583,19 +4591,29 @@ impl AppServer {
             .as_deref()
             .filter(|role| !role.is_empty())
         {
+            // Delegated steps re-resolve the parent conversation's grant
+            // layers inside the subagent executor (`parent_conversation_id`)
+            // and narrow them with the role's capability map.
             Some(role_name) => {
                 self.execute_plan_step_via_subagent(plan, step, &prompt, role_name, cancel_rx)
                     .await
             }
             None => {
                 self.execute_plan_step_direct(
-                    prompt, history, workspace, model, run_policy, cancel_rx,
+                    prompt,
+                    history,
+                    workspace,
+                    model,
+                    run_policy,
+                    session_rules,
+                    cancel_rx,
                 )
                 .await
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_plan_step_direct(
         &self,
         prompt: String,
@@ -4603,6 +4621,7 @@ impl AppServer {
         workspace: &Workspace,
         model: &str,
         run_policy: &CapabilityPolicy,
+        session_rules: &Arc<std::sync::RwLock<Vec<PolicyRule>>>,
         cancel_rx: &watch::Receiver<Option<String>>,
     ) -> (String, bool) {
         let request = AgentRequest {
@@ -4624,6 +4643,7 @@ impl AppServer {
                 .with_actor(local_actor().id)
                 .with_launcher(self.inner.config.host.launcher.clone())
                 .with_environment(self.inner.config.host.environment.clone())
+                .with_session_rules(Arc::clone(session_rules))
                 .with_rule_source(self.rule_source(workspace)),
         };
         let sink = PlanStepSink::default();
@@ -6911,6 +6931,63 @@ fn rule_source_for(
     })
 }
 
+/// Effective grant layers for one conversation's runs: `base` overlaid with
+/// the profile's `network` capability entry then the conversation's
+/// capability map (`apply_overrides` — most specific wins), so a stored
+/// `network: allow` reaches the launcher's `NetAccess` check; plus the
+/// profile's `exec_rules` for the caller to seed as the run's session
+/// rules. This is operator/user configuration, not a child policy —
+/// subagent/task capability maps still only narrow via `narrow_with`.
+///
+/// A profile's capability map is overlaid for `network` only: those maps
+/// historically reached children via `narrow_with`, where `allow` entries
+/// were inert — widening every stored entry to a live grant would silently
+/// auto-approve e.g. a saved `execute: allow` meant for unattended runs.
+/// The conversation map is explicit per-conversation user config, so it
+/// overlays in full.
+///
+/// The policy is a run-start snapshot: capability-matrix edits mid-run
+/// apply to the next run (policy *rules* still update live through the
+/// `rule_source` attached to each context).
+pub(crate) fn conversation_run_grants(
+    legacy: Option<&LegacyStore>,
+    base: CapabilityPolicy,
+    conversation_id: Option<i64>,
+) -> (CapabilityPolicy, Vec<PolicyRule>) {
+    let mut policy = base;
+    let mut exec_rules = Vec::new();
+    let (Some(legacy), Some(conversation_id)) = (legacy, conversation_id) else {
+        return (policy, exec_rules);
+    };
+    let actor = local_actor();
+    let Ok(conversation) = legacy.get_conversation(&actor.id, conversation_id) else {
+        return (policy, exec_rules);
+    };
+    if let Some(settings) = conversation
+        .profile_id
+        .and_then(|profile_id| legacy.get_profile(profile_id).ok())
+        .and_then(|profile| profile.settings)
+    {
+        if let Some(network) = settings
+            .get("capability_policy")
+            .and_then(|map| map.get("network"))
+        {
+            let grant = serde_json::json!({ "network": network });
+            policy = policy.apply_overrides(&scheduler::policy_from_json(Some(&grant)));
+        }
+        if let Some(rules) = settings
+            .get("exec_rules")
+            .and_then(|value| serde_json::from_value::<Vec<PolicyRule>>(value.clone()).ok())
+        {
+            exec_rules = rules;
+        }
+    }
+    if let Some(map) = conversation.capability_policy.as_ref() {
+        policy = policy.apply_overrides(&scheduler::policy_from_json(Some(map)));
+    }
+    (policy, exec_rules)
+}
+
 fn rpc_id_from_value(value: &serde_json::Value) -> RpcId {
     match value.get("id") {
         Some(serde_json::Value::String(id)) => RpcId::String(id.clone()),
@@ -7462,12 +7539,13 @@ mod tests {
         assert!(*failed_rx.borrow());
     }
 
-    /// A conversation's capability matrix (and its profile's
-    /// `settings.capability_policy`) reaches the run policy as a grant layer:
-    /// `network: allow` resolves `Allow` so tool process launches get
-    /// `NetAccess::Full`, while unnamed capabilities keep the server base
-    /// (wildcard `ask`). Sessions without a conversation or a map keep the
-    /// fail-closed base unchanged.
+    /// A conversation's capability matrix reaches the run policy as a full
+    /// grant layer (`network: allow` resolves `Allow` so tool process
+    /// launches get `NetAccess::Full`), while the profile's capability map
+    /// grants `network` only — its other stored entries stay inert on the
+    /// foreground run (they exist to narrow children). Profile `exec_rules`
+    /// come back for the caller to seed as session rules. Sessions without
+    /// a conversation or a map keep the fail-closed base unchanged.
     #[test]
     fn run_policy_for_conversation_applies_profile_then_conversation_grants() {
         use cool_security::{Capability, Decision};
@@ -7482,7 +7560,12 @@ mod tests {
             .create_profile(&NewAgentProfile {
                 name: "Net".to_owned(),
                 slug: "net".to_owned(),
-                settings: Some(json!({"capability_policy": {"write": "deny", "network": "ask"}})),
+                settings: Some(json!({
+                    "capability_policy": {"write": "deny", "network": "ask"},
+                    "exec_rules": [
+                        {"tool": "shell", "kind": "command", "pattern": "rm *", "decision": "deny"}
+                    ]
+                })),
                 ..Default::default()
             })
             .expect("profile");
@@ -7501,18 +7584,49 @@ mod tests {
             ..ServerConfig::default()
         });
 
-        let policy = server.run_policy_for_conversation(Some(conversation.id));
+        let (policy, exec_rules) = server.run_policy_for_conversation(Some(conversation.id));
         assert_eq!(policy.resolve(Capability::Network), Decision::Allow);
-        assert_eq!(policy.resolve(Capability::Write), Decision::Deny);
+        // The profile's `write: deny` is NOT overlaid: profile maps grant
+        // only `network` — their other entries narrow children instead.
+        assert_eq!(policy.resolve(Capability::Write), Decision::Ask);
         assert_eq!(policy.resolve(Capability::Read), Decision::Ask);
+        assert_eq!(exec_rules.len(), 1);
+        assert_eq!(exec_rules[0].decision, Decision::Deny);
 
-        for policy in [
+        for (policy, rules) in [
             server.run_policy_for_conversation(None),
             server.run_policy_for_conversation(Some(conversation.id + 1000)),
         ] {
             assert_eq!(policy.resolve(Capability::Network), Decision::Ask);
             assert_eq!(policy.resolve(Capability::Write), Decision::Ask);
+            assert!(rules.is_empty());
         }
+    }
+
+    /// The shared `{name: decision}` parser: `"*"` is the wildcard entry,
+    /// unknown capability names and decisions are skipped, and non-object
+    /// input yields an empty policy (resolve falls back to `Allow`).
+    #[test]
+    fn policy_from_json_parses_wildcard_and_skips_unknown_entries() {
+        use cool_security::{Capability, Decision};
+        use serde_json::json;
+
+        let policy = crate::scheduler::policy_from_json(Some(&json!({
+            "*": "deny",
+            "network": "allow",
+            "not_a_capability": "allow",
+            "execute": "not-a-decision"
+        })));
+        assert_eq!(policy.resolve(Capability::Network), Decision::Allow);
+        // `execute`'s bogus decision was skipped — it hits the wildcard.
+        assert_eq!(policy.resolve(Capability::Execute), Decision::Deny);
+
+        for value in [json!("not-an-object"), json!(["network"]), json!(7)] {
+            let policy = crate::scheduler::policy_from_json(Some(&value));
+            assert_eq!(policy.resolve(Capability::Read), Decision::Allow);
+        }
+        let policy = crate::scheduler::policy_from_json(None);
+        assert_eq!(policy.resolve(Capability::Read), Decision::Allow);
     }
 
     #[tokio::test]

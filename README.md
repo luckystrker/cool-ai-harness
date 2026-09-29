@@ -258,11 +258,16 @@ Beyond the core agent loop, these subsystems are implemented:
   Granting `network` (`NetAccess::Full`) is per-run configuration, not a
   rule: `cool run --allow-network` for one-shot runs, and for `cool serve`
   the conversation's capability matrix (Settings → Agent) or
-  `AgentProfile.settings["capability_policy"]` — profile entries apply
-  first, the conversation map wins per capability. `host`/`jobobject`
-  spawns refuse anything below `Full`, so shell/git tools need that grant
-  plus a `shell`/`git` allow rule or interactive approval; `bwrap`/`seatbelt`
-  can isolate and spawn with `None`.
+  `AgentProfile.settings["capability_policy"]["network"]` — the profile
+  map grants `network` only on the foreground run (its other entries exist
+  to narrow children), the conversation map overlays in full, and children
+  (subagents, delegated plan steps) narrow the parent's effective policy so
+  configured grants propagate but child maps still can't widen. Profile
+  `settings["exec_rules"]` apply to the run's session rules the same way
+  they do for subagents. `host`/`jobobject` spawns refuse anything below
+  `Full`, so shell/git tools need that grant plus a `shell`/`git` allow
+  rule or interactive approval; `bwrap`/`seatbelt` can isolate and spawn
+  with `None`.
 - **Policy rules** — exec rules (`tool` + glob on `program args`, or
   `path_glob`/`domain` patterns) are evaluated *before* the capability
   policy, first match wins, strictest on ties. Scopes: `session`

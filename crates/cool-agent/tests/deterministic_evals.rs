@@ -76,9 +76,17 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
         let mut tool_context = ToolContext::new(Workspace::new(directory.path()).unwrap(), policy);
         if let Some(launcher) = scenario.launcher.as_deref() {
             tool_context = match launcher {
-                "host" => tool_context
-                    .with_launcher(Arc::new(cool_agent::HostLauncher))
-                    .with_environment(std::env::vars().collect()),
+                "host" => {
+                    // Host scenarios spawn the real `git` binary — skip on
+                    // a runner that cannot resolve it on PATH.
+                    if !git_on_path() {
+                        eprintln!("scenario {} skipped: git not on PATH", scenario.id);
+                        continue;
+                    }
+                    tool_context
+                        .with_launcher(Arc::new(cool_agent::HostLauncher))
+                        .with_environment(std::env::vars().collect())
+                }
                 other => panic!("unknown launcher {other}"),
             };
         }
@@ -167,6 +175,13 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
         }
         store.replay_run(&run, "local-user").unwrap();
     }
+}
+
+fn git_on_path() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn parse_capability(value: &str) -> Capability {

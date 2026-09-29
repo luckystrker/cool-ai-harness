@@ -2386,8 +2386,10 @@ impl ToolHandler for PythonFallbackTool {
 /// (`--unshare-net`/seatbelt, or a fail-closed `HostLauncher` refusal).
 /// `Ask` resolves to `None` too: approving e.g. a `shell` call's Execute
 /// capability must NOT silently grant it full networking — the child stays
-/// offline unless the Network capability itself resolves `Allow` (a
-/// dedicated net approval/allowlist is a documented follow-up).
+/// offline unless the Network capability itself resolves `Allow`. Grants
+/// reach the policy as configuration, never as a rule or an approval:
+/// `cool run --allow-network`, or on the serve path a `network: allow`
+/// entry in the conversation's capability map (or its profile's).
 fn process_net(context: &ToolContext) -> NetAccess {
     match context.policy.resolve(Capability::Network) {
         Decision::Allow => NetAccess::Full,

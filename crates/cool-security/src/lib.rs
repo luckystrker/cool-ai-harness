@@ -157,16 +157,25 @@ impl CapabilityPolicy {
     }
 
     /// Layer a configured grant map over `self`: each capability the overlay
-    /// decides replaces `self`'s entry, wildcard included. This composes
-    /// *configuration* layers — server base → profile → conversation — where
-    /// the most specific entry wins, e.g. a conversation's `network: allow`
-    /// grants `Decision::Allow` even when the base wildcard is `ask`. Unlike
+    /// decides replaces `self`'s entry, wildcard included — except `Deny`: a
+    /// base deny (named entry or wildcard) is a hard bound no grant layer may
+    /// lift, matching rules, which can never weaken a deny either. A named
+    /// overlay entry still wins over a base *wildcard* deny (the explicit
+    /// exception beats the blanket bound). This composes *configuration*
+    /// layers — server base → profile → conversation — where the most
+    /// specific entry wins, e.g. a conversation's `network: allow` grants
+    /// `Decision::Allow` even when the base wildcard is `ask`. Unlike
     /// [`narrow_with`], which clamps a child policy to never exceed its
-    /// parent, an overlay is trusted configuration and may loosen entries.
-    /// Rules append base-first (first match still wins in `match_rule`).
+    /// parent, an overlay is trusted configuration and may loosen non-deny
+    /// entries. Rules append base-first (first match still wins in
+    /// `match_rule`).
     pub fn apply_overrides(&self, overlay: &Self) -> Self {
         let mut merged = Self {
-            wildcard: overlay.wildcard.or(self.wildcard),
+            wildcard: if self.wildcard == Some(Decision::Deny) {
+                self.wildcard
+            } else {
+                overlay.wildcard.or(self.wildcard)
+            },
             decisions: self.decisions.clone(),
             rules: self
                 .rules
@@ -176,6 +185,9 @@ impl CapabilityPolicy {
                 .collect(),
         };
         for (capability, decision) in &overlay.decisions {
+            if self.decisions.get(capability) == Some(&Decision::Deny) {
+                continue;
+            }
             merged.decisions.insert(*capability, *decision);
         }
         merged
@@ -771,5 +783,28 @@ mod tests {
         named.set(Capability::Git, Decision::Allow);
         let merged = named.apply_overrides(&CapabilityPolicy::new(Some(Decision::Deny)));
         assert_eq!(merged.resolve(Capability::Git), Decision::Allow);
+    }
+
+    /// A base `Deny` is a hard bound an overlay cannot lift: a named deny
+    /// survives an overlay `allow`, and a wildcard deny survives an overlay
+    /// wildcard — while a named overlay entry still punches through the
+    /// blanket bound (the explicit exception wins).
+    #[test]
+    fn apply_overrides_cannot_lift_a_base_deny() {
+        let mut base = CapabilityPolicy::new(Some(Decision::Ask));
+        base.set(Capability::Write, Decision::Deny);
+        let mut overlay = CapabilityPolicy::new(Some(Decision::Allow));
+        overlay.set(Capability::Write, Decision::Allow);
+        let merged = base.apply_overrides(&overlay);
+        assert_eq!(merged.resolve(Capability::Write), Decision::Deny);
+        assert_eq!(merged.resolve(Capability::Read), Decision::Allow);
+
+        let mut network = CapabilityPolicy::new(None);
+        network.set(Capability::Network, Decision::Allow);
+        let locked = CapabilityPolicy::new(Some(Decision::Deny))
+            .apply_overrides(&CapabilityPolicy::new(Some(Decision::Allow)))
+            .apply_overrides(&network);
+        assert_eq!(locked.resolve(Capability::Read), Decision::Deny);
+        assert_eq!(locked.resolve(Capability::Network), Decision::Allow);
     }
 }

@@ -254,6 +254,25 @@
     "expectedFile": false
   },
   {
+    "id": "shell_deny_rule_beats_network_allow_grant",
+    "calls": [
+      {
+        "callId": "shell-git-version",
+        "name": "shell",
+        "arguments": {"program": "git", "args": ["--version"]}
+      }
+    ],
+    "capability": "network",
+    "decision": "allow",
+    "rules": [
+      {"tool": "shell", "kind": "command", "pattern": "git *", "decision": "deny"}
+    ],
+    "launcher": "host",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
     "id": "shell_disabled_launcher_fails_closed_even_with_network_allow",
     "calls": [
       {
