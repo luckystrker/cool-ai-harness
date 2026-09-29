@@ -8,8 +8,8 @@ publish = false
 
 [dependencies]
 axum.workspace = true
-cool-app-server = { path = "../cool-app-server", version = "0.1.0" }
-cool-protocol = { path = "../cool-protocol", version = "0.1.0" }
+cool-app-server = { path = "../cool-app-server", version = "0.2.0" }
+cool-protocol = { path = "../cool-protocol", version = "0.2.0" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,7 +19,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-cool-state = { path = "../cool-state", version = "0.1.0" }
+cool-state = { path = "../cool-state", version = "0.2.0" }
 reqwest = { workspace = true, features = ["cookies"] }
 tempfile.workspace = true
 tokio.workspace = true
