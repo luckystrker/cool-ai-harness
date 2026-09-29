@@ -574,15 +574,17 @@ export function useConversationStream() {
                     ...m,
                     streaming: false,
                     elapsedMs: m.elapsedMs ?? elapsedMs,
-                    // Once the stream ends nothing owns an unresolved card:
-                    // left attached it would render a duplicate beside the
-                    // restored tail card (SSE drop while parked) or a stale
-                    // forever-"pending" card that errors on every click
-                    // (cancel while parked). Resolved badges stay as
-                    // history; actionable cards come back only through the
-                    // pending-approvals restore.
+                    // Once the stream ends nothing owns the live accumulator's
+                    // unresolved card: left attached it would render a
+                    // duplicate beside the restored tail card (SSE drop while
+                    // parked) or a stale forever-"pending" card that errors
+                    // on every click (cancel while parked). Resolved badges
+                    // stay as history. Restored tail cards are owned by
+                    // restoredRef and must keep their approval — strip only
+                    // the accumulator's own.
                     approval:
                       m.approval != null &&
+                      m.approval.approvalId === acc.approval?.approvalId &&
                       (m.approval.status === "pending" || m.approval.status === "resolving")
                         ? undefined
                         : m.approval,

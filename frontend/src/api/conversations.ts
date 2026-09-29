@@ -40,17 +40,21 @@ const MAX_HISTORY_PAGES = 100
  * rejects it (`invalid_event_page_limit`: deployments may configure a lower
  * `event_page_limit` than the 256 default — the SPA cannot read the
  * advertised value because its pooled transport connection is already
- * initialized).
+ * initialized). The learned limit is shared through `pageSize` so later
+ * pages and runs don't re-pay the failed RPC.
  */
-async function fetchEventPage(runId: string, afterSeq: number | null) {
-  let limit = 256
+async function fetchEventPage(
+  runId: string,
+  afterSeq: number | null,
+  pageSize: { limit: number }
+) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
-      return await sdk.runEvents({ runId, afterSeq, limit })
+      return await sdk.runEvents({ runId, afterSeq, limit: pageSize.limit })
     } catch (error) {
       const code = error instanceof CoolProtocolError ? error.protocol.coolCode : null
-      if (code !== "invalid_event_page_limit" || limit <= 1) throw error
-      limit = Math.max(1, Math.floor(limit / 2))
+      if (code !== "invalid_event_page_limit" || pageSize.limit <= 1) throw error
+      pageSize.limit = Math.max(1, Math.floor(pageSize.limit / 2))
     }
   }
   throw new Error("unreachable")
@@ -212,6 +216,7 @@ export const conversationsApi = {
   pendingApprovals: async (convId: number): Promise<InlineApproval[]> => {
     const sessionId = await sessionFor(convId)
     const { runs } = await sdk.sessionRuns({ sessionId, limit: 50 })
+    const pageSize = { limit: 256 }
     const pending: InlineApproval[] = []
     for (const run of runs) {
       if (run.status !== "awaiting_approval") continue
@@ -219,7 +224,7 @@ export const conversationsApi = {
       let afterSeq: number | null = null
       try {
         for (let page = 0; page < 40; page += 1) {
-          const result = await fetchEventPage(run.runId, afterSeq)
+          const result = await fetchEventPage(run.runId, afterSeq, pageSize)
           for (const envelope of result.events) {
             const event = envelope.event
             if (event.kind === "tool.approval_required") {
