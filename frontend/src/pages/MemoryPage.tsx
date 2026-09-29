@@ -446,7 +446,7 @@ function MemoryCard({
           </div>
           {expanded && <ExplainPanel memoryId={memory.id} />}
         </div>
-        <div className="flex gap-1 opacity-100 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
+        <div className="flex gap-1 opacity-100 transition-opacity md:opacity-0 md:pointer-events-none md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100 md:group-hover:pointer-events-auto md:group-hover:opacity-100">
           <Button
             size="icon"
             variant="ghost"

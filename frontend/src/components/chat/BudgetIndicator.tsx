@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import { Wallet } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
+import { useMediaQuery } from "@/hooks/useMediaQuery"
 import { budgetsApi } from "@/api/budgets"
 import { cn } from "@/lib/utils"
 
@@ -22,6 +23,15 @@ export function BudgetIndicator() {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const popoverId = useId()
+  // Hover opens the popover only on pointers that can actually hover — on
+  // touch the first tap would otherwise open AND toggle-close it again.
+  const canHover = useMediaQuery("(hover: hover)")
+  const hoverHandlers = canHover
+    ? {
+        onMouseEnter: () => setOpen(true),
+        onMouseLeave: () => setOpen(false),
+      }
+    : {}
   const { data: status, isLoading } = useQuery({
     queryKey: ["budgets"],
     queryFn: budgetsApi.getStatus,
@@ -48,12 +58,7 @@ export function BudgetIndicator() {
   if (!status) {
     // No data yet (or no limits configured) — render a neutral icon.
     return (
-      <div
-        ref={rootRef}
-        className="relative inline-flex"
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-      >
+      <div ref={rootRef} className="relative inline-flex" {...hoverHandlers}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
@@ -77,12 +82,7 @@ export function BudgetIndicator() {
     : "text-muted-foreground"
 
   return (
-    <div
-      ref={rootRef}
-      className="relative inline-flex"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
+    <div ref={rootRef} className="relative inline-flex" {...hoverHandlers}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
