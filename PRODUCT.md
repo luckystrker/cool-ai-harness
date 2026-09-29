@@ -8,82 +8,97 @@ web
 
 ## Users
 
-Основной пользователь — владелец собственной локальной установки: разработчик или
-технический power user, который использует AI для работы с кодом, сложных исследований,
-анализа материалов и личной автоматизации. Продукт в первую очередь оптимизируется для
-личного использования, а не для командного SaaS-сценария.
+The primary user is the owner of their own local installation: a developer or
+technical power user who uses AI for coding work, deep research, material
+analysis, and personal automation. The product is optimized for personal use
+first, not a team SaaS scenario.
 
 ## Product Purpose
 
-Продукт объединяет модели, инструменты и контекст пользователя в одном рабочем месте,
-где сложную AI-задачу можно поставить, контролировать, при необходимости остановить и
-проверить после выполнения. Успех означает, что пользователь доводит реальный результат
-до завершения, не теряя понимания того, что делал агент, какими правами пользовался и
-сколько ресурсов потратил.
+The product unifies models, tools, and the user's context into a single
+workspace where a complex AI task can be started, controlled, stopped when
+needed, and audited after completion. Success means the user drives a real
+outcome to completion without losing track of what the agent did, which
+permissions it used, and how much it spent.
 
 ## Positioning
 
-Контролируемое локальное рабочее место для сложных AI-задач с проверяемыми,
-возобновляемыми запусками — не просто чат с набором инструментов. Отличительный механизм
-продукта — durable execution: каждый запуск имеет состояние, append-only журнал событий,
-контроль разрешений, approvals, бюджеты, checkpoints и средства инспекции и replay.
+A controllable local workspace for complex AI tasks with verifiable,
+resumable runs — not just a chat with a toolset. The product's distinguishing
+mechanism is durable execution: every run has state, an append-only event
+log, permission control, approvals, budgets, checkpoints, and inspection /
+replay tooling.
 
 ## Operating Context
 
-- Пользователь запускает Rust `cool` server и React SPA в собственной среде и подключает
-  выбранного LLM-провайдера через API-ключ или совместимый endpoint.
-- Работа начинается с диалога или специализированного workflow; пользователь выбирает
-  проект/рабочую директорию, модель, режим разрешений и при необходимости plan mode.
-- Агент может работать с локальными файлами и кодом, Git/GitHub, браузером, документами,
-  памятью, skills, MCP-инструментами, subagents и повторяющимися задачами.
-- Ход работы доступен через потоковые события, approvals, артефакты, журнал запуска,
-  inspector, аналитику расходов и результатов инструментов.
+- The user runs the Rust `cool` server and the React SPA in their own
+  environment and connects an LLM provider via an API key, a subscription
+  OAuth sign-in (`cool auth`), or a compatible endpoint.
+- Work starts from a conversation or a specialized workflow; the user picks
+  the project/working directory, the model, the permission mode, and
+  optionally plan mode.
+- The agent can work with local files and code (search/read/write/edit),
+  Git/shell through the gated process launcher, documents, memory, skills,
+  MCP tools, subagents (including background, worktree-isolated ones), and
+  recurring tasks.
+- Progress is observable via streamed events, approvals, interactive
+  questions (`ask_user`), artifacts, the run journal, the inspector, and
+  spend/tool analytics.
+- Sessions can be forked/rewound from any message cursor, and filesystem
+  checkpoints allow scoped workspace restore per run.
 
 ## Capabilities and Constraints
 
-- Текущий продукт — web-приложение: Rust trusted core (`cool` binary) / SQLite backend и
-  React 19 / TypeScript / Vite / Tailwind SPA.
-- Доступ к LLM проходит только через единый `LLMProvider`; продукт поддерживает OpenAI,
-  Anthropic и OpenAI-compatible endpoints.
-- Tools, skills, MCP servers и subagent roles подключаются через реестры и плагины, а не
-  вшиваются в agent loop.
-- Безопасность основана на отдельных capabilities (`read`, `write`, `execute`, `network`,
-  `git`, `send_external`), изоляции workspace, защите сетевого доступа, sandboxing,
-  approvals и маскировании secrets.
-- Память имеет project-scoped visibility и доступна агенту только через зарегистрированные
-  memory tools.
-- Реализованы фазы 0–4 roadmap. Telegram/voice, product-readiness и последующий UX backlog
-  остаются планами и не должны описываться как доступные возможности.
-- Репозиторий распространяется по лицензии MIT.
-- Обязательный стандарт доступности пока не определён.
+- The current product is a web application: a Rust trusted core (`cool`
+  binary) / SQLite backend and a React 19 / TypeScript / Vite / Tailwind SPA.
+- LLM access goes through the single `LLMProvider` interface only; the
+  product supports OpenAI, Anthropic, Gemini, OpenAI-compatible endpoints,
+  and OAuth subscriptions (Claude, ChatGPT, Gemini).
+- Tools, skills, MCP servers, and subagent roles attach through registries
+  and plugins rather than being hard-wired into the agent loop; rare tools
+  are deferred and activated lazily (`search_tools`/`activate_tools`).
+- Security is built on separate capabilities (`read`, `write`, `execute`,
+  `network`, `git`, `send_external`), workspace isolation, persistent
+  exec/path/domain policy rules, a process launcher (`disabled` / `host` /
+  OS-sandboxed), SSRF protection, approvals, and secret masking.
+- Memory has project-scoped visibility and is reachable by the agent only
+  through registered memory tools.
+- Roadmap phases 0–4 and the 0.2 hardening track are implemented. Telegram /
+  voice, product-readiness items, and the remaining UX backlog stay planned
+  and must not be described as available capabilities.
+- The repository is distributed under the MIT license.
+- A mandatory accessibility standard is not defined yet.
 
 ## Brand Commitments
 
-Название продукта — **Cool**. Это подтверждённая идентичность продукта; `Harness`
-остаётся техническим описанием категории, но не используется как пользовательское имя.
+The product name is **Cool**. That is the confirmed product identity;
+`Harness` remains a technical description of the category and is not used as
+a user-facing name.
 
 ## Evidence on Hand
 
-- `README.md` — текущее описание продукта, запуска, реализованных подсистем и roadmap.
-- `docs/PLAN.md` и `docs/phases/` — цели, архитектурные принципы, подтверждённые фазы и
-  будущие планы.
-- `crates/` — реализация, тесты и детерминированный eval gate
-  (`cool-agent/tests/deterministic_evals.rs`) для agent loop, безопасности и бюджетов.
-- `frontend/src/` — действующий web-интерфейс для чата, памяти, research, profiles,
-  аналитики, задач, budgets, subagents, settings и inspector.
-- В `README.md` есть снимок существующего интерфейса; в репозитории нет подтверждённых
-  отзывов, клиентов, публичных benchmark-результатов, тарифов или коммерческих claims.
-  Будущие материалы не должны их выдумывать.
+- `README.md` — the current product description, launch instructions,
+  implemented subsystems, and roadmap.
+- `docs/PLAN.md` — goals, architectural principles, shipped phases, and
+  future plans; `docs/migration/` — migration checkpoints and ADRs.
+- `crates/` — the implementation, tests, and the deterministic eval gate
+  (`cool-agent/tests/deterministic_evals.rs`) for the agent loop, security,
+  and budgets.
+- `frontend/src/` — the live web interface for chat, memory, research,
+  profiles, analytics, tasks, budgets, subagents, settings, and inspector.
+- `README.md` carries screenshots of the existing interface; the repository
+  contains no confirmed user reviews, customers, public benchmark results,
+  pricing, or commercial claims. Future materials must not invent them.
 
 ## Product Principles
 
-1. **Личная полезность прежде масштаба.** В первую очередь продукт должен помогать одному
-   владельцу установки завершать реальные задачи без инфраструктуры командного SaaS.
-2. **Пользователь сохраняет контроль.** Существенные действия видимы, ограничены
-   capabilities и могут требовать явного подтверждения.
-3. **Результат должен быть проверяемым.** Состояние запуска, события, стоимость,
-   артефакты и результаты инструментов образуют единую трассу выполнения.
-4. **Модели и расширения заменяемы.** Провайдеры, tools, skills, MCP и subagents остаются
-   модульными и не создают скрытой привязки к одному поставщику.
-5. **Долгая работа не должна быть хрупкой.** Streaming, cancellation, checkpoints,
-   бюджеты и durable runs поддерживают сложные и продолжительные задачи.
+1. **Personal usefulness before scale.** The product must first help a single
+   installation owner finish real tasks without team-SaaS infrastructure.
+2. **The user keeps control.** Meaningful actions are visible, bounded by
+   capabilities, and may require explicit approval.
+3. **The result must be verifiable.** Run state, events, cost, artifacts, and
+   tool results form a single execution trace.
+4. **Models and extensions are replaceable.** Providers, tools, skills, MCP,
+   and subagents stay modular and create no hidden lock-in to one vendor.
+5. **Long-running work must not be fragile.** Streaming, cancellation,
+   checkpoints, budgets, and durable runs support complex, lengthy tasks.

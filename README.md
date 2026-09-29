@@ -15,12 +15,15 @@ inspector/replay console, and durable agent runs. Control via the web UI.
 
 </div>
 
-> Status: **Фазы 0–4 shipped** on the Rust core. Phase 4 delivers Deep
-> Research, Code/Git, multimodal attachments, and Agent Constructor ✅ —
-> browser automation and provider-native vision/OCR are deferred gaps
-> (see [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap).
-
-<img width="1718" height="1273" alt="Cool chat UI" src="https://github.com/user-attachments/assets/473ff4c8-052a-4e62-a3b5-3d9a99610686" />
+> Status: **v0.2.0**. Phases 0–4 are shipped on the Rust core; the 0.2 line
+> adds the coding-agent toolset (search/edit files, launcher-gated `shell`
+> and `git`, output spill), persistent policy rules, an OS sandbox backend,
+> `ask_user`, background subagents with git-worktree isolation, lazy tool
+> activation, session fork/rewind with filesystem checkpoints, multimodal
+> images to vision-capable providers, OAuth sign-in (Claude, ChatGPT,
+> Gemini), and a `cool run --mode json` machine-readable mode. Browser
+> automation remains a deferred gap (see [`docs/PLAN.md`](docs/PLAN.md) for
+> the full roadmap).
 
 ## Download
 
@@ -60,13 +63,14 @@ git push origin main --tags`.
   [`docs/backlog/python-workers.md`](docs/backlog/python-workers.md)
 - **Frontend:** React 19 + TypeScript + Vite 8 + Tailwind 4 (zustand,
   @tanstack/react-query, Radix-based UI primitives)
-- **LLM providers:** OpenAI + Anthropic via a single provider interface
-  (OpenAI-compatible base URL works for OpenRouter/DeepSeek/Groq/Ollama)
-- **Scheduler:** in-process cron/interval/date recurring agent tasks (Фаза 3b)
+- **LLM providers:** OpenAI + Anthropic + Gemini via a single provider
+  interface (OpenAI-compatible base URL works for
+  OpenRouter/DeepSeek/Groq/Ollama); subscription OAuth sign-in for Claude,
+  ChatGPT and Gemini via `cool auth`
+- **Scheduler:** in-process cron/interval/date recurring agent tasks
 - **RSS:** aggregator with per-subscription filters and LLM summarization
-  (Фаза 3b)
-- **Observability:** unified LLM-call log, aggregating dashboards (Фаза 3a)
-- **Telegram:** Bot + Web App adapter — planned (Фаза 5)
+- **Observability:** unified LLM-call log, aggregating dashboards
+- **Telegram:** Bot + Web App adapter — planned
 
 ## Quick start
 
@@ -80,7 +84,7 @@ cp .env.example .env
 openssl rand -base64 32
 ```
 
-#### OAuth sign-in (P2.11)
+#### OAuth sign-in
 
 `cool auth <provider>` runs a local PKCE flow and stores the tokens
 Fernet-encrypted on the provider row (`auth_kind=oauth`, requires
@@ -193,7 +197,7 @@ authenticated server profile and Telegram identity adapter remain later phases.
 
 ## Durable runs & migrations
 
-Each agent turn is a **durable run** (Фаза 1.5): an `agent_runs` row tracks its
+Each agent turn is a **durable run**: an `agent_runs` row tracks its
 status (`running` → `completed`/`failed`/`cancelled`), cumulative token/cost
 usage, iterations, and outcome; an append-only `run_events` log records every
 event for replay/inspection. Interactive runs (SSE via `GET /api/events`) are
@@ -265,8 +269,15 @@ Beyond the core agent loop, these subsystems are implemented:
   is masked, capped at 4 KiB, and reported as `ToolResult.diagnostics`
   (`"skipped"` when the launcher is disabled; failures are warnings).
 - **Context management** — token-aware history budgeting/truncation, project
-  instructions loading (AGENTS.md from the working directory), and working
-  context compaction with collapsible chat history.
+  instructions loading (AGENTS.md from the working directory), in-loop
+  LLM-summarized compaction with collapsible chat history, and a
+  `.cool/progress.md` progress file the agent updates on long tasks.
+- **Output spill** — tool output over the byte cap is spilled to
+  `.cool/spill/` files in the workspace and the model receives a head/tail
+  view instead of losing the payload.
+- **Lazy tool catalog** — deferred/rare tools (e.g. `deep_research`) stay out
+  of the context window; the meta-tools `search_tools` and `activate_tools`
+  let the agent discover and enable them mid-run.
 - **Cost budgets** — per-period spend limits with alert threshold and optional
   block-on-exceed; spend is logged per run.
 - **Skills** — discover `SKILL.md` skills from builtin/user dirs; rank by
@@ -277,45 +288,59 @@ Beyond the core agent loop, these subsystems are implemented:
   A marketplace client queries `registry.modelcontextprotocol.io`.
 - **Subagents** — isolated conversations + durable runs spawned from roles
   (`researcher`, `code-reviewer`, `summarizer` seeded by default); capability
-  policies per role, background launch/cancel, delegated plan steps.
+  policies per role, background (`background=true`) or blocking launch,
+  `fork_context` control over parent context, optional git-worktree
+  isolation under `.cool/worktrees`, and steering via
+  `send_to_subagent` / `collect_subagent` / `list_subagents`.
+- **Interactive questions** — `ask_user` lets a running agent ask the human a
+  question through the approval machinery (option buttons + free text), and
+  fails closed on unattended runs.
+- **Session fork & rewind** — `session.fork` branches a conversation at any
+  message cursor, and filesystem checkpoints record workspace state per run
+  for scoped restore.
 - **Planning mode** — research-first loop emits a fenced `plan` JSON block;
   steps have dependencies (topological execution), draft → approve → execute,
   with `plan_progress` events and templates.
-- **Memory** (Фаза 3a) — long-term memory (`MemoryItem`/`Episode`) with FTS5
+- **Memory** — long-term memory (`MemoryItem`/`Episode`) with FTS5
   recall + composite reranking, entity extraction with confirmation/explain
   panels, pinning/export, post-session LLM extraction, decay/consolidation
   sweeps, and working-memory scratchpads; project-scoped visibility. Exposed to
   the agent via memory tools.
-- **Personalities** (Фаза 3a) — multiple agent profiles with distinct system
+- **Personalities** — multiple agent profiles with distinct system
   prompts/names/descriptions; switchable per chat, persisted in the DB
   (`agent_profiles`).
-- **Analytics** (Фаза 3a) — aggregating dashboards (spend, tool usage, runs,
+- **Analytics** — aggregating dashboards (spend, tool usage, runs,
   latency), unified LLM-call log, and optional OpenTelemetry export.
 - **Inspector** — live tail of in-progress runs over `GET /api/events`, plus
   timeline reconstruction, two-run comparison, and replay over the event log.
-- **Recurring tasks** (Фаза 3b) — in-process cron/interval/date agent
-  tasks persisted in the DB (`cool-app-server` scheduler); scheduled runs are
-  durable with delivery templates (reminders, reports, summaries).
-- **RSS** (Фаза 3b) — feed subscriptions with filters, scheduled aggregation,
-  and LLM summarization into a digest/inbox.
-- **Webhooks** (Фаза 3b) — HTTP webhook router that triggers agent runs/tasks
-  from external services (signed, idempotent).
+- **Recurring tasks** — in-process cron/interval/date agent tasks persisted
+  in the DB (`cool-app-server` scheduler); scheduled runs are durable with
+  delivery templates (reminders, reports, summaries).
+- **RSS** — feed subscriptions with filters, scheduled aggregation, and LLM
+  summarization into a digest/inbox.
+- **Webhooks** — HTTP webhook router that triggers agent runs/tasks from
+  external services (signed, idempotent).
 - **Wiki** — markdown article store (`wiki_articles`) with agent search/write
   tools and a browsing UI.
-- **Code & Git tools** (Фаза 4) — policy-gated `shell` process execution
-  (fails closed without a configured launcher) and a `git` tool; GitHub
-  integration goes through attached MCP servers or the `gh` CLI.
-- **Deep Research** (Фаза 4) — durable research runs with parallel subagents,
-  source citations, and Markdown/HTML export (PDF/DOCX export is a delegated
-  worker stub — see `docs/backlog/python-workers.md`).
-- **Multimodal chat** (Фаза 4) — image/document attachments with blob
-  storage and thumbnails; provider-native vision payloads and OCR are a
-  recorded M12 deferred gap (attachments are acknowledged, not yet sent to
-  the model).
-- **Browser automation** (Фаза 4, planned) — isolated Playwright sessions were
-  a Python-era feature; no implementation exists on the Rust core yet.
-- **Agent Constructor** (Фаза 4) — reusable blueprints, per-agent limits,
-  tool/skill selection, playground runs, sharing/cloning, and macro-tools.
+- **Code & Git tools** — `search_files`/`find_files`/`list_files`/
+  `read_file`, `write_file`/`edit_file` (atomic anchor edits), policy-gated
+  `shell` process execution (fails closed without a configured launcher) and
+  a `git` tool; GitHub integration goes through attached MCP servers or the
+  `gh` CLI.
+- **Deep Research** — durable research runs with parallel subagents, source
+  citations, and Markdown/HTML export (PDF/DOCX export is a delegated worker
+  stub — see `docs/backlog/python-workers.md`).
+- **Multimodal chat** — image/document attachments with blob storage and
+  thumbnails; images reach vision-capable providers as native image blocks
+  (chat attachments and the `view_image` tool). OCR for scanned documents
+  remains a deferred gap.
+- **Browser automation** (planned) — isolated Playwright sessions were a
+  Python-era feature; no implementation exists on the Rust core yet.
+- **Agent Constructor** — reusable blueprints, per-agent limits, tool/skill
+  selection, playground runs, sharing/cloning, and macro-tools.
+- **Machine-readable CLI** — `cool run --mode json` emits one NDJSON line per
+  run event for scripting; `cool doctor` reports environment and launcher
+  isolation status.
 
 ## Project layout
 
@@ -346,8 +371,8 @@ cool-ai-harness/
 ├── skills/                      # bundled SKILL.md skills
 ├── packaging/                   # release archive docs (INSTALL.md)
 ├── docs/
-│   ├── PLAN.md                  # full roadmap
-│   ├── phases/                  # per-phase specs (phase-0 .. phase-7)
+│   ├── PLAN.md                  # roadmap (phases, deferred gaps)
+│   ├── RUST_CORE_MIGRATION_PLAN.md  # completed migration plan (archive)
 │   ├── migration/               # Rust-core migration checkpoints/ADRs (evidence)
 │   ├── backlog/                 # parked workstreams (optional workers, Telegram)
 │   └── screenshots/             # README imagery
@@ -359,20 +384,21 @@ cool-ai-harness/
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full plan:
 
-| Фаза | Статус |
-|------|--------|
-| **Фаза 0** — Foundation | ✅ Done |
-| **Фаза 1** — Agent loop + tools + chat MVP | ✅ Done |
-| **Фаза 1.5** — Надёжность запусков, безопасность, артефакты, evals, HITL | ✅ Done |
-| **Фаза 2** — Skills + MCP + subagents + planning mode | ✅ Done |
-| **Фаза 3a** — Memory + personalities + observability | ✅ Done |
-| **Фаза 3b** — Recurring tasks + RSS + webhook | ✅ Done |
-| **Фаза 4** — Workflows + multimodal + browser/code tools | ✅ Done |
-| **Фаза 5** — Telegram + voice interface | ⏳ |
-| **Фаза 6** — Product readiness + backlog | ⏳ |
-| **Фаза 7** — UX polish + DevX | ⏳ |
-
-Each phase has its own file in [`docs/phases/`](docs/phases/).
+| Phase | Status |
+|-------|--------|
+| **Phase 0** — Foundation | ✅ Done |
+| **Phase 1** — Agent loop + tools + chat MVP | ✅ Done |
+| **Phase 1.5** — Run reliability, security, artifacts, evals, HITL | ✅ Done |
+| **Phase 2** — Skills + MCP + subagents + planning mode | ✅ Done |
+| **Phase 3a** — Memory + personalities + observability | ✅ Done |
+| **Phase 3b** — Recurring tasks + RSS + webhook | ✅ Done |
+| **Phase 4** — Workflows + multimodal + code tools | ✅ Done |
+| **0.2 hardening** — coding toolset, sandboxed launcher, policy rules,
+  ask_user, async subagents, fork/rewind + FS checkpoints, multimodal
+  vision, OAuth providers, `--mode json` | ✅ Done (v0.2.0) |
+| **Phase 5** — Telegram + voice interface | ⏳ |
+| **Phase 6** — Product readiness + backlog | ⏳ |
+| **Phase 7** — UX polish + dev experience | ⏳ |
 
 ## License
 
