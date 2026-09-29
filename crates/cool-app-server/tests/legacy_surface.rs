@@ -2168,6 +2168,47 @@ async fn workspace_directories_and_git_commands_are_available() {
 
     request(&client, Command::WorkspaceRecent(EmptyParams {})).await;
 
+    // E2E bug B5: the React directory browser joins `current` + "/" + name —
+    // a verbatim or mixed-separator `current` made drill-down fail with
+    // "path is not a directory". Joined paths must resolve and every string
+    // we hand back must stay join-safe.
+    std::fs::create_dir(directory.path().join("alpha").join("inner")).expect("nested dir");
+    let mut cursor = directory.path().to_string_lossy().into_owned();
+    for name in ["alpha", "inner"] {
+        cursor = format!("{cursor}/{name}");
+        let listing = request(
+            &client,
+            Command::WorkspaceDirectories(WorkspaceOptionalPathParams { path: Some(cursor) }),
+        )
+        .await;
+        let ResponsePayload::WorkspaceDirectories(listing) = listing else {
+            panic!("unexpected payload");
+        };
+        assert!(!listing.current.contains("\\\\?"), "{listing:?}");
+        if let Some(parent) = &listing.parent {
+            assert!(!parent.contains("\\\\?"), "{listing:?}");
+        }
+        assert!(!listing.default.contains("\\\\?"), "{listing:?}");
+        cursor = listing.current;
+    }
+
+    #[cfg(windows)]
+    {
+        let verbatim = format!(r"\\?\{}", directory.path().display());
+        let listing = request(
+            &client,
+            Command::WorkspaceDirectories(WorkspaceOptionalPathParams {
+                path: Some(verbatim),
+            }),
+        )
+        .await;
+        assert!(matches!(
+            listing,
+            ResponsePayload::WorkspaceDirectories(listing)
+                if !listing.current.contains("\\\\?") && listing.directories.contains(&"alpha".to_owned())
+        ));
+    }
+
     if std::process::Command::new("git")
         .arg("--version")
         .output()
