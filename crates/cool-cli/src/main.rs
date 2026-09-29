@@ -36,7 +36,8 @@ use cool_protocol::{
     SystemPromptRecord, WorkerRecord,
 };
 use cool_security::{
-    CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace, mask_secrets,
+    Capability, CapabilityPolicy, Decision, NetworkPolicy, SecretKey, SecretKeyring, Workspace,
+    mask_secrets,
 };
 use cool_state::DurableStore;
 use cool_store::LegacyStore;
@@ -366,9 +367,15 @@ fn cli_launcher(
 
 /// The policy for `cool run`: interactive Ask defaults plus the workspace's
 /// persistent project rules — a one-shot run honours `.cool/policy.json`
-/// deny rules just like a server run does (P1.6).
-fn run_policy(workspace: &Workspace) -> CapabilityPolicy {
+/// deny rules just like a server run does (P1.6). `--allow-network` grants
+/// the `network` capability for the run: launchers stay fail-closed without
+/// it (`host`/`jobobject` cannot isolate networking and refuse anything
+/// below `NetAccess::Full`).
+fn run_policy(workspace: &Workspace, allow_network: bool) -> CapabilityPolicy {
     let mut policy = CapabilityPolicy::new(Some(Decision::Ask));
+    if allow_network {
+        policy.set(Capability::Network, Decision::Allow);
+    }
     policy.set_rules(cool_app_server::load_project_rules(workspace));
     policy
 }
@@ -1760,6 +1767,7 @@ async fn start_configured_opencode_worker(runtime: &ExtensionRuntime, data_dir: 
 async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
     let mut scripted = false;
     let mut allow_shell = false;
+    let mut allow_network = false;
     let mut process_launcher: Option<String> = None;
     let mut sandbox: Option<String> = None;
     let mut mode = "text".to_owned();
@@ -1770,6 +1778,7 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
         match name {
             "--scripted" => scripted = true,
             "--allow-shell" => allow_shell = true,
+            "--allow-network" => allow_network = true,
             "--mode" => {
                 mode = flag_value(&inline, &mut arguments, "missing mode value")?;
             }
@@ -1846,9 +1855,12 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(workspace.clone(), run_policy(&workspace))
-                    .with_launcher(host.launcher.clone())
-                    .with_environment(host.environment.clone()),
+                tool_context: ToolContext::new(
+                    workspace.clone(),
+                    run_policy(&workspace, allow_network),
+                )
+                .with_launcher(host.launcher.clone())
+                .with_environment(host.environment.clone()),
             },
             sink,
             &AutoApprovalGate {
@@ -2146,13 +2158,29 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] [--mode text|json] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] [--mode text|json] [--allow-shell] [--sandbox BACKEND]\n        [--allow-network] [--process-launcher KIND] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--allow-network` is the only `cool run` grant for the `network`
+    /// capability: without it the policy stays fail-closed (`ask` → the
+    /// launcher maps it to `NetAccess::None`), with it resolve yields
+    /// `Allow` (`NetAccess::Full`).
+    #[test]
+    fn run_policy_grants_network_only_with_the_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(directory.path()).unwrap();
+        let denied = run_policy(&workspace, false);
+        assert_eq!(denied.resolve(Capability::Network), Decision::Ask);
+        let granted = run_policy(&workspace, true);
+        assert_eq!(granted.resolve(Capability::Network), Decision::Allow);
+        // Other capabilities keep the interactive default.
+        assert_eq!(granted.resolve(Capability::Execute), Decision::Ask);
+    }
 
     #[test]
     fn opencode_worker_is_absent_without_the_env_entry() {

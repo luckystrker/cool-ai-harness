@@ -700,6 +700,37 @@ impl AppServer {
         self.inner.policy.clone()
     }
 
+    /// The capability policy a conversation's runs execute under: the server
+    /// base with the conversation's profile then conversation capability
+    /// maps applied as grant layers (`apply_overrides` — most specific
+    /// wins), so a stored `network: allow` reaches the launcher's
+    /// `NetAccess` check. This is operator/user configuration, not a child
+    /// policy — subagent/task maps still only narrow via `narrow_with`.
+    fn run_policy_for_conversation(&self, conversation_id: Option<i64>) -> CapabilityPolicy {
+        let mut policy = self.merged_policy();
+        let (Some(legacy), Some(conversation_id)) =
+            (self.inner.config.legacy_store.as_deref(), conversation_id)
+        else {
+            return policy;
+        };
+        let actor = local_actor();
+        let Ok(conversation) = legacy.get_conversation(&actor.id, conversation_id) else {
+            return policy;
+        };
+        if let Some(profile_map) = conversation
+            .profile_id
+            .and_then(|profile_id| legacy.get_profile(profile_id).ok())
+            .and_then(|profile| profile.settings)
+            .and_then(|settings| settings.get("capability_policy").cloned())
+        {
+            policy = policy.apply_overrides(&scheduler::policy_from_json(Some(&profile_map)));
+        }
+        if let Some(map) = conversation.capability_policy.as_ref() {
+            policy = policy.apply_overrides(&scheduler::policy_from_json(Some(map)));
+        }
+        policy
+    }
+
     /// Live project+user rule source for a run's workspace (P1.6): every
     /// tool call re-reads `<run workspace>/.cool/policy.json` so rule
     /// mutations and external file edits apply to in-flight runs.
@@ -3525,19 +3556,22 @@ impl AppServer {
                         .conversation_id_for_session(&local_actor().id, &run.session_id)
                         .ok()
                         .flatten();
-                    ToolContext::new(workspace.clone(), server.merged_policy())
-                        .with_actor(local_actor().id)
-                        .with_launcher(server.inner.config.host.launcher.clone())
-                        .with_environment(server.inner.config.host.environment.clone())
-                        .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
-                        .with_rule_source(server.rule_source(&workspace))
-                        .with_session_id(run.session_id.clone())
-                        .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
-                            server: server.clone(),
-                            conversation_id,
-                        }))
-                        .with_conversation(conversation_id)
-                        .with_question_gate(approvals.clone())
+                    ToolContext::new(
+                        workspace.clone(),
+                        server.run_policy_for_conversation(conversation_id),
+                    )
+                    .with_actor(local_actor().id)
+                    .with_launcher(server.inner.config.host.launcher.clone())
+                    .with_environment(server.inner.config.host.environment.clone())
+                    .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                    .with_rule_source(server.rule_source(&workspace))
+                    .with_session_id(run.session_id.clone())
+                    .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                        server: server.clone(),
+                        conversation_id,
+                    }))
+                    .with_conversation(conversation_id)
+                    .with_question_gate(approvals.clone())
                 },
             };
             let lifecycle_sink =
@@ -4029,6 +4063,7 @@ impl AppServer {
             .as_ref()
             .and_then(|conversation| conversation.model.clone())
             .unwrap_or_else(|| self.inner.default_model.clone());
+        let run_policy = self.run_policy_for_conversation(Some(plan.conversation_id));
         let workspace = match conversation
             .as_ref()
             .and_then(|conversation| conversation.working_directory.as_deref())
@@ -4113,7 +4148,15 @@ impl AppServer {
                 )))
                 .await;
             let (summary, step_failed) = self
-                .execute_plan_step(&plan, step, &history, &workspace, &model, &cancel_rx)
+                .execute_plan_step(
+                    &plan,
+                    step,
+                    &history,
+                    &workspace,
+                    &model,
+                    &run_policy,
+                    &cancel_rx,
+                )
                 .await;
             let summary = mask_secrets(&summary);
             if step_failed {
@@ -4531,6 +4574,7 @@ impl AppServer {
         history: &[Message],
         workspace: &Workspace,
         model: &str,
+        run_policy: &CapabilityPolicy,
         cancel_rx: &watch::Receiver<Option<String>>,
     ) -> (String, bool) {
         let prompt = plan_step_prompt(step);
@@ -4544,8 +4588,10 @@ impl AppServer {
                     .await
             }
             None => {
-                self.execute_plan_step_direct(prompt, history, workspace, model, cancel_rx)
-                    .await
+                self.execute_plan_step_direct(
+                    prompt, history, workspace, model, run_policy, cancel_rx,
+                )
+                .await
             }
         }
     }
@@ -4556,6 +4602,7 @@ impl AppServer {
         history: &[Message],
         workspace: &Workspace,
         model: &str,
+        run_policy: &CapabilityPolicy,
         cancel_rx: &watch::Receiver<Option<String>>,
     ) -> (String, bool) {
         let request = AgentRequest {
@@ -4573,7 +4620,7 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: None,
-            tool_context: ToolContext::new(workspace.clone(), self.merged_policy())
+            tool_context: ToolContext::new(workspace.clone(), run_policy.clone())
                 .with_actor(local_actor().id)
                 .with_launcher(self.inner.config.host.launcher.clone())
                 .with_environment(self.inner.config.host.environment.clone())
@@ -7413,6 +7460,59 @@ mod tests {
         );
         failed_rx.changed().await.unwrap();
         assert!(*failed_rx.borrow());
+    }
+
+    /// A conversation's capability matrix (and its profile's
+    /// `settings.capability_policy`) reaches the run policy as a grant layer:
+    /// `network: allow` resolves `Allow` so tool process launches get
+    /// `NetAccess::Full`, while unnamed capabilities keep the server base
+    /// (wildcard `ask`). Sessions without a conversation or a map keep the
+    /// fail-closed base unchanged.
+    #[test]
+    fn run_policy_for_conversation_applies_profile_then_conversation_grants() {
+        use cool_security::{Capability, Decision};
+        use cool_store::LegacyStore;
+        use cool_store::domains::conversations::NewConversation;
+        use cool_store::domains::profiles::NewAgentProfile;
+        use serde_json::json;
+
+        let legacy = LegacyStore::in_memory().expect("store");
+        let actor = crate::local_actor_id();
+        let profile = legacy
+            .create_profile(&NewAgentProfile {
+                name: "Net".to_owned(),
+                slug: "net".to_owned(),
+                settings: Some(json!({"capability_policy": {"write": "deny", "network": "ask"}})),
+                ..Default::default()
+            })
+            .expect("profile");
+        let conversation = legacy
+            .create_conversation(
+                &actor,
+                &NewConversation {
+                    profile_id: Some(profile.id),
+                    capability_policy: Some(json!({"network": "allow"})),
+                    ..Default::default()
+                },
+            )
+            .expect("conversation");
+        let server = AppServer::new(ServerConfig {
+            legacy_store: Some(std::sync::Arc::new(legacy)),
+            ..ServerConfig::default()
+        });
+
+        let policy = server.run_policy_for_conversation(Some(conversation.id));
+        assert_eq!(policy.resolve(Capability::Network), Decision::Allow);
+        assert_eq!(policy.resolve(Capability::Write), Decision::Deny);
+        assert_eq!(policy.resolve(Capability::Read), Decision::Ask);
+
+        for policy in [
+            server.run_policy_for_conversation(None),
+            server.run_policy_for_conversation(Some(conversation.id + 1000)),
+        ] {
+            assert_eq!(policy.resolve(Capability::Network), Decision::Ask);
+            assert_eq!(policy.resolve(Capability::Write), Decision::Ask);
+        }
     }
 
     #[tokio::test]

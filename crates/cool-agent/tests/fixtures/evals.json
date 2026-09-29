@@ -219,5 +219,53 @@
     "approval": "approved",
     "expectedEvents": ["tool.failed", "run.completed"],
     "expectedFile": false
+  },
+  {
+    "id": "shell_host_launcher_runs_with_network_allow",
+    "calls": [
+      {
+        "callId": "shell-git-version",
+        "name": "shell",
+        "arguments": {"program": "git", "args": ["--version"]}
+      }
+    ],
+    "capability": "network",
+    "decision": "allow",
+    "launcher": "host",
+    "approval": "approved",
+    "expectedEvents": ["tool.approval_required", "tool.approval_resolved", "tool.completed", "run.completed"],
+    "expectedFile": false,
+    "expectedOutputContains": "git version"
+  },
+  {
+    "id": "shell_host_launcher_fails_closed_without_network_allow",
+    "calls": [
+      {
+        "callId": "shell-git-version",
+        "name": "shell",
+        "arguments": {"program": "git", "args": ["--version"]}
+      }
+    ],
+    "capability": "network",
+    "decision": "ask",
+    "launcher": "host",
+    "approval": "approved",
+    "expectedEvents": ["tool.approval_required", "tool.approval_resolved", "tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "shell_disabled_launcher_fails_closed_even_with_network_allow",
+    "calls": [
+      {
+        "callId": "shell-git-version",
+        "name": "shell",
+        "arguments": {"program": "git", "args": ["--version"]}
+      }
+    ],
+    "capability": "network",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.approval_required", "tool.approval_resolved", "tool.failed", "run.completed"],
+    "expectedFile": false
   }
 ]

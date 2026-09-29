@@ -21,9 +21,14 @@ struct Scenario {
     decision: Option<String>,
     #[serde(default)]
     rules: Vec<PolicyRule>,
+    /// Process launcher to attach (`"host"`); unset keeps the fail-closed
+    /// `DisabledLauncher` default.
+    launcher: Option<String>,
     approval: String,
     expected_events: Vec<String>,
     expected_file: bool,
+    /// Substring that must appear in the `tool.completed` result payload.
+    expected_output_contains: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +73,15 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                 ModelEvent::Finish { reason: None },
             ]),
         ]);
+        let mut tool_context = ToolContext::new(Workspace::new(directory.path()).unwrap(), policy);
+        if let Some(launcher) = scenario.launcher.as_deref() {
+            tool_context = match launcher {
+                "host" => tool_context
+                    .with_launcher(Arc::new(cool_agent::HostLauncher))
+                    .with_environment(std::env::vars().collect()),
+                other => panic!("unknown launcher {other}"),
+            };
+        }
         let store = DurableStore::in_memory().unwrap();
         let session = store
             .create_session("local-user", "session", "session", None, None)
@@ -101,10 +115,7 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                         "shell".to_owned(),
                         "view_image".to_owned(),
                     ])),
-                    tool_context: ToolContext::new(
-                        Workspace::new(directory.path()).unwrap(),
-                        policy,
-                    ),
+                    tool_context,
                 },
                 &sink,
                 &AutoApprovalGate {
@@ -138,6 +149,22 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
             "scenario {} file side effect mismatch",
             scenario.id
         );
+        if let Some(needle) = scenario.expected_output_contains {
+            let payload = events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CanonicalEvent::ToolCompleted(completed) => Some(completed.result.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!("scenario {} expected a tool.completed event", scenario.id)
+                });
+            assert!(
+                payload.contains(&needle),
+                "scenario {} tool output must contain {needle:?}, got {payload}",
+                scenario.id
+            );
+        }
         store.replay_run(&run, "local-user").unwrap();
     }
 }
@@ -146,6 +173,7 @@ fn parse_capability(value: &str) -> Capability {
     match value {
         "read" => Capability::Read,
         "write" => Capability::Write,
+        "network" => Capability::Network,
         other => panic!("unknown capability {other}"),
     }
 }

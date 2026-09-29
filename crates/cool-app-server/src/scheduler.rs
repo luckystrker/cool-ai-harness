@@ -626,9 +626,21 @@ impl TaskExecutor {
 /// Narrow the core policy with the task's stored capability policy (a task may
 /// only restrict, never widen) and deny `send_external` for `deny_external`.
 fn task_policy(base: &CapabilityPolicy, task: &ScheduledTask) -> CapabilityPolicy {
+    let mut child = policy_from_json(task.capability_policy.as_ref());
+    if task.approval_policy != APPROVAL_ALLOW_ALL {
+        child.set(Capability::SendExternal, Decision::Deny);
+    }
+    base.narrow_with(&child)
+}
+
+/// Build a standalone policy from a stored `{name: decision}` map — `"*"` is
+/// the wildcard entry; unknown names and decisions are skipped. Callers then
+/// either narrow the base with it (tasks/subagents) or apply it as a grant
+/// layer (profiles/conversations).
+pub(crate) fn policy_from_json(value: Option<&Value>) -> CapabilityPolicy {
     let mut wildcard = None;
     let mut per_capability = Vec::new();
-    if let Some(Value::Object(entries)) = task.capability_policy.as_ref() {
+    if let Some(Value::Object(entries)) = value {
         for (name, value) in entries {
             let Some(decision) = value.as_str().and_then(decision_from_name) else {
                 continue;
@@ -641,14 +653,11 @@ fn task_policy(base: &CapabilityPolicy, task: &ScheduledTask) -> CapabilityPolic
             }
         }
     }
-    let mut child = CapabilityPolicy::new(wildcard);
+    let mut policy = CapabilityPolicy::new(wildcard);
     for (capability, decision) in per_capability {
-        child.set(capability, decision);
+        policy.set(capability, decision);
     }
-    if task.approval_policy != APPROVAL_ALLOW_ALL {
-        child.set(Capability::SendExternal, Decision::Deny);
-    }
-    base.narrow_with(&child)
+    policy
 }
 
 pub(crate) fn capability_from_name(name: &str) -> Option<Capability> {

@@ -155,6 +155,31 @@ impl CapabilityPolicy {
             .collect();
         result
     }
+
+    /// Layer a configured grant map over `self`: each capability the overlay
+    /// decides replaces `self`'s entry, wildcard included. This composes
+    /// *configuration* layers — server base → profile → conversation — where
+    /// the most specific entry wins, e.g. a conversation's `network: allow`
+    /// grants `Decision::Allow` even when the base wildcard is `ask`. Unlike
+    /// [`narrow_with`], which clamps a child policy to never exceed its
+    /// parent, an overlay is trusted configuration and may loosen entries.
+    /// Rules append base-first (first match still wins in `match_rule`).
+    pub fn apply_overrides(&self, overlay: &Self) -> Self {
+        let mut merged = Self {
+            wildcard: overlay.wildcard.or(self.wildcard),
+            decisions: self.decisions.clone(),
+            rules: self
+                .rules
+                .iter()
+                .cloned()
+                .chain(overlay.rules.iter().cloned())
+                .collect(),
+        };
+        for (capability, decision) in &overlay.decisions {
+            merged.decisions.insert(*capability, *decision);
+        }
+        merged
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -703,4 +728,48 @@ pub fn sanitize_environment<'a>(
         })
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Configuration layers (profile → conversation) override the base per
+    /// entry: an overlay `allow` loosens a wildcard-`ask` base, entries the
+    /// overlay does not name keep the base resolution, and an overlay `deny`
+    /// still tightens.
+    #[test]
+    fn apply_overrides_replaces_named_entries_and_keeps_the_rest() {
+        let base = CapabilityPolicy::new(Some(Decision::Ask));
+        let mut overlay = CapabilityPolicy::new(None);
+        overlay.set(Capability::Network, Decision::Allow);
+        overlay.set(Capability::Execute, Decision::Deny);
+        let merged = base.apply_overrides(&overlay);
+        assert_eq!(merged.resolve(Capability::Network), Decision::Allow);
+        assert_eq!(merged.resolve(Capability::Execute), Decision::Deny);
+        assert_eq!(merged.resolve(Capability::Read), Decision::Ask);
+    }
+
+    /// Later layers win per entry: a profile `ask` under a conversation
+    /// `allow` resolves `allow`, and an overlay wildcard replaces the base's.
+    #[test]
+    fn apply_overrides_layers_most_specific_wins() {
+        let base = CapabilityPolicy::new(Some(Decision::Ask));
+        let mut profile = CapabilityPolicy::new(None);
+        profile.set(Capability::Network, Decision::Ask);
+        let mut conversation = CapabilityPolicy::new(None);
+        conversation.set(Capability::Network, Decision::Allow);
+        let merged = base
+            .apply_overrides(&profile)
+            .apply_overrides(&conversation);
+        assert_eq!(merged.resolve(Capability::Network), Decision::Allow);
+
+        let wildcard = base.apply_overrides(&CapabilityPolicy::new(Some(Decision::Deny)));
+        assert_eq!(wildcard.resolve(Capability::Read), Decision::Deny);
+        // A named base entry survives an overlay that only sets a wildcard.
+        let mut named = CapabilityPolicy::new(None);
+        named.set(Capability::Git, Decision::Allow);
+        let merged = named.apply_overrides(&CapabilityPolicy::new(Some(Decision::Deny)));
+        assert_eq!(merged.resolve(Capability::Git), Decision::Allow);
+    }
 }
