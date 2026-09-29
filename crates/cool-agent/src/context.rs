@@ -230,6 +230,11 @@ pub fn estimate_history_tokens(history: &[Message]) -> u64 {
     history.iter().map(estimate_message_tokens).sum()
 }
 
+/// Provider-side image tokenization is opaque and not character-driven —
+/// charge a fixed block per image so compaction and budgets see the
+/// attachment's real weight instead of treating pixels as free.
+const IMAGE_PART_TOKEN_ESTIMATE: usize = 1_500;
+
 fn estimate_message_tokens(message: &Message) -> u64 {
     let content = message.content.as_deref().unwrap_or_default().len() / CHARS_PER_TOKEN;
     let calls = message
@@ -241,8 +246,18 @@ fn estimate_message_tokens(message: &Message) -> u64 {
                     / CHARS_PER_TOKEN
         })
         .sum::<usize>();
+    let parts: usize = message
+        .parts
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|part| match part {
+            ModelContentPart::Text { text } => text.len() / CHARS_PER_TOKEN,
+            ModelContentPart::Image { .. } => IMAGE_PART_TOKEN_ESTIMATE,
+        })
+        .sum();
     let overhead = usize::from(message.role == MessageRole::Tool) * 10;
-    (content.max(usize::from(message.content.is_some())) + calls + overhead) as u64
+    (content.max(usize::from(message.content.is_some())) + calls + parts + overhead) as u64
 }
 
 /// Split history into the leading system message and indivisible non-system

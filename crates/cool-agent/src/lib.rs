@@ -16,7 +16,7 @@ mod web_tools;
 
 pub use anthropic::AnthropicDriver;
 pub use checkpoints::{
-    CHECKPOINT_ERROR_EXTENSION_KEY, CHECKPOINT_EXTENSION_KEY, restore_checkpoint,
+    CHECKPOINT_ERROR_EXTENSION_KEY, CHECKPOINT_EXTENSION_KEY, MANIFEST_PREFIX, restore_checkpoint,
     snapshot_before_tool, tracks_tool,
 };
 pub use context::{

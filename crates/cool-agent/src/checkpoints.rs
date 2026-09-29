@@ -44,9 +44,12 @@ pub const CHECKPOINT_ERROR_EXTENSION_KEY: &str = "checkpoint_error";
 const SNAPSHOT_TOOLS: &[&str] = &["write_file", "edit_file", "shell", "git"];
 
 const GIT_REF_PREFIX: &str = "refs/cool/checkpoints";
-const MANIFEST_PREFIX: &str = "manifest:";
+pub const MANIFEST_PREFIX: &str = "manifest:";
 const SNAPSHOT_DIR: &str = ".cool/snapshots";
 const INDEX_DIR: &str = ".cool/checkpoints";
+/// Per-file cap on the manifest fallback's full-file copies — bigger files
+/// record a non-restorable checkpoint instead of being duplicated.
+const MAX_MANIFEST_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const PLUMBING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// cap_std roots are `\\?\` verbatim paths on Windows; git's own path
@@ -117,12 +120,13 @@ pub async fn snapshot_before_tool(
 /// `.cool/checkpoints/` — the user's index and refs are never touched, so
 /// staged changes survive a rewind; the working tree itself is overwritten
 /// by design. `tool_paths` names the files the discarded file tools touched
-/// — a scoped `git clean` removes exactly those so a rewind deletes the
-/// tool's own debris without touching unrelated untracked files the user
-/// created after the checkpoint. Shell/git mutations carry no path args and
-/// stay non-restorable as documented. Manifest restores rewrite the
-/// recorded files; a non-restorable manifest (pre-`shell`/`git` snapshot)
-/// is a hard error.
+/// — restore is scoped to exactly those (checkout on index-tracked ones,
+/// `git clean` on tool-created ones), so a rewind undoes the tool's own
+/// changes without touching files the user edited or created after the
+/// checkpoint. Shell/git mutations carry no path args and stay
+/// non-restorable as documented. Manifest restores rewrite the recorded
+/// files; a non-restorable manifest (pre-`shell`/`git` snapshot or an
+/// oversized file) is a hard error.
 pub async fn restore_checkpoint(
     workspace: &Workspace,
     launcher: &Arc<dyn ProcessLauncher>,
@@ -155,18 +159,23 @@ pub async fn restore_checkpoint(
         &index_env,
     )
     .await?;
-    run_plumbing(
-        workspace,
-        launcher,
-        environment,
-        &["checkout-index", "-a", "-f"],
-        &index_env,
-    )
-    .await?;
-    // Delete only the paths the discarded file tools named — a blanket
-    // `git clean` would also remove unrelated files the user created after
-    // the checkpoint.
+    // Restore only the paths the discarded file tools named — a full-tree
+    // `checkout-index -a` would also clobber unrelated edits the user made
+    // after the checkpoint. `ls-files` on the private index narrows the
+    // pathspec to entries the checkpoint actually tracks, so tool-created
+    // paths (absent from the tree) don't fail the checkout.
     if !tool_paths.is_empty() {
+        let mut ls_args = vec!["ls-files", "--"];
+        ls_args.extend(tool_paths.iter().map(String::as_str));
+        let listed = run_plumbing(workspace, launcher, environment, &ls_args, &index_env).await?;
+        let tracked: Vec<&str> = listed.lines().filter(|line| !line.is_empty()).collect();
+        if !tracked.is_empty() {
+            let mut checkout_args = vec!["checkout-index", "-f", "--"];
+            checkout_args.extend(tracked);
+            run_plumbing(workspace, launcher, environment, &checkout_args, &index_env).await?;
+        }
+        // Then delete the tool-created paths — they are untracked relative
+        // to the restored index.
         let mut args = vec!["clean", "-fd", "-e", ".cool", "--"];
         args.extend(tool_paths.iter().map(String::as_str));
         run_plumbing(workspace, launcher, environment, &args, &index_env).await?;
@@ -304,6 +313,10 @@ struct SnapshotManifest {
     tool: String,
     restorable: bool,
     files: Vec<ManifestFile>,
+    /// Files too large to copy into the snapshot — their presence makes the
+    /// checkpoint non-restorable rather than silently partial.
+    #[serde(default)]
+    skipped_oversize: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -329,6 +342,7 @@ fn manifest_snapshot(
         .map_err(|error| format!("snapshot dir: {error}"))?;
     let restorable = !matches!(tool_name, "shell" | "git");
     let mut files = Vec::new();
+    let mut skipped_oversize = Vec::new();
     if restorable {
         let mut paths = Vec::new();
         if let Some(path) = arguments.get("path").and_then(Value::as_str) {
@@ -339,11 +353,18 @@ fn manifest_snapshot(
                 Ok(relative) => relative,
                 Err(_) => continue,
             };
-            let existed = dir
-                .metadata(&relative)
+            let metadata = dir.metadata(&relative).ok();
+            let existed = metadata
+                .as_ref()
                 .map(|metadata| metadata.is_file())
                 .unwrap_or(false);
-            let snapshot = if existed {
+            // Copying the whole file per snapshot must stay bounded — an
+            // oversized target is recorded but marked non-restorable rather
+            // than duplicated at unbounded memory/disk cost.
+            let oversized = metadata
+                .map(|metadata| metadata.len() > MAX_MANIFEST_FILE_BYTES)
+                .unwrap_or(false);
+            let snapshot = if existed && !oversized {
                 let body = dir
                     .read(&relative)
                     .map_err(|error| format!("snapshot read {path}: {error}"))?;
@@ -354,6 +375,9 @@ fn manifest_snapshot(
             } else {
                 None
             };
+            if oversized {
+                skipped_oversize.push(relative.to_string_lossy().into_owned());
+            }
             files.push(ManifestFile {
                 path: relative.to_string_lossy().into_owned(),
                 existed,
@@ -370,8 +394,9 @@ fn manifest_snapshot(
             .unwrap_or_default(),
         call_id: call_id.to_owned(),
         tool: tool_name.to_owned(),
-        restorable,
+        restorable: restorable && skipped_oversize.is_empty(),
         files,
+        skipped_oversize,
     };
     let body = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("manifest serialize: {error}"))?;
@@ -387,6 +412,12 @@ fn restore_manifest(workspace: &Workspace, manifest_path: &str) -> Result<(), St
         .map_err(|error| format!("manifest read: {error}"))?;
     let manifest: SnapshotManifest =
         serde_json::from_slice(&body).map_err(|error| format!("manifest parse: {error}"))?;
+    if !manifest.skipped_oversize.is_empty() {
+        return Err(format!(
+            "checkpoint is not restorable (snapshot skipped oversized file(s): {})",
+            manifest.skipped_oversize.join(", ")
+        ));
+    }
     if !manifest.restorable {
         return Err(format!(
             "checkpoint is not restorable (recorded before a {} call)",

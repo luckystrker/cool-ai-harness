@@ -98,6 +98,9 @@ async fn git_snapshot_uses_private_index_and_never_touches_head_or_index() {
 async fn git_snapshot_and_restore_roundtrip() {
     let dir = git_repo();
     std::fs::write(dir.path().join("a.txt"), "v1").unwrap();
+    // A file the checkpoint tracks but no discarded tool names — the user's
+    // post-checkpoint edit to it must survive the restore.
+    std::fs::write(dir.path().join("user-tracked.txt"), "v1").unwrap();
     let context = context(dir.path());
     let reference = snapshot_before_tool(
         &context,
@@ -113,17 +116,22 @@ async fn git_snapshot_and_restore_roundtrip() {
     .unwrap()
     .expect("checkpoint ref");
 
-    // The tool mutates the workspace; the user also makes an unrelated file.
+    // The tool mutates the workspace; the user also makes unrelated files —
+    // one untracked, one a tracked file the tool never named (its later edit
+    // must survive the restore).
     std::fs::write(dir.path().join("a.txt"), "v2").unwrap();
     std::fs::write(dir.path().join("created.txt"), "new").unwrap();
     std::fs::write(dir.path().join("user-notes.txt"), "keep me").unwrap();
+    std::fs::write(dir.path().join("user-tracked.txt"), "v2-user").unwrap();
 
+    // `discarded_paths` names every path the discarded file tools touched —
+    // here the write_file's `a.txt` plus the created file.
     restore_checkpoint(
         &context.workspace,
         &context.launcher,
         &context.environment,
         &reference,
-        &["created.txt".to_owned()],
+        &["a.txt".to_owned(), "created.txt".to_owned()],
     )
     .await
     .unwrap();
@@ -131,12 +139,16 @@ async fn git_snapshot_and_restore_roundtrip() {
         std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "v1"
     );
-    // The discarded tool's file is removed; an unrelated untracked file the
-    // tool never named survives the restore.
+    // The discarded tool's file is removed; unrelated files the tool never
+    // named — untracked or tracked-but-user-edited — survive the restore.
     assert!(!dir.path().join("created.txt").exists());
     assert_eq!(
         std::fs::read_to_string(dir.path().join("user-notes.txt")).unwrap(),
         "keep me"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("user-tracked.txt")).unwrap(),
+        "v2-user"
     );
 }
 

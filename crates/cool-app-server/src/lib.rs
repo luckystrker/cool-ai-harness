@@ -1559,17 +1559,33 @@ impl AppServer {
                     match outcome.value.checkpoint_ref.clone() {
                         Some(checkpoint_ref) => {
                             let workspace = self.run_workspace_for_session(&params.session_id);
-                            match cool_agent::restore_checkpoint(
-                                &workspace,
-                                &self.inner.config.host.launcher,
-                                &self.inner.config.host.environment,
-                                &checkpoint_ref,
-                                &outcome.value.discarded_paths,
-                            )
-                            .await
-                            {
-                                Ok(()) => workspace_restored = true,
-                                Err(error) => restore_error = Some(error),
+                            // A manifest checkpoint covers only the file its
+                            // own call touched — replay every discarded
+                            // manifest newest-first so each file lands at the
+                            // pre-first-call state; a git tree snapshot covers
+                            // the whole workspace and restores once.
+                            let refs: Vec<&String> =
+                                if checkpoint_ref.starts_with(cool_agent::MANIFEST_PREFIX) {
+                                    outcome.value.checkpoint_refs.iter().rev().collect()
+                                } else {
+                                    vec![&checkpoint_ref]
+                                };
+                            for reference in refs {
+                                match cool_agent::restore_checkpoint(
+                                    &workspace,
+                                    &self.inner.config.host.launcher,
+                                    &self.inner.config.host.environment,
+                                    reference,
+                                    &outcome.value.discarded_paths,
+                                )
+                                .await
+                                {
+                                    Ok(()) => workspace_restored = true,
+                                    Err(error) => {
+                                        restore_error = Some(error);
+                                        break;
+                                    }
+                                }
                             }
                         }
                         None => {
@@ -4339,20 +4355,29 @@ impl AppServer {
                     }
                     if blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str()) {
                         // Image parts resolve to base64 for this turn; the
-                        // durable text keeps only the marker (P2.12).
-                        out.push_str(&format!("\n[image: {id}]"));
-                        if let Some(blobs) = blobs
-                            && let Ok((_, bytes)) = blobs.read_artifact(&actor.id, id)
-                        {
-                            use base64::Engine as _;
-                            if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES {
-                                model_parts.push(ModelContentPart::Image {
-                                    media_type: artifact.media_type.clone(),
-                                    data_base64: base64::engine::general_purpose::STANDARD
-                                        .encode(bytes),
-                                });
+                        // durable text keeps only the marker (P2.12). The
+                        // marker must say WHY pixels are missing — a bare
+                        // marker would have the model answer questions about
+                        // an image it never received.
+                        let mut note = " (image unavailable)";
+                        if let Some(blobs) = blobs {
+                            match blobs.read_artifact(&actor.id, id) {
+                                Ok((_, bytes)) if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES => {
+                                    use base64::Engine as _;
+                                    model_parts.push(ModelContentPart::Image {
+                                        media_type: artifact.media_type.clone(),
+                                        data_base64: base64::engine::general_purpose::STANDARD
+                                            .encode(bytes),
+                                    });
+                                    note = "";
+                                }
+                                Ok(..) | Err(blobs::BlobError::TooLarge(_)) => {
+                                    note = " (image too large to attach)";
+                                }
+                                Err(_) => {}
                             }
                         }
+                        out.push_str(&format!("\n[image: {id}{note}]"));
                     } else if let Some(text) = artifact.extracted_text.as_deref() {
                         out.push_str(&format!("\n[Attachment: {}]\n{text}", artifact.filename));
                     } else {
@@ -7242,7 +7267,9 @@ impl AppServer {
             return failure(id, error(-32010, "legacy_store_unavailable", false));
         };
         // Anthropic's manual callback renders `code#state` — the code is the
-        // first half; whitespace defensiveness for pasted input.
+        // first half; whitespace defensiveness for pasted input. The fragment
+        // is the provider's state echo: it must bind to THIS handshake, or a
+        // stray/unrelated callback could be exchanged under it.
         let code = params
             .code
             .split('#')
@@ -7252,6 +7279,11 @@ impl AppServer {
             .to_owned();
         if code.is_empty() {
             return failure(id, error(-32035, "oauth_code_missing", false));
+        }
+        if let Some(pasted_state) = params.code.split('#').nth(1)
+            && pasted_state.trim() != params.state
+        {
+            return failure(id, error(-32039, "oauth_state_mismatch", false));
         }
         let http = match reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())

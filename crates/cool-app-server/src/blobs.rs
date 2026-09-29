@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::io;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,6 +29,11 @@ pub const MAX_EXTRACTED_CHARS: usize = 100_000;
 /// types eligible for inline image parts (and `image_analyze` fallback).
 pub(crate) const SUPPORTED_IMAGE_TYPES: [&str; 4] =
     ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// In-process `read_artifact` cap — its consumers are image-bound
+/// (10 MiB `MAX_IMAGE_PART_BYTES`); the read itself enforces it so an
+/// oversized blob fails before its full size is allocated.
+const MAX_READ_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Errors the HTTP layer maps to 4xx/5xx responses.
 #[derive(Debug)]
@@ -223,7 +229,9 @@ impl BlobStore {
     /// Resolve an artifact id to `(media_type, bytes)` for in-process
     /// consumers — the tool `artifact_reader` (P2.12 `view_image`) and
     /// multimodal prompt expansion. Actor-scoped; the HTTP route's
-    /// conversation check stays on `open_artifact`.
+    /// conversation check stays on `open_artifact`. Read is capped at
+    /// `MAX_READ_ARTIFACT_BYTES`: these consumers are image-bound and the
+    /// 10 MiB part cap must hold before the allocation, not after it.
     pub fn read_artifact(
         &self,
         actor_id: &str,
@@ -233,7 +241,12 @@ impl BlobStore {
         let path = self.artifact_file(&artifact).ok_or_else(|| {
             BlobError::Io(io::Error::new(io::ErrorKind::NotFound, "blob file missing"))
         })?;
-        let body = fs::read(&path)?;
+        let file = fs::File::open(&path)?;
+        let mut body = Vec::new();
+        io::Read::take(file, MAX_READ_ARTIFACT_BYTES + 1).read_to_end(&mut body)?;
+        if body.len() as u64 > MAX_READ_ARTIFACT_BYTES {
+            return Err(BlobError::TooLarge(body.len()));
+        }
         Ok((artifact, body))
     }
 

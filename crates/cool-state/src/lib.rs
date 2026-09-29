@@ -181,6 +181,13 @@ pub struct SessionRewindOutcome {
     /// carry no path and stay non-restorable as documented.
     #[serde(default)]
     pub discarded_paths: Vec<String>,
+    /// Every `checkpoint_ref` found beyond the cursor, in order —
+    /// `checkpoint_ref` is the first entry. Manifest checkpoints cover only
+    /// the file their own call touched, so a manifest-backend restore must
+    /// replay all of them newest-first; a git tree snapshot already covers
+    /// the whole workspace and restores once.
+    #[serde(default)]
+    pub checkpoint_refs: Vec<String>,
 }
 
 /// Result of binding a legacy conversation to a durable Rust session.
@@ -842,6 +849,7 @@ impl DurableStore {
         // mutation when the cursor sits before it.
         let mut copied = Vec::new();
         let mut checkpoint_ref: Option<String> = None;
+        let mut checkpoint_refs: Vec<String> = Vec::new();
         let mut discarded_paths: Vec<String> = Vec::new();
         {
             let mut statement = transaction.prepare(
@@ -881,11 +889,13 @@ impl DurableStore {
                 {
                     discarded_paths.push(path.to_owned());
                 }
-                if checkpoint_ref.is_none()
-                    && let Some(value) = source.extensions.get("checkpoint_ref")
+                if let Some(value) = source.extensions.get("checkpoint_ref")
                     && let Some(value) = value.as_str()
                 {
-                    checkpoint_ref = Some(value.to_owned());
+                    if checkpoint_ref.is_none() {
+                        checkpoint_ref = Some(value.to_owned());
+                    }
+                    checkpoint_refs.push(value.to_owned());
                 }
             }
             discarded_paths.sort();
@@ -1018,6 +1028,7 @@ impl DurableStore {
             rewound_run_ids,
             checkpoint_ref,
             discarded_paths,
+            checkpoint_refs,
         };
         insert_idempotency(
             &transaction,

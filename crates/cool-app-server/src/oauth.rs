@@ -699,10 +699,18 @@ impl ProviderTokenSource {
 impl cool_agent::AccessTokenSource for ProviderTokenSource {
     async fn access_token(&self) -> Result<String, cool_agent::ProviderError> {
         let mut cached = self.cached.lock().await;
-        let tokens = match cached.clone() {
+        let mut tokens = match cached.clone() {
             Some(tokens) => tokens,
             None => self.load()?,
         };
+        if tokens.is_expired() {
+            // Re-read the store: a newer `oauth_complete` may have replaced
+            // the tokens since our cache snapshot — refreshing the stale
+            // bundle would write old-account tokens over the new login.
+            if let Ok(stored) = self.load() {
+                tokens = stored;
+            }
+        }
         if tokens.is_expired() {
             let refresh_token = tokens.refresh_token.clone().ok_or_else(|| {
                 cool_agent::ProviderError::new(
@@ -726,10 +734,13 @@ impl cool_agent::AccessTokenSource for ProviderTokenSource {
 
     async fn refresh(&self) -> Result<String, cool_agent::ProviderError> {
         let refresh_token = {
-            let cached = self.cached.lock().await.clone();
-            let tokens = match cached {
-                Some(tokens) => tokens,
-                None => self.load()?,
+            // Prefer the stored bundle over the cache: a newer
+            // `oauth_complete` may have replaced the tokens since the cache
+            // snapshot — refreshing the stale snapshot would write
+            // old-account tokens over the new login.
+            let tokens = match self.load() {
+                Ok(tokens) => tokens,
+                Err(load_error) => self.cached.lock().await.clone().ok_or(load_error)?,
             };
             tokens.refresh_token.ok_or_else(|| {
                 cool_agent::ProviderError::new(

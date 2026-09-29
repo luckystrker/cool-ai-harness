@@ -251,15 +251,21 @@ async fn manual_login(
     .await
     .map_err(|error| runtime("oauth_stdin", &error.to_string()))?
     .map_err(|error| runtime("oauth_stdin", &error.to_string()))?;
-    let code = line
-        .trim()
-        .split('#')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let mut parts = line.trim().split('#');
+    let code = parts.next().unwrap_or_default().trim().to_owned();
     if code.is_empty() {
         return Err(runtime("oauth_code_missing", "empty code pasted"));
+    }
+    // The pasted `code#state` fragment is the provider's state echo — it
+    // must bind to THIS handshake, or a stray/unrelated callback could be
+    // exchanged under it.
+    if let Some(pasted_state) = parts.next()
+        && pasted_state.trim() != state
+    {
+        return Err(runtime(
+            "oauth_state_mismatch",
+            "pasted callback state does not match this login — start over",
+        ));
     }
     exchange(http, flow, pkce.verifier, redirect_uri.to_owned(), &code).await
 }
