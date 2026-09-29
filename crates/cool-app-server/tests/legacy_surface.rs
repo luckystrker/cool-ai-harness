@@ -1027,6 +1027,7 @@ async fn providers_encrypt_secrets_and_expose_cached_models() {
             is_fallback: false,
             is_default: true,
             chat_models: Some(json!([{"id": "gpt-4o", "context_window": 128000}])),
+            auth_kind: None,
         }),
     )
     .await;
@@ -1084,6 +1085,7 @@ async fn providers_encrypt_secrets_and_expose_cached_models() {
             is_fallback: None,
             is_default: None,
             chat_models: None,
+            auth_kind: None,
         }),
     )
     .await;
@@ -1125,12 +1127,65 @@ async fn provider_writes_fail_closed_without_a_keyring() {
             is_fallback: false,
             is_default: false,
             chat_models: None,
+            auth_kind: None,
         }))
         .await
         .expect_err("must fail closed");
     assert!(matches!(
         error,
         cool_app_server::ClientError::Protocol(protocol) if protocol.cool_code == "secret_key_unavailable"
+    ));
+}
+
+#[tokio::test]
+async fn oauth_start_rejects_unsupported_providers_and_returns_manual_claude_flow() {
+    let (server, _store) = legacy_server();
+    let (client, _task) = connected_client(server).await;
+
+    let error = client
+        .request(Command::ProvidersOauthStart(ProvidersOauthStartParams {
+            provider: "mistral".to_owned(),
+            redirect_uri: None,
+        }))
+        .await
+        .expect_err("unknown provider must be rejected");
+    assert!(matches!(
+        error,
+        cool_app_server::ClientError::Protocol(protocol) if protocol.cool_code == "oauth_provider_unsupported"
+    ));
+
+    let started = request(
+        &client,
+        Command::ProvidersOauthStart(ProvidersOauthStartParams {
+            provider: "claude".to_owned(),
+            redirect_uri: None,
+        }),
+    )
+    .await;
+    let ResponsePayload::ProvidersOauthStarted(start) = started else {
+        panic!("unexpected payload");
+    };
+    assert_eq!(start.completion, "manual");
+    assert!(
+        start
+            .auth_url
+            .starts_with("https://claude.ai/oauth/authorize?")
+    );
+    assert!(start.notice.is_some());
+    assert!(!start.state.is_empty());
+
+    let error = client
+        .request(Command::ProvidersOauthComplete(
+            ProvidersOauthCompleteParams {
+                state: "never-started".to_owned(),
+                code: "code".to_owned(),
+            },
+        ))
+        .await
+        .expect_err("unknown state must be rejected");
+    assert!(matches!(
+        error,
+        cool_app_server::ClientError::Protocol(protocol) if protocol.cool_code == "oauth_state_unknown"
     ));
 }
 
@@ -2011,7 +2066,7 @@ async fn profiles_seed_clone_and_playground_are_store_backed() {
     .await;
     assert!(matches!(
         seeded,
-        ResponsePayload::ProfilesSeeded(SeedResult { created: 5 })
+        ResponsePayload::ProfilesSeeded(SeedResult { created: 6 })
     ));
 
     let listed = request(
@@ -2025,7 +2080,7 @@ async fn profiles_seed_clone_and_playground_are_store_backed() {
         ResponsePayload::ProfilesListed(profiles) => profiles,
         other => panic!("unexpected payload: {other:?}"),
     };
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     let source = profiles.iter().find(|p| p.slug == "coder").unwrap();
 
     let cloned = request(

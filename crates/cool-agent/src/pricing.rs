@@ -67,6 +67,10 @@ static PRICING: &[(&str, ModelPricing)] = &[
     ("claude-sonnet-4", pricing_cached(3_000, 15_000)),
     ("claude-opus-4", pricing_cached(15_000, 75_000)),
     ("claude-haiku-4", pricing_cached(1_000, 5_000)),
+    // --- Google Gemini (AI Studio paid tier) ---
+    ("gemini-2.5-pro", pricing(1_250, 10_000)),
+    ("gemini-2.5-flash", pricing(300, 2_500)),
+    ("gemini-2.0-flash", pricing(100, 400)),
     // --- DeepSeek ---
     ("deepseek-chat", pricing(270, 1_100)),
     ("deepseek-reasoner", pricing(550, 2_190)),

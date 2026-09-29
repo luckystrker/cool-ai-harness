@@ -1,4 +1,6 @@
+mod auth;
 mod executor_tools;
+mod jsonl;
 mod mcp_admin;
 mod mcp_store;
 mod memory_extract;
@@ -16,12 +18,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, AnthropicDriver, AutoApprovalGate, CancelSignal,
-    MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome, ScriptedDriver, StoreEventSink,
-    ToolContext, builtin_registry,
+    EventSink, GeminiDriver, MessageRole, ModelDriver, OpenAiCompatibleDriver, RunOutcome,
+    ScriptedDriver, StoreEventSink, ToolContext, builtin_registry,
 };
 use cool_app_server::{
     AppClient, AppServer, AppSettings, ExtensionAdmin, McpAdmin, RunLifecycle, ServerConfig,
-    capabilities,
+    capabilities, oauth,
 };
 use cool_extensions::{
     CompatibilityAdapter, ExtensionRuntime, HookDeclaration, InstalledPlugin, McpToolPolicy,
@@ -76,24 +78,41 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
             let mut endpoint: Option<PathBuf> = None;
             let mut data_dir = default_data_dir();
             let mut legacy_store = false;
+            let mut process_launcher: Option<String> = None;
+            let mut sandbox: Option<String> = None;
+            let mut allow_shell = false;
             while let Some(argument) = args.next() {
-                match argument.as_str() {
+                let (name, inline) = inline_flag(&argument);
+                match name {
                     "--transport" => {
-                        transport = args
-                            .next()
-                            .ok_or_else(|| usage("missing transport value"))?;
+                        transport = flag_value(&inline, &mut args, "missing transport value")?;
                     }
                     "--endpoint" => {
-                        endpoint = Some(PathBuf::from(
-                            args.next().ok_or_else(|| usage("missing endpoint value"))?,
-                        ));
+                        endpoint = Some(PathBuf::from(flag_value(
+                            &inline,
+                            &mut args,
+                            "missing endpoint value",
+                        )?));
                     }
                     "--data-dir" => {
-                        data_dir = PathBuf::from(
-                            args.next().ok_or_else(|| usage("missing data directory"))?,
-                        );
+                        data_dir = PathBuf::from(flag_value(
+                            &inline,
+                            &mut args,
+                            "missing data directory",
+                        )?);
                     }
                     "--legacy-store" => legacy_store = true,
+                    "--process-launcher" => {
+                        process_launcher = Some(flag_value(
+                            &inline,
+                            &mut args,
+                            "missing process-launcher value",
+                        )?);
+                    }
+                    "--sandbox" => {
+                        sandbox = Some(flag_value(&inline, &mut args, "missing sandbox value")?);
+                    }
+                    "--allow-shell" => allow_shell = true,
                     _ => return Err(usage("unknown app-server argument")),
                 }
             }
@@ -103,7 +122,9 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 "local" => return Err(usage("local transport needs endpoint")),
                 _ => return Err(usage("transport must be stdio or local")),
             }
-            let server = build_server(&data_dir, legacy_store).await?;
+            let host =
+                cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
+            let server = build_server(&data_dir, legacy_store, host).await?;
             match transport.as_str() {
                 "stdio" => server
                     .serve_stdio()
@@ -147,6 +168,11 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                     "agentLoop": true,
                     "trustedTools": true,
                     "baselineProvider": "openai-compatible",
+                    "processLauncher": {
+                        "default": "disabled",
+                        "envOverride": env::var("COOL_PROCESS_LAUNCHER").ok(),
+                        "sandboxBackends": cool_agent::sandbox_backend_status()
+                    },
                     "plugins": true,
                     "pluginInstall": ["local", "git-pinned"],
                     "mcp": ["stdio", "streamable-http"],
@@ -161,6 +187,39 @@ async fn run() -> Result<(), (i32, serde_json::Value)> {
                 .expect("doctor JSON serializes")
             );
             Ok(())
+        }
+        "auth" => {
+            let mut provider: Option<String> = None;
+            let mut data_dir = default_data_dir();
+            let mut device = false;
+            let mut manual = false;
+            while let Some(argument) = args.next() {
+                let (name, inline) = inline_flag(&argument);
+                match name {
+                    "--data-dir" => {
+                        data_dir = PathBuf::from(flag_value(
+                            &inline,
+                            &mut args,
+                            "missing data directory",
+                        )?);
+                    }
+                    "--device" => device = true,
+                    "--manual" => manual = true,
+                    _ if !argument.starts_with('-') => {
+                        if provider.is_some() {
+                            return Err(usage("extra auth argument"));
+                        }
+                        provider = Some(argument);
+                    }
+                    _ => return Err(usage("unknown auth argument")),
+                }
+            }
+            let Some(provider) = provider else {
+                return Err(usage(
+                    "usage: cool auth <claude|chatgpt|gemini> [--device] [--manual]",
+                ));
+            };
+            auth::auth_command(&provider, &data_dir, device, manual).await
         }
         "plugin" => plugin_command(args.collect()),
         "mcp" => mcp_command(args.collect()),
@@ -270,9 +329,81 @@ fn configured_secrets() -> Option<Arc<SecretKeyring>> {
     Some(Arc::new(SecretKeyring::new(key, std::iter::empty())))
 }
 
+/// Launcher selection for the CLI surface (P0.3/P2.17).
+///
+/// Chain: `COOL_PROCESS_LAUNCHER` env → explicit flag → default disabled.
+/// `--allow-shell` is the `--process-launcher=host` shorthand; `--sandbox`
+/// selects the sandbox backend (`bwrap|seatbelt|jobobject`, or
+/// `none|off|disabled` for no backend) and implies
+/// `--process-launcher=sandboxed` when a backend is given. Unknown or
+/// unavailable values fail closed.
+fn cli_launcher(
+    process_launcher: Option<String>,
+    sandbox: Option<String>,
+    allow_shell: bool,
+) -> Result<Arc<dyn cool_agent::ProcessLauncher>, String> {
+    if allow_shell {
+        if process_launcher.is_some() {
+            return Err("--allow-shell conflicts with --process-launcher".to_owned());
+        }
+        return Ok(Arc::new(cool_agent::HostLauncher));
+    }
+    let backend = match sandbox.as_deref() {
+        None | Some("none" | "off" | "disabled") => None,
+        Some(value) => Some(
+            cool_agent::SandboxBackend::parse(value)
+                .ok_or_else(|| format!("unknown sandbox backend '{value}'"))?,
+        ),
+    };
+    match process_launcher {
+        None => match backend {
+            Some(backend) => cool_agent::resolve_launcher("sandboxed", Some(backend)),
+            None => Ok(Arc::new(cool_agent::DisabledLauncher)),
+        },
+        Some(kind) => cool_agent::resolve_launcher(&kind, backend),
+    }
+}
+
+/// The policy for `cool run`: interactive Ask defaults plus the workspace's
+/// persistent project rules — a one-shot run honours `.cool/policy.json`
+/// deny rules just like a server run does (P1.6).
+fn run_policy(workspace: &Workspace) -> CapabilityPolicy {
+    let mut policy = CapabilityPolicy::new(Some(Decision::Ask));
+    policy.set_rules(cool_app_server::load_project_rules(workspace));
+    policy
+}
+
+/// The `HostContext` for a CLI-built server/context: the launcher from the
+/// selection chain plus the host environment that launched processes inherit
+/// (only populated when a launcher is enabled — a disabled launcher runs no
+/// processes at all).
+fn cli_host(
+    process_launcher: Option<String>,
+    sandbox: Option<String>,
+    allow_shell: bool,
+) -> Result<cool_agent::HostContext, String> {
+    // `COOL_PROCESS_LAUNCHER`/`COOL_SANDBOX_BACKEND` override the flags.
+    let launcher = match cool_agent::launcher_from_env() {
+        Ok(Some(launcher)) => launcher,
+        Ok(None) => cli_launcher(process_launcher, sandbox, allow_shell)?,
+        Err(error) => return Err(error),
+    };
+    let environment = if launcher.kind() == cool_agent::LauncherKind::Disabled {
+        std::collections::HashMap::new()
+    } else {
+        std::env::vars().collect()
+    };
+    Ok(cool_agent::HostContext {
+        launcher,
+        environment,
+        rules: std::sync::Arc::new(cool_security::RuleState::default()),
+    })
+}
+
 async fn build_server(
     data_dir: &std::path::Path,
     legacy_store: bool,
+    host: cool_agent::HostContext,
 ) -> Result<AppServer, (i32, serde_json::Value)> {
     // Resolve the legacy store before creating rust-core.db so a misconfigured
     // `--legacy-store` exits without touching the data directory. A fresh data
@@ -291,9 +422,10 @@ async fn build_server(
         // Content-addressed artifact blobs live beside the database (Python
         // `artifacts/` layout); enables the blob endpoints + upload paths.
         artifacts_dir: Some(data_dir.join("artifacts")),
+        host,
         ..ServerConfig::default()
     };
-    let (provider, model) = configured_provider(config.event_delay, true)?;
+    let (provider, model) = configured_provider(config.event_delay, true, data_dir)?;
     let extraction_provider = provider.clone();
     let extraction_model = model.clone();
     let workspace = current_workspace()?;
@@ -1017,53 +1149,51 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
     let mut options = cool_http::ServeOptions::default();
     let mut data_dir = default_data_dir();
     let mut legacy_store = false;
+    let mut process_launcher: Option<String> = None;
+    let mut sandbox: Option<String> = None;
+    let mut allow_shell = false;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
-        match argument.as_str() {
+        let (name, inline) = inline_flag(&argument);
+        match name {
             "--data-dir" => {
-                data_dir = PathBuf::from(
-                    arguments
-                        .next()
-                        .ok_or_else(|| usage("missing data directory"))?,
-                );
+                data_dir = PathBuf::from(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing data directory",
+                )?);
             }
             "--bind" => {
-                let value = arguments
-                    .next()
-                    .ok_or_else(|| usage("missing bind address"))?;
+                let value = flag_value(&inline, &mut arguments, "missing bind address")?;
                 let address: std::net::IpAddr = value
                     .parse()
                     .map_err(|_| usage("bind must be an IP address"))?;
                 options.bind.set_ip(address);
             }
             "--port" => {
-                let value = arguments.next().ok_or_else(|| usage("missing port"))?;
+                let value = flag_value(&inline, &mut arguments, "missing port")?;
                 let port: u16 = value.parse().map_err(|_| usage("port must be a number"))?;
                 options.bind.set_port(port);
             }
             "--assets" => {
-                options.assets = Some(PathBuf::from(
-                    arguments
-                        .next()
-                        .ok_or_else(|| usage("missing assets directory"))?,
-                ));
+                options.assets = Some(PathBuf::from(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing assets directory",
+                )?));
             }
             "--token" => {
-                options.token = Some(
-                    arguments
-                        .next()
-                        .ok_or_else(|| usage("missing token value"))?,
-                );
+                options.token = Some(flag_value(&inline, &mut arguments, "missing token value")?);
             }
             "--public-url" => {
-                options.public_url = Some(
-                    arguments
-                        .next()
-                        .ok_or_else(|| usage("missing public URL value"))?,
-                );
+                options.public_url = Some(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing public URL value",
+                )?);
             }
             "--profile" => {
-                let value = arguments.next().ok_or_else(|| usage("missing profile"))?;
+                let value = flag_value(&inline, &mut arguments, "missing profile")?;
                 options.profile = match value.as_str() {
                     "local" => cool_http::ServeProfile::Local,
                     "server" => cool_http::ServeProfile::Server,
@@ -1074,6 +1204,21 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
             "--tls-terminated" => options.tls_terminated = true,
             "--allow-remote" => options.allow_remote = true,
             "--legacy-store" => legacy_store = true,
+            "--process-launcher" => {
+                process_launcher = Some(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing process-launcher value",
+                )?);
+            }
+            "--sandbox" => {
+                sandbox = Some(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing sandbox value",
+                )?);
+            }
+            "--allow-shell" => allow_shell = true,
             _ => return Err(usage("unknown serve argument")),
         }
     }
@@ -1088,7 +1233,8 @@ async fn serve_command(arguments: Vec<String>) -> Result<(), (i32, serde_json::V
     cool_http::validate_options(&options).map_err(|error| usage(&error.to_string()))?;
     let bind = options.bind;
     let profile = cool_http::profile_name(options.profile);
-    let server = build_server(&data_dir, legacy_store).await?;
+    let host = cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
+    let server = build_server(&data_dir, legacy_store, host).await?;
     let facade =
         cool_http::HttpFacade::new(server, options).map_err(|error| usage(&error.to_string()))?;
     let listener = tokio::net::TcpListener::bind(bind)
@@ -1612,19 +1758,56 @@ async fn start_configured_opencode_worker(runtime: &ExtensionRuntime, data_dir: 
 }
 
 async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Value)> {
-    let (scripted, prompt_parts) = match arguments.first().map(String::as_str) {
-        Some("--scripted") => (true, &arguments[1..]),
-        _ => (false, arguments.as_slice()),
+    let mut scripted = false;
+    let mut allow_shell = false;
+    let mut process_launcher: Option<String> = None;
+    let mut sandbox: Option<String> = None;
+    let mut mode = "text".to_owned();
+    let mut prompt_parts: Vec<String> = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        let (name, inline) = inline_flag(&argument);
+        match name {
+            "--scripted" => scripted = true,
+            "--allow-shell" => allow_shell = true,
+            "--mode" => {
+                mode = flag_value(&inline, &mut arguments, "missing mode value")?;
+            }
+            "--process-launcher" => {
+                process_launcher = Some(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing process-launcher value",
+                )?);
+            }
+            "--sandbox" => {
+                sandbox = Some(flag_value(
+                    &inline,
+                    &mut arguments,
+                    "missing sandbox value",
+                )?);
+            }
+            _ if argument.starts_with("--") => {
+                return Err(usage("unknown run argument"));
+            }
+            _ => prompt_parts.push(argument),
+        }
+    }
+    let json_mode = match mode.as_str() {
+        "text" => false,
+        "json" => true,
+        _ => return Err(usage("--mode must be text|json")),
     };
     if prompt_parts.is_empty() {
         return Err(usage("run needs a prompt"));
     }
+    let host = cli_host(process_launcher, sandbox, allow_shell).map_err(|error| usage(&error))?;
     let prompt = prompt_parts.join(" ");
     let workspace = current_workspace()?;
     let (provider, model): (Arc<dyn ModelDriver>, String) = if scripted {
         (Arc::new(ScriptedDriver::echo()), "scripted-echo".to_owned())
     } else {
-        configured_provider(std::time::Duration::ZERO, false)?
+        configured_provider(std::time::Duration::ZERO, false, &default_data_dir())?
     };
     let store = DurableStore::in_memory()
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?;
@@ -1642,27 +1825,32 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
         .start_run("local-user", "cli-run", "cli-run", &session)
         .map_err(|error| runtime("durable_state_failed", &error.to_string()))?
         .value;
-    let sink = StoreEventSink::new(store, "local-user", session, run);
+    let store_sink = StoreEventSink::new(store, "local-user", session, run);
+    // P2.14: json mode wraps the store sink — one NDJSON line per event on
+    // stdout, the terminal run.completed carrying the result text.
+    let jsonl_sink = jsonl::JsonlEventSink::new(store_sink.clone());
     let agent = AgentRuntime::new(provider, builtin_registry());
     let (_, cancel) = CancelSignal::channel();
+    let sink: &dyn EventSink = if json_mode { &jsonl_sink } else { &store_sink };
     let outcome = agent
         .run(
             AgentRequest {
                 model,
                 history: Vec::new(),
                 user_input: prompt,
+                user_parts: Vec::new(),
+                user_replay_parts: Vec::new(),
                 system_prompt: None,
                 mode: None,
                 temperature: 0.7,
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(
-                    workspace,
-                    CapabilityPolicy::new(Some(Decision::Ask)),
-                ),
+                tool_context: ToolContext::new(workspace.clone(), run_policy(&workspace))
+                    .with_launcher(host.launcher.clone())
+                    .with_environment(host.environment.clone()),
             },
-            &sink,
+            sink,
             &AutoApprovalGate {
                 outcome: ApprovalOutcome::Denied,
             },
@@ -1678,7 +1866,11 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
                 .find(|message| message.role == MessageRole::Assistant)
                 .and_then(|message| message.content.as_deref())
                 .unwrap_or_default();
-            println!("{output}");
+            if json_mode {
+                jsonl_sink.finish(output);
+            } else {
+                println!("{output}");
+            }
             Ok(())
         }
         RunOutcome::Cancelled { reason, .. } => Err(runtime("run_cancelled", &reason)),
@@ -1689,11 +1881,18 @@ async fn run_prompt(arguments: Vec<String>) -> Result<(), (i32, serde_json::Valu
 fn configured_provider(
     echo_delay: std::time::Duration,
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let provider_kind = env::var("COOL_PROVIDER").unwrap_or_default().to_lowercase();
     match provider_kind.as_str() {
-        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback),
-        "" | "openai" | "openai-compatible" | "openai_compatible" => {}
+        "anthropic" => return configured_anthropic_provider(allow_scripted_fallback, data_dir),
+        "gemini" | "google" => {
+            return configured_gemini_provider(allow_scripted_fallback, data_dir);
+        }
+        // `chatgpt`/`codex` alias the OpenAI-compatible path; stored OAuth
+        // tokens get a clear unsupported-wire error below rather than a
+        // silent fallback.
+        "" | "openai" | "openai-compatible" | "openai_compatible" | "chatgpt" | "codex" => {}
         // An explicit but unknown provider must fail closed — never silently
         // fall back to a different backend than the operator asked for.
         other => {
@@ -1708,13 +1907,19 @@ fn configured_provider(
     if provider_kind.is_empty()
         && env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.is_empty())
     {
-        return configured_anthropic_provider(allow_scripted_fallback);
+        return configured_anthropic_provider(allow_scripted_fallback, data_dir);
     }
     let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let configured_base_url = env::var("OPENAI_BASE_URL")
         .ok()
         .filter(|value| !value.is_empty());
     if api_key.is_empty() && configured_base_url.is_none() {
+        if stored_oauth_source(&["openai", "chatgpt", "codex"], "chatgpt", data_dir).is_some() {
+            return Err(runtime(
+                "oauth_wire_not_supported",
+                "stored ChatGPT OAuth tokens authenticate OpenAI's Codex backend (Responses API), which the OpenAI-compatible chat/completions driver does not implement — set OPENAI_API_KEY",
+            ));
+        }
         if allow_scripted_fallback {
             return Ok((
                 Arc::new(ScriptedDriver::echo_with_delay(echo_delay)),
@@ -1755,9 +1960,15 @@ fn configured_provider(
 /// `ANTHROPIC_MODEL`/`COOL_MODEL` or the current Claude default.
 fn configured_anthropic_provider(
     allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
 ) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
     let api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
+    let oauth_source = if api_key.is_empty() {
+        stored_oauth_source(&["anthropic", "claude"], "claude", data_dir)
+    } else {
+        None
+    };
+    if api_key.is_empty() && oauth_source.is_none() {
         if allow_scripted_fallback {
             return Ok((
                 Arc::new(ScriptedDriver::echo_with_delay(std::time::Duration::ZERO)),
@@ -1766,7 +1977,7 @@ fn configured_anthropic_provider(
         }
         return Err(runtime(
             "provider_credentials_missing",
-            "COOL_PROVIDER=anthropic requires ANTHROPIC_API_KEY",
+            "COOL_PROVIDER=anthropic requires ANTHROPIC_API_KEY or `cool auth claude`",
         ));
     }
     let base_url = env::var("ANTHROPIC_BASE_URL")
@@ -1787,12 +1998,136 @@ fn configured_anthropic_provider(
     } else {
         NetworkPolicy::new([host.to_owned()])
     };
-    let provider = AnthropicDriver::new(&base_url, api_key, policy)
-        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let provider: Arc<dyn ModelDriver> = match oauth_source {
+        Some(source) => Arc::new(
+            AnthropicDriver::for_oauth(&base_url, source, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+        None => Arc::new(
+            AnthropicDriver::new(&base_url, api_key, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+    };
     let model = env::var("ANTHROPIC_MODEL")
         .or_else(|_| env::var("COOL_MODEL"))
         .unwrap_or_else(|_| "claude-sonnet-4-5".to_owned());
-    Ok((Arc::new(provider), model))
+    Ok((provider, model))
+}
+
+/// Stored OAuth credentials for a CLI provider fallback (P2.11): the first
+/// provider row matching `names` with `auth_kind=oauth` and stored tokens,
+/// wrapped as an `AccessTokenSource` that refreshes through the keyring.
+/// `data_dir` must match where `cool auth` stored the login — a custom
+/// `--data-dir` makes the default path see no tokens.
+fn stored_oauth_source(
+    names: &[&str],
+    flow_name: &str,
+    data_dir: &std::path::Path,
+) -> Option<Arc<oauth::ProviderTokenSource>> {
+    let flow = oauth::oauth_flow(flow_name)?;
+    let store = Arc::new(open_legacy_store(&data_dir.join("harness.db")).ok()?);
+    let secrets = configured_secrets()?;
+    let actor = "local-user";
+    let provider = store
+        .list_providers(actor, true)
+        .ok()?
+        .into_iter()
+        .find(|provider| {
+            provider.auth_kind == "oauth"
+                && provider.oauth_tokens_encrypted.is_some()
+                && names
+                    .iter()
+                    .any(|name| provider.name.eq_ignore_ascii_case(name))
+        })?;
+    Some(Arc::new(oauth::ProviderTokenSource::new(
+        flow,
+        provider.id,
+        actor.to_owned(),
+        store,
+        secrets,
+    )))
+}
+
+/// Gemini provider wiring (P2.11): `GEMINI_API_KEY`/`GOOGLE_API_KEY` +
+/// optional `GEMINI_BASE_URL`; stored OAuth from `cool auth gemini` when no
+/// key is set. Model from `GEMINI_MODEL`/`COOL_MODEL`.
+fn configured_gemini_provider(
+    allow_scripted_fallback: bool,
+    data_dir: &std::path::Path,
+) -> Result<(Arc<dyn ModelDriver>, String), (i32, serde_json::Value)> {
+    let api_key = env::var("GEMINI_API_KEY")
+        .or_else(|_| env::var("GOOGLE_API_KEY"))
+        .unwrap_or_default();
+    let oauth_source = if api_key.is_empty() {
+        stored_oauth_source(&["gemini", "google"], "gemini", data_dir)
+    } else {
+        None
+    };
+    if api_key.is_empty() && oauth_source.is_none() {
+        if allow_scripted_fallback {
+            return Ok((
+                Arc::new(ScriptedDriver::echo_with_delay(std::time::Duration::ZERO)),
+                "scripted-echo".to_owned(),
+            ));
+        }
+        return Err(runtime(
+            "provider_credentials_missing",
+            "COOL_PROVIDER=gemini requires GEMINI_API_KEY or `cool auth gemini`",
+        ));
+    }
+    let base_url = env::var("GEMINI_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_owned());
+    let parsed = url::Url::parse(&base_url)
+        .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| runtime("provider_config_invalid", "provider URL has no host"))?;
+    let allow_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let policy = if allow_loopback {
+        NetworkPolicy::new([host.to_owned()]).loopback_only()
+    } else {
+        NetworkPolicy::new([host.to_owned()])
+    };
+    let provider: Arc<dyn ModelDriver> = match oauth_source {
+        Some(source) => Arc::new(
+            GeminiDriver::for_oauth(&base_url, source, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+        None => Arc::new(
+            GeminiDriver::new(&base_url, api_key, policy)
+                .map_err(|error| runtime("provider_config_invalid", &error.to_string()))?,
+        ),
+    };
+    let model = env::var("GEMINI_MODEL")
+        .or_else(|_| env::var("COOL_MODEL"))
+        .unwrap_or_else(|_| "gemini-2.5-flash".to_owned());
+    Ok((provider, model))
+}
+
+/// Splits `--flag=value` into the flag name and its inline value; arguments
+/// without `=` (or not starting with `--`) pass through with no value.
+fn inline_flag(argument: &str) -> (&str, Option<String>) {
+    match argument.split_once('=') {
+        Some((name, value)) if name.starts_with("--") => (name, Some(value.to_owned())),
+        _ => (argument, None),
+    }
+}
+
+/// The value for a flag arm: the inline `--flag=value` or the next argument.
+fn flag_value(
+    inline: &Option<String>,
+    arguments: &mut impl Iterator<Item = String>,
+    missing: &'static str,
+) -> Result<String, (i32, serde_json::Value)> {
+    match inline {
+        Some(value) => Ok(value.clone()),
+        None => arguments.next().ok_or_else(|| usage(missing)),
+    }
 }
 
 fn usage(message: &str) -> (i32, serde_json::Value) {
@@ -1811,7 +2146,7 @@ fn runtime(code: &str, message: &str) -> (i32, serde_json::Value) {
 
 fn print_help() {
     println!(
-        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
+        "Cool Rust CLI\n\nCommands:\n  (no arguments)              interactive TUI\n  app-server [--transport stdio|local] [--endpoint PATH] [--data-dir PATH] [--legacy-store]\n  serve [--data-dir PATH] [--bind IP] [--port N] [--assets DIR] [--profile local|server]\n        [--token TOKEN] [--public-url URL] [--trusted-proxy] [--tls-terminated]\n        [--allow-remote] [--legacy-store]\n  run [--scripted] [--mode text|json] <prompt>\n  acp                         ACP v1 agent over stdio\n  plugin install <path|git-url> [--revision SHA]\n  plugin list\n  plugin validate <path>\n  plugin doctor [path]\n  store adopt [--data-dir PATH]\n  mcp list\n  hooks list\n  doctor [--data-dir PATH]"
     );
 }
 

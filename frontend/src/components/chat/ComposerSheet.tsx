@@ -24,6 +24,8 @@ export interface ComposerSheetProps {
   onModelChange: (model: string) => void
   planMode: boolean
   onPlanModeChange: (v: boolean) => void
+  longTaskMode: boolean
+  onLongTaskModeChange: (v: boolean) => void
   pendingFiles: File[]
   onAttach: (files: File[]) => void
   onRemoveFile: (index: number) => void
@@ -49,6 +51,8 @@ export function ComposerSheet({
   onModelChange,
   planMode,
   onPlanModeChange,
+  longTaskMode,
+  onLongTaskModeChange,
   pendingFiles,
   onAttach,
   onRemoveFile,
@@ -284,6 +288,23 @@ export function ComposerSheet({
                 Plan
               </button>
             </div>
+          </section>
+
+          {/* --- Long-running task mode --- */}
+          <section>
+            <SheetLabel>Task progress</SheetLabel>
+            <button
+              className={cn(
+                "h-12 w-full rounded-lg border text-sm transition-colors",
+                longTaskMode
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              onClick={() => onLongTaskModeChange(!longTaskMode)}
+              aria-pressed={longTaskMode}
+            >
+              Long-running task mode
+            </button>
           </section>
             </div>
 

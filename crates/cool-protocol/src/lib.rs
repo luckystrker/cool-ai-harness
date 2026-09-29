@@ -179,6 +179,8 @@ pub enum Command {
     SessionHistory(SessionHistoryParams),
     #[serde(rename = "session.fork")]
     SessionFork(SessionForkParams),
+    #[serde(rename = "session.rewind")]
+    SessionRewind(SessionRewindParams),
     #[serde(rename = "session.for_conversation")]
     SessionForConversation(SessionForConversationParams),
     #[serde(rename = "session.runs")]
@@ -193,6 +195,12 @@ pub enum Command {
     RunSubscribe(RunSubscribeParams),
     #[serde(rename = "approval.resolve")]
     ApprovalResolve(ApprovalResolveParams),
+    #[serde(rename = "policy.rules_list")]
+    PolicyRulesList(PolicyRulesListParams),
+    #[serde(rename = "policy.rule_add")]
+    PolicyRuleAdd(PolicyRuleAddParams),
+    #[serde(rename = "policy.rule_delete")]
+    PolicyRuleDelete(PolicyRuleDeleteParams),
     #[serde(rename = "status.get")]
     StatusGet(StatusGetParams),
     #[serde(rename = "tools.list")]
@@ -281,6 +289,10 @@ pub enum Command {
     ProvidersListModels(LegacyIdParams),
     #[serde(rename = "providers.preview_models")]
     ProvidersPreviewModels(ProvidersPreviewModelsParams),
+    #[serde(rename = "providers.oauth_start")]
+    ProvidersOauthStart(ProvidersOauthStartParams),
+    #[serde(rename = "providers.oauth_complete")]
+    ProvidersOauthComplete(ProvidersOauthCompleteParams),
     #[serde(rename = "memory.list")]
     MemoryList(MemoryListParams),
     #[serde(rename = "memory.get")]
@@ -559,6 +571,12 @@ pub struct SessionPromptParams {
     /// plan through the trusted `update_plan` tool instead of executing.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Long-running task mode: the run is marked `long_task` and the existing
+    /// task progress file (`.cool/task/progress.md`, maintained by the bundled
+    /// long-running-task skill) is injected into the system prompt so the
+    /// agent resumes from tracked state. Ignored in planning mode.
+    #[serde(default)]
+    pub long_task_mode: bool,
     /// Caller-supplied system prompt. Ignored in planning mode, where the
     /// runtime owns the system prompt so a caller cannot steer the plan.
     pub system_prompt: Option<String>,
@@ -615,6 +633,42 @@ pub struct SessionForkParams {
     pub idempotency_key: IdempotencyKey,
     pub session_id: String,
     pub title: Option<String>,
+    /// Fork point: only events at or below this cursor are copied. The cursor
+    /// is the `HistoryItem.cursor` space (`rust_events.rowid`), the same
+    /// durable cursor `session.history` returns and renders in the UI.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub up_to_cursor: Option<u64>,
+    /// Alternate bound in the events' own `seq` space (`e.seq` <= N). An alias
+    /// for `up_to_cursor` for callers that page `run.events` by seq; when both
+    /// bounds are set, both apply.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub up_to_event_seq: Option<u64>,
+}
+
+/// Rewind a session to an earlier point: the previous runs are superseded
+/// (`rewound` status, append-only — their events stay durable) and a fresh
+/// seed run carries the retained history prefix up to `to_cursor`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRewindParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    pub session_id: String,
+    /// Durable cursor the session rewinds to (`HistoryItem.cursor`, the
+    /// `rust_events.rowid`). History visible after the rewind is exactly the
+    /// prefix of history events at or below this cursor.
+    #[ts(type = "number")]
+    pub to_cursor: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Restore the workspace to the filesystem checkpoint recorded nearest
+    /// to `to_cursor` (P2.18). Without a recorded checkpoint ref the rewind
+    /// still lands and the result reports `workspaceRestored: false`.
+    #[serde(default)]
+    pub restore_workspace: Option<bool>,
 }
 
 /// Binds one legacy conversation to a durable Rust session, importing the
@@ -626,6 +680,11 @@ pub struct SessionForConversationParams {
     #[ts(type = "string")]
     pub idempotency_key: IdempotencyKey,
     pub conversation_id: i64,
+    /// Bind an existing actor-owned session instead of creating one (fork
+    /// flows): the conversation links to that session and no transcript is
+    /// imported. The session must not already be linked to a conversation.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// List durable runs of one session, newest first.
@@ -687,6 +746,93 @@ pub struct ApprovalResolveParams {
     #[ts(type = "number")]
     pub expected_revision: u64,
     pub decision: ApprovalDecision,
+    /// Persist a rule for the approved call: `"session"` keeps it in memory
+    /// for the run, `"project"` writes `<workspace>/.cool/policy.json`,
+    /// `"user"` stores it in the durable `policy_rules` table.
+    #[serde(default)]
+    pub remember: Option<String>,
+    /// Rule payload for `remember`; when absent the server derives one from
+    /// the tool call (same shape as `ToolApprovalRequired.suggestedRule`).
+    #[serde(default)]
+    pub rule: Option<PolicyRuleRecord>,
+    /// Free-form answer for `breakpointType: "question"` asks (the `ask_user`
+    /// tool): an option id/string or arbitrary JSON. Ignored for plain
+    /// allow/deny approvals.
+    #[serde(default)]
+    pub answer: Option<serde_json::Value>,
+}
+
+/// Wire mirror of `cool_security::PolicyRule` — kept as plain strings so the
+/// protocol crate carries no cool-security dependency.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleRecord {
+    /// Qualified id (`"user:3"`, `"project:1"`, `"session:0"`) for deletes.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Tool name, or `"*"` for every tool.
+    pub tool: String,
+    /// `command` | `path_glob` | `domain` | `any`.
+    pub kind: String,
+    #[serde(default)]
+    pub pattern: String,
+    /// `allow` | `ask` | `deny`.
+    pub decision: String,
+    /// `session` | `project` | `user`.
+    pub scope: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRulesListParams {
+    /// Optional scope filter (`session|project|user`); absent lists all.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Session rules of this run when `scope = "session"`.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRulesListResult {
+    pub rules: Vec<PolicyRuleRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleAddParams {
+    pub rule: PolicyRuleRecord,
+    /// Session rules attach to a live run; required when `scope = "session"`.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleDeleteParams {
+    #[ts(type = "string")]
+    pub idempotency_key: IdempotencyKey,
+    /// Qualified rule id from `policy.rules_list` (`"user:3"`, `"project:1"`,
+    /// `"session:0"`).
+    pub rule_id: String,
+    /// Required when deleting a `session:` rule.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct PolicyRuleDeleteResult {
+    pub deleted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -781,6 +927,11 @@ pub enum CanonicalEvent {
     RunFailed(RunTerminal),
     #[serde(rename = "run.cancelled")]
     RunCancelled(RunTerminal),
+    /// Marker event appended to the seed run a `session.rewind` creates: the
+    /// session's visible history was reset to the prefix ending at `cursor`.
+    /// It does not change run status — the superseded runs carry `rewound`.
+    #[serde(rename = "run.rewound")]
+    RunRewound(RunRewound),
     #[serde(rename = "item.started")]
     ItemStarted(ItemEvent),
     #[serde(rename = "item.updated")]
@@ -794,7 +945,7 @@ pub enum CanonicalEvent {
     #[serde(rename = "tool.requested")]
     ToolRequested(ToolRequested),
     #[serde(rename = "tool.approval_required")]
-    ToolApprovalRequired(ToolApprovalRequired),
+    ToolApprovalRequired(Box<ToolApprovalRequired>),
     #[serde(rename = "tool.approval_resolved")]
     ToolApprovalResolved(ToolApprovalResolved),
     #[serde(rename = "tool.started")]
@@ -897,6 +1048,17 @@ pub struct RunTerminal {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
+pub struct RunRewound {
+    /// Durable cursor (`rust_events.rowid`) the session rewound to.
+    #[ts(type = "number")]
+    pub cursor: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct ItemEvent {
     pub role: Option<String>,
     pub content: Option<String>,
@@ -937,6 +1099,14 @@ pub struct ToolApprovalRequired {
     pub breakpoint_type: Option<String>,
     pub result_preview: Option<String>,
     pub current_content: Option<String>,
+    /// The exec/policy rule that produced this ask (`None` when the ask came
+    /// from the capability fallback).
+    #[serde(default)]
+    pub matched_rule: Option<String>,
+    /// A rule the client can persist via `approval.resolve {remember}` to
+    /// stop prompting for equivalent calls.
+    #[serde(default)]
+    pub suggested_rule: Option<PolicyRuleRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1512,6 +1682,9 @@ pub struct ApprovalResolvedResult {
     #[ts(type = "number")]
     pub revision: u64,
     pub outcome: ApprovalOutcome,
+    /// The persisted rule when the resolve carried `remember` (P1.6).
+    #[serde(default)]
+    pub remembered_rule: Option<PolicyRuleRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1583,6 +1756,30 @@ pub struct SessionHistoryResult {
 pub struct SessionForkedResult {
     pub session_id: String,
     pub forked_from: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct SessionRewindResult {
+    pub session_id: String,
+    /// The seed run carrying the retained history (mode `rewind`).
+    pub run_id: String,
+    /// Runs superseded by the rewind (now `rewound` status).
+    #[serde(default)]
+    pub rewound_run_ids: Vec<String>,
+    #[ts(type = "number")]
+    pub to_cursor: u64,
+    /// Checkpoint ref the workspace was restored to, when one applied.
+    #[serde(default)]
+    pub checkpoint_ref: Option<String>,
+    #[serde(default)]
+    pub workspace_restored: bool,
+    /// Why workspace restore did not apply (no checkpoint, not a restorable
+    /// snapshot, launcher disabled, restore failed). Present only when
+    /// `restoreWorkspace` was requested and `workspace_restored` is false.
+    #[serde(default)]
+    pub restore_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1683,6 +1880,7 @@ pub enum ResponsePayload {
     SessionListed(SessionListResult),
     SessionHistory(SessionHistoryResult),
     SessionForked(SessionForkedResult),
+    SessionRewound(SessionRewindResult),
     SessionForConversation(SessionConversationResult),
     SessionRuns(SessionRunsResult),
     PromptAccepted(PromptAcceptedResult),
@@ -1690,6 +1888,9 @@ pub enum ResponsePayload {
     RunCancelled(RunCancelledResult),
     RunSubscribed(RunSubscribedResult),
     ApprovalResolved(ApprovalResolvedResult),
+    PolicyRulesListed(PolicyRulesListResult),
+    PolicyRuleAdded(PolicyRuleRecord),
+    PolicyRuleDeleted(PolicyRuleDeleteResult),
     EventPage(EventPage),
     Status(StatusGetResult),
     ToolsListed(Vec<ToolCatalogRecord>),
@@ -1733,6 +1934,8 @@ pub enum ResponsePayload {
     ProvidersModels(Vec<ModelInfoRecord>),
     ProvidersModelsLive(Vec<ModelInfoRecord>),
     ProvidersModelsPreview(Vec<ModelInfoRecord>),
+    ProvidersOauthStarted(ProvidersOauthStartResult),
+    ProvidersOauthCompleted(ProvidersOauthCompleteResult),
     MemoryListed(Vec<MemoryRecord>),
     MemoryGot(MemoryRecord),
     MemoryCreated(MemoryRecord),

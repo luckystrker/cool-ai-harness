@@ -144,6 +144,8 @@ export interface SendMessageRequest {
   tool_names?: string[]
   /** When true, the agent generates a structured plan instead of executing directly (Фаза 2 §1). */
   plan_mode?: boolean
+  /** When true, the run resumes the task from `.cool/task/progress.md` (long-running task mode). */
+  long_task_mode?: boolean
 }
 
 // --- providers ---

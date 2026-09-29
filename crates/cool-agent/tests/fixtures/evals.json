@@ -65,5 +65,159 @@
     "approval": "approved",
     "expectedEvents": ["tool.failed", "tool.failed", "run.completed"],
     "expectedFile": false
+  },
+  {
+    "id": "search_and_find_empty_workspace",
+    "calls": [
+      {
+        "callId": "search-none",
+        "name": "search_files",
+        "arguments": {"pattern": "needle"}
+      },
+      {
+        "callId": "find-none",
+        "name": "find_files",
+        "arguments": {"glob": "**/*.txt"}
+      }
+    ],
+    "capability": "read",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.completed", "tool.completed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "edit_file_create_and_anchor",
+    "calls": [
+      {
+        "callId": "edit-create",
+        "name": "edit_file",
+        "arguments": {
+          "path": "eval.txt",
+          "edits": [{"old": "", "new": "seed"}],
+          "create_if_missing": true
+        }
+      },
+      {
+        "callId": "edit-anchor",
+        "name": "edit_file",
+        "arguments": {"path": "eval.txt", "edits": [{"old": "seed", "new": "grown"}]}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": [
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.approval_required",
+      "tool.approval_resolved",
+      "tool.completed",
+      "tool.completed",
+      "run.completed"
+    ],
+    "expectedFile": true
+  },
+  {
+    "id": "rule_denies_shell_without_dialog",
+    "calls": [
+      {
+        "callId": "shell-denied",
+        "name": "shell",
+        "arguments": {"program": "rm", "args": ["-rf", "x"]}
+      }
+    ],
+    "capability": null,
+    "decision": null,
+    "rules": [
+      {"tool": "shell", "kind": "command", "pattern": "rm *", "decision": "deny"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "capability_deny_is_an_outer_bound_over_rule_allow",
+    "calls": [
+      {
+        "callId": "write-deny-outer-bound",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "rule cannot lift deny"}
+      }
+    ],
+    "capability": "write",
+    "decision": "deny",
+    "rules": [
+      {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "rule_allow_relaxes_ask_to_allow",
+    "calls": [
+      {
+        "callId": "write-rule-relaxed",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "rule relaxes ask"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "rules": [
+      {"tool": "write_file", "kind": "path_glob", "pattern": "eval.txt", "decision": "allow"}
+    ],
+    "approval": "denied",
+    "expectedEvents": ["tool.completed", "run.completed"],
+    "expectedFile": true
+  },
+  {
+    "id": "rule_deny_beats_capability_allow",
+    "calls": [
+      {
+        "callId": "write-rule-denied",
+        "name": "write_file",
+        "arguments": {"path": "eval.txt", "content": "denied by rule"}
+      }
+    ],
+    "capability": "write",
+    "decision": "allow",
+    "rules": [
+      {"tool": "*", "kind": "path_glob", "pattern": "*.txt", "decision": "deny"}
+    ],
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "view_image_missing_file",
+    "calls": [
+      {
+        "callId": "view-missing",
+        "name": "view_image",
+        "arguments": {"path": "eval.png"}
+      }
+    ],
+    "capability": "read",
+    "decision": "allow",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
+  },
+  {
+    "id": "view_image_read_denied",
+    "calls": [
+      {
+        "callId": "view-denied",
+        "name": "view_image",
+        "arguments": {"path": "eval.png"}
+      }
+    ],
+    "capability": "read",
+    "decision": "deny",
+    "approval": "approved",
+    "expectedEvents": ["tool.failed", "run.completed"],
+    "expectedFile": false
   }
 ]

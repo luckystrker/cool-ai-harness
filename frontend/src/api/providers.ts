@@ -20,6 +20,7 @@ export const providersApi = {
         isFallback: body.is_fallback ?? false,
         isDefault: body.is_default ?? false,
         chatModels: (body.chat_models as unknown as JsonValue) ?? null,
+        authKind: null,
       })
     ),
 
@@ -38,6 +39,7 @@ export const providersApi = {
         isFallback: body.is_fallback ?? null,
         isDefault: body.is_default ?? null,
         chatModels: (body.chat_models as unknown as JsonValue) ?? null,
+        authKind: null,
       })
     ),
 

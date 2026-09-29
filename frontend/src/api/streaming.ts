@@ -22,6 +22,7 @@ export async function* streamConversationMessage(
   const link = await sdk.sessionForConversation({
     idempotencyKey: `session-for-conversation-${conversationId}`,
     conversationId,
+    sessionId: null,
   })
   const content: ContentPart[] = [{ type: "text", text: body.content }]
   for (const artifactId of body.artifact_ids ?? []) {
@@ -33,6 +34,7 @@ export async function* streamConversationMessage(
     content,
     model: body.model ?? null,
     planMode: body.plan_mode ?? false,
+    longTaskMode: body.long_task_mode ?? false,
     systemPrompt: body.system_prompt ?? null,
   })
   yield* streamRunEvents(accepted.runId, {

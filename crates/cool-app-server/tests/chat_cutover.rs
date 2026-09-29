@@ -104,6 +104,7 @@ fn link_command(conversation_id: i64) -> Command {
     Command::SessionForConversation(SessionForConversationParams {
         idempotency_key: key("link-1"),
         conversation_id,
+        session_id: None,
     })
 }
 
@@ -192,6 +193,7 @@ async fn session_for_conversation_imports_history_and_is_idempotent() {
         Command::SessionForConversation(SessionForConversationParams {
             idempotency_key: key("link-2"),
             conversation_id,
+            session_id: None,
         }),
     )
     .await;
@@ -415,6 +417,7 @@ async fn replay_after_conversation_delete_returns_the_original_link() {
             SessionForConversationParams {
                 idempotency_key: key("link-after-delete"),
                 conversation_id,
+                session_id: None,
             },
         ))
         .await

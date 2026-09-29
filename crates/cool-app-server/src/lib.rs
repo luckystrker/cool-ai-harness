@@ -6,6 +6,7 @@
 pub mod blobs;
 pub mod client;
 mod legacy;
+pub mod oauth;
 mod research;
 mod scheduler;
 mod subagents;
@@ -14,7 +15,7 @@ pub use blobs::{BlobError, BlobStore};
 pub use client::{AppClient, ClientError};
 pub use research::{ResearchExecutor, ResearchOutcome};
 pub use scheduler::TaskExecutor;
-pub use subagents::{SubagentExecutor, SubagentLaunchSpec};
+pub use subagents::{ForkContext, SubagentExecutor, SubagentIsolation, SubagentLaunchSpec};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -26,9 +27,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cool_agent::{
     AgentLimits, AgentRequest, AgentRuntime, ApprovalGate, ApprovalRequest, AutoApprovalGate,
-    CancelSignal, EventSink, Message, MessageRole, RunOutcome, RuntimeError, ScriptedDriver,
-    ToolContext, Usage, builtin_registry, default_agent_system_prompt, history_from_events,
-    mask_canonical_event, planning_system_prompt,
+    CancelSignal, EventSink, GateOutcome, Message, MessageRole, ModelContentPart, RunOutcome,
+    RuntimeError, ScriptedDriver, ToolContext, Usage, builtin_registry,
+    default_agent_system_prompt, history_from_event_rows, load_task_progress, mask_canonical_event,
+    planning_system_prompt,
 };
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalOutcome, ApprovalResolvedResult, CanonicalEvent, Command,
@@ -38,16 +40,21 @@ use cool_protocol::{
     McpServerListResult, McpStoreInstallParams, McpStoreSearchResult, McpToolListResult,
     McpUpdateServerParams, MemoryExtractResult, ModelInfoRecord, PlanCreated, PlanExecuteResult,
     PlanProgress, PlanProgressStatus, PlanStep as ProtocolPlanStep, PluginRecord,
-    PromptAcceptedResult, ProtocolError, ResponsePayload, RpcFailure, RpcId, RpcNotification,
-    RpcRequest, RpcSuccess, RssFetchResult, RunCancelledResult, RunEventMethod, RunStarted,
-    RunSubscribedResult, RunTerminal, ServerFrame, SessionCompacted, SessionConversationResult,
-    SessionCreatedResult, SessionForkedResult, SessionHistoryResult, SessionListResult,
-    SessionLoadedResult, SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams,
-    SkillCreateResult, SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult,
-    SystemPromptRecord, TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord,
-    ToolCompleted, ToolRequested, TransportLimits, UsageUpdated, V1Version,
+    PromptAcceptedResult, ProtocolError, ProvidersOauthCompleteParams,
+    ProvidersOauthCompleteResult, ProvidersOauthStartParams, ProvidersOauthStartResult,
+    ResponsePayload, RpcFailure, RpcId, RpcNotification, RpcRequest, RpcSuccess, RssFetchResult,
+    RunCancelledResult, RunEventMethod, RunStarted, RunSubscribedResult, RunTerminal, ServerFrame,
+    SessionCompacted, SessionConversationResult, SessionCreatedResult, SessionForkedResult,
+    SessionHistoryResult, SessionListResult, SessionLoadedResult, SessionRewindResult,
+    SessionRunSummary, SessionRunsResult, SessionSummary, SkillCreateParams, SkillCreateResult,
+    SkillListResult, StatusGetResult, StreamFrame, SubagentRunCancelResult, SystemPromptRecord,
+    TaskRunCancelResult, TaskTemplateRecord, TextDelta, ToolCatalogRecord, ToolCompleted,
+    ToolRequested, TransportLimits, UsageUpdated, V1Version,
 };
-use cool_security::{CapabilityPolicy, Decision, SecretKeyring, Workspace, mask_secrets};
+use cool_security::{
+    CapabilityPolicy, Decision, PolicyRule, RulePatternKind, RuleScope, RuleState, SecretKeyring,
+    Workspace, mask_secrets,
+};
 use cool_state::{
     BudgetDelta, CancelAcceptance, ConversationLink, DurableStore, EventProvenance,
     ImportedHistoryEvent, StoreError,
@@ -89,6 +96,9 @@ pub struct ServerConfig {
     /// on the CLI path). When unset (tests without a filesystem layout),
     /// research reports persist on the row without an artifact.
     pub artifacts_dir: Option<PathBuf>,
+    /// Process-launcher selection + host environment + shared rule state
+    /// (P0.3/P1.6). Defaults fail closed: `DisabledLauncher`, empty env.
+    pub host: cool_agent::HostContext,
 }
 
 impl Default for ServerConfig {
@@ -105,6 +115,7 @@ impl Default for ServerConfig {
             legacy_store: None,
             secrets: None,
             artifacts_dir: None,
+            host: cool_agent::HostContext::default(),
         }
     }
 }
@@ -127,6 +138,7 @@ impl std::fmt::Debug for ServerConfig {
             )
             .field("secrets", &self.secrets.is_some())
             .field("artifacts_dir", &self.artifacts_dir)
+            .field("launcher", &self.host.launcher.kind())
             .finish()
     }
 }
@@ -144,7 +156,7 @@ struct Inner {
     workspace: Workspace,
     policy: CapabilityPolicy,
     default_model: String,
-    approval_waiters: Mutex<HashMap<String, watch::Sender<Option<cool_protocol::ApprovalOutcome>>>>,
+    approval_waiters: Mutex<HashMap<String, watch::Sender<Option<GateOutcome>>>>,
     /// Connection that started each live run, so `run.subscribe` fan-out can
     /// skip it (the owner already receives events through its run sink).
     run_owners: Mutex<HashMap<String, String>>,
@@ -184,6 +196,8 @@ struct Inner {
     /// Durable plan id persisted for each run's first `plan.created`, so one
     /// run's repeated `update_plan` calls do not create duplicate drafts.
     planned_runs: std::sync::Mutex<HashMap<String, i64>>,
+    /// In-flight `providers.oauth_start` handshakes keyed by `state` (P2.11).
+    pending_oauth: std::sync::Mutex<HashMap<String, oauth::PendingOAuth>>,
 }
 
 #[async_trait]
@@ -441,10 +455,32 @@ struct RunRecord {
 /// the spawned run does not retain the whole request envelope.
 struct PromptRequest {
     content: String,
+    /// Resolved image bytes for the model's first turn (P2.12); `content`
+    /// carries the durable `[image: <artifact_id>]` markers instead.
+    model_parts: Vec<ModelContentPart>,
+    /// Attachment refs for the `ItemCompleted` `content_parts` extension —
+    /// the UI replays chips from these, never from bytes (P2.12).
+    replay_parts: Vec<ContentPart>,
     model: Option<String>,
     system_prompt: Option<String>,
     plan_mode: bool,
+    long_task_mode: bool,
 }
+
+/// `expand_prompt_parts` result (P2.12): `text` is what durable history and
+/// model `content` keep (with `[image: <artifact_id>]` markers), `model_parts`
+/// carries the resolved image bytes for this turn only, `replay_parts` is the
+/// attachment-ref list persisted on the `ItemCompleted` `content_parts`
+/// envelope extension so the UI can replay attachments without bytes.
+struct ExpandedContent {
+    text: String,
+    model_parts: Vec<ModelContentPart>,
+    replay_parts: Vec<ContentPart>,
+}
+
+/// Largest image attachment decoded into a model part (P2.12) — matches the
+/// `view_image` tool ceiling; bigger blobs degrade to the marker only.
+const MAX_IMAGE_PART_BYTES: u64 = 10 * 1024 * 1024;
 
 struct ConnectionState {
     initialized: bool,
@@ -574,6 +610,12 @@ impl AppServer {
             !config.write_timeout.is_zero(),
             "write_timeout must be positive"
         );
+        // P1.6: project-scope rules live in <workspace>/.cool/policy.json —
+        // load them into the shared rule state executors clone into contexts.
+        config
+            .host
+            .rules
+            .set_project_rules(load_project_rules(&workspace));
         let subagent_executor = config.legacy_store.as_ref().map(|legacy| {
             Arc::new(SubagentExecutor::new(
                 Arc::clone(legacy),
@@ -582,6 +624,7 @@ impl AppServer {
                 workspace.clone(),
                 policy.clone(),
                 default_model.clone(),
+                config.host.clone(),
             ))
         });
         let research_executor = config
@@ -606,6 +649,7 @@ impl AppServer {
                 default_model.clone(),
                 cool_store::scheduler::SchedulerConfig::default(),
                 research_executor.as_ref().map(Arc::clone),
+                config.host.clone(),
             ))
         });
         let blob_store = config
@@ -638,6 +682,7 @@ impl AppServer {
                 research_executor,
                 blob_store,
                 planned_runs: std::sync::Mutex::new(HashMap::new()),
+                pending_oauth: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -646,6 +691,323 @@ impl AppServer {
     /// (the CLI) start its loop with [`TaskExecutor::spawn_loop`].
     pub fn task_executor(&self) -> Option<Arc<TaskExecutor>> {
         self.inner.task_executor.clone()
+    }
+
+    /// The run's base capability policy. Project + user rules are NOT
+    /// snapshotted here: runs attach `rule_source` so rule mutations apply
+    /// to in-flight runs instead of a run-start copy (P1.6).
+    fn merged_policy(&self) -> CapabilityPolicy {
+        self.inner.policy.clone()
+    }
+
+    /// Live project+user rule source for a run's workspace (P1.6): every
+    /// tool call re-reads `<run workspace>/.cool/policy.json` so rule
+    /// mutations and external file edits apply to in-flight runs.
+    fn rule_source(&self, run_workspace: &Workspace) -> cool_agent::RuleSource {
+        rule_source_for(
+            self.inner.config.legacy_store.clone(),
+            run_workspace.clone(),
+            self.inner.config.host.rules.clone(),
+        )
+    }
+
+    /// The workspace a session's runs execute in — the linked
+    /// conversation's `working_directory` when set, else the server
+    /// workspace (same derivation the run spawn path uses).
+    fn run_workspace_for_session(&self, session_id: &str) -> Workspace {
+        self.inner
+            .config
+            .legacy_store
+            .as_deref()
+            .and_then(|legacy| {
+                self.inner
+                    .store
+                    .conversation_id_for_session(&local_actor().id, session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|conversation_id| {
+                        legacy
+                            .get_conversation(&local_actor().id, conversation_id)
+                            .ok()
+                    })
+                    .and_then(|conversation| conversation.working_directory)
+            })
+            .and_then(|path| Workspace::new(path).ok())
+            .unwrap_or_else(|| self.inner.workspace.clone())
+    }
+
+    /// The workspace a RUN executes in — resolved through its session.
+    /// Falls back to the server workspace for unknown/missing runs.
+    fn run_workspace_for_run(&self, run_id: &str) -> Workspace {
+        self.inner
+            .store
+            .run(run_id, &local_actor().id)
+            .ok()
+            .map(|run| run.session_id)
+            .map(|session_id| self.run_workspace_for_session(&session_id))
+            .unwrap_or_else(|| self.inner.workspace.clone())
+    }
+
+    /// Workspace rule commands operate on: the run's when `run_id` is
+    /// given, else the server's — so rules manage the workspace they
+    /// were written to (a remembered project rule in another cwd stays
+    /// listable/deletable via its run).
+    fn rule_workspace(&self, run_id: Option<&str>) -> Workspace {
+        run_id
+            .map(|run_id| self.run_workspace_for_run(run_id))
+            .unwrap_or_else(|| self.inner.workspace.clone())
+    }
+
+    /// Persists a rule by scope. Returns the stored rule plus whether it was
+    /// newly inserted — an identical rule already present is returned as
+    /// `(existing, false)` so retries never duplicate rules. `workspace` is
+    /// the run's working directory: project rules land in ITS
+    /// `.cool/policy.json` so the run's live rule source sees them.
+    fn add_policy_rule(
+        &self,
+        mut rule: PolicyRule,
+        run_id: Option<&str>,
+        workspace: &Workspace,
+    ) -> Result<(PolicyRule, bool), String> {
+        match rule.scope {
+            RuleScope::Session => {
+                let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
+                let existed = self
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .session_rules(run_id)
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .any(|existing| existing.same_signature(&rule));
+                let rule = self.inner.config.host.rules.add_session_rule(run_id, rule);
+                Ok((rule, !existed))
+            }
+            RuleScope::Project => self.add_project_rule_to(workspace, rule),
+            RuleScope::User => {
+                let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
+                    "user-scope rules require the durable store (--legacy-store)".to_owned()
+                })?;
+                // Dedupe: an identical stored rule makes the add a no-op —
+                // retried resolves and replays must not pile up duplicates.
+                if let Some(existing) = user_policy_rules(legacy, &project_key(workspace))
+                    .map_err(|error| format!("policy store unavailable: {error}"))?
+                    .into_iter()
+                    .find(|existing| existing.same_signature(&rule))
+                {
+                    return Ok((existing, false));
+                }
+                let row = legacy
+                    .insert_policy_rule(&cool_store::domains::policy_rules::NewPolicyRule {
+                        tool: rule.tool.clone(),
+                        pattern_kind: rule.kind.name().to_owned(),
+                        pattern: rule.pattern.clone(),
+                        decision: match rule.decision {
+                            Decision::Allow => "allow",
+                            Decision::Ask => "ask",
+                            Decision::Deny => "deny",
+                        }
+                        .to_owned(),
+                        scope: "user".to_owned(),
+                        project_key: None,
+                        note: rule.note.clone(),
+                        created_by: Some(local_actor().id),
+                    })
+                    .map_err(|error| error.to_string())?;
+                rule.id = Some(format!("user:{}", row.id));
+                rule.scope = RuleScope::User;
+                Ok((rule, true))
+            }
+        }
+    }
+
+    /// Read-modify-write a project rule into `<workspace>/.cool/policy.json`.
+    /// The file is the source of truth: edits a client made between calls
+    /// survive (they merge rather than being clobbered by a stale mirror),
+    /// and ids come from the file's persisted `next_id` so a deleted id is
+    /// never reused — even across restarts. When the target is the server
+    /// workspace the in-memory mirror is refreshed alongside the write.
+    fn add_project_rule_to(
+        &self,
+        workspace: &Workspace,
+        mut rule: PolicyRule,
+    ) -> Result<(PolicyRule, bool), String> {
+        let (mut rules, next_id) = load_project_policy(workspace);
+        if let Some(existing) = rules.iter().find(|existing| existing.same_signature(&rule)) {
+            return Ok((existing.clone(), false));
+        }
+        rule.scope = RuleScope::Project;
+        rule.id = Some(format!("project:{next_id}"));
+        rules.push(rule.clone());
+        persist_project_rules(workspace, next_id + 1, &rules)
+            .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
+        if workspace.root() == self.inner.workspace.root() {
+            self.inner.config.host.rules.set_project_rules(rules);
+        }
+        Ok((rule, true))
+    }
+
+    fn delete_policy_rule(
+        &self,
+        rule_id: &str,
+        run_id: Option<&str>,
+        workspace: &Workspace,
+    ) -> Result<bool, String> {
+        let Some((scope, _)) = rule_id.split_once(':') else {
+            return Err(format!(
+                "invalid rule id '{rule_id}' (expected scope:id, e.g. user:3)"
+            ));
+        };
+        match scope {
+            "session" => {
+                let run_id = run_id.ok_or_else(|| "session rules require a run_id".to_owned())?;
+                Ok(self
+                    .inner
+                    .config
+                    .host
+                    .rules
+                    .delete_session_rule(run_id, rule_id))
+            }
+            "project" => {
+                // File read-modify-write in the rule's own workspace:
+                // delete by exact id only, carry the `next_id` counter
+                // forward so the freed id never returns.
+                let (mut rules, next_id) = load_project_policy(workspace);
+                let Some(index) = rules
+                    .iter()
+                    .position(|rule| rule.id.as_deref() == Some(rule_id))
+                else {
+                    return Ok(false);
+                };
+                rules.remove(index);
+                persist_project_rules(workspace, next_id, &rules)
+                    .map_err(|error| format!("failed to persist .cool/policy.json: {error}"))?;
+                if workspace.root() == self.inner.workspace.root() {
+                    self.inner.config.host.rules.set_project_rules(rules);
+                }
+                Ok(true)
+            }
+            "user" => {
+                let legacy = self.inner.config.legacy_store.as_ref().ok_or_else(|| {
+                    "user-scope rules require the durable store (--legacy-store)".to_owned()
+                })?;
+                let Some((_, id)) = rule_id.split_once(':') else {
+                    return Err(format!("invalid user rule id '{rule_id}'"));
+                };
+                let id: i64 = id
+                    .parse()
+                    .map_err(|_| format!("invalid user rule id '{rule_id}'"))?;
+                legacy
+                    .delete_policy_rule(id)
+                    .map_err(|error| error.to_string())
+            }
+            _ => Err(format!("unknown rule scope '{scope}' in '{rule_id}'")),
+        }
+    }
+
+    /// Builds the rule a `remember`-flagged `approval.resolve` asks for,
+    /// WITHOUT persisting it — persistence happens only after the approval
+    /// commits so a rule never becomes live before (or without) the grant
+    /// it is tied to. The ticket's stored (already masked) call is the
+    /// anchor: an explicit `rule` payload is VALIDATED to cover that call,
+    /// never trusted as given — an approval for one tool must not mint a
+    /// rule for another.
+    fn prepare_approval_rule(
+        &self,
+        run_id: &str,
+        approval_id: &str,
+        scope: &str,
+        explicit: Option<&cool_protocol::PolicyRuleRecord>,
+    ) -> Result<PolicyRule, String> {
+        let scope =
+            RuleScope::parse(scope).ok_or_else(|| format!("unknown remember scope '{scope}'"))?;
+        // Rebuild the stored call from the run's approval event.
+        let call = self
+            .inner
+            .store
+            .all_events(run_id, &local_actor().id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find_map(|envelope| match envelope.event {
+                CanonicalEvent::ToolApprovalRequired(required)
+                    if required.approval_id == approval_id =>
+                {
+                    Some(cool_agent::ToolCall {
+                        call_id: required.call_id,
+                        name: required.name,
+                        arguments: required
+                            .arguments
+                            .into_iter()
+                            .collect::<serde_json::Map<_, _>>(),
+                    })
+                }
+                _ => None,
+            })
+            .ok_or_else(|| "approval call is not recoverable".to_owned())?;
+        let mut rule = match explicit {
+            Some(record) => {
+                let rule = cool_agent::policy_rule_from_record(record)
+                    .ok_or_else(|| "invalid rule payload".to_owned())?;
+                if !rule.matches(&call.name, &cool_agent::rule_subject(&call)) {
+                    return Err("rule does not cover the approved tool call".to_owned());
+                }
+                rule
+            }
+            None => cool_agent::suggest_policy_rule(&call)
+                .ok_or_else(|| "no suggested rule for this tool call".to_owned())?,
+        };
+        rule.scope = scope;
+        Ok(rule)
+    }
+
+    /// All rules across scopes (session rules only for `run_id`, when given),
+    /// with qualified ids — first-match-wins order: session → project → user.
+    fn list_policy_rules(
+        &self,
+        scope: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<Vec<PolicyRule>, String> {
+        // `run_id` routes project/user reads to the run's own workspace —
+        // a rule written into another conversation's cwd is manageable
+        // through its run, not through the server workspace.
+        let workspace = self.rule_workspace(run_id);
+        let mut rules = Vec::new();
+        let include = |wanted: &str| scope.is_none_or(|scope| scope == wanted);
+        if include("session")
+            && let Some(run_id) = run_id
+        {
+            rules.extend(
+                self.inner
+                    .config
+                    .host
+                    .rules
+                    .session_rules(run_id)
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .cloned(),
+            );
+        }
+        if include("project") {
+            // Live file view — picks up both API mutations and external
+            // edits to `.cool/policy.json`.
+            rules.extend(load_project_rules(&workspace));
+        }
+        if include("user") {
+            if let Some(legacy) = &self.inner.config.legacy_store {
+                rules.extend(
+                    user_policy_rules(legacy, &project_key(&workspace))
+                        .map_err(|error| format!("policy store unavailable: {error}"))?,
+                );
+            } else if scope == Some("user") {
+                return Err(
+                    "user-scope rules require the durable store (--legacy-store)".to_owned(),
+                );
+            }
+        }
+        Ok(rules)
     }
 
     /// The foreground subagent executor (for agent tools that delegate).
@@ -1017,15 +1379,20 @@ impl AppServer {
         run_id: &str,
         call_id: &str,
         tool_name: &str,
+        arguments: &std::collections::BTreeMap<String, serde_json::Value>,
         reason: &str,
     ) -> Result<cool_state::ApprovalTicket, StoreError> {
-        self.inner.store.create_approval(
+        self.inner.store.create_approval_with_arguments(
             &local_actor().id,
             session_id,
             run_id,
             call_id,
             tool_name,
+            arguments,
             reason,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1149,6 +1516,8 @@ impl AppServer {
                     &fingerprint,
                     &params.session_id,
                     params.title.as_deref(),
+                    params.up_to_cursor,
+                    params.up_to_event_seq,
                 ) {
                     Ok(forked) => success(
                         id,
@@ -1160,6 +1529,90 @@ impl AppServer {
                     Err(store) => failure(id, store_error(store)),
                 };
                 let _ = self.send(&outbound, frame).await;
+            }
+            Command::SessionRewind(params) => {
+                let actor = local_actor();
+                let fingerprint = fingerprint(&params);
+                let outcome = match self.inner.store.rewind_session(
+                    &actor.id,
+                    params.idempotency_key.as_str(),
+                    &fingerprint,
+                    &params.session_id,
+                    params.to_cursor,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                // Workspace restore happens after the durable rewind commits:
+                // the event log already carries the rewound marker, so a failed
+                // restore is reported on the result, not rolled back (P2.18).
+                // `!outcome.created` is an idempotent replay of an earlier
+                // rewind — restoring again would overwrite workspace work
+                // done since the first response.
+                let mut workspace_restored = false;
+                let mut restore_error = None;
+                if params.restore_workspace.unwrap_or(false) && outcome.created {
+                    match outcome.value.checkpoint_ref.clone() {
+                        Some(checkpoint_ref) => {
+                            let workspace = self.run_workspace_for_session(&params.session_id);
+                            // A manifest checkpoint covers only the file its
+                            // own call touched — replay every discarded
+                            // manifest newest-first so each file lands at the
+                            // pre-first-call state; a git tree snapshot covers
+                            // the whole workspace and restores once.
+                            let refs: Vec<&String> =
+                                if checkpoint_ref.starts_with(cool_agent::MANIFEST_PREFIX) {
+                                    outcome.value.checkpoint_refs.iter().rev().collect()
+                                } else {
+                                    vec![&checkpoint_ref]
+                                };
+                            for reference in refs {
+                                match cool_agent::restore_checkpoint(
+                                    &workspace,
+                                    &self.inner.config.host.launcher,
+                                    &self.inner.config.host.environment,
+                                    reference,
+                                    &outcome.value.discarded_paths,
+                                )
+                                .await
+                                {
+                                    Ok(()) => workspace_restored = true,
+                                    Err(error) => {
+                                        restore_error = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            restore_error = Some(
+                                "no mutating-tool checkpoint beyond the cursor — nothing to undo"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+                let _ = self
+                    .send(
+                        &outbound,
+                        success(
+                            id,
+                            ResponsePayload::SessionRewound(SessionRewindResult {
+                                session_id: params.session_id,
+                                run_id: outcome.value.run_id,
+                                rewound_run_ids: outcome.value.rewound_run_ids,
+                                to_cursor: params.to_cursor,
+                                checkpoint_ref: outcome.value.checkpoint_ref,
+                                workspace_restored,
+                                restore_error,
+                            }),
+                        ),
+                    )
+                    .await;
             }
             Command::SessionForConversation(params) => {
                 let actor = local_actor();
@@ -1195,6 +1648,9 @@ impl AppServer {
                         .await;
                     return;
                 };
+                // The conversation must exist and belong to the actor before
+                // ANY link is written — the bind path below must not attach a
+                // session to a foreign or nonexistent conversation id.
                 let conversation = match legacy.get_conversation(&actor.id, params.conversation_id)
                 {
                     Ok(conversation) => conversation,
@@ -1205,6 +1661,23 @@ impl AppServer {
                         return;
                     }
                 };
+                // Fork flow: bind an existing actor-owned session to the
+                // conversation instead of creating one and importing the
+                // legacy transcript.
+                if let Some(session_id) = params.session_id.as_deref() {
+                    let frame = match self.inner.store.bind_session_to_conversation(
+                        &actor.id,
+                        params.idempotency_key.as_str(),
+                        &fingerprint,
+                        params.conversation_id,
+                        session_id,
+                    ) {
+                        Ok(link) => success(id, session_conversation_payload(link)),
+                        Err(error) => failure(id, store_error(error)),
+                    };
+                    let _ = self.send(&outbound, frame).await;
+                    return;
+                }
                 let window = match legacy.recent_messages(
                     &actor.id,
                     params.conversation_id,
@@ -1276,29 +1749,27 @@ impl AppServer {
                 let _ = self.send(&outbound, frame).await;
             }
             Command::SessionSteer(params) => {
-                if params
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    let _ = self
-                        .send(
-                            &outbound,
-                            failure(id, error(-32602, "unsupported_content_part", false)),
-                        )
-                        .await;
-                    return;
-                }
-                let content = params
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if content.trim().is_empty() {
+                let actor = local_actor();
+                // Image/artifact parts are expanded like prompt parts (P2.12):
+                // the steered item's `content` keeps the marker text and its
+                // envelope `extensions.content_parts` carries the refs
+                // `drain_steers` resolves into model image parts.
+                let run = match self.inner.store.run(&params.run_id, &actor.id) {
+                    Ok(run) => run,
+                    Err(error) => {
+                        let _ = self.send(&outbound, failure(id, store_error(error))).await;
+                        return;
+                    }
+                };
+                let expanded =
+                    match self.expand_prompt_parts(&actor, &run.session_id, &params.content) {
+                        Ok(expanded) => expanded,
+                        Err(error) => {
+                            let _ = self.send(&outbound, failure(id, error)).await;
+                            return;
+                        }
+                    };
+                if expanded.text.trim().is_empty() {
                     let _ = self
                         .send(
                             &outbound,
@@ -1307,14 +1778,20 @@ impl AppServer {
                         .await;
                     return;
                 }
-                let actor = local_actor();
+                let mut extensions = cool_protocol::Extensions::default();
+                if !expanded.replay_parts.is_empty()
+                    && let Ok(value) = serde_json::to_value(&expanded.replay_parts)
+                {
+                    extensions.insert("content_parts".to_owned(), value);
+                }
                 let fingerprint = fingerprint(&params);
                 let frame = match self.inner.store.steer_run(
                     &actor.id,
                     params.idempotency_key.as_str(),
                     &fingerprint,
                     &params.run_id,
-                    &mask_secrets(&content),
+                    &mask_secrets(&expanded.text),
+                    extensions,
                 ) {
                     Ok(steer) => {
                         let frame = success(id, ResponsePayload::SteerAccepted(steer.value));
@@ -1361,9 +1838,9 @@ impl AppServer {
                         return;
                     }
                 }
-                let content =
+                let expanded =
                     match self.expand_prompt_parts(&actor, &params.session_id, &params.content) {
-                        Ok(content) => content,
+                        Ok(expanded) => expanded,
                         Err(error) => {
                             let _ = self.send(&outbound, failure(id, error)).await;
                             return;
@@ -1371,7 +1848,7 @@ impl AppServer {
                     };
                 if !self.prompt_start_frames_fit(
                     &params.session_id,
-                    &content,
+                    &expanded.text,
                     params.model.as_deref(),
                 ) {
                     let _ = self
@@ -1410,10 +1887,13 @@ impl AppServer {
                             self.spawn_agent_run(
                                 run_id,
                                 PromptRequest {
-                                    content,
+                                    content: expanded.text,
+                                    model_parts: expanded.model_parts,
+                                    replay_parts: expanded.replay_parts,
                                     model: params.model,
                                     system_prompt: params.system_prompt,
                                     plan_mode: params.plan_mode,
+                                    long_task_mode: params.long_task_mode,
                                 },
                                 cancel,
                                 outbound,
@@ -1559,6 +2039,105 @@ impl AppServer {
             Command::ApprovalResolve(params) => {
                 let actor = local_actor();
                 let fingerprint = fingerprint(&params);
+                let approved = params.decision == cool_protocol::ApprovalDecision::Approved;
+                // P1.6: VALIDATE the `remember` rule before resolving (the
+                // ticket's stored call must be recoverable and an explicit
+                // rule must cover it — an unrelated rule is rejected while
+                // the approval stays pending, so a corrected retry works),
+                // but PERSIST it only after the approval commits — a rule
+                // that goes live before its grant commits could be used by
+                // concurrent calls even if the resolve later fails.
+                let mut prepared = None;
+                if approved && let Some(scope) = params.remember.as_deref() {
+                    // `approval_call_context` locates the ticket's run — a
+                    // replay of an already-resolved approval still finds it
+                    // (dedupe makes the second persist a no-op), so replays
+                    // stay idempotent instead of erroring on state.
+                    match self
+                        .inner
+                        .store
+                        .approval_call_context(&actor.id, &params.approval_id)
+                        .map_err(|_| "approval is not pending or does not exist".to_owned())
+                    {
+                        Err(message) => {
+                            let _ = self
+                                .send(
+                                    &outbound,
+                                    failure(
+                                        id,
+                                        masked_detail_error(
+                                            -32021,
+                                            "rule_persist_failed",
+                                            &message,
+                                        ),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                        Ok(context) => match self.prepare_approval_rule(
+                            &context.run_id,
+                            &params.approval_id,
+                            scope,
+                            params.rule.as_ref(),
+                        ) {
+                            Ok(rule) => {
+                                prepared = Some((context.session_id, context.run_id, rule));
+                            }
+                            Err(message) => {
+                                let _ = self
+                                    .send(
+                                        &outbound,
+                                        failure(
+                                            id,
+                                            masked_detail_error(
+                                                -32021,
+                                                "rule_persist_failed",
+                                                &message,
+                                            ),
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        },
+                    }
+                }
+                // Persist project/user rules into their durable location
+                // BEFORE the approval commits, but hidden from every rule
+                // source via `pending`: a rule is usable exactly when its
+                // grant commits — never earlier (no live-rule window), and
+                // a persist failure leaves the approval untouched (still
+                // pending) instead of recording a false "approved". A
+                // session rule lives only in memory and cannot fail, so it
+                // is inserted post-commit instead.
+                let mut persisted = None;
+                if let Some((session_id, run_id, rule)) = &prepared
+                    && rule.scope != RuleScope::Session
+                {
+                    self.inner.config.host.rules.hide_pending(rule);
+                    let workspace = self.run_workspace_for_session(session_id);
+                    match self.add_policy_rule(rule.clone(), Some(run_id), &workspace) {
+                        Ok((stored, _)) => persisted = Some(stored),
+                        Err(message) => {
+                            self.inner.config.host.rules.promote_pending(rule);
+                            let _ = self
+                                .send(
+                                    &outbound,
+                                    failure(
+                                        id,
+                                        masked_detail_error(
+                                            -32021,
+                                            "rule_persist_failed",
+                                            &message,
+                                        ),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                }
                 let resolved = self.inner.store.resolve_approval(
                     &actor.id,
                     params.idempotency_key.as_str(),
@@ -1566,9 +2145,25 @@ impl AppServer {
                     &params.approval_id,
                     params.expected_revision,
                     params.decision,
+                    params.answer.as_ref(),
                 );
                 match resolved {
                     Ok(resolution) => {
+                        // The approval committed — the prepared rule goes
+                        // live exactly now: unhide persisted rules, insert
+                        // session rules.
+                        let mut remembered = None;
+                        if let Some((_, run_id, rule)) = prepared {
+                            let stored = if rule.scope == RuleScope::Session {
+                                self.add_policy_rule(rule, Some(&run_id), &self.inner.workspace)
+                                    .ok()
+                                    .map(|(stored, _)| stored)
+                            } else {
+                                self.inner.config.host.rules.promote_pending(&rule);
+                                persisted
+                            };
+                            remembered = stored.map(|rule| cool_agent::policy_rule_record(&rule));
+                        }
                         if let Some(waiter) = self
                             .inner
                             .approval_waiters
@@ -1576,12 +2171,16 @@ impl AppServer {
                             .await
                             .remove(&resolution.approval_id)
                         {
-                            let _ = waiter.send(Some(resolution.outcome.clone()));
+                            let _ = waiter.send(Some(GateOutcome {
+                                decision: resolution.outcome.clone(),
+                                answer: resolution.answer.clone(),
+                            }));
                         }
                         let response = ApprovalResolvedResult {
                             approval_id: resolution.approval_id,
                             revision: resolution.revision,
                             outcome: resolution.outcome,
+                            remembered_rule: remembered,
                         };
                         if self
                             .send(
@@ -1597,9 +2196,101 @@ impl AppServer {
                         }
                     }
                     Err(store) => {
+                        // The resolve never committed — the persisted rule
+                        // was never live; drop the dead row/file entry so
+                        // a failed resolve doesn't leak an ungranted rule.
+                        if let Some((session_id, run_id, rule)) = prepared {
+                            self.inner.config.host.rules.promote_pending(&rule);
+                            if let Some(stored) = &persisted
+                                && let Some(stored_id) = stored.id.clone()
+                            {
+                                let workspace = self.run_workspace_for_session(&session_id);
+                                let _ =
+                                    self.delete_policy_rule(&stored_id, Some(&run_id), &workspace);
+                            }
+                        }
                         let _ = self.send(&outbound, failure(id, store_error(store))).await;
                     }
                 }
+            }
+            Command::PolicyRulesList(params) => {
+                let frame = match self
+                    .list_policy_rules(params.scope.as_deref(), params.run_id.as_deref())
+                {
+                    Ok(rules) => success(
+                        id,
+                        ResponsePayload::PolicyRulesListed(cool_protocol::PolicyRulesListResult {
+                            rules: rules.iter().map(cool_agent::policy_rule_record).collect(),
+                        }),
+                    ),
+                    Err(message) => failure(
+                        id,
+                        masked_detail_error(-32022, "policy_rules_failed", &message),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::PolicyRuleAdd(params) => {
+                let frame = match cool_agent::policy_rule_from_record(&params.rule) {
+                    // An `allow` rule widens access — minting one bypasses
+                    // the approval flow entirely, so it is only accepted
+                    // through `approval.resolve`+`remember` (human
+                    // confirmation). Deny/ask rules never widen access and
+                    // stay self-service.
+                    Some(rule) if rule.decision == Decision::Allow => failure(
+                        id,
+                        masked_detail_error(
+                            -32022,
+                            "policy_rules_failed",
+                            "allow rules require an approved approval.resolve with remember",
+                        ),
+                    ),
+                    Some(rule) => match self.add_policy_rule(
+                        rule,
+                        params.run_id.as_deref(),
+                        &self.rule_workspace(params.run_id.as_deref()),
+                    ) {
+                        Ok((stored, _)) => success(
+                            id,
+                            ResponsePayload::PolicyRuleAdded(cool_agent::policy_rule_record(
+                                &stored,
+                            )),
+                        ),
+                        Err(message) => failure(
+                            id,
+                            masked_detail_error(-32022, "policy_rules_failed", &message),
+                        ),
+                    },
+                    None => failure(
+                        id,
+                        masked_detail_error(
+                            -32002,
+                            "invalid_params",
+                            "rule has an unknown kind, decision or scope",
+                        ),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::PolicyRuleDelete(params) => {
+                let workspace = self.rule_workspace(params.run_id.as_deref());
+                let frame = match self.delete_policy_rule(
+                    &params.rule_id,
+                    params.run_id.as_deref(),
+                    &workspace,
+                ) {
+                    Ok(deleted) => success(
+                        id,
+                        ResponsePayload::PolicyRuleDeleted(cool_protocol::PolicyRuleDeleteResult {
+                            deleted,
+                        }),
+                    ),
+                    Err(message) => failure(
+                        id,
+                        masked_detail_error(-32022, "policy_rules_failed", &message),
+                    ),
+                };
+                let _ = self.send(&outbound, frame).await;
             }
             Command::StatusGet(_) => {
                 let status = match &self.inner.lifecycle {
@@ -1984,6 +2675,14 @@ impl AppServer {
                 };
                 let _ = self.send(&outbound, frame).await;
             }
+            Command::ProvidersOauthStart(params) => {
+                let frame = self.handle_oauth_start(id, params).await;
+                let _ = self.send(&outbound, frame).await;
+            }
+            Command::ProvidersOauthComplete(params) => {
+                let frame = self.handle_oauth_complete(id, params).await;
+                let _ = self.send(&outbound, frame).await;
+            }
             Command::RssFetchNow(params) => {
                 let frame = match &self.inner.rss_feed_fetch {
                     Some(fetch) => {
@@ -2108,6 +2807,7 @@ impl AppServer {
                             name: params.name.clone(),
                             prompt: params.prompt.clone(),
                             model: params.model.clone(),
+                            ..SubagentLaunchSpec::default()
                         };
                         let fingerprint = legacy::fingerprint(&params);
                         match executor
@@ -2147,6 +2847,7 @@ impl AppServer {
                                 name: item.name.clone(),
                                 prompt: item.prompt.clone(),
                                 model: item.model.clone(),
+                                ..SubagentLaunchSpec::default()
                             })
                             .collect::<Vec<_>>();
                         let fingerprint = legacy::fingerprint(&params);
@@ -2758,19 +3459,28 @@ impl AppServer {
             let Some(run) = server.inner.store.run(&run_id, &local_actor().id).ok() else {
                 return;
             };
+            // The run works in the conversation's working directory when the
+            // linked conversation sets one (matching the plan executor);
+            // everything else falls back to the server workspace.
+            let workspace = server.run_workspace_for_session(&run.session_id);
             let sink = AppServerEventSink {
                 server: server.clone(),
                 run_id: run_id.clone(),
+                workspace: workspace.clone(),
                 outbound: outbound.clone(),
                 steer_cursor: Arc::new(AtomicU64::new(run.last_seq)),
                 own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                pending_compact_cursor: Arc::new(Mutex::new(None)),
             };
-            let approvals = AppServerApprovalGate {
+            // Shared between the run's approval asks (passed by reference) and
+            // the `ask_user` question gate on the tool context (P1.8) — the
+            // app-server transport is the only surface that can reach a human.
+            let approvals = Arc::new(AppServerApprovalGate {
                 server: server.clone(),
                 run_id: run_id.clone(),
                 session_id: run.session_id.clone(),
                 outbound: outbound.clone(),
-            };
+            });
             let masked_prompt = mask_secrets(&prompt.content);
             // Planning mode owns the system prompt: a caller cannot override the
             // directive that turns the turn into plan generation. The prompt is
@@ -2789,7 +3499,10 @@ impl AppServer {
                     Some(system_prompt) => Some(system_prompt),
                     None => default_system_prompt(&server).await,
                 };
-                (system_prompt, None)
+                // Long-task mode keeps the normal system prompt; the loop
+                // itself injects the progress file and marks the run.
+                let mode = prompt.long_task_mode.then(|| "long_task".to_owned());
+                (system_prompt, mode)
             };
             let request = AgentRequest {
                 model: prompt
@@ -2797,25 +3510,35 @@ impl AppServer {
                     .unwrap_or_else(|| server.inner.default_model.clone()),
                 history: Vec::<Message>::new(),
                 user_input: prompt.content,
+                user_parts: prompt.model_parts,
+                user_replay_parts: prompt.replay_parts,
                 system_prompt,
                 mode,
                 temperature: 0.0,
                 max_tokens: None,
                 limits: AgentLimits::default(),
                 tool_names: None,
-                tool_context: ToolContext::new(
-                    server.inner.workspace.clone(),
-                    server.inner.policy.clone(),
-                )
-                .with_actor(local_actor().id)
-                .with_conversation(
-                    server
+                tool_context: {
+                    let conversation_id = server
                         .inner
                         .store
                         .conversation_id_for_session(&local_actor().id, &run.session_id)
                         .ok()
-                        .flatten(),
-                ),
+                        .flatten();
+                    ToolContext::new(workspace.clone(), server.merged_policy())
+                        .with_actor(local_actor().id)
+                        .with_launcher(server.inner.config.host.launcher.clone())
+                        .with_environment(server.inner.config.host.environment.clone())
+                        .with_session_rules(server.inner.config.host.rules.session_rules(&run_id))
+                        .with_rule_source(server.rule_source(&workspace))
+                        .with_session_id(run.session_id.clone())
+                        .with_artifact_reader(std::sync::Arc::new(ServerArtifactReader {
+                            server: server.clone(),
+                            conversation_id,
+                        }))
+                        .with_conversation(conversation_id)
+                        .with_question_gate(approvals.clone())
+                },
             };
             let lifecycle_sink =
                 server
@@ -2838,10 +3561,13 @@ impl AppServer {
                 .run(
                     request,
                     event_sink,
-                    &approvals,
+                    approvals.as_ref(),
                     CancelSignal::from_receiver(cancel),
                 )
                 .await;
+            // The run is settled — drop its session-rule set so finished
+            // runs don't accumulate per-run state forever.
+            server.inner.config.host.rules.remove_session(&run_id);
             let terminal = server
                 .inner
                 .store
@@ -3089,17 +3815,24 @@ impl AppServer {
                 truncate_chars(&content, 300)
             ));
         }
-        let model = legacy
-            .get_conversation(&actor.id, conversation_id)
-            .ok()
-            .and_then(|conversation| conversation.model)
+        let conversation = legacy.get_conversation(&actor.id, conversation_id).ok();
+        let model = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.model.clone())
             .unwrap_or_else(|| self.inner.default_model.clone());
+        // The task progress file lives in the conversation's workspace, not
+        // the server root (same resolution as `run_plan`/`spawn_agent_run`).
+        let workspace = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.working_directory.as_deref())
+            .and_then(|path| Workspace::new(path).ok())
+            .unwrap_or_else(|| self.inner.workspace.clone());
         // Mask before truncating so a secret cannot be split across a cut and
         // survive the pattern matcher; a provider failure falls back to a
         // deterministic extractive summary so compaction never loses context.
         let fallback = truncate_chars(&mask_secrets(&transcript), 4000);
         let summary = self
-            .summarize_conversation(&transcript, &model)
+            .summarize_conversation(&workspace, &transcript, &model)
             .await
             .map(|text| truncate_chars(&text, 8000))
             .unwrap_or(fallback);
@@ -3161,12 +3894,32 @@ impl AppServer {
         Ok(items)
     }
 
-    /// One provider call producing the rolling summary (masked).
-    async fn summarize_conversation(&self, transcript: &str, model: &str) -> Option<String> {
+    /// One provider call producing the rolling summary (masked). When the
+    /// run's workspace carries a task progress file
+    /// (`.cool/task/progress.md`, the long-running-task skill convention),
+    /// its content is prepended so the summary preserves tracked task state
+    /// across compaction.
+    async fn summarize_conversation(
+        &self,
+        workspace: &Workspace,
+        transcript: &str,
+        model: &str,
+    ) -> Option<String> {
+        let mut input = String::new();
+        if let Ok(Some(progress)) = load_task_progress(workspace) {
+            input.push_str(
+                "[Task progress file — preserve this tracked state verbatim in the summary]\n",
+            );
+            input.push_str(&mask_secrets(&progress));
+            input.push_str("\n\n");
+        }
+        input.push_str(transcript);
         let request = AgentRequest {
             model: model.to_owned(),
             history: Vec::new(),
-            user_input: transcript.to_owned(),
+            user_input: input,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: Some(SUMMARIZER_SYSTEM_PROMPT.to_owned()),
             mode: Some("compact".to_owned()),
             temperature: 0.0,
@@ -3176,7 +3929,7 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: Some(BTreeSet::new()),
-            tool_context: ToolContext::new(self.inner.workspace.clone(), self.inner.policy.clone())
+            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone())
                 .with_actor(local_actor().id),
         };
         let sink = PlanStepSink::default();
@@ -3258,15 +4011,41 @@ impl AppServer {
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return;
         };
-        let sink = AppServerEventSink {
+        let ordered = topological_order(&steps);
+        let total = ordered.len() as u32;
+        let make_sink = |workspace: Workspace| AppServerEventSink {
             server: self.clone(),
             run_id: run_id.clone(),
+            workspace,
             outbound: outbound.clone(),
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
-        let ordered = topological_order(&steps);
-        let total = ordered.len() as u32;
+        let conversation = legacy
+            .get_conversation(&actor.id, plan.conversation_id)
+            .ok();
+        let model = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.model.clone())
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        let workspace = match conversation
+            .as_ref()
+            .and_then(|conversation| conversation.working_directory.as_deref())
+        {
+            Some(path) => match Workspace::new(path) {
+                Ok(workspace) => workspace,
+                Err(_) => {
+                    let sink = make_sink(self.inner.workspace.clone());
+                    let _ = self
+                        .finish_plan(&sink, legacy, &actor, &plan, "failed", 0, total)
+                        .await;
+                    return;
+                }
+            },
+            None => self.inner.workspace.clone(),
+        };
+        let sink = make_sink(workspace.clone());
         let _ = sink
             .emit(CanonicalEvent::RunStarted(RunStarted {
                 model: None,
@@ -3294,28 +4073,6 @@ impl AppServer {
                 status: PlanProgressStatus::Executing,
             }))
             .await;
-        let conversation = legacy
-            .get_conversation(&actor.id, plan.conversation_id)
-            .ok();
-        let model = conversation
-            .as_ref()
-            .and_then(|conversation| conversation.model.clone())
-            .unwrap_or_else(|| self.inner.default_model.clone());
-        let workspace = match conversation
-            .as_ref()
-            .and_then(|conversation| conversation.working_directory.as_deref())
-        {
-            Some(path) => match Workspace::new(path) {
-                Ok(workspace) => workspace,
-                Err(_) => {
-                    let _ = self
-                        .finish_plan(&sink, legacy, &actor, &plan, "failed", 0, total)
-                        .await;
-                    return;
-                }
-            },
-            None => self.inner.workspace.clone(),
-        };
         let mut statuses = steps
             .iter()
             .map(|step| (step.position, step.status.clone()))
@@ -3502,31 +4259,37 @@ impl AppServer {
         Ok(())
     }
 
-    /// Expand `ContentPart`s into the text-only user input the Rust runtime
-    /// accepts (Python `build_multimodal_content`, `backend/app/multimodal.py`):
-    /// extracted text is inlined as `[Attachment: name]`, supported images get
-    /// a marker pointing at `image_analyze` (the Rust `Message` has no vision
-    /// parts — tracked as an M12 checkpoint gap), opaque files get the
+    /// Expand `ContentPart`s (Python `build_multimodal_content`,
+    /// `backend/app/multimodal.py`): extracted text is inlined as
+    /// `[Attachment: name]`, supported images become model image parts plus a
+    /// `[image: <id>]` marker (P2.12), opaque files get the
     /// `no text extracted` marker. Ownership matches Python: when the session
     /// is linked to a conversation, artifacts must belong to it.
+    /// `expand_prompt_parts` output (P2.12): the durable marker text, the
+    /// model-facing image parts (base64, this turn only), and the attachment
+    /// refs that land on the `ItemCompleted` `content_parts` extension.
     fn expand_prompt_parts(
         &self,
         actor: &ActorRef,
         session_id: &str,
         parts: &[ContentPart],
-    ) -> Result<String, ProtocolError> {
+    ) -> Result<ExpandedContent, ProtocolError> {
         if parts
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
         {
-            return Ok(parts
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"));
+            return Ok(ExpandedContent {
+                text: parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                model_parts: Vec::new(),
+                replay_parts: Vec::new(),
+            });
         }
         let Some(legacy) = self.inner.config.legacy_store.as_deref() else {
             return Err(error(-32010, "legacy_store_unavailable", false));
@@ -3561,7 +4324,9 @@ impl AppServer {
             .ok_or_else(|| {
                 legacy::invalid_input("Artifact attachments require a linked conversation")
             })?;
+        let blobs = self.inner.blob_store.as_ref();
         let mut out = String::new();
+        let mut model_parts = Vec::new();
         let mut emitted = HashSet::new();
         for part in parts {
             match part {
@@ -3588,16 +4353,31 @@ impl AppServer {
                             "Artifact {id} not found in this conversation"
                         )));
                     }
-                    if artifact.kind == "image"
-                        && blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str())
-                    {
-                        // Rust messages are text-only and there is no vision
-                        // tool; the attachment is acknowledged but its pixels
-                        // cannot be inspected (parity gap, tracked in M12).
-                        out.push_str(&format!(
-                            "\n[Attached image: {} — artifact #{}; image content is not visible to this runtime]",
-                            artifact.filename, artifact.id
-                        ));
+                    if blobs::SUPPORTED_IMAGE_TYPES.contains(&artifact.media_type.as_str()) {
+                        // Image parts resolve to base64 for this turn; the
+                        // durable text keeps only the marker (P2.12). The
+                        // marker must say WHY pixels are missing — a bare
+                        // marker would have the model answer questions about
+                        // an image it never received.
+                        let mut note = " (image unavailable)";
+                        if let Some(blobs) = blobs {
+                            match blobs.read_artifact(&actor.id, id) {
+                                Ok((_, bytes)) if (bytes.len() as u64) <= MAX_IMAGE_PART_BYTES => {
+                                    use base64::Engine as _;
+                                    model_parts.push(ModelContentPart::Image {
+                                        media_type: artifact.media_type.clone(),
+                                        data_base64: base64::engine::general_purpose::STANDARD
+                                            .encode(bytes),
+                                    });
+                                    note = "";
+                                }
+                                Ok(..) | Err(blobs::BlobError::TooLarge(_)) => {
+                                    note = " (image too large to attach)";
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        out.push_str(&format!("\n[image: {id}{note}]"));
                     } else if let Some(text) = artifact.extracted_text.as_deref() {
                         out.push_str(&format!("\n[Attachment: {}]\n{text}", artifact.filename));
                     } else {
@@ -3609,7 +4389,22 @@ impl AppServer {
                 }
             }
         }
-        Ok(out)
+        Ok(ExpandedContent {
+            text: out,
+            model_parts,
+            // The extension replays the prompt — its text parts must carry
+            // the same secret masking as the durable content, not the raw
+            // input.
+            replay_parts: parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => ContentPart::Text {
+                        text: mask_secrets(text),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        })
     }
 
     /// Kick off a canonical run for a research row created by `research.create`
@@ -3683,9 +4478,11 @@ impl AppServer {
                 let sink = AppServerEventSink {
                     server: server.clone(),
                     run_id: spawned.clone(),
+                    workspace: server.inner.workspace.clone(),
                     outbound,
                     steer_cursor: Arc::new(AtomicU64::new(0)),
                     own_user_items: Arc::new(Mutex::new(HashSet::new())),
+                    pending_compact_cursor: Arc::new(Mutex::new(None)),
                 };
                 let _ = sink
                     .emit(CanonicalEvent::RunFailed(RunTerminal {
@@ -3717,9 +4514,11 @@ impl AppServer {
         let sink = AppServerEventSink {
             server: self.clone(),
             run_id,
+            workspace: self.inner.workspace.clone(),
             outbound,
             steer_cursor: Arc::new(AtomicU64::new(0)),
             own_user_items: Arc::new(Mutex::new(HashSet::new())),
+            pending_compact_cursor: Arc::new(Mutex::new(None)),
         };
         let _ = executor.execute(research_run_id, &sink, cancel_rx).await;
     }
@@ -3763,6 +4562,8 @@ impl AppServer {
             model: model.to_owned(),
             history: history.to_vec(),
             user_input: prompt,
+            user_parts: Vec::new(),
+            user_replay_parts: Vec::new(),
             system_prompt: None,
             mode: Some("plan_step".to_owned()),
             temperature: 0.0,
@@ -3772,8 +4573,11 @@ impl AppServer {
                 ..AgentLimits::default()
             },
             tool_names: None,
-            tool_context: ToolContext::new(workspace.clone(), self.inner.policy.clone())
-                .with_actor(local_actor().id),
+            tool_context: ToolContext::new(workspace.clone(), self.merged_policy())
+                .with_actor(local_actor().id)
+                .with_launcher(self.inner.config.host.launcher.clone())
+                .with_environment(self.inner.config.host.environment.clone())
+                .with_rule_source(self.rule_source(workspace)),
         };
         let sink = PlanStepSink::default();
         let outcome = self
@@ -3830,6 +4634,7 @@ impl AppServer {
             name: Some(format!("plan-step-{}:{role_name}", step.position)),
             prompt: prompt.to_owned(),
             model: None,
+            ..SubagentLaunchSpec::default()
         };
         let key = format!("plan-step:{}:{}", plan.id, step.position);
         let run = match executor.launch(&actor.id, spec, &key, &key).await {
@@ -3929,6 +4734,7 @@ impl AppServer {
         run_id: &str,
         event: CanonicalEvent,
         terminal: bool,
+        extensions: cool_protocol::Extensions,
     ) -> Option<EventEnvelope> {
         let durable_run = self.inner.store.run(run_id, &local_actor().id).ok()?;
         if durable_run.status.is_terminal() {
@@ -3953,7 +4759,7 @@ impl AppServer {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         let envelope = self
             .inner
@@ -4070,9 +4876,17 @@ impl AppServer {
 struct AppServerEventSink {
     server: AppServer,
     run_id: String,
+    /// Workspace the run executes in — the conversation's working directory
+    /// when set, else the server workspace. `summarize_for_compaction` reads
+    /// the task progress file from here.
+    workspace: Workspace,
     outbound: Outbound,
     steer_cursor: Arc<AtomicU64>,
     own_user_items: Arc<Mutex<HashSet<String>>>,
+    /// Rust-events cursor up to which the in-progress compaction's summary
+    /// covers history; set by `summarize_for_compaction` and consumed by
+    /// `emit` when the `session.compacted` event passes through.
+    pending_compact_cursor: Arc<Mutex<Option<u64>>>,
 }
 
 struct LifecycleEventSink {
@@ -4085,60 +4899,18 @@ struct LifecycleEventSink {
 #[async_trait]
 impl EventSink for LifecycleEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
-        let payload = lifecycle_payload(&event);
-        match &event {
-            CanonicalEvent::RunStarted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SessionStart", payload.clone()).await;
-                self.dispatch(
-                    "UserPromptSubmit",
-                    serde_json::json!({"content": self.prompt}),
-                )
-                .await;
-                Ok(envelope)
-            }
-            CanonicalEvent::ToolStarted(_) => {
-                self.dispatch("PreToolUse", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolApprovalRequired(_) => {
-                self.dispatch("PermissionRequest", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::SessionCompacted(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostCompact", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentStarted(_) => {
-                self.dispatch("SubagentStart", payload).await;
-                self.inner.emit(event).await
-            }
-            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("PostToolUse", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
-                let envelope = self.inner.emit(event).await?;
-                self.dispatch("SubagentStop", payload).await;
-                Ok(envelope)
-            }
-            CanonicalEvent::RunCompleted(_)
-            | CanonicalEvent::RunFailed(_)
-            | CanonicalEvent::RunCancelled(_) => {
-                if self.terminal_already_recorded() {
-                    return self.inner.emit(event).await;
-                }
-                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
-                let envelope = self.inner.emit(event).await?;
-                let hook = if cancelled { "Interrupt" } else { "Stop" };
-                self.dispatch(hook, payload.clone()).await;
-                self.dispatch("SessionEnd", payload).await;
-                Ok(envelope)
-            }
-            _ => self.inner.emit(event).await,
-        }
+        self.emit_routed(event, None).await
+    }
+
+    /// Lifecycle hooks fire on the same routing as `emit`; envelope
+    /// extensions (checkpoint refs, replay parts) must reach the persisting
+    /// sink rather than being dropped by the trait default.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_routed(event, Some(extensions)).await
     }
 
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
@@ -4161,9 +4933,89 @@ impl EventSink for LifecycleEventSink {
     async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
         self.inner.drain_steers().await
     }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+        retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.inner.summarize_for_compaction(dropped, retained).await
+    }
 }
 
 impl LifecycleEventSink {
+    async fn forward(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        match extensions {
+            Some(extensions) => self.inner.emit_with_extensions(event, extensions).await,
+            None => self.inner.emit(event).await,
+        }
+    }
+
+    async fn emit_routed(
+        &self,
+        event: CanonicalEvent,
+        extensions: Option<cool_protocol::Extensions>,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let payload = lifecycle_payload(&event);
+        match &event {
+            CanonicalEvent::RunStarted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SessionStart", payload.clone()).await;
+                self.dispatch(
+                    "UserPromptSubmit",
+                    serde_json::json!({"content": self.prompt}),
+                )
+                .await;
+                Ok(envelope)
+            }
+            CanonicalEvent::ToolStarted(_) => {
+                self.dispatch("PreToolUse", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolApprovalRequired(_) => {
+                self.dispatch("PermissionRequest", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::SessionCompacted(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostCompact", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentStarted(_) => {
+                self.dispatch("SubagentStart", payload).await;
+                self.forward(event, extensions).await
+            }
+            CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("PostToolUse", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::SubagentCompleted(_) | CanonicalEvent::SubagentFailed(_) => {
+                let envelope = self.forward(event, extensions).await?;
+                self.dispatch("SubagentStop", payload).await;
+                Ok(envelope)
+            }
+            CanonicalEvent::RunCompleted(_)
+            | CanonicalEvent::RunFailed(_)
+            | CanonicalEvent::RunCancelled(_) => {
+                if self.terminal_already_recorded() {
+                    return self.forward(event, extensions).await;
+                }
+                let cancelled = matches!(event, CanonicalEvent::RunCancelled(_));
+                let envelope = self.forward(event, extensions).await?;
+                let hook = if cancelled { "Interrupt" } else { "Stop" };
+                self.dispatch(hook, payload.clone()).await;
+                self.dispatch("SessionEnd", payload).await;
+                Ok(envelope)
+            }
+            _ => self.forward(event, extensions).await,
+        }
+    }
+
     async fn dispatch(&self, event: &str, payload: serde_json::Value) {
         let events = self.lifecycle.on_event(event, payload, &self.policy).await;
         for lifecycle_event in events {
@@ -4234,19 +5086,80 @@ fn lifecycle_payload(event: &CanonicalEvent) -> serde_json::Value {
     }
 }
 
+/// P2.12: resolves artifact ids to `(media_type, bytes)` for multimodal
+/// tools and prompt expansion — `BlobStore`-backed, scoped to the
+/// conversation the run is bound to (same rule as prompt attachments;
+/// without a linked conversation reads fail closed).
+#[derive(Clone)]
+struct ServerArtifactReader {
+    server: AppServer,
+    conversation_id: Option<i64>,
+}
+
+impl std::fmt::Debug for ServerArtifactReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ServerArtifactReader")
+    }
+}
+
+impl cool_agent::ArtifactReader for ServerArtifactReader {
+    fn read_artifact(&self, artifact_id: &str) -> Result<(String, Vec<u8>), String> {
+        let artifact_id: i64 = artifact_id
+            .parse()
+            .map_err(|_| format!("invalid artifact id '{artifact_id}'"))?;
+        let Some(legacy) = self.server.inner.config.legacy_store.as_deref() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let artifact = legacy
+            .get_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        if Some(artifact.conversation_id) != self.conversation_id {
+            return Err(format!("artifact {artifact_id}: not in this conversation"));
+        }
+        let Some(blobs) = self.server.blob_store() else {
+            return Err("artifact store unavailable".to_owned());
+        };
+        let (_, body) = blobs
+            .read_artifact(&local_actor().id, artifact_id)
+            .map_err(|error| format!("artifact {artifact_id}: {error}"))?;
+        Ok((artifact.media_type, body))
+    }
+}
+
 #[async_trait]
 impl EventSink for AppServerEventSink {
-    async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
-        let envelope = self.emit_once(event).await?;
-        if matches!(
-            &envelope.event,
-            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
-        ) {
-            self.own_user_items
-                .lock()
-                .await
-                .insert(envelope.event_id.clone());
+    async fn emit(&self, mut event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
         }
+        let envelope = self.emit_once(event, Default::default()).await?;
+        self.track_user_item(&envelope).await;
+        Ok(envelope)
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let mut event = event;
+        if let CanonicalEvent::SessionCompacted(compacted) = &mut event {
+            let cursor = self.pending_compact_cursor.lock().await.take();
+            if compacted.compact_up_to_cursor.is_none()
+                && compacted.summary.is_some()
+                && let Some(cursor) = cursor
+            {
+                compacted.compact_up_to_cursor = Some(cursor);
+            }
+        }
+        let envelope = self.emit_once(event, extensions).await?;
+        self.track_user_item(&envelope).await;
         Ok(envelope)
     }
 
@@ -4256,21 +5169,102 @@ impl EventSink for AppServerEventSink {
             .inner
             .store
             .run(&self.run_id, &local_actor().id)?;
-        let events = self
-            .server
-            .inner
-            .store
-            .session_events(&run.session_id, &local_actor().id)?;
-        let history = history_from_events(&events)?;
-        if let Some(last_seq) = events
+        let rows = self.server.inner.store.session_event_window(
+            &run.session_id,
+            &local_actor().id,
+            None,
+            i64::MAX as usize,
+        )?;
+        let history = history_from_event_rows(&rows)?;
+        if let Some(last_seq) = rows
             .iter()
-            .filter(|event| event.run_id == self.run_id)
-            .map(|event| event.seq)
+            .filter(|(_, event)| event.run_id == self.run_id)
+            .map(|(_, event)| event.seq)
             .max()
         {
             self.steer_cursor.fetch_max(last_seq, Ordering::SeqCst);
         }
         Ok(history)
+    }
+
+    async fn summarize_for_compaction(
+        &self,
+        dropped: &[Message],
+        retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        let actor = local_actor();
+        let store = &self.server.inner.store;
+        let run = store.run(&self.run_id, &actor.id)?;
+        let rows =
+            store.session_event_window(&run.session_id, &actor.id, None, i64::MAX as usize)?;
+        // `compact_up_to_cursor` lives in the rust_events.rowid space the
+        // history endpoint projects. History's non-system messages map
+        // one-to-one onto the LAST message-producing events — every
+        // compaction (summary or drop-only) keeps a suffix of the log — so
+        // the summary covers everything before `retained`'s tail.
+        let produces_message = |envelope: &EventEnvelope| {
+            matches!(
+                &envelope.event,
+                CanonicalEvent::ItemCompleted(item)
+                    if matches!(item.role.as_deref(), Some("user" | "assistant"))
+            ) || matches!(
+                &envelope.event,
+                CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
+            )
+        };
+        let message_cursors: Vec<u64> = rows
+            .iter()
+            .filter(|(_, envelope)| produces_message(envelope))
+            .map(|(cursor, _)| *cursor)
+            .collect();
+        let covered_cursor = message_cursors
+            .len()
+            .checked_sub(retained + 1)
+            .and_then(|index| message_cursors.get(index).copied());
+        let mut transcript = String::new();
+        for message in dropped {
+            let role = match message.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+            };
+            let mut line = message.content.clone().unwrap_or_default();
+            if !message.tool_calls.is_empty() {
+                let calls = message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        format!(
+                            "{} {}",
+                            call.name,
+                            truncate_chars(
+                                &serde_json::to_string(&call.arguments).unwrap_or_default(),
+                                100,
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&format!("[calls: {calls}]"));
+            }
+            transcript.push_str(&format!("{role}: {}\n", truncate_chars(&line, 300)));
+        }
+        let summary = self
+            .server
+            .summarize_conversation(
+                &self.workspace,
+                &transcript,
+                &self.server.inner.default_model.clone(),
+            )
+            .await;
+        if summary.is_some() {
+            *self.pending_compact_cursor.lock().await = covered_cursor;
+        }
+        Ok(summary)
     }
 
     async fn reserve_usage(&self, usage: &Usage) -> Result<(), RuntimeError> {
@@ -4309,7 +5303,12 @@ impl EventSink for AppServerEventSink {
                     continue;
                 }
                 if let Some(content) = item.content.clone() {
-                    messages.push(Message::text(MessageRole::User, content));
+                    // Steered attachments: the envelope's content_parts refs
+                    // resolve to image parts for this turn only — the item's
+                    // text already carries the `[image: <id>]` markers any
+                    // rebuilt history will keep (P2.12).
+                    let parts = self.steer_model_parts(envelope);
+                    messages.push(Message::with_parts(MessageRole::User, content, parts));
                 }
             }
         }
@@ -4320,7 +5319,79 @@ impl EventSink for AppServerEventSink {
 }
 
 impl AppServerEventSink {
-    async fn emit_once(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+    /// A steered user item's `content_parts` envelope refs → this-turn model
+    /// image parts (P2.12). Bytes come from the blob store fresh; anything
+    /// unreadable or oversized just degrades to the marker already in
+    /// `content`.
+    fn steer_model_parts(&self, envelope: &EventEnvelope) -> Vec<ModelContentPart> {
+        let Some(blobs) = self.server.blob_store() else {
+            return Vec::new();
+        };
+        let Some(value) = envelope.extensions.get("content_parts") else {
+            return Vec::new();
+        };
+        let Ok(parts) = serde_json::from_value::<Vec<ContentPart>>(value.clone()) else {
+            return Vec::new();
+        };
+        use base64::Engine as _;
+        let actor = local_actor();
+        // Same conversation boundary as `view_image`/prompt attachments — a
+        // steer must not smuggle another conversation's artifact to the model.
+        let conversation_id = self
+            .server
+            .inner
+            .store
+            .conversation_id_for_session(&actor.id, &envelope.session_id)
+            .ok()
+            .flatten();
+        parts
+            .iter()
+            .filter_map(|part| {
+                let (artifact_id, declared_media_type) = match part {
+                    ContentPart::Image {
+                        artifact_id,
+                        media_type,
+                    } => (artifact_id, Some(media_type.clone())),
+                    ContentPart::Artifact { artifact_id } => (artifact_id, None),
+                    _ => return None,
+                };
+                let id = artifact_id.parse::<i64>().ok()?;
+                let (artifact, bytes) = blobs.read_artifact(&actor.id, id).ok()?;
+                if Some(artifact.conversation_id) != conversation_id {
+                    return None;
+                }
+                let media_type = declared_media_type.unwrap_or(artifact.media_type);
+                if !media_type.starts_with("image/") || (bytes.len() as u64) > MAX_IMAGE_PART_BYTES
+                {
+                    return None;
+                }
+                Some(ModelContentPart::Image {
+                    media_type,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+            })
+            .collect()
+    }
+
+    /// User items this loop emitted itself are already in its history —
+    /// `drain_steers` must not deliver them a second time.
+    async fn track_user_item(&self, envelope: &EventEnvelope) {
+        if matches!(
+            &envelope.event,
+            CanonicalEvent::ItemCompleted(item) if item.role.as_deref() == Some("user")
+        ) {
+            self.own_user_items
+                .lock()
+                .await
+                .insert(envelope.event_id.clone());
+        }
+    }
+
+    async fn emit_once(
+        &self,
+        event: CanonicalEvent,
+        extensions: cool_protocol::Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let mut event = mask_canonical_event(event)?;
         self.persist_plan_created(&mut event);
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
@@ -4387,7 +5458,7 @@ impl AppServerEventSink {
         );
         let envelope = self
             .server
-            .append_event(&self.run_id, event, terminal)
+            .append_event(&self.run_id, event, terminal, extensions)
             .await
             .ok_or_else(|| RuntimeError::Sink("run no longer accepts events".to_owned()))?;
         // Fan out to subscribers before the owner send: the event is already
@@ -4480,8 +5551,8 @@ impl ApprovalGate for AppServerApprovalGate {
         request: ApprovalRequest,
         _sink: &dyn EventSink,
         cancel: &mut CancelSignal,
-    ) -> Result<cool_protocol::ApprovalOutcome, RuntimeError> {
-        let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(
+    ) -> Result<GateOutcome, RuntimeError> {
+        let masked = mask_canonical_event(CanonicalEvent::ToolApprovalRequired(Box::new(
             cool_protocol::ToolApprovalRequired {
                 call_id: request.call.call_id.clone(),
                 name: request.call.name.clone(),
@@ -4489,11 +5560,16 @@ impl ApprovalGate for AppServerApprovalGate {
                 reason: request.reason.clone(),
                 approval_id: request.approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: request.breakpoint_type.clone(),
                 result_preview: None,
                 current_content: None,
+                matched_rule: request.matched_rule.clone(),
+                suggested_rule: request
+                    .suggested_rule
+                    .as_ref()
+                    .map(cool_agent::policy_rule_record),
             },
-        ))?;
+        )))?;
         let CanonicalEvent::ToolApprovalRequired(masked) = masked else {
             unreachable!("event variant is preserved by masking")
         };
@@ -4513,6 +5589,9 @@ impl ApprovalGate for AppServerApprovalGate {
             &request.call.name,
             &masked.arguments,
             &masked.reason,
+            masked.matched_rule.as_deref(),
+            masked.suggested_rule.as_ref(),
+            masked.breakpoint_type.as_deref(),
         )?;
         let (sender, mut receiver) = watch::channel(None);
         self.server
@@ -4546,7 +5625,7 @@ impl ApprovalGate for AppServerApprovalGate {
                 ));
             }
         }
-        if let Some(outcome) = self
+        if let Some((outcome, answer)) = self
             .server
             .inner
             .store
@@ -4558,9 +5637,20 @@ impl ApprovalGate for AppServerApprovalGate {
                 .lock()
                 .await
                 .remove(&ticket.approval_id);
-            return Ok(outcome);
+            return Ok(GateOutcome {
+                decision: outcome,
+                answer,
+            });
         }
-        let result = tokio::select! {
+        // The waiter entry must go on every exit — including a caller-side
+        // timeout (P1.8 `question_timeout`) dropping this pending future,
+        // which an `is_err`-only cleanup could not observe. `WaiterCleanup`
+        // removes it from `Drop`.
+        let _waiter_cleanup = WaiterCleanup {
+            inner: Arc::clone(&self.server.inner),
+            approval_id: ticket.approval_id.clone(),
+        };
+        tokio::select! {
             outcome = async {
                 loop {
                     receiver.changed().await.map_err(|_| RuntimeError::Sink("approval channel closed".to_owned()))?;
@@ -4570,16 +5660,62 @@ impl ApprovalGate for AppServerApprovalGate {
                 }
             } => outcome,
             reason = cancel.wait() => Err(RuntimeError::Sink(format!("approval cancelled: {reason}"))),
-        };
-        if result.is_err() {
-            self.server
-                .inner
-                .approval_waiters
-                .lock()
-                .await
-                .remove(&ticket.approval_id);
         }
-        result
+    }
+
+    /// `ask_user` timeout path (P1.8): the tool-side timer won, so expire the
+    /// durable ticket — `timed_out` + `ToolApprovalResolved` flips the run
+    /// back to `running` and clears the pending question card — then fan the
+    /// resolution out to subscribers exactly like a user decision. `false`
+    /// means a user answer committed first and wins the race.
+    async fn expire(&self, approval_id: &str) -> Result<bool, RuntimeError> {
+        if !self
+            .server
+            .inner
+            .store
+            .expire_approval(&local_actor().id, approval_id)?
+        {
+            return Ok(false);
+        }
+        if let Some(event) = self
+            .server
+            .inner
+            .store
+            .all_events(&self.run_id, &local_actor().id)?
+            .into_iter()
+            .last()
+        {
+            self.server.publish_to_subscribers(&event).await;
+            let _ = self.server.send(&self.outbound, notification(event)).await;
+        }
+        Ok(true)
+    }
+}
+
+/// Removes a `approval_waiters` entry when the gate request future exits —
+/// normally or by being dropped (a `tokio::time::timeout` in the tool loses
+/// the future mid-`select!`, skipping every statement after the select).
+struct WaiterCleanup {
+    inner: Arc<Inner>,
+    approval_id: String,
+}
+
+impl Drop for WaiterCleanup {
+    fn drop(&mut self) {
+        match self.inner.approval_waiters.try_lock() {
+            Ok(mut waiters) => {
+                waiters.remove(&self.approval_id);
+            }
+            Err(_) => {
+                // Contended at drop time — a spawned task still removes the
+                // entry; the receiver is dead either way.
+                let inner = Arc::clone(&self.inner);
+                let approval_id = self.approval_id.clone();
+                tokio::spawn(async move {
+                    inner.approval_waiters.lock().await.remove(&approval_id);
+                });
+            }
+        }
     }
 }
 
@@ -4596,12 +5732,12 @@ impl Drop for SocketCleanup {
 /// Captures the concatenated content deltas of one plan step; a plan step does
 /// not project its own transcript.
 #[derive(Default)]
-struct PlanStepSink {
+pub(crate) struct PlanStepSink {
     text: std::sync::Mutex<String>,
 }
 
 impl PlanStepSink {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.text
             .lock()
             .map(|text| text.clone())
@@ -4867,7 +6003,7 @@ fn error_text(error: &cool_store::StoreError) -> String {
 const MAX_IMPORTED_MESSAGES: usize = 10_000;
 
 /// System directive for `conversations.compact` (rolling summary).
-const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
+pub(crate) const SUMMARIZER_SYSTEM_PROMPT: &str = "You summarize a conversation for the assistant's future context. Keep durable facts, decisions, open tasks and user preferences; drop pleasantries. Reply with the summary only.";
 
 fn session_conversation_payload(link: ConversationLink) -> ResponsePayload {
     ResponsePayload::SessionForConversation(SessionConversationResult {
@@ -5499,6 +6635,10 @@ fn store_error(value: StoreError) -> ProtocolError {
         StoreError::InvalidTransition { .. } => error(-32007, "session_run_active", true),
         StoreError::BudgetExceeded(_) => error(-32014, "budget_exceeded", false),
         StoreError::NotFound(_) => error(-32004, "resource_not_found", false),
+        StoreError::RewindRejected(reason) => match reason {
+            "session_has_live_run" => error(-32007, "session_run_active", true),
+            _ => error(-32602, "rewind_rejected", false),
+        },
         StoreError::Sqlite(_)
         | StoreError::Json(_)
         | StoreError::Io(_)
@@ -5532,6 +6672,196 @@ fn encode_bounded_frame(frame: ServerFrame, limit: usize) -> io::Result<Vec<u8>>
 
 fn fingerprint<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("protocol parameters serialize deterministically")
+}
+
+/// Workspace key for `policy_rules.project_key` rows — the workspace root
+/// path, stable for a given checkout.
+fn project_key(workspace: &Workspace) -> String {
+    workspace.root().to_string_lossy().into_owned()
+}
+
+/// A rule that denies everything — substituted for a policy that exists but
+/// cannot be parsed, so corrupt config never degrades to the permissive
+/// capability fallback (fail closed, with the reason surfaced in `note`).
+fn deny_all_rule(scope: RuleScope, id: &str, note: &str) -> PolicyRule {
+    PolicyRule {
+        tool: "*".to_owned(),
+        kind: RulePatternKind::Any,
+        pattern: String::new(),
+        decision: Decision::Deny,
+        scope,
+        note: Some(note.to_owned()),
+        id: Some(id.to_owned()),
+    }
+}
+
+/// Loads `<workspace>/.cool/policy.json` — `{"rules": [...], "next_id": n}` —
+/// tolerating a missing file (no rules) but failing CLOSED on a corrupt one:
+/// a malformed file or entry yields a deny-all rule, never an empty rule set.
+/// Returns the rules plus the persisted monotonic id counter (falling back
+/// to max-suffix+1 for files written before `next_id` existed) so new rule
+/// ids are never reused across restarts.
+fn load_project_policy(workspace: &Workspace) -> (Vec<PolicyRule>, u64) {
+    let Ok(body) = workspace.dir().read(".cool/policy.json") else {
+        return (Vec::new(), 0);
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            vec![deny_all_rule(
+                RuleScope::Project,
+                "project:parse-failure",
+                "malformed .cool/policy.json",
+            )],
+            0,
+        );
+    };
+    // A file that exists but has no `rules` array is MALFORMED — the
+    // writer always emits `{"version":1,"next_id":n,"rules":[...]}`.
+    // Treating it as "no rules" would silently drop restrictions
+    // (fail closed, same as an unparseable file).
+    let Some(items) = parsed.get("rules").and_then(serde_json::Value::as_array) else {
+        return (
+            vec![deny_all_rule(
+                RuleScope::Project,
+                "project:malformed",
+                "malformed .cool/policy.json (no rules array)",
+            )],
+            0,
+        );
+    };
+    let rules: Vec<PolicyRule> = items
+        .iter()
+        .enumerate()
+        .flat_map(
+            |(index, item)| match serde_json::from_value::<PolicyRule>(item.clone()) {
+                Ok(mut rule) => {
+                    rule.scope = RuleScope::Project;
+                    if rule.id.is_none() {
+                        rule.id = Some(format!("project:{index}"));
+                    }
+                    vec![rule]
+                }
+                Err(_) => vec![deny_all_rule(
+                    RuleScope::Project,
+                    &format!("project:{index}:parse-failure"),
+                    "malformed entry in .cool/policy.json",
+                )],
+            },
+        )
+        .collect();
+    let next_id = parsed
+        .get("next_id")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| {
+            rules
+                .iter()
+                .filter_map(|rule| rule.id.as_deref())
+                .filter_map(|id| id.strip_prefix("project:"))
+                .filter_map(|suffix| suffix.parse::<u64>().ok())
+                .map(|suffix| suffix + 1)
+                .max()
+                .unwrap_or(0)
+        });
+    (rules, next_id)
+}
+
+/// Loads `<workspace>/.cool/policy.json` rules — see [`load_project_policy`].
+pub fn load_project_rules(workspace: &Workspace) -> Vec<PolicyRule> {
+    load_project_policy(workspace).0
+}
+
+/// Rewrites `<workspace>/.cool/policy.json` after a project-rule mutation,
+/// carrying the monotonic `next_id` forward so deleted ids stay dead.
+fn persist_project_rules(
+    workspace: &Workspace,
+    next_id: u64,
+    rules: &[PolicyRule],
+) -> Result<(), StoreError> {
+    let body = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "next_id": next_id,
+        "rules": rules,
+    }))?;
+    workspace.dir().create_dir_all(".cool")?;
+    workspace.dir().write(".cool/policy.json", body)?;
+    Ok(())
+}
+
+/// Maps `policy_rules` rows to `PolicyRule`s. Fail closed: a row whose
+/// kind/decision cannot be parsed becomes a deny rule for that row's tool —
+/// a corrupt stored rule must widen nothing, not silently disappear.
+/// Store errors propagate: callers must NOT fall back to an empty rule set
+/// (a vanished deny rule widens access).
+fn user_policy_rules(
+    legacy: &LegacyStore,
+    project_key: &str,
+) -> Result<Vec<PolicyRule>, StoreError> {
+    Ok(legacy
+        .list_policy_rules(Some(project_key))
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?
+        .into_iter()
+        .map(|row| {
+            let kind = cool_security::RulePatternKind::parse(&row.pattern_kind);
+            let decision = match row.decision.as_str() {
+                "allow" => Some(Decision::Allow),
+                "ask" => Some(Decision::Ask),
+                "deny" => Some(Decision::Deny),
+                _ => None,
+            };
+            let scope = RuleScope::parse(&row.scope).unwrap_or(RuleScope::User);
+            match (kind, decision) {
+                (Some(kind), Some(decision)) => PolicyRule {
+                    tool: row.tool,
+                    kind,
+                    pattern: row.pattern,
+                    decision,
+                    scope,
+                    note: row.note,
+                    id: Some(format!("user:{}", row.id)),
+                },
+                _ => {
+                    let mut rule = deny_all_rule(
+                        scope,
+                        &format!("user:{}:parse-failure", row.id),
+                        "malformed stored policy rule",
+                    );
+                    rule.tool = row.tool;
+                    rule
+                }
+            }
+        })
+        .collect())
+}
+
+/// Live project+user rule source for a run (P1.6): re-evaluated per tool
+/// call — the run workspace's `.cool/policy.json` is re-read every call so
+/// `policy.rule_add`/`rule_delete` AND external file edits apply to
+/// in-flight runs. A store outage fails closed (deny-all), never falls
+/// back to a rule-free merge.
+fn rule_source_for(
+    legacy: Option<Arc<LegacyStore>>,
+    run_workspace: Workspace,
+    state: Arc<RuleState>,
+) -> cool_agent::RuleSource {
+    Arc::new(move || {
+        let mut merged = load_project_rules(&run_workspace);
+        if let Some(legacy) = &legacy {
+            match user_policy_rules(legacy, &project_key(&run_workspace)) {
+                Ok(rules) => merged.extend(rules),
+                Err(_) => {
+                    return vec![deny_all_rule(
+                        RuleScope::User,
+                        "user:store-error",
+                        "policy store unavailable",
+                    )];
+                }
+            }
+        }
+        // Rules persisted for a not-yet-committed approval stay inert —
+        // they apply exactly when the grant commits, never earlier.
+        merged.retain(|rule| !state.is_pending(rule));
+        merged
+    })
 }
 
 fn rpc_id_from_value(value: &serde_json::Value) -> RpcId {
@@ -5712,7 +7042,7 @@ pub fn task_templates() -> Vec<TaskTemplateRecord> {
              missing error handling and style violations. Report the findings \
              grouped by file, most important first, with concrete suggestions.",
             "0 18 * * 1-5",
-            &["read_file", "list_files"],
+            &["read_file", "list_files", "search_files", "find_files"],
             15,
         ),
         template(
@@ -5809,6 +7139,210 @@ fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month as u32, day as u32)
+}
+
+/// `providers.oauth_start` / `providers.oauth_complete` handlers (P2.11).
+/// The pending map is connection-independent: any connection may finish a
+/// login any connection started (same as the CLI's `cool auth`, which uses
+/// its own loopback listener instead of these commands).
+impl AppServer {
+    async fn handle_oauth_start(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthStartParams,
+    ) -> ServerFrame {
+        let Some(flow) = oauth::oauth_flow(&params.provider) else {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32030,
+                    "oauth_provider_unsupported",
+                    "no verified OAuth flow for this provider (supported: claude, chatgpt, gemini)",
+                ),
+            );
+        };
+        if let Err(oauth_error) = oauth::flow_ready(&flow) {
+            return failure(
+                id,
+                masked_detail_error(-32036, oauth_error.code, &oauth_error.message),
+            );
+        }
+        if let Some(uri) = params.redirect_uri.as_deref()
+            && !oauth::redirect_uri_allowed(&flow, uri)
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32037,
+                    "oauth_redirect_invalid",
+                    "redirect_uri must be the flow's manual callback or an http://localhost|127.0.0.1 loopback URI",
+                ),
+            );
+        }
+        let pkce = oauth::pkce_pair();
+        let state = flow.state(&pkce);
+        // Without an explicit redirect_uri the flow must have a usable
+        // default — a fixed loopback port or a manual callback. Otherwise the
+        // authorize URL would carry a literal `:0` placeholder no provider
+        // accepts: tell the caller to bind its own loopback listener.
+        if params.redirect_uri.is_none()
+            && flow.loopback_port.is_none()
+            && flow.manual_redirect.is_none()
+        {
+            return failure(
+                id,
+                masked_detail_error(
+                    -32038,
+                    "oauth_redirect_required",
+                    "provider has no default callback — bind a loopback listener and pass redirect_uri",
+                ),
+            );
+        }
+        // Claude defaults to Anthropic's manual paste-the-code callback — the
+        // only redirect verified against the console app. Callers that bound
+        // their own listener pass `redirect_uri` explicitly.
+        let manual = flow.manual_redirect.is_some() && params.redirect_uri.is_none();
+        let redirect_uri = match &params.redirect_uri {
+            Some(uri) => uri.clone(),
+            None if manual => flow.manual_redirect.map(str::to_owned).unwrap_or_default(),
+            None => oauth::redirect_uri(flow.clone(), None),
+        };
+        let notice = match flow.name {
+            "claude" => Some(
+                "Anthropic subscription OAuth is off-label use; an API key remains the supported credential."
+                    .to_owned(),
+            ),
+            "chatgpt" => Some(
+                "Codex OAuth tokens authenticate OpenAI's Codex backend; the chat/completions driver reports `oauth_wire_not_supported`."
+                    .to_owned(),
+            ),
+            _ => None,
+        };
+        let auth_url = oauth::authorize_url(flow.clone(), &redirect_uri, &pkce.challenge, &state);
+        let pending = oauth::PendingOAuth {
+            flow,
+            verifier: pkce.verifier.clone(),
+            redirect_uri: redirect_uri.clone(),
+            created: Instant::now(),
+        };
+        if let Ok(mut map) = self.inner.pending_oauth.lock() {
+            map.retain(|_, entry| !entry.is_expired());
+            map.insert(state.clone(), pending);
+        }
+        success(
+            id,
+            ResponsePayload::ProvidersOauthStarted(ProvidersOauthStartResult {
+                auth_url,
+                state,
+                completion: if manual {
+                    "manual".to_owned()
+                } else {
+                    "loopback".to_owned()
+                },
+                redirect_uri,
+                notice,
+            }),
+        )
+    }
+
+    async fn handle_oauth_complete(
+        &self,
+        id: RpcId,
+        params: ProvidersOauthCompleteParams,
+    ) -> ServerFrame {
+        let pending = match self.inner.pending_oauth.lock() {
+            Ok(mut map) => map.remove(&params.state),
+            Err(_) => None,
+        };
+        let Some(pending) = pending else {
+            return failure(id, error(-32032, "oauth_state_unknown", false));
+        };
+        if pending.is_expired() {
+            return failure(id, error(-32033, "oauth_state_expired", false));
+        }
+        let Some(secrets) = self.inner.config.secrets.as_deref() else {
+            return failure(id, error(-32034, "oauth_secrets_unavailable", false));
+        };
+        let Some(store) = self.inner.config.legacy_store.as_deref() else {
+            return failure(id, error(-32010, "legacy_store_unavailable", false));
+        };
+        // Anthropic's manual callback renders `code#state` — the code is the
+        // first half; whitespace defensiveness for pasted input. The fragment
+        // is the provider's state echo: it must bind to THIS handshake, or a
+        // stray/unrelated callback could be exchanged under it.
+        let code = params
+            .code
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if code.is_empty() {
+            return failure(id, error(-32035, "oauth_code_missing", false));
+        }
+        if let Some(pasted_state) = params.code.split('#').nth(1)
+            && pasted_state.trim() != params.state
+        {
+            return failure(id, error(-32039, "oauth_state_mismatch", false));
+        }
+        let http = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(build_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, "oauth_http_client", &build_error.to_string()),
+                );
+            }
+        };
+        let tokens = match oauth::exchange_code(&http, pending.flow.clone(), &pending, &code).await
+        {
+            Ok(tokens) => tokens,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        let actor = local_actor().id;
+        let provider = match oauth::oauth_provider_row(store, &actor, pending.flow) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
+        let encrypted = match oauth::encrypt_tokens(secrets, &tokens) {
+            Ok(encrypted) => encrypted,
+            Err(oauth_error) => {
+                return failure(
+                    id,
+                    masked_detail_error(-32031, oauth_error.code, &oauth_error.message),
+                );
+            }
+        };
+        if let Err(store_error) = store.set_provider_oauth_tokens(&actor, provider.id, &encrypted) {
+            return failure(id, legacy::store_error(store_error));
+        }
+        // Refetch — the row fetched before `set_provider_oauth_tokens` still
+        // shows hasOauthTokens:false.
+        let provider = match store.get_provider(&actor, provider.id) {
+            Ok(provider) => provider,
+            Err(store_error) => return failure(id, legacy::store_error(store_error)),
+        };
+        let record = match legacy::provider_record(provider, Some(secrets)) {
+            Ok(record) => record,
+            Err(protocol_error) => return failure(id, protocol_error),
+        };
+        success(
+            id,
+            ResponsePayload::ProvidersOauthCompleted(ProvidersOauthCompleteResult {
+                provider: record,
+                expires_at: tokens.expires_at,
+            }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -5915,6 +7449,7 @@ mod tests {
                     }],
                 }),
                 false,
+                Default::default(),
             )
             .await
             .unwrap();

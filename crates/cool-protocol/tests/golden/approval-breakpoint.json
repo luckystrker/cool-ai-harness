@@ -55,7 +55,9 @@
           "revision": 1,
           "breakpointType": "before_write",
           "resultPreview": null,
-          "currentContent": "old"
+          "currentContent": "old",
+          "matchedRule": null,
+          "suggestedRule": null
         }
       }
     },

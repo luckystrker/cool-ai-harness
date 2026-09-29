@@ -64,6 +64,7 @@ async fn link(client: &AppClient, conversation_id: i64) -> String {
             SessionForConversationParams {
                 idempotency_key: key(&format!("link-{conversation_id}")),
                 conversation_id,
+                session_id: None,
             },
         ))
         .await
@@ -160,6 +161,7 @@ async fn plan_created_persists_a_durable_plan_with_a_store_id() {
             model: None,
             system_prompt: None,
             plan_mode: true,
+            long_task_mode: false,
         }))
         .await
         .expect("prompt");
@@ -541,6 +543,7 @@ async fn plan_created_without_a_linked_conversation_has_no_store_id() {
             model: None,
             system_prompt: None,
             plan_mode: true,
+            long_task_mode: false,
         }))
         .await
         .expect("prompt");
@@ -674,6 +677,7 @@ async fn repeated_update_plan_persists_one_draft() {
             model: None,
             system_prompt: None,
             plan_mode: true,
+            long_task_mode: false,
         }))
         .await
         .expect("prompt");

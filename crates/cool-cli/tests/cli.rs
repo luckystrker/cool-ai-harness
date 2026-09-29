@@ -685,3 +685,50 @@ fn serve_starts_the_http_facade_and_answers_health() {
         "response:\n{response}"
     );
 }
+
+#[test]
+fn scripted_run_mode_json_streams_ndjson_events() {
+    let output = cool()
+        .args(["run", "--scripted", "--mode", "json", "say", "hi"])
+        .output()
+        .expect("run scripted json agent");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert!(lines.len() >= 4, "expected a full event stream: {stdout}");
+    // Golden expectation: the scripted run emits this exact event-kind
+    // sequence (fixtures/run_scripted_ndjson_kinds.txt), one JSON object per
+    // line, and the terminal line carries the result text.
+    let golden = include_str!("fixtures/run_scripted_ndjson_kinds.txt");
+    let expected_kinds: Vec<&str> = golden.lines().filter(|l| !l.is_empty()).collect();
+    let mut kinds = Vec::new();
+    for line in &lines {
+        let envelope: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("line is not JSON ({error}): {line}"));
+        kinds.push(
+            envelope["event"]["kind"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    assert_eq!(kinds, expected_kinds);
+    let last: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(last["event"]["kind"], "run.completed");
+    assert_eq!(last["event"]["payload"]["result"]["text"], "say hi");
+}
+
+#[test]
+fn run_rejects_an_unknown_mode() {
+    let output = cool()
+        .args(["run", "--scripted", "--mode", "yaml", "hi"])
+        .output()
+        .expect("run with bad mode");
+    assert_eq!(output.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&output.stderr).expect("structured CLI error");
+    assert_eq!(error["coolCode"], "invalid_cli_usage");
+}

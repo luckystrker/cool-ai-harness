@@ -80,6 +80,31 @@ cp .env.example .env
 openssl rand -base64 32
 ```
 
+#### OAuth sign-in (P2.11)
+
+`cool auth <provider>` runs a local PKCE flow and stores the tokens
+Fernet-encrypted on the provider row (`auth_kind=oauth`, requires
+`SECRET_KEY`); drivers refresh on expiry and retry once on 401:
+
+- `cool auth claude` — Anthropic's manual flow: the console shows
+  `code#state`, paste it back. Off-label use; an API key stays the
+  supported credential.
+- `cool auth chatgpt` — OpenAI device-authorization flow (code + URL,
+  polls until issued). **Codex tokens authenticate the Codex backend
+  (Responses API), not chat/completions** — stored ChatGPT tokens make
+  the OpenAI driver report `oauth_wire_not_supported`; use
+  `OPENAI_API_KEY` for that wire.
+- `cool auth gemini` — Google loopback OAuth (`--device`/`--manual`
+  variants exist). Requires `COOL_GOOGLE_CLIENT_ID`/
+  `COOL_GOOGLE_CLIENT_SECRET` — the public desktop client Google ships
+  with gemini-cli, kept out of this repo (secret scanning); without it
+  the flow returns `oauth_client_unconfigured`. Powers
+  `COOL_PROVIDER=gemini` when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is unset.
+
+The same flow is exposed to the app over `providers.oauth_start` /
+`providers.oauth_complete`; unsupported providers return
+`oauth_provider_unsupported`.
+
 ### 2. Run the packaged app (recommended)
 
 ```bash
@@ -214,6 +239,31 @@ Beyond the core agent loop, these subsystems are implemented:
   `read`/`write`/`execute`/`network`/`git`/`send_external`; file tools are
   workspace-confined, network tools use an SSRF-protected allowlist, code
   execution is sandboxed, and secrets are masked in messages/traces/logs.
+- **Process launcher** — every host-process spawn goes through a
+  `ProcessLauncher`: `disabled` (fail-closed default), `host` (JobObject /
+  process-group containment, cleared environment, secret redaction), or
+  `sandboxed` (Linux `bwrap` selective ro-binds + workspace rw,
+  macOS `sandbox-exec` seatbelt restricted reads, Windows JobObject —
+  containment only, no FS/net isolation in v1; `cool doctor` reports
+  per-backend `isolation`). Selection order: `COOL_PROCESS_LAUNCHER` env →
+  `AgentProfile.settings["process_launcher"]` → `cool serve/run` flags
+  (`--allow-shell`, `--sandbox=bwrap|seatbelt|jobobject|none`, `--flag=value`
+  forms supported). A `network` capability `deny` propagates
+  `NetAccess::None` into spawned processes; `NetAccess::Pinned` is refused
+  in v1 (needs an allowlist proxy — fail closed, no silent full access).
+- **Policy rules** — exec rules (`tool` + glob on `program args`, or
+  `path_glob`/`domain` patterns) are evaluated *before* the capability
+  policy, first match wins, strictest on ties. Scopes: `session`
+  (in-memory, per run), `project` (`<workspace>/.cool/policy.json`), `user`
+  (durable `policy_rules` table). Approval cards carry a `suggested_rule`
+  and a "don't ask again" checkbox; `approval.resolve {remember: "session"
+  |"project"|"user"}` persists it; managed via `policy.rules_list` /
+  `policy.rule_add` / `policy.rule_delete`.
+- **Write diagnostics** — after `write_file`/`edit_file`, a per-extension
+  command from `.cool/config.json` (`diagnostics` map, e.g. `rs` →
+  `cargo check --message-format=short`) runs through the launcher; output
+  is masked, capped at 4 KiB, and reported as `ToolResult.diagnostics`
+  (`"skipped"` when the launcher is disabled; failures are warnings).
 - **Context management** — token-aware history budgeting/truncation, project
   instructions loading (AGENTS.md from the working directory), and working
   context compaction with collapsible chat history.

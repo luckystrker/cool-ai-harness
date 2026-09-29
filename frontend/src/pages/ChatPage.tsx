@@ -62,6 +62,7 @@ export function ChatPage() {
   const [searchParams] = useSearchParams()
   const convId = conversationId ? Number(conversationId) : null
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const { data: detail, isLoading, isError, refetch } = useQuery({
@@ -124,15 +125,20 @@ export function ChatPage() {
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [planMode, setPlanMode] = useState(false)
+  const [longTaskMode, setLongTaskMode] = useState(false)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [recorderOpen, setRecorderOpen] = useState(false)
   const isMobile = useIsMobile()
   const { openDrawer } = useMobileNav()
 
-  // When a different conversation is selected, drop any pending bubbles.
+  // When a different conversation is selected, drop any pending bubbles and
+  // per-conversation run modes — a foreign progress file must not leak into
+  // the next chat.
   useEffect(() => {
     clearPending()
     setRecorderOpen(false)
+    setPlanMode(false)
+    setLongTaskMode(false)
   }, [convId, clearPending])
 
   // Compaction: messages covered by the working-memory rolling summary are
@@ -223,6 +229,43 @@ export function ChatPage() {
       }),
   })
 
+  // P2.13: fork the durable session at a history cursor and open the new
+  // conversation bound to the fork.
+  const forkFromHere = useMutation({
+    mutationFn: (cursor: number) => conversationsApi.forkFromCursor(convId!, cursor),
+    onSuccess: (conversation) => {
+      queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      navigate(`/chat/${conversation.id}`)
+    },
+    onError: (error) =>
+      toast.error("Conversation was not forked", {
+        description: getErrorDescription(error, "Try again."),
+      }),
+  })
+
+  // P2.13/P2.18: rewind the session to a history cursor; the workspace rolls
+  // back to the newest recorded checkpoint when one exists.
+  const rewindToHere = useMutation({
+    mutationFn: (cursor: number) => conversationsApi.rewindToCursor(convId!, cursor),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] })
+      queryClient.invalidateQueries({ queryKey: ["conversation-runs", convId] })
+      queryClient.invalidateQueries({ queryKey: ["conversations"] })
+      toast.success("Conversation rewound", {
+        description: result.workspaceRestored
+          ? "History and workspace restored."
+          : (result.restoreError ?? "History rewound."),
+      })
+    },
+    onError: (error) =>
+      toast.error("Could not rewind", {
+        description: getErrorDescription(
+          error,
+          "A run may still be active — try again when it finishes."
+        ),
+      }),
+  })
+
   const modeMutation = useMutation({
     mutationFn: (vars: { id: number; permissions: ToolPermissions }) =>
       conversationsApi.update(vars.id, { permissions: vars.permissions }),
@@ -298,9 +341,11 @@ export function ChatPage() {
       detail?.model || undefined,
       planMode,
       systemPrompt,
-      artifactIds
+      artifactIds,
+      longTaskMode
     )
-    // Reset plan mode after sending (one-shot toggle).
+    // Reset plan mode after sending (one-shot toggle); long-task mode
+    // persists — a tracked task spans many turns.
     const wasPlanMode = planMode
     setPlanMode(false)
     // Persisted history is now the source of truth — refetch and drop pending
@@ -622,7 +667,20 @@ export function ChatPage() {
                     <CompactedHistory messages={compactedMsgs} />
                   )}
                   {historyMsgs.map((m) => (
-                    <MessageBubble key={m.id} msg={m} />
+                    <MessageBubble
+                      key={m.id}
+                      msg={m}
+                      onForkFromHere={
+                        m.cursor != null
+                          ? () => forkFromHere.mutate(m.cursor!)
+                          : undefined
+                      }
+                      onRewindToHere={
+                        m.cursor != null && !isStreaming
+                          ? () => rewindToHere.mutate(m.cursor!)
+                          : undefined
+                      }
+                    />
                   ))}
                   {pendingMsgs.map((m) => (
                     <MessageBubble
@@ -696,6 +754,8 @@ export function ChatPage() {
                     modelPending={updateMutation.isPending}
                     planMode={planMode}
                     onPlanModeChange={setPlanMode}
+                    longTaskMode={longTaskMode}
+                    onLongTaskModeChange={setLongTaskMode}
                   />
                 )
               }
@@ -715,6 +775,8 @@ export function ChatPage() {
                 onModelChange={handleModelChange}
                 planMode={planMode}
                 onPlanModeChange={setPlanMode}
+                longTaskMode={longTaskMode}
+                onLongTaskModeChange={setLongTaskMode}
                 pendingFiles={pendingFiles}
                 onAttach={handleAttach}
                 onRemoveFile={handleRemoveFile}
@@ -891,6 +953,7 @@ function stitchHistory(messages: Message[]): MessageViewModel[] {
       id: `db-${m.id}`,
       role: m.role,
       content: m.content ?? "",
+      cursor: m.id,
       toolCalls,
       thinking: m.thinking ?? undefined,
       usage: (m.usage as MessageViewModel["usage"]) ?? undefined,

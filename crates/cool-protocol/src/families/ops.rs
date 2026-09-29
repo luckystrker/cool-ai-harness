@@ -29,6 +29,16 @@ pub struct ProviderRecord {
     /// set. Never the key itself; mirrors the Python `ProviderOut.api_key_hint`.
     #[serde(default)]
     pub api_key_hint: Option<String>,
+    /// `api_key` or `oauth` (P2.11); absent on older stores → `api_key`.
+    #[serde(default = "default_auth_kind")]
+    pub auth_kind: String,
+    /// Whether Fernet-encrypted OAuth tokens are stored. Never the tokens.
+    #[serde(default)]
+    pub has_oauth_tokens: bool,
+}
+
+fn default_auth_kind() -> String {
+    "api_key".to_owned()
 }
 
 /// One model advertised by a provider row's cached catalog.
@@ -70,6 +80,10 @@ pub struct ProviderCreateParams {
     #[serde(default)]
     pub is_default: bool,
     pub chat_models: Option<Value>,
+    /// `api_key` (default) or `oauth`; OAuth rows carry tokens set by
+    /// `providers.oauth_complete`, never by this field.
+    #[serde(default)]
+    pub auth_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -87,6 +101,8 @@ pub struct ProviderUpdateParams {
     pub is_fallback: Option<bool>,
     pub is_default: Option<bool>,
     pub chat_models: Option<Value>,
+    #[serde(default)]
+    pub auth_kind: Option<String>,
 }
 
 /// Live model-list probe for an unsaved provider (create form). The plaintext
@@ -98,6 +114,61 @@ pub struct ProvidersPreviewModelsParams {
     pub name: String,
     pub base_url: Option<String>,
     pub api_key: String,
+}
+
+/// Start a provider OAuth login (P2.11): `claude`, `chatgpt` or `gemini`.
+/// Returns the authorization URL plus the `state` binding the handshake;
+/// finish with `providers.oauth_complete`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ProvidersOauthStartParams {
+    /// CLI login name: `claude`, `chatgpt` or `gemini`.
+    pub provider: String,
+    /// Redirect URI the caller will complete on (e.g. its bound loopback
+    /// address). Defaults to the provider's registered loopback or, for
+    /// Claude, the manual paste-the-code callback.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProvidersOauthStartResult {
+    /// The provider's authorization URL to open in a browser.
+    pub auth_url: String,
+    /// Opaque handshake handle for `providers.oauth_complete` (10 min TTL).
+    pub state: String,
+    /// `manual` = show the URL and wait for a pasted code; `loopback` = a
+    /// local callback listener must be bound on the returned redirect URI.
+    pub completion: String,
+    /// Redirect the browser will land on (manual flow shows `code#state`).
+    pub redirect_uri: String,
+    /// Claude-style caveat text for subscriptions, when relevant.
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// Finish a login started by `providers.oauth_start`. Anthropic's manual
+/// callback page renders `code#state` — pass it through verbatim.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ProvidersOauthCompleteParams {
+    pub state: String,
+    /// Authorization code, or the verbatim `code#state` the callback shows.
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProvidersOauthCompleteResult {
+    /// The provider row the tokens were attached to (created when absent).
+    pub provider: ProviderRecord,
+    /// Unix seconds the access token expires at, when known.
+    pub expires_at: Option<i64>,
 }
 
 /// One budget configuration row.

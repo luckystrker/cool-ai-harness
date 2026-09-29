@@ -58,6 +58,29 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
               );
               CREATE INDEX ix_rust_idempotency_actor ON rust_idempotency(actor_id);",
     },
+    Migration {
+        version: 3,
+        name: "policy_rules",
+        sql: "CREATE TABLE policy_rules(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool TEXT NOT NULL,
+                pattern_kind TEXT NOT NULL,
+                pattern TEXT NOT NULL DEFAULT '',
+                decision TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'user',
+                project_key TEXT,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                created_by TEXT
+              );
+              CREATE INDEX ix_policy_rules_scope ON policy_rules(scope, tool);",
+    },
+    Migration {
+        version: 4,
+        name: "provider_oauth",
+        sql: "ALTER TABLE providers ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'api_key';
+              ALTER TABLE providers ADD COLUMN oauth_tokens_encrypted TEXT;",
+    },
 ];
 
 #[cfg(test)]

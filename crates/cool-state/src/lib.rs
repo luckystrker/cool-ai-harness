@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use cool_protocol::{
     ActorKind, ActorRef, ApprovalDecision, ApprovalOutcome, CanonicalEvent, EventEnvelope,
-    ItemEvent, RunCancelledResult, RunStarted, RunTerminal, SteerAcceptedResult,
+    Extensions, ItemEvent, RunCancelledResult, RunStarted, RunTerminal, SteerAcceptedResult,
     ToolApprovalRequired, ToolApprovalResolved, ToolFailed, V1Version, WorkerEvent,
 };
 use cool_security::mask_json;
@@ -19,14 +19,17 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     Io(std::io::Error),
-    InvalidTransition { from: RunStatus, to: RunStatus },
+    InvalidTransition {
+        from: RunStatus,
+        to: RunStatus,
+    },
     IdempotencyConflict,
     NotFound(&'static str),
     ActorMismatch,
@@ -34,6 +37,9 @@ pub enum StoreError {
     AlreadyResolved,
     RunNotActive,
     BudgetExceeded(BudgetSnapshot),
+    /// `session.rewind` rejected the target state (live run or nothing to
+    /// rewind). The message is a stable machine-readable reason.
+    RewindRejected(&'static str),
     Corrupt(String),
 }
 
@@ -52,6 +58,7 @@ impl fmt::Display for StoreError {
             Self::RevisionConflict => formatter.write_str("revision conflict"),
             Self::AlreadyResolved => formatter.write_str("approval is already resolved"),
             Self::RunNotActive => formatter.write_str("run is not active"),
+            Self::RewindRejected(reason) => write!(formatter, "rewind rejected: {reason}"),
             Self::BudgetExceeded(snapshot) => write!(
                 formatter,
                 "budget exceeded at {} tokens / {} micro-USD",
@@ -96,11 +103,17 @@ pub enum RunStatus {
     Completed,
     Failed,
     Cancelled,
+    /// The run was superseded by a `session.rewind`: its events stay durable
+    /// in the append-only log but leave the session's visible history.
+    Rewound,
 }
 
 impl RunStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Rewound
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -111,6 +124,7 @@ impl RunStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Rewound => "rewound",
         }
     }
 
@@ -122,6 +136,7 @@ impl RunStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "rewound" => Ok(Self::Rewound),
             other => Err(StoreError::Corrupt(format!("unknown run status {other}"))),
         }
     }
@@ -151,6 +166,28 @@ pub struct SessionListEntry {
     pub active_run_id: Option<String>,
     pub last_seq: Option<u64>,
     pub created_at: String,
+}
+
+/// What `session.rewind` left behind: the seed run, the superseded runs and
+/// the newest filesystem checkpoint ref found in the retained history (P2.18).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionRewindOutcome {
+    pub run_id: String,
+    pub rewound_run_ids: Vec<String>,
+    pub checkpoint_ref: Option<String>,
+    /// Workspace paths the discarded file tools named (`write_file`/
+    /// `edit_file` `path` args) — the set a scoped `git clean` removes on
+    /// restore so unrelated untracked files survive. Shell/git mutations
+    /// carry no path and stay non-restorable as documented.
+    #[serde(default)]
+    pub discarded_paths: Vec<String>,
+    /// Every `checkpoint_ref` found beyond the cursor, in order —
+    /// `checkpoint_ref` is the first entry. Manifest checkpoints cover only
+    /// the file their own call touched, so a manifest-backend restore must
+    /// replay all of them newest-first; a git tree snapshot already covers
+    /// the whole workspace and restores once.
+    #[serde(default)]
+    pub checkpoint_refs: Vec<String>,
 }
 
 /// Result of binding a legacy conversation to a durable Rust session.
@@ -254,6 +291,16 @@ pub struct ApprovalTicket {
     pub created: bool,
 }
 
+/// Where an approval ticket points before it is resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalCallContext {
+    pub session_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    /// `pending` / `approved` / `denied`.
+    pub state: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalResolution {
     pub approval_id: String,
@@ -262,6 +309,9 @@ pub struct ApprovalResolution {
     pub call_id: String,
     pub revision: u64,
     pub outcome: ApprovalOutcome,
+    /// Question-ask payload resolved alongside the decision (`ask_user`,
+    /// `breakpointType: "question"`); `None` for plain allow/deny approvals.
+    pub answer: Option<serde_json::Value>,
     pub created: bool,
     pub event: EventEnvelope,
 }
@@ -453,9 +503,12 @@ impl DurableStore {
         if before_cursor.is_some_and(|value| value > i64::MAX as u64) {
             return Ok(Vec::new());
         }
+        // Runs superseded by a `session.rewind` keep their durable events
+        // but leave the session's visible history window.
         let mut statement = connection.prepare(
             "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-             WHERE r.session_id = ?1 AND (?2 IS NULL OR e.rowid < ?2) \
+             WHERE r.session_id = ?1 AND r.status != 'rewound' \
+             AND (?2 IS NULL OR e.rowid < ?2) \
              ORDER BY e.rowid DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(
@@ -502,6 +555,13 @@ impl DurableStore {
         rows.map(|row| Ok(row?)).collect()
     }
 
+    /// Fork a session, optionally bounded to a history prefix.
+    ///
+    /// `up_to_cursor` bounds on the durable event cursor (`HistoryItem.cursor`
+    /// = `rust_events.rowid`); `up_to_event_seq` bounds on each event's own
+    /// `seq`. Both bounds apply when both are set. Events of runs superseded
+    /// by a rewind (`rewound` status) are never copied.
+    #[allow(clippy::too_many_arguments)]
     pub fn fork_session(
         &self,
         actor_id: &str,
@@ -509,6 +569,8 @@ impl DurableStore {
         fingerprint: &str,
         source_session_id: &str,
         title: Option<&str>,
+        up_to_cursor: Option<u64>,
+        up_to_event_seq: Option<u64>,
     ) -> Result<IdempotentOutcome<String>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -581,36 +643,52 @@ impl DurableStore {
         {
             // `seq` is per run, so the merged history must keep the durable
             // (run rowid, seq) order and must never be re-sorted by seq alone.
+            // `up_to_cursor` bounds the event rowid — the same cursor space
+            // `session.history` exposes — while `up_to_event_seq` bounds seq.
             let mut statement = transaction.prepare(
-                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
-                 WHERE r.session_id = ?1 AND r.id != ?2 ORDER BY r.rowid, e.seq",
+                "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' \
+                 AND (?2 IS NULL OR e.rowid <= ?2) AND (?3 IS NULL OR e.seq <= ?3) \
+                 ORDER BY r.rowid, e.seq",
             )?;
-            let rows = statement.query_map(params![source_session_id, run_id], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = statement.query_map(
+                params![
+                    source_session_id,
+                    up_to_cursor.map(|value| value.min(i64::MAX as u64) as i64),
+                    up_to_event_seq.map(|value| value.min(i64::MAX as u64) as i64)
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?;
             for row in rows {
-                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                let (source_rowid, json) = row?;
+                let mut source: EventEnvelope = serde_json::from_str(&json)?;
                 if !is_history_event(&source.event) {
                     continue;
                 }
-                copied.push(source);
+                // Workspace-bound extensions (`checkpoint_ref` — the
+                // P2.18 key, kept as a literal since cool-state can't see
+                // cool-agent's constant) name refs in the source session's
+                // working tree; on the fork they either don't resolve or
+                // would restore the wrong tree — strip them.
+                source.extensions.remove("checkpoint_ref");
+                copied.push((source_rowid, source));
             }
         }
-        for source in copied {
+        for (_, source) in &copied {
             fork_events.push(EventEnvelope {
                 event_id: format!("event-{}", Uuid::new_v4()),
                 schema_version: V1Version::VALUE,
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                item_id: source.item_id,
+                item_id: source.item_id.clone(),
                 seq: 0,
-                occurred_at: source.occurred_at,
-                actor: source.actor,
+                occurred_at: source.occurred_at.clone(),
+                actor: source.actor.clone(),
                 source: "cool-state-fork".to_owned(),
-                causation_id: Some(source.event_id),
-                correlation_id: source.correlation_id,
-                event: source.event,
-                extensions: source.extensions,
+                causation_id: Some(source.event_id.clone()),
+                correlation_id: source.correlation_id.clone(),
+                event: source.event.clone(),
+                extensions: source.extensions.clone(),
             });
         }
         fork_events.push(EventEnvelope {
@@ -634,10 +712,36 @@ impl DurableStore {
             }),
             extensions: Default::default(),
         });
-        for event in &mut fork_events {
+        // Copied `session.compacted` markers carry `compact_up_to_cursor`
+        // in the SOURCE rowid space; remap it to the rowid the covering
+        // prefix got here or the transcript re-shows compacted messages.
+        let mut boundary_rowid = 0_i64;
+        let mut inserted_rowids: Vec<(i64, i64)> = Vec::new();
+        for (index, event) in fork_events.iter_mut().enumerate() {
             next_seq += 1;
             event.seq = next_seq;
+            if index > 0
+                && let CanonicalEvent::SessionCompacted(compacted) = &mut event.event
+                && let Some(covered) = compacted.compact_up_to_cursor
+            {
+                let covered = covered.min(i64::MAX as u64) as i64;
+                compacted.compact_up_to_cursor = Some(
+                    inserted_rowids
+                        .iter()
+                        .rev()
+                        .find(|(source_rowid, _)| *source_rowid <= covered)
+                        .map(|(_, new_rowid)| *new_rowid)
+                        .unwrap_or(boundary_rowid)
+                        .max(0) as u64,
+                );
+            }
             append_event_tx(&transaction, actor_id, event)?;
+            let new_rowid = transaction.last_insert_rowid();
+            if index == 0 {
+                boundary_rowid = new_rowid;
+            } else if index <= copied.len() {
+                inserted_rowids.push((copied[index - 1].0, new_rowid));
+            }
         }
         insert_idempotency(
             &transaction,
@@ -652,6 +756,385 @@ impl DurableStore {
             value: session_id,
             created: true,
         })
+    }
+
+    /// Rewind a session to `to_cursor`, append-only.
+    ///
+    /// Every existing run is superseded — marked `rewound`, a terminal status
+    /// that removes its events from the session's visible history while the
+    /// append-only log keeps them durable — and a fresh seed run records the
+    /// retained history prefix: `RunStarted(mode="rewind")`, copies of the
+    /// history events at or below the cursor, a `run.rewound` marker and
+    /// `RunCompleted(reason="rewind")`. The session ends with no active run,
+    /// so the next prompt builds history from exactly the retained prefix.
+    ///
+    /// Rejects with `RewindRejected` when any run is still live or nothing
+    /// sits beyond the cursor. The returned `checkpoint_ref` is the
+    /// pre-dispatch snapshot of the FIRST mutating call beyond the cursor —
+    /// the workspace state the retained prefix ended in (P2.18).
+    ///
+    /// Only events in runs that are not already `rewound` feed the retained
+    /// prefix or the checkpoint scan, so a second rewind can neither copy
+    /// previously discarded history nor select a superseded checkpoint.
+    pub fn rewind_session(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        session_id: &str,
+        to_cursor: u64,
+        reason: Option<&str>,
+    ) -> Result<IdempotentOutcome<SessionRewindOutcome>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<SessionRewindOutcome>(
+            &transaction,
+            actor_id,
+            "session.rewind",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(IdempotentOutcome {
+                value: existing,
+                created: false,
+            });
+        }
+        let owner: String = transaction
+            .query_row(
+                "SELECT actor_id FROM rust_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        let mut runs_statement = transaction.prepare(
+            "SELECT id, status FROM rust_runs WHERE session_id = ?1 AND status != 'rewound' ORDER BY rowid",
+        )?;
+        let runs = runs_statement
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    RunStatus::parse(&row.get::<_, String>(1)?).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(runs_statement);
+        if runs.iter().any(|(_, status)| !status.is_terminal()) {
+            return Err(StoreError::RewindRejected("session_has_live_run"));
+        }
+        let cursor_i64 = to_cursor.min(i64::MAX as u64) as i64;
+        let beyond: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+             WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid > ?2",
+            params![session_id, cursor_i64],
+            |row| row.get(0),
+        )?;
+        if beyond == 0 {
+            return Err(StoreError::RewindRejected("nothing_to_rewind"));
+        }
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let now = timestamp();
+        // Collect the retained history prefix before superseding the source
+        // runs. The workspace checkpoint is the pre-dispatch snapshot of the
+        // FIRST mutating call beyond the cursor — restoring it returns the
+        // tree to the state the retained prefix ended in, which keeps changes
+        // made by calls whose results are retained (their pre-dispatch
+        // snapshot would discard them) and still undoes the first discarded
+        // mutation when the cursor sits before it.
+        let mut copied = Vec::new();
+        let mut checkpoint_ref: Option<String> = None;
+        let mut checkpoint_refs: Vec<String> = Vec::new();
+        let mut discarded_paths: Vec<String> = Vec::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT e.rowid, e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid <= ?2 ORDER BY r.rowid, e.seq",
+            )?;
+            let rows = statement.query_map(params![session_id, cursor_i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (source_rowid, json) = row?;
+                let source: EventEnvelope = serde_json::from_str(&json)?;
+                if !is_history_event(&source.event) {
+                    continue;
+                }
+                copied.push((source_rowid, source));
+            }
+        }
+        {
+            let mut statement = transaction.prepare(
+                "SELECT e.envelope_json FROM rust_runs r JOIN rust_events e ON e.run_id = r.id \
+                 WHERE r.session_id = ?1 AND r.status != 'rewound' AND e.rowid > ?2 ORDER BY e.rowid",
+            )?;
+            let rows = statement.query_map(params![session_id, cursor_i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let source: EventEnvelope = serde_json::from_str(&row?)?;
+                // Path arguments of the discarded file tools — the scoped
+                // clean a restore runs so unrelated untracked files survive.
+                if let CanonicalEvent::ToolRequested(request) = &source.event
+                    && matches!(request.name.as_str(), "write_file" | "edit_file")
+                    && let Some(path) = request
+                        .arguments
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    discarded_paths.push(path.to_owned());
+                }
+                if let Some(value) = source.extensions.get("checkpoint_ref")
+                    && let Some(value) = value.as_str()
+                {
+                    if checkpoint_ref.is_none() {
+                        checkpoint_ref = Some(value.to_owned());
+                    }
+                    checkpoint_refs.push(value.to_owned());
+                }
+            }
+            discarded_paths.sort();
+            discarded_paths.dedup();
+        }
+        let rewound_run_ids: Vec<String> = runs.iter().map(|(id, _)| id.clone()).collect();
+        for (existing_id, _) in &runs {
+            transaction.execute(
+                "UPDATE rust_runs SET status = 'rewound', updated_at = ?1 WHERE id = ?2",
+                params![now, existing_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO rust_runs(id, session_id, actor_id, status, last_seq, updated_at) VALUES (?1, ?2, ?3, 'running', 0, ?4)",
+            params![run_id, session_id, actor_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE rust_sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run_id, session_id],
+        )?;
+
+        let mut next_seq = 0_u64;
+        let system_actor = || ActorRef {
+            id: "cool-core".to_owned(),
+            kind: ActorKind::System,
+        };
+        let mut rewind_events = vec![EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: now.clone(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunStarted(RunStarted {
+                model: None,
+                mode: Some("rewind".to_owned()),
+            }),
+            extensions: Default::default(),
+        }];
+        for (_, source) in &copied {
+            rewind_events.push(EventEnvelope {
+                event_id: format!("event-{}", Uuid::new_v4()),
+                schema_version: V1Version::VALUE,
+                session_id: session_id.to_owned(),
+                run_id: run_id.clone(),
+                item_id: source.item_id.clone(),
+                seq: 0,
+                occurred_at: source.occurred_at.clone(),
+                actor: source.actor.clone(),
+                source: "cool-state-rewind".to_owned(),
+                causation_id: Some(source.event_id.clone()),
+                correlation_id: source.correlation_id.clone(),
+                event: source.event.clone(),
+                extensions: source.extensions.clone(),
+            });
+        }
+        rewind_events.push(EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: timestamp(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunRewound(cool_protocol::RunRewound {
+                cursor: to_cursor,
+                reason: reason.map(str::to_owned),
+            }),
+            extensions: Default::default(),
+        });
+        rewind_events.push(EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: session_id.to_owned(),
+            run_id: run_id.clone(),
+            item_id: None,
+            seq: 0,
+            occurred_at: timestamp(),
+            actor: system_actor(),
+            source: "cool-state-rewind".to_owned(),
+            causation_id: None,
+            correlation_id: None,
+            event: CanonicalEvent::RunCompleted(RunTerminal {
+                reason: "rewind".to_owned(),
+                error_code: None,
+            }),
+            extensions: Default::default(),
+        });
+        // Same `compact_up_to_cursor` remap as the fork path: source-space
+        // cursors would cover nothing once the copies get fresh rowids.
+        let mut boundary_rowid = 0_i64;
+        let mut inserted_rowids: Vec<(i64, i64)> = Vec::new();
+        for (index, event) in rewind_events.iter_mut().enumerate() {
+            next_seq += 1;
+            event.seq = next_seq;
+            if index > 0
+                && let CanonicalEvent::SessionCompacted(compacted) = &mut event.event
+                && let Some(covered) = compacted.compact_up_to_cursor
+            {
+                let covered = covered.min(i64::MAX as u64) as i64;
+                compacted.compact_up_to_cursor = Some(
+                    inserted_rowids
+                        .iter()
+                        .rev()
+                        .find(|(source_rowid, _)| *source_rowid <= covered)
+                        .map(|(_, new_rowid)| *new_rowid)
+                        .unwrap_or(boundary_rowid)
+                        .max(0) as u64,
+                );
+            }
+            append_event_tx(&transaction, actor_id, event)?;
+            let new_rowid = transaction.last_insert_rowid();
+            if index == 0 {
+                boundary_rowid = new_rowid;
+            } else if index <= copied.len() {
+                inserted_rowids.push((copied[index - 1].0, new_rowid));
+            }
+        }
+        let outcome = SessionRewindOutcome {
+            run_id: run_id.clone(),
+            rewound_run_ids,
+            checkpoint_ref,
+            discarded_paths,
+            checkpoint_refs,
+        };
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.rewind",
+            key,
+            fingerprint,
+            &outcome,
+        )?;
+        transaction.commit()?;
+        Ok(IdempotentOutcome {
+            value: outcome,
+            created: true,
+        })
+    }
+
+    /// Bind an existing actor-owned session to a legacy conversation (fork
+    /// flow): inserts only the link row — no session or transcript import.
+    pub fn bind_session_to_conversation(
+        &self,
+        actor_id: &str,
+        key: &str,
+        fingerprint: &str,
+        conversation_id: i64,
+        session_id: &str,
+    ) -> Result<ConversationLink, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = lookup_idempotency::<ConversationLink>(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+        )? {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        if let Some((owner, linked)) = transaction
+            .query_row(
+                "SELECT actor_id, session_id FROM rust_conversation_links WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if owner != actor_id {
+                return Err(StoreError::ActorMismatch);
+            }
+            if linked == session_id {
+                let link = ConversationLink {
+                    conversation_id,
+                    session_id: linked,
+                    created: false,
+                    imported_events: 0,
+                    truncated: false,
+                };
+                insert_idempotency(
+                    &transaction,
+                    actor_id,
+                    "session.for_conversation",
+                    key,
+                    fingerprint,
+                    &link,
+                )?;
+                transaction.commit()?;
+                return Ok(link);
+            }
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let (owner, already_linked): (String, Option<i64>) = transaction
+            .query_row(
+                "SELECT s.actor_id, (SELECT l.conversation_id FROM rust_conversation_links l \
+                 WHERE l.session_id = s.id) FROM rust_sessions s WHERE s.id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("session"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        if already_linked.is_some() {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let link = ConversationLink {
+            conversation_id,
+            session_id: session_id.to_owned(),
+            created: true,
+            imported_events: 0,
+            truncated: false,
+        };
+        transaction.execute(
+            "INSERT INTO rust_conversation_links(conversation_id, actor_id, session_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, actor_id, session_id, timestamp()],
+        )?;
+        insert_idempotency(
+            &transaction,
+            actor_id,
+            "session.for_conversation",
+            key,
+            fingerprint,
+            &link,
+        )?;
+        transaction.commit()?;
+        Ok(link)
     }
 
     /// Find or create the durable session bound to a legacy conversation.
@@ -894,6 +1377,7 @@ impl DurableStore {
         fingerprint: &str,
         run_id: &str,
         content: &str,
+        extensions: Extensions,
     ) -> Result<IdempotentOutcome<SteerAcceptedResult>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -934,7 +1418,7 @@ impl DurableStore {
                 content: Some(content.to_owned()),
                 tool_calls: Vec::new(),
             }),
-            extensions: Default::default(),
+            extensions,
         };
         append_event_tx(&transaction, actor_id, &event)?;
         let result = SteerAcceptedResult {
@@ -1363,6 +1847,9 @@ impl DurableStore {
             tool_name,
             &BTreeMap::new(),
             reason,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1376,6 +1863,9 @@ impl DurableStore {
         tool_name: &str,
         arguments: &BTreeMap<String, serde_json::Value>,
         reason: &str,
+        matched_rule: Option<&str>,
+        suggested_rule: Option<&cool_protocol::PolicyRuleRecord>,
+        breakpoint_type: Option<&str>,
     ) -> Result<ApprovalTicket, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1425,17 +1915,19 @@ impl DurableStore {
             source: "cool-security".to_owned(),
             causation_id: Some(call_id.to_owned()),
             correlation_id: None,
-            event: CanonicalEvent::ToolApprovalRequired(ToolApprovalRequired {
+            event: CanonicalEvent::ToolApprovalRequired(Box::new(ToolApprovalRequired {
                 call_id: call_id.to_owned(),
                 name: tool_name.to_owned(),
                 arguments: arguments.clone(),
                 reason: reason.to_owned(),
                 approval_id: approval_id.clone(),
                 revision: 1,
-                breakpoint_type: None,
+                breakpoint_type: breakpoint_type.map(str::to_owned),
                 result_preview: None,
                 current_content: None,
-            }),
+                matched_rule: matched_rule.map(str::to_owned),
+                suggested_rule: suggested_rule.cloned(),
+            })),
             extensions: Default::default(),
         };
         append_event_tx(&transaction, actor_id, &event)?;
@@ -1447,33 +1939,83 @@ impl DurableStore {
         })
     }
 
+    /// The committed outcome plus any question answer payload (`ask_user`).
+    /// `None` while the approval is still pending.
     pub fn approval_outcome(
         &self,
         actor_id: &str,
         approval_id: &str,
-    ) -> Result<Option<ApprovalOutcome>, StoreError> {
+    ) -> Result<Option<(ApprovalOutcome, Option<serde_json::Value>)>, StoreError> {
         let connection = self.connection()?;
-        let (owner, state) = connection
+        let (owner, state, answer_json) = connection
             .query_row(
-                "SELECT actor_id, state FROM rust_approvals WHERE id = ?1",
+                "SELECT actor_id, state, answer_json FROM rust_approvals WHERE id = ?1",
                 [approval_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or(StoreError::NotFound("approval"))?;
         if owner != actor_id {
             return Err(StoreError::ActorMismatch);
         }
+        let answer = answer_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(format!("approval answer: {error}")))?;
         match state.as_str() {
             "pending" => Ok(None),
-            "approved" => Ok(Some(ApprovalOutcome::Approved)),
-            "denied" => Ok(Some(ApprovalOutcome::Denied)),
+            "approved" => Ok(Some((ApprovalOutcome::Approved, answer))),
+            "denied" => Ok(Some((ApprovalOutcome::Denied, answer))),
+            "timed_out" => Ok(Some((ApprovalOutcome::TimedOut, answer))),
             _ => Err(StoreError::Corrupt(format!(
                 "unknown approval state {state}"
             ))),
         }
     }
 
+    /// The run/session/call an approval ticket belongs to, plus its current
+    /// state — used to persist `remember` rules before the resolve commits.
+    pub fn approval_call_context(
+        &self,
+        actor_id: &str,
+        approval_id: &str,
+    ) -> Result<ApprovalCallContext, StoreError> {
+        let connection = self.connection()?;
+        let (owner, session_id, run_id, call_id, state) = connection
+            .query_row(
+                "SELECT actor_id, session_id, run_id, call_id, state FROM rust_approvals WHERE id = ?1",
+                [approval_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("approval"))?;
+        if owner != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        Ok(ApprovalCallContext {
+            session_id,
+            run_id,
+            call_id,
+            state,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_approval(
         &self,
         actor_id: &str,
@@ -1482,6 +2024,7 @@ impl DurableStore {
         approval_id: &str,
         expected_revision: u64,
         decision: ApprovalDecision,
+        answer: Option<&serde_json::Value>,
     ) -> Result<ApprovalResolution, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1529,10 +2072,29 @@ impl DurableStore {
             ApprovalDecision::Approved => "approved",
             ApprovalDecision::Denied => "denied",
         };
+        // `ask_user` answers can be credentials — the durable copy is masked
+        // before it touches `answer_json` or the idempotency payload; only
+        // the in-memory resolution carries the raw value to the waiting run.
+        let masked_answer = answer.map(|answer| {
+            let mut value = answer.clone();
+            mask_json(&mut value);
+            value
+        });
+        let answer_json = masked_answer
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let changed = transaction.execute(
-            "UPDATE rust_approvals SET state = ?1, revision = revision + 1, decided_by = ?2, decision_source = 'user', decided_at = ?3 \
+            "UPDATE rust_approvals SET state = ?1, revision = revision + 1, decided_by = ?2, decision_source = 'user', decided_at = ?3, answer_json = ?6 \
              WHERE id = ?4 AND actor_id = ?2 AND revision = ?5 AND state = 'pending'",
-            params![state, actor_id, timestamp(), approval_id, expected_revision as i64],
+            params![
+                state,
+                actor_id,
+                timestamp(),
+                approval_id,
+                expected_revision as i64,
+                answer_json
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::RevisionConflict);
@@ -1573,6 +2135,7 @@ impl DurableStore {
             call_id: approval.2,
             revision: expected_revision + 1,
             outcome,
+            answer: answer.cloned(),
             event,
         };
         insert_idempotency(
@@ -1581,10 +2144,93 @@ impl DurableStore {
             "approval.resolve",
             key,
             fingerprint,
-            &stored,
+            &StoredApprovalResolution {
+                answer: masked_answer.clone(),
+                ..stored.clone()
+            },
         )?;
         transaction.commit()?;
         Ok(stored.into_public(true))
+    }
+
+    /// System-side expiry of a pending approval (P1.8 `question_timeout`):
+    /// marks the ticket `timed_out`, audits it, and appends a
+    /// `ToolApprovalResolved` event so the run leaves `awaiting_approval`.
+    /// Returns `false` when the ticket was already resolved — a racing user
+    /// answer then wins and the timeout is a no-op.
+    pub fn expire_approval(&self, actor_id: &str, approval_id: &str) -> Result<bool, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let approval = transaction
+            .query_row(
+                "SELECT session_id, run_id, call_id, actor_id, revision, state FROM rust_approvals WHERE id = ?1",
+                [approval_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("approval"))?;
+        if approval.3 != actor_id {
+            return Err(StoreError::ActorMismatch);
+        }
+        if approval.5 != "pending" {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let changed = transaction.execute(
+            "UPDATE rust_approvals SET state = 'timed_out', revision = revision + 1, decision_source = 'system', decided_at = ?1 \
+             WHERE id = ?2 AND actor_id = ?3 AND revision = ?4 AND state = 'pending'",
+            params![timestamp(), approval_id, actor_id, approval.4],
+        )?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO rust_audit(id, actor_id, source, action, subject_id, payload_json, occurred_at) VALUES (?1, ?2, 'system', 'approval.expire', ?3, ?4, ?5)",
+            params![
+                format!("audit-{}", Uuid::new_v4()),
+                actor_id,
+                approval_id,
+                serde_json::to_string(&ApprovalOutcome::TimedOut)?,
+                timestamp()
+            ],
+        )?;
+        let run = require_run(&transaction, &approval.1, actor_id)?;
+        let event = EventEnvelope {
+            event_id: format!("event-{}", Uuid::new_v4()),
+            schema_version: V1Version::VALUE,
+            session_id: approval.0.clone(),
+            run_id: approval.1.clone(),
+            item_id: None,
+            seq: run.last_seq + 1,
+            occurred_at: timestamp(),
+            actor: ActorRef {
+                id: actor_id.to_owned(),
+                kind: ActorKind::System,
+            },
+            source: "cool-security".to_owned(),
+            causation_id: Some(approval_id.to_owned()),
+            correlation_id: None,
+            event: CanonicalEvent::ToolApprovalResolved(ToolApprovalResolved {
+                call_id: approval.2.clone(),
+                approval_id: approval_id.to_owned(),
+                revision: approval.4 as u64 + 1,
+                decision: ApprovalOutcome::TimedOut,
+            }),
+            extensions: Default::default(),
+        };
+        append_event_tx(&transaction, actor_id, &event)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn set_budget_limits(
@@ -1774,7 +2420,7 @@ impl DurableStore {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct StoredApprovalResolution {
     approval_id: String,
     run_id: String,
@@ -1782,6 +2428,8 @@ struct StoredApprovalResolution {
     call_id: String,
     revision: u64,
     outcome: ApprovalOutcome,
+    #[serde(default)]
+    answer: Option<serde_json::Value>,
     event: EventEnvelope,
 }
 
@@ -1794,6 +2442,7 @@ impl StoredApprovalResolution {
             call_id: self.call_id,
             revision: self.revision,
             outcome: self.outcome,
+            answer: self.answer,
             created,
             event: self.event,
         }
@@ -1822,7 +2471,7 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS rust_runs(
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES rust_sessions(id), actor_id TEXT NOT NULL,
-           status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled')),
+           status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled','rewound')),
            last_seq INTEGER NOT NULL DEFAULT 0, checkpoint_json TEXT, usage_json TEXT,
            iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL
          );
@@ -1844,6 +2493,7 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
            call_id TEXT NOT NULL, tool_name TEXT NOT NULL, reason TEXT NOT NULL, actor_id TEXT NOT NULL,
            revision INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','timed_out')),
            decided_by TEXT, decision_source TEXT, created_at TEXT NOT NULL, decided_at TEXT,
+           answer_json TEXT,
            UNIQUE(run_id, call_id)
          );
          CREATE TABLE IF NOT EXISTS rust_audit(
@@ -1878,6 +2528,43 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS rust_conversation_sessions ON rust_conversation_links(session_id);
          UPDATE rust_schema_meta SET version = 2 WHERE version < 2;
          COMMIT;",
+    )?;
+    // Question-ask answers (P1.8): nullable JSON column appended to
+    // databases created before the DDL above carried it.
+    if connection
+        .prepare("SELECT answer_json FROM rust_approvals LIMIT 0")
+        .is_err()
+    {
+        connection.execute("ALTER TABLE rust_approvals ADD COLUMN answer_json TEXT", [])?;
+    }
+    // Run status 'rewound' (P2.13): SQLite cannot ALTER a CHECK constraint,
+    // so databases created before the DDL above carried it get rust_runs
+    // rebuilt in place — contents preserved, references updated by the rename.
+    let runs_ddl: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rust_runs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !runs_ddl.contains("'rewound'") {
+        connection.execute_batch("PRAGMA foreign_keys = OFF")?;
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE rust_runs_v3(
+               id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES rust_sessions(id), actor_id TEXT NOT NULL,
+               status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_approval','completed','failed','cancelled','rewound')),
+               last_seq INTEGER NOT NULL DEFAULT 0, checkpoint_json TEXT, usage_json TEXT,
+               iterations INTEGER NOT NULL DEFAULT 0, finish_reason TEXT, updated_at TEXT NOT NULL
+             );
+             INSERT INTO rust_runs_v3 SELECT * FROM rust_runs;
+             DROP TABLE rust_runs;
+             ALTER TABLE rust_runs_v3 RENAME TO rust_runs;
+             COMMIT;",
+        )?;
+        connection.execute_batch("PRAGMA foreign_keys = ON")?;
+    }
+    connection.execute(
+        "UPDATE rust_schema_meta SET version = 3 WHERE version < 3",
+        [],
     )?;
     Ok(())
 }
@@ -1977,7 +2664,7 @@ fn is_history_event(event: &CanonicalEvent) -> bool {
     ) || matches!(
         event,
         CanonicalEvent::ToolCompleted(_) | CanonicalEvent::ToolFailed(_)
-    )
+    ) || matches!(event, CanonicalEvent::SessionCompacted(_))
 }
 
 fn event_status(event: &CanonicalEvent) -> Option<RunStatus> {

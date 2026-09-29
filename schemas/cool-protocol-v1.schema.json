@@ -387,6 +387,10 @@
     "ApprovalResolveParams": {
       "type": "object",
       "properties": {
+        "answer": {
+          "description": "Free-form answer for `breakpointType: \"question\"` asks (the `ask_user`\ntool): an option id/string or arbitrary JSON. Ignored for plain\nallow/deny approvals.",
+          "default": null
+        },
         "approvalId": {
           "type": "string"
         },
@@ -400,6 +404,26 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "remember": {
+          "description": "Persist a rule for the approved call: `\"session\"` keeps it in memory\nfor the run, `\"project\"` writes `<workspace>/.cool/policy.json`,\n`\"user\"` stores it in the durable `policy_rules` table.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rule": {
+          "description": "Rule payload for `remember`; when absent the server derives one from\nthe tool call (same shape as `ToolApprovalRequired.suggestedRule`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -418,6 +442,18 @@
         },
         "outcome": {
           "$ref": "#/$defs/ApprovalOutcome"
+        },
+        "rememberedRule": {
+          "description": "The persisted rule when the resolve carried `remember` (P1.6).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "revision": {
           "type": "integer",
@@ -1018,6 +1054,24 @@
             },
             "payload": {
               "$ref": "#/$defs/RunTerminal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ]
+        },
+        {
+          "description": "Marker event appended to the seed run a `session.rewind` creates: the\nsession's visible history was reset to the prefix ending at `cursor`.\nIt does not change run status — the superseded runs carry `rewound`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run.rewound"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunRewound"
             }
           },
           "additionalProperties": false,
@@ -1864,6 +1918,23 @@
           "properties": {
             "method": {
               "type": "string",
+              "const": "session.rewind"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionRewindParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
               "const": "session.for_conversation"
             },
             "params": {
@@ -1970,6 +2041,57 @@
             },
             "params": {
               "$ref": "#/$defs/ApprovalResolveParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rules_list"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRulesListParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rule_add"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRuleAddParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "policy.rule_delete"
+            },
+            "params": {
+              "$ref": "#/$defs/PolicyRuleDeleteParams"
             }
           },
           "additionalProperties": false,
@@ -2718,6 +2840,40 @@
             },
             "params": {
               "$ref": "#/$defs/ProvidersPreviewModelsParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "providers.oauth_start"
+            },
+            "params": {
+              "$ref": "#/$defs/ProvidersOauthStartParams"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "providers.oauth_complete"
+            },
+            "params": {
+              "$ref": "#/$defs/ProvidersOauthCompleteParams"
             }
           },
           "additionalProperties": false,
@@ -8198,6 +8354,148 @@
         "status"
       ]
     },
+    "PolicyRuleAddParams": {
+      "type": "object",
+      "properties": {
+        "rule": {
+          "$ref": "#/$defs/PolicyRuleRecord"
+        },
+        "runId": {
+          "description": "Session rules attach to a live run; required when `scope = \"session\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rule"
+      ]
+    },
+    "PolicyRuleDeleteParams": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "ruleId": {
+          "description": "Qualified rule id from `policy.rules_list` (`\"user:3\"`, `\"project:1\"`,\n`\"session:0\"`).",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Required when deleting a `session:` rule.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "ruleId"
+      ]
+    },
+    "PolicyRuleDeleteResult": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "deleted"
+      ]
+    },
+    "PolicyRuleRecord": {
+      "description": "Wire mirror of `cool_security::PolicyRule` — kept as plain strings so the\nprotocol crate carries no cool-security dependency.",
+      "type": "object",
+      "properties": {
+        "decision": {
+          "description": "`allow` | `ask` | `deny`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Qualified id (`\"user:3\"`, `\"project:1\"`, `\"session:0\"`) for deletes.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "`command` | `path_glob` | `domain` | `any`.",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pattern": {
+          "type": "string",
+          "default": ""
+        },
+        "scope": {
+          "description": "`session` | `project` | `user`.",
+          "type": "string"
+        },
+        "tool": {
+          "description": "Tool name, or `\"*\"` for every tool.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "kind",
+        "decision",
+        "scope"
+      ]
+    },
+    "PolicyRulesListParams": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "description": "Session rules of this run when `scope = \"session\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "description": "Optional scope filter (`session|project|user`); absent lists all.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyRulesListResult": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PolicyRuleRecord"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ]
+    },
     "ProfileCreateParams": {
       "type": "object",
       "properties": {
@@ -8483,6 +8781,14 @@
             "null"
           ]
         },
+        "authKind": {
+          "description": "`api_key` (default) or `oauth`; OAuth rows carry tokens set by\n`providers.oauth_complete`, never by this field.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "baseUrl": {
           "type": [
             "string",
@@ -8553,6 +8859,11 @@
           ],
           "default": null
         },
+        "authKind": {
+          "description": "`api_key` or `oauth` (P2.11); absent on older stores → `api_key`.",
+          "type": "string",
+          "default": "api_key"
+        },
         "baseUrl": {
           "type": [
             "string",
@@ -8565,6 +8876,11 @@
             "string",
             "null"
           ]
+        },
+        "hasOauthTokens": {
+          "description": "Whether Fernet-encrypted OAuth tokens are stored. Never the tokens.",
+          "type": "boolean",
+          "default": false
         },
         "id": {
           "type": "integer",
@@ -8609,6 +8925,13 @@
             "string",
             "null"
           ]
+        },
+        "authKind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "baseUrl": {
           "type": [
@@ -8659,6 +8982,101 @@
       "required": [
         "idempotencyKey",
         "id"
+      ]
+    },
+    "ProvidersOauthCompleteParams": {
+      "description": "Finish a login started by `providers.oauth_start`. Anthropic's manual\ncallback page renders `code#state` — pass it through verbatim.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Authorization code, or the verbatim `code#state` the callback shows.",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "code"
+      ]
+    },
+    "ProvidersOauthCompleteResult": {
+      "type": "object",
+      "properties": {
+        "expiresAt": {
+          "description": "Unix seconds the access token expires at, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "provider": {
+          "description": "The provider row the tokens were attached to (created when absent).",
+          "$ref": "#/$defs/ProviderRecord"
+        }
+      },
+      "required": [
+        "provider"
+      ]
+    },
+    "ProvidersOauthStartParams": {
+      "description": "Start a provider OAuth login (P2.11): `claude`, `chatgpt` or `gemini`.\nReturns the authorization URL plus the `state` binding the handshake;\nfinish with `providers.oauth_complete`.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "CLI login name: `claude`, `chatgpt` or `gemini`.",
+          "type": "string"
+        },
+        "redirectUri": {
+          "description": "Redirect URI the caller will complete on (e.g. its bound loopback\naddress). Defaults to the provider's registered loopback or, for\nClaude, the manual paste-the-code callback.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider"
+      ]
+    },
+    "ProvidersOauthStartResult": {
+      "type": "object",
+      "properties": {
+        "authUrl": {
+          "description": "The provider's authorization URL to open in a browser.",
+          "type": "string"
+        },
+        "completion": {
+          "description": "`manual` = show the URL and wait for a pasted code; `loopback` = a\nlocal callback listener must be bound on the returned redirect URI.",
+          "type": "string"
+        },
+        "notice": {
+          "description": "Claude-style caveat text for subscriptions, when relevant.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "redirectUri": {
+          "description": "Redirect the browser will land on (manual flow shows `code#state`).",
+          "type": "string"
+        },
+        "state": {
+          "description": "Opaque handshake handle for `providers.oauth_complete` (10 min TTL).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authUrl",
+        "state",
+        "completion",
+        "redirectUri"
       ]
     },
     "ProvidersPreviewModelsParams": {
@@ -9228,6 +9646,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "session_rewound"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionRewindResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "session_for_conversation"
             },
             "value": {
@@ -9334,6 +9769,57 @@
             },
             "value": {
               "$ref": "#/$defs/ApprovalResolvedResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rules_listed"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRulesListResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rule_added"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy_rule_deleted"
+            },
+            "value": {
+              "$ref": "#/$defs/PolicyRuleDeleteResult"
             }
           },
           "additionalProperties": false,
@@ -10098,6 +10584,40 @@
               "items": {
                 "$ref": "#/$defs/ModelInfoRecord"
               }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_oauth_started"
+            },
+            "value": {
+              "$ref": "#/$defs/ProvidersOauthStartResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "providers_oauth_completed"
+            },
+            "value": {
+              "$ref": "#/$defs/ProvidersOauthCompleteResult"
             }
           },
           "additionalProperties": false,
@@ -12759,6 +13279,28 @@
         "limit"
       ]
     },
+    "RunRewound": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "description": "Durable cursor (`rust_events.rowid`) the session rewound to.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cursor"
+      ]
+    },
     "RunStarted": {
       "type": "object",
       "properties": {
@@ -13050,6 +13592,14 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "sessionId": {
+          "description": "Bind an existing actor-owned session instead of creating one (fork\nflows): the conversation links to that session and no transcript is\nimported. The session must not already be linked to a conversation.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -13072,6 +13622,26 @@
             "string",
             "null"
           ]
+        },
+        "upToCursor": {
+          "description": "Fork point: only events at or below this cursor are copied. The cursor\nis the `HistoryItem.cursor` space (`rust_events.rowid`), the same\ndurable cursor `session.history` returns and renders in the UI.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "upToEventSeq": {
+          "description": "Alternate bound in the events' own `seq` space (`e.seq` <= N). An alias\nfor `up_to_cursor` for callers that page `run.events` by seq; when both\nbounds are set, both apply.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -13236,6 +13806,11 @@
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
         },
+        "longTaskMode": {
+          "description": "Long-running task mode: the run is marked `long_task` and the existing\ntask progress file (`.cool/task/progress.md`, maintained by the bundled\nlong-running-task skill) is injected into the system prompt so the\nagent resumes from tracked state. Ignored in planning mode.",
+          "type": "boolean",
+          "default": false
+        },
         "model": {
           "type": [
             "string",
@@ -13263,6 +13838,96 @@
         "idempotencyKey",
         "sessionId",
         "content"
+      ]
+    },
+    "SessionRewindParams": {
+      "description": "Rewind a session to an earlier point: the previous runs are superseded\n(`rewound` status, append-only — their events stay durable) and a fresh\nseed run carries the retained history prefix up to `to_cursor`.",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "restoreWorkspace": {
+          "description": "Restore the workspace to the filesystem checkpoint recorded nearest\nto `to_cursor` (P2.18). Without a recorded checkpoint ref the rewind\nstill lands and the result reports `workspaceRestored: false`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toCursor": {
+          "description": "Durable cursor the session rewinds to (`HistoryItem.cursor`, the\n`rust_events.rowid`). History visible after the rewind is exactly the\nprefix of history events at or below this cursor.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "sessionId",
+        "toCursor"
+      ]
+    },
+    "SessionRewindResult": {
+      "type": "object",
+      "properties": {
+        "checkpointRef": {
+          "description": "Checkpoint ref the workspace was restored to, when one applied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "restoreError": {
+          "description": "Why workspace restore did not apply (no checkpoint, not a restorable\nsnapshot, launcher disabled, restore failed). Present only when\n`restoreWorkspace` was requested and `workspace_restored` is false.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rewoundRunIds": {
+          "description": "Runs superseded by the rewind (now `rewound` status).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runId": {
+          "description": "The seed run carrying the retained history (mode `rewind`).",
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toCursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "workspaceRestored": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "runId",
+        "toCursor"
       ]
     },
     "SessionRunSummary": {
@@ -15282,6 +15947,14 @@
             "null"
           ]
         },
+        "matchedRule": {
+          "description": "The exec/policy rule that produced this ask (`None` when the ask came\nfrom the capability fallback).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "name": {
           "type": "string"
         },
@@ -15298,6 +15971,18 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "suggestedRule": {
+          "description": "A rule the client can persist via `approval.resolve {remember}` to\nstop prompting for equivalent calls.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,

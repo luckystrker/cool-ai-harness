@@ -106,6 +106,62 @@ fn subagent_role_crud_ordering_and_builtin_policy() {
     assert!(matches!(gone, StoreError::NotFound("subagent role")));
 }
 
+/// Seeding must forward-migrate builtin roles whose stored tool list still
+/// matches a previously shipped builtin list — user edits stay untouched.
+#[test]
+fn builtin_roles_gain_new_file_tools_on_reseed() {
+    let (_directory, store) = adopted_store();
+    let legacy_two_tool = json!(["read_file", "list_files"]);
+    for (name, tools) in [
+        (
+            "researcher",
+            json!(["web_fetch", "web_search", "read_file", "list_files"]),
+        ),
+        ("code-reviewer", legacy_two_tool.clone()),
+        ("summarizer", legacy_two_tool.clone()),
+    ] {
+        store
+            .create_subagent_role(&NewSubagentRole {
+                name: name.to_string(),
+                tool_names: Some(tools),
+                is_builtin: true,
+                ..NewSubagentRole::default()
+            })
+            .expect("legacy builtin");
+    }
+
+    store.seed_builtin_roles().expect("seed");
+
+    let roles = store.list_subagent_roles().expect("list");
+    for name in ["researcher", "code-reviewer", "summarizer"] {
+        let role = roles.iter().find(|role| role.name == name).unwrap();
+        let tools = role.tool_names.as_ref().unwrap().as_array().unwrap();
+        for expected in ["search_files", "find_files"] {
+            assert!(
+                tools.iter().any(|item| item == expected),
+                "{name} is missing {expected}"
+            );
+        }
+    }
+
+    // A user-edited builtin list is not clobbered by the next seed.
+    let summarizer = roles.iter().find(|role| role.name == "summarizer").unwrap();
+    let edited = json!(["read_file", "custom_tool"]);
+    store
+        .update_subagent_role(
+            summarizer.id,
+            &SubagentRolePatch {
+                tool_names: Some(edited.clone()),
+                ..SubagentRolePatch::default()
+            },
+        )
+        .expect("edit");
+    store.seed_builtin_roles().expect("reseed");
+    let roles = store.list_subagent_roles().expect("list");
+    let summarizer = roles.iter().find(|role| role.name == "summarizer").unwrap();
+    assert_eq!(summarizer.tool_names.as_ref(), Some(&edited));
+}
+
 #[test]
 fn subagent_runs_are_owned_and_lifecycle_bounded() {
     let (_directory, store) = adopted_store();

@@ -71,13 +71,16 @@ External tool servers can be connected via MCP. When MCP tools are available, th
 ## File Tools
 File operations are **confined to the workspace directory**. You cannot read or write outside the allowed working directory.
 
-- `read_file` — Read file contents. Always read a file before modifying it.
+- `read_file` — Read file contents. Always read a file before modifying it. Page large files with `offset_bytes`/`maxBytes`.
+- `edit_file` — Apply anchor-based edits: each `{old,new}` edit replaces the exact `old` text atomically (all edits in one call succeed or none do). Prefer it over `write_file` for targeted changes to existing files.
 - `write_file` — Create or overwrite a file, or append to one.
 - `list_files` — List directory contents to understand project structure.
+- `search_files` — Search file contents with a regex; respects .gitignore and skips files >4MB.
+- `find_files` — Find files by glob pattern, e.g. `**/*.ts`.
 
 When working on a project:
-1. First understand the structure (`list_files`, `read_file` on key files).
-2. Identify the relevant files for the task.
+1. First understand the structure (`list_files`, `find_files`, `read_file` on key files).
+2. Locate relevant code (`search_files`) before reading files.
 3. Read those files completely before making changes.
 4. Make focused, minimal changes.
 
@@ -86,6 +89,7 @@ When working on a project:
 - `git` — Run git commands through the same launcher.
 - Prefer file tools for simple read/write operations.
 - Use `shell` for: running tests, builds, linters, data processing, and complex transformations.
+- Oversized command output is truncated to head/tail and spilled to `.cool/spill/<call_id>-<stream>.txt`; read that file with `read_file` to see more.
 
 ## Web Tools
 - `web_fetch` — Fetch and extract content from a URL. Subject to domain allowlist and SSRF protection.

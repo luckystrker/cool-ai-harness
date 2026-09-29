@@ -1,16 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use cool_protocol::{
-    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, EventEnvelope, ItemEvent, PlanCreated,
-    PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal, SessionCompacted,
-    SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved, ToolCompleted,
-    ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
+    ActorKind, ActorRef, ApprovalOutcome, CanonicalEvent, ContentPart, EventEnvelope, Extensions,
+    ItemEvent, PlanCreated, PlanProgress, PlanProgressStatus, PlanStep, RunStarted, RunTerminal,
+    SessionCompacted, SubagentEvent, TextDelta, ToolApprovalRequired, ToolApprovalResolved,
+    ToolCompleted, ToolFailed, ToolLifecycle, ToolRequested, UsageUpdated, V1Version,
 };
-use cool_security::{Decision, mask_json};
+use cool_security::{
+    Decision, PolicyRule, RulePatternKind, RuleScope, RuleSubject, mask_json, mask_secrets,
+    match_rules,
+};
 use cool_state::{BudgetDelta, DurableStore, StoreError};
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -20,11 +23,26 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::context::{
-    Message, MessageRole, ToolCall, compact_history, estimate_history_tokens,
-    load_project_instructions,
+    Message, MessageRole, ModelContentPart, ToolCall, compact_history, estimate_history_tokens,
+    is_summary_message, load_project_instructions, load_task_progress, summary_drop_candidates,
 };
 use crate::provider::{ModelDriver, ModelEvent, ModelRequest, ProviderError, Usage};
 use crate::tools::{ToolCatalogEntry, ToolContext, ToolRegistry, ToolResult};
+
+/// Injected for `long_task` runs with no progress file yet — mirrors the
+/// bundled `long-running-task` skill convention so a fresh long task starts
+/// tracking itself on disk.
+const LONG_TASK_BOOTSTRAP_SECTION: &str = "\
+[LONG-RUNNING TASK MODE]
+Track this task on disk so progress survives context compaction and fresh \
+runs. Maintain two files in the workspace:
+- `.cool/task/progress.md` — journal with **Done**, **Next** and \
+**Acceptance criteria** sections.
+- `.cool/task/features.json` — machine-readable checklist: \
+{\"features\": [{\"id\", \"title\", \"status\": \"pending|in_progress|done\", \"notes\"}]}.
+Create them now: break the request into a feature checklist. Keep the files \
+consistent and update them before every reply — a fresh run must resume \
+from them alone.";
 
 #[derive(Clone, Debug)]
 pub struct AgentLimits {
@@ -54,6 +72,14 @@ pub struct AgentRequest {
     pub model: String,
     pub history: Vec<Message>,
     pub user_input: String,
+    /// Resolved model-visible parts for the first user message (P2.12):
+    /// base64 image data lives here, `user_input` keeps the degraded
+    /// `[image: <id>]` marker text that durable history carries.
+    pub user_parts: Vec<ModelContentPart>,
+    /// The protocol parts as the client sent them — recorded on the user
+    /// `ItemCompleted` envelope under `extensions.content_parts` so the UI
+    /// can replay attachment refs without the bytes (P2.12).
+    pub user_replay_parts: Vec<ContentPart>,
     pub system_prompt: Option<String>,
     /// Optional run-mode marker surfaced on `run.started` (`plan` for planning
     /// turns). `None` keeps the default agent mode.
@@ -70,6 +96,31 @@ pub struct ApprovalRequest {
     pub approval_id: String,
     pub call: ToolCall,
     pub reason: String,
+    /// The policy rule that produced this ask (`None` for a capability ask).
+    pub matched_rule: Option<String>,
+    /// A suggested persistent rule derived from the call, so the approval UI
+    /// can offer "remember this" (P1.6).
+    pub suggested_rule: Option<PolicyRule>,
+    /// Breakpoint classification on the wire (`"question"` for `ask_user`);
+    /// `None` renders the generic approval card (P1.8).
+    pub breakpoint_type: Option<String>,
+}
+
+/// What the gate resolved for one ask: the allow/deny decision plus an
+/// optional free-form payload for question breakpoints (P1.8 `ask_user`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateOutcome {
+    pub decision: ApprovalOutcome,
+    pub answer: Option<Value>,
+}
+
+impl GateOutcome {
+    pub fn decided(decision: ApprovalOutcome) -> Self {
+        Self {
+            decision,
+            answer: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -130,6 +181,17 @@ impl From<StoreError> for RuntimeError {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError>;
+    /// Emit with envelope `extensions` attached (P2.18 checkpoint refs,
+    /// P2.12 replay parts). Sinks that persist envelopes store the map;
+    /// observing sinks ignore it.
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let _ = extensions;
+        self.emit(event).await
+    }
     async fn before_compaction(&self, _history: &[Message]) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -144,6 +206,19 @@ pub trait EventSink: Send + Sync {
     async fn drain_steers(&self) -> Result<Vec<Message>, RuntimeError> {
         Ok(Vec::new())
     }
+    /// Summarize the history prefix compaction is about to drop. `Some`
+    /// replaces those groups with a synthetic system message; `None` keeps
+    /// the drop-oldest fallback. Implementations that have no model driver
+    /// leave the default — a summarizer failure must never block the loop.
+    /// `retained` is how many non-system history messages stay after the
+    /// dropped prefix — the coverage cursor anchors before that tail.
+    async fn summarize_for_compaction(
+        &self,
+        _dropped: &[Message],
+        _retained: usize,
+    ) -> Result<Option<String>, RuntimeError> {
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -153,7 +228,17 @@ pub trait ApprovalGate: Send + Sync {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError>;
+    ) -> Result<GateOutcome, RuntimeError>;
+
+    /// Expires a pending approval system-side. Called when the tool-side
+    /// timeout wins the race first (P1.8 `question_timeout`): without it the
+    /// durable ticket stays `pending` and the run remains `awaiting_approval`
+    /// forever. Returns `true` when this call performed the transition —
+    /// `false` means the ticket was already resolved (a user answer won the
+    /// race) or the gate keeps no durable ticket.
+    async fn expire(&self, _approval_id: &str) -> Result<bool, RuntimeError> {
+        Ok(false)
+    }
 }
 
 #[derive(Clone)]
@@ -168,18 +253,22 @@ impl ApprovalGate for AutoApprovalGate {
         request: ApprovalRequest,
         sink: &dyn EventSink,
         _cancel: &mut CancelSignal,
-    ) -> Result<ApprovalOutcome, RuntimeError> {
-        sink.emit(CanonicalEvent::ToolApprovalRequired(ToolApprovalRequired {
-            call_id: request.call.call_id.clone(),
-            name: request.call.name.clone(),
-            arguments: request.call.arguments.clone().into_iter().collect(),
-            reason: request.reason,
-            approval_id: request.approval_id.clone(),
-            revision: 1,
-            breakpoint_type: None,
-            result_preview: None,
-            current_content: None,
-        }))
+    ) -> Result<GateOutcome, RuntimeError> {
+        sink.emit(CanonicalEvent::ToolApprovalRequired(Box::new(
+            ToolApprovalRequired {
+                call_id: request.call.call_id.clone(),
+                name: request.call.name.clone(),
+                arguments: request.call.arguments.clone().into_iter().collect(),
+                reason: request.reason,
+                approval_id: request.approval_id.clone(),
+                revision: 1,
+                breakpoint_type: request.breakpoint_type,
+                result_preview: None,
+                current_content: None,
+                matched_rule: request.matched_rule,
+                suggested_rule: request.suggested_rule.as_ref().map(policy_rule_record),
+            },
+        )))
         .await?;
         sink.emit(CanonicalEvent::ToolApprovalResolved(ToolApprovalResolved {
             call_id: request.call.call_id,
@@ -188,7 +277,7 @@ impl ApprovalGate for AutoApprovalGate {
             decision: self.outcome.clone(),
         }))
         .await?;
-        Ok(self.outcome.clone())
+        Ok(GateOutcome::decided(self.outcome.clone()))
     }
 }
 
@@ -279,23 +368,71 @@ impl AgentRuntime {
         } else {
             request.history
         };
+        // A replayed synthetic compaction summary is also a system message:
+        // it must not suppress or absorb the configured system prompt.
         if let Some(system_prompt) = request.system_prompt.take()
             && !history
                 .iter()
-                .any(|message| message.role == MessageRole::System)
+                .any(|message| message.role == MessageRole::System && !is_summary_message(message))
         {
             history.insert(0, Message::text(MessageRole::System, system_prompt));
         }
         if let Ok(Some(instructions)) = load_project_instructions(&request.tool_context.workspace) {
             if let Some(system) = history
                 .iter_mut()
-                .find(|message| message.role == MessageRole::System)
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
             {
                 let content = system.content.get_or_insert_default();
                 content.push_str("\n\n");
                 content.push_str(&instructions);
             } else {
                 history.insert(0, Message::text(MessageRole::System, instructions));
+            }
+        }
+        // Long-task mode resumes from the progress file the bundled
+        // long-running-task skill maintains; without one the run is a fresh
+        // task and gets the tracking convention so the agent creates the
+        // files itself.
+        if request.mode.as_deref() == Some("long_task") {
+            let section = match load_task_progress(&request.tool_context.workspace) {
+                Ok(Some(progress)) => format!(
+                    "[TASK PROGRESS — .cool/task/progress.md]\nResume the task from this tracked \
+                     state and keep the file updated as work proceeds.\n\n{}",
+                    mask_secrets(&progress)
+                ),
+                _ => LONG_TASK_BOOTSTRAP_SECTION.to_owned(),
+            };
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(&section);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, section));
+            }
+        }
+        // P1.10: when deferred tools exist, tell the model how to surface
+        // them — the catalog line sits on the system message like project
+        // instructions do. Runs whose tool_names allowlist hides the
+        // meta-tools get no hint: it would advertise tools they cannot call.
+        let meta_tools_visible = request
+            .tool_names
+            .as_ref()
+            .is_none_or(|names| names.contains("search_tools") && names.contains("activate_tools"));
+        if self.tools.has_deferred_tools() && meta_tools_visible {
+            let line = "Some tools are hidden. Use search_tools(query) to discover and \
+                        activate_tools(names) to enable them.";
+            if let Some(system) = history
+                .iter_mut()
+                .find(|message| message.role == MessageRole::System && !is_summary_message(message))
+            {
+                let content = system.content.get_or_insert_default();
+                content.push_str("\n\n");
+                content.push_str(line);
+            } else {
+                history.insert(0, Message::text(MessageRole::System, line));
             }
         }
         sink.emit(CanonicalEvent::RunStarted(RunStarted {
@@ -308,12 +445,22 @@ impl AgentRuntime {
             ),
         }))
         .await?;
-        let user_message = Message::text(MessageRole::User, request.user_input);
-        sink.emit(CanonicalEvent::ItemCompleted(ItemEvent {
-            role: Some("user".to_owned()),
-            content: user_message.content.clone(),
-            tool_calls: Vec::new(),
-        }))
+        let user_message =
+            Message::with_parts(MessageRole::User, request.user_input, request.user_parts);
+        let mut user_extensions = Extensions::default();
+        if !request.user_replay_parts.is_empty()
+            && let Ok(value) = serde_json::to_value(&request.user_replay_parts)
+        {
+            user_extensions.insert("content_parts".to_owned(), value);
+        }
+        sink.emit_with_extensions(
+            CanonicalEvent::ItemCompleted(ItemEvent {
+                role: Some("user".to_owned()),
+                content: user_message.content.clone(),
+                tool_calls: Vec::new(),
+            }),
+            user_extensions,
+        )
         .await?;
         history.push(user_message);
         let mut total_usage = Usage::default();
@@ -329,22 +476,57 @@ impl AgentRuntime {
             for steer in sink.drain_steers().await? {
                 history.push(steer);
             }
-            if estimate_history_tokens(&history) > request.limits.context_tokens {
+            // Compaction engages at 85% of the window: early enough that a
+            // sink-provided summary can still replace the dropped prefix
+            // before the context genuinely overflows.
+            let compaction_trigger = request.limits.context_tokens.saturating_mul(85) / 100;
+            let summary = if estimate_history_tokens(&history) > compaction_trigger {
                 sink.before_compaction(&history).await?;
-            }
-            let compacted = compact_history(&history, request.limits.context_tokens);
+                let dropped = summary_drop_candidates(&history, request.limits.context_tokens);
+                if dropped.is_empty() {
+                    None
+                } else {
+                    let retained = history
+                        .iter()
+                        .filter(|message| message.role != MessageRole::System)
+                        .count()
+                        .saturating_sub(
+                            dropped
+                                .iter()
+                                .filter(|message| message.role != MessageRole::System)
+                                .count(),
+                        );
+                    sink.summarize_for_compaction(&dropped, retained)
+                        .await
+                        .unwrap_or_default()
+                }
+            } else {
+                None
+            };
+            let compacted = compact_history(&history, request.limits.context_tokens, summary);
             if compacted.dropped_messages > 0 {
                 sink.emit(CanonicalEvent::SessionCompacted(SessionCompacted {
                     retained_items: compacted.messages.len() as u32,
                     summary_item_id: None,
-                    summary: None,
+                    summary: compacted.summary.clone(),
                     compact_up_to_cursor: None,
                 }))
                 .await?;
             }
+            // Continue from the compacted history: the next compaction sees
+            // the synthetic summary instead of the messages it covered.
+            history = compacted.messages;
+            // P1.10: deferred tools ship only once `activate_tools` lists them
+            // in the run's `active_tools` set.
+            let active_tools = request
+                .tool_context
+                .active_tools
+                .read()
+                .map(|set| set.clone())
+                .unwrap_or_default();
             let definitions = self
                 .tools
-                .definitions()
+                .visible_definitions(&active_tools)
                 .into_iter()
                 .filter(|definition| {
                     request
@@ -355,7 +537,7 @@ impl AgentRuntime {
                 .collect();
             let model_request = ModelRequest {
                 model: request.model.clone(),
-                messages: compacted.messages,
+                messages: history.clone(),
                 tools: definitions,
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
@@ -463,6 +645,7 @@ impl AgentRuntime {
             let assistant_message = Message {
                 role: MessageRole::Assistant,
                 content: (!content.is_empty()).then_some(content),
+                parts: None,
                 tool_calls: calls.clone(),
                 tool_call_id: None,
                 name: None,
@@ -483,24 +666,63 @@ impl AgentRuntime {
             .await?;
             history.push(assistant_message);
             if calls.is_empty() {
-                sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
-                    reason: "stop".to_owned(),
-                    error_code: None,
-                }))
-                .await?;
-                return Ok(RunOutcome::Completed {
-                    history,
-                    usage: total_usage,
-                });
+                // A steer can land during the final (tool-free) turn — drain
+                // once more before completing or `send_to_subagent`/steer
+                // callers would see delivery reported while the message is
+                // never consumed by this run.
+                let steers = sink.drain_steers().await?;
+                if steers.is_empty() {
+                    sink.emit(CanonicalEvent::RunCompleted(RunTerminal {
+                        reason: "stop".to_owned(),
+                        error_code: None,
+                    }))
+                    .await?;
+                    return Ok(RunOutcome::Completed {
+                        history,
+                        usage: total_usage,
+                    });
+                }
+                history.extend(steers);
+                // A steer on the final allowed iteration costs a turn like
+                // any other — fail with `iteration_limit` rather than falling
+                // out of the loop into the unreachable tail.
+                if iteration == request.limits.max_iterations {
+                    return finish_failed(sink, history, "iteration_limit".to_owned()).await;
+                }
+                continue;
             }
+            // The snapshot lets `spawn_subagent(fork_context)` seed a child
+            // with the transcript as the model itself just saw it (P1.7).
+            request.tool_context.history_snapshot = Some(history.clone());
             let batch = self
-                .execute_tool_batch(calls, &request.tool_context, sink, approvals, &mut cancel)
+                .execute_tool_batch(
+                    calls,
+                    &request.tool_context,
+                    request.tool_names.as_ref(),
+                    sink,
+                    approvals,
+                    &mut cancel,
+                )
                 .await?;
             for (call, result) in batch.results {
-                let message = Message::tool_result(
+                // The model sees the same payload the event log does —
+                // including write diagnostics it is expected to react to.
+                let mut output = result.output.clone();
+                if let Some(diagnostics) = &result.diagnostics {
+                    if let Value::Object(map) = &mut output {
+                        map.insert("diagnostics".to_owned(), Value::String(diagnostics.clone()));
+                    } else {
+                        output = serde_json::json!({
+                            "output": output,
+                            "diagnostics": diagnostics,
+                        });
+                    }
+                }
+                let mut message = Message::tool_result(
                     &call,
-                    serde_json::to_string(&result.output).unwrap_or_else(|_| "null".to_owned()),
+                    serde_json::to_string(&output).unwrap_or_else(|_| "null".to_owned()),
                 );
+                message.parts = result.output_parts.clone();
                 history.push(message);
             }
             if let Some(reason) = batch.cancelled {
@@ -518,31 +740,107 @@ impl AgentRuntime {
         &self,
         calls: Vec<ToolCall>,
         context: &ToolContext,
+        tool_names: Option<&BTreeSet<String>>,
         sink: &dyn EventSink,
         approvals: &dyn ApprovalGate,
         cancel: &mut CancelSignal,
     ) -> Result<ToolBatchOutcome, RuntimeError> {
         let mut immediate = HashMap::new();
         let mut runnable = Vec::new();
+        // The ToolRequested seq names each call's checkpoint ref
+        // (`refs/cool/checkpoints/{session}/{seq}`, P2.18): deterministic and
+        // durable before the snapshot runs.
+        let mut requested_seqs = HashMap::new();
         for (index, call) in calls.iter().cloned().enumerate() {
-            sink.emit(CanonicalEvent::ToolRequested(ToolRequested {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone().into_iter().collect(),
-            }))
-            .await?;
+            let requested = sink
+                .emit(CanonicalEvent::ToolRequested(ToolRequested {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone().into_iter().collect(),
+                }))
+                .await?;
+            requested_seqs.insert(call.call_id.clone(), requested.seq);
             let Some(tool) = self.tools.get(&call.name) else {
                 let result = ToolResult::error("tool_not_found", "tool is not registered");
                 emit_tool_result(sink, &call, &result).await?;
                 immediate.insert(index, (call, result));
                 continue;
             };
-            let decision = context
+            // Visibility gates execution too (P1.10/P2.15): a `tool_names`
+            // allowlist is not just an advertising filter — a profile that
+            // hides a tool must not be callable by name — and a deferred
+            // tool runs only once activated. Both fail before policy.
+            if let Some(names) = tool_names
+                && !names.contains(&call.name)
+            {
+                let result = ToolResult::error(
+                    "tool_not_allowed",
+                    "tool is outside this run's tool allowlist",
+                );
+                emit_tool_result(sink, &call, &result).await?;
+                immediate.insert(index, (call, result));
+                continue;
+            }
+            if self.tools.is_tool_deferred(&call.name) {
+                let activated = context
+                    .active_tools
+                    .read()
+                    .map(|set| set.contains(&call.name))
+                    .unwrap_or(false);
+                if !activated {
+                    let result = ToolResult::error(
+                        "tool_not_active",
+                        "tool is deferred; call activate_tools to enable it",
+                    );
+                    emit_tool_result(sink, &call, &result).await?;
+                    immediate.insert(index, (call, result));
+                    continue;
+                }
+            }
+            // Policy rules apply BEFORE the capability fallback (P0.3/P1.6):
+            // session rules first (most local wins), then the live
+            // project+user source, then rules embedded in the policy itself.
+            // First match wins — BUT a capability deny is the outer bound:
+            // a rule's `allow` may relax `ask`→`allow`, it may never lift a
+            // capability `deny` (a scheduled task/subagent could otherwise
+            // self-authorize denied tools via its own policy.json).
+            let subject = rule_subject(&call);
+            let matched_rule = context
+                .session_rules
+                .as_ref()
+                .and_then(|rules| {
+                    let guard = rules.read().unwrap_or_else(|error| error.into_inner());
+                    match_rules(guard.iter(), &call.name, &subject).cloned()
+                })
+                .or_else(|| {
+                    context.rule_source.as_ref().and_then(|source| {
+                        let rules = source();
+                        match_rules(rules.iter(), &call.name, &subject).cloned()
+                    })
+                })
+                .or_else(|| context.policy.match_rule(&call.name, &subject).cloned());
+            let capability = context
                 .policy
                 .evaluate(tool.capabilities.iter().copied(), tool.default_decision)
                 .effective;
+            let decision = if capability == Decision::Deny {
+                Decision::Deny
+            } else {
+                match matched_rule.as_ref() {
+                    Some(rule) => rule.decision,
+                    None => capability,
+                }
+            };
             if decision == Decision::Deny {
-                let result = ToolResult::error("capability_denied", "tool capability was denied");
+                let result = ToolResult::error(
+                    "capability_denied",
+                    match matched_rule.as_ref() {
+                        Some(rule) if rule.decision == Decision::Deny => {
+                            format!("denied by policy rule: {}", rule.describe())
+                        }
+                        _ => "tool capability was denied".to_owned(),
+                    },
+                );
                 emit_tool_result(sink, &call, &result).await?;
                 immediate.insert(index, (call, result));
                 continue;
@@ -554,12 +852,15 @@ impl AgentRuntime {
                             approval_id: format!("approval-{}", Uuid::new_v4()),
                             call: call.clone(),
                             reason: "tool requires approval".to_owned(),
+                            matched_rule: matched_rule.as_ref().map(PolicyRule::describe),
+                            suggested_rule: suggest_policy_rule(&call),
+                            breakpoint_type: None,
                         },
                         sink,
                         cancel,
                     )
                     .await?;
-                if outcome != ApprovalOutcome::Approved {
+                if outcome.decision != ApprovalOutcome::Approved {
                     let result = ToolResult::error("approval_denied", "tool approval was denied");
                     emit_tool_result(sink, &call, &result).await?;
                     immediate.insert(index, (call, result));
@@ -569,14 +870,51 @@ impl AgentRuntime {
             runnable.push((index, call, tool));
         }
         let mut join_set = JoinSet::new();
+        // P2.18: pre-dispatch filesystem checkpoints run for EVERY mutating
+        // call before any tool in the batch starts — otherwise a spawned
+        // call's in-flight writes would land in a later call's "pre-dispatch"
+        // snapshot (torn checkpoint). A failed snapshot never blocks the
+        // call — the error lands on ToolStarted.extensions.checkpoint_error.
+        let mut prepared = Vec::with_capacity(runnable.len());
         for (index, call, tool) in runnable {
-            sink.emit(CanonicalEvent::ToolStarted(ToolLifecycle {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-            }))
+            let mut extensions = Extensions::new();
+            match crate::checkpoints::snapshot_before_tool(
+                context,
+                &call.name,
+                &call.call_id,
+                requested_seqs.get(&call.call_id).copied().unwrap_or(0),
+                &call.arguments,
+            )
+            .await
+            {
+                Ok(Some(reference)) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_EXTENSION_KEY.to_owned(),
+                        Value::String(reference),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    extensions.insert(
+                        crate::checkpoints::CHECKPOINT_ERROR_EXTENSION_KEY.to_owned(),
+                        Value::String(error),
+                    );
+                }
+            }
+            sink.emit_with_extensions(
+                CanonicalEvent::ToolStarted(ToolLifecycle {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                }),
+                extensions,
+            )
             .await?;
+            prepared.push((index, call, tool));
+        }
+        for (index, call, tool) in prepared {
             let mut context = context.clone();
             context.cancel = Some(cancel.clone());
+            context.call_id = Some(call.call_id.clone());
             join_set.spawn(async move {
                 let arguments = Value::Object(call.arguments.clone());
                 let result = std::panic::AssertUnwindSafe(tool.execute(&context, arguments))
@@ -741,10 +1079,16 @@ async fn emit_tool_result(
         }))
         .await?;
     } else {
+        let mut payload = result.output.clone();
+        // P1.9: post-write diagnostics travel inside the free-form result —
+        // already masked and ≤4 KiB by the diagnostics runner.
+        if let Some(diagnostics) = &result.diagnostics {
+            payload["diagnostics"] = Value::String(diagnostics.clone());
+        }
         sink.emit(CanonicalEvent::ToolCompleted(ToolCompleted {
             call_id: call.call_id.clone(),
             name: call.name.clone(),
-            result: result.output.clone(),
+            result: payload,
         }))
         .await?;
     }
@@ -914,6 +1258,14 @@ impl StoreEventSink {
 #[async_trait]
 impl EventSink for StoreEventSink {
     async fn emit(&self, event: CanonicalEvent) -> Result<EventEnvelope, RuntimeError> {
+        self.emit_with_extensions(event, Extensions::new()).await
+    }
+
+    async fn emit_with_extensions(
+        &self,
+        event: CanonicalEvent,
+        extensions: Extensions,
+    ) -> Result<EventEnvelope, RuntimeError> {
         let event = mask_canonical_event(event)?;
         if matches!(event, CanonicalEvent::RunCancelled(_)) {
             let run = self.store.run(&self.run_id, &self.owner_actor_id)?;
@@ -959,7 +1311,7 @@ impl EventSink for StoreEventSink {
             causation_id: None,
             correlation_id: None,
             event,
-            extensions: BTreeMap::new(),
+            extensions,
         };
         Ok(self
             .store
@@ -983,11 +1335,12 @@ impl EventSink for StoreEventSink {
     }
 
     async fn load_history(&self) -> Result<Vec<Message>, RuntimeError> {
-        history_from_events(
-            &self
-                .store
-                .session_events(&self.session_id, &self.owner_actor_id)?,
-        )
+        history_from_event_rows(&self.store.session_event_window(
+            &self.session_id,
+            &self.owner_actor_id,
+            None,
+            i64::MAX as usize,
+        )?)
     }
 }
 
@@ -999,9 +1352,32 @@ pub fn mask_canonical_event(event: CanonicalEvent) -> Result<CanonicalEvent, Run
         .map_err(|error| RuntimeError::Sink(format!("masked event is invalid: {error}")))
 }
 
+/// Rebuild model history from a session's canonical events. A
+/// `SessionCompacted` carrying a summary re-hydrates it as a synthetic
+/// system message — without this a restarted run loses its compaction
+/// context. This cursor-free form cannot compare `compact_up_to_cursor`,
+/// so covered events are not filtered out.
 pub fn history_from_events(events: &[EventEnvelope]) -> Result<Vec<Message>, RuntimeError> {
-    let mut history = Vec::new();
-    for envelope in events {
+    history_from_event_rows(
+        &events
+            .iter()
+            .map(|envelope| (u64::MAX, envelope.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// `history_from_events` on `(cursor, event)` rows — `cursor` is the
+/// `rust_events.rowid` projected by `session_event_window`/`session_history`.
+/// Message-producing events at or below `compact_up_to_cursor` are covered
+/// by that summary and skipped, so replay stays as compact as the live run
+/// was. Each summary lands right after the leading system message.
+pub fn history_from_event_rows(
+    rows: &[(u64, EventEnvelope)],
+) -> Result<Vec<Message>, RuntimeError> {
+    let mut covered_through = 0_u64;
+    let mut entries: Vec<(u64, Message)> = Vec::new();
+    let mut summaries: Vec<(u64, String)> = Vec::new();
+    for (cursor, envelope) in rows {
         match &envelope.event {
             CanonicalEvent::ItemCompleted(item)
                 if matches!(item.role.as_deref(), Some("user" | "assistant")) =>
@@ -1011,49 +1387,252 @@ pub fn history_from_events(events: &[EventEnvelope]) -> Result<Vec<Message>, Run
                 } else {
                     MessageRole::Assistant
                 };
-                history.push(Message {
-                    role,
-                    content: item.content.clone(),
-                    tool_calls: item
-                        .tool_calls
-                        .iter()
-                        .map(|call| ToolCall {
-                            call_id: call.call_id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone().into_iter().collect(),
-                        })
-                        .collect(),
-                    tool_call_id: None,
-                    name: None,
-                });
+                entries.push((
+                    *cursor,
+                    Message {
+                        role,
+                        content: item.content.clone(),
+                        // Image bytes are never re-fetched for history —
+                        // rebuilt messages degrade to the `[image: id]`
+                        // marker text (P2.12).
+                        parts: None,
+                        tool_calls: item
+                            .tool_calls
+                            .iter()
+                            .map(|call| ToolCall {
+                                call_id: call.call_id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone().into_iter().collect(),
+                            })
+                            .collect(),
+                        tool_call_id: None,
+                        name: None,
+                    },
+                ));
             }
-            CanonicalEvent::ToolCompleted(tool) => history.push(Message {
-                role: MessageRole::Tool,
-                content: Some(
-                    serde_json::to_string(&tool.result)
+            CanonicalEvent::ToolCompleted(tool) => entries.push((
+                *cursor,
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some(
+                        serde_json::to_string(&tool.result)
+                            .map_err(|error| RuntimeError::Sink(error.to_string()))?,
+                    ),
+                    parts: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(tool.call_id.clone()),
+                    name: Some(tool.name.clone()),
+                },
+            )),
+            CanonicalEvent::ToolFailed(tool) => entries.push((
+                *cursor,
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some(
+                        serde_json::to_string(&json!({
+                            "error": tool.message,
+                            "errorCode": tool.error_code,
+                        }))
                         .map_err(|error| RuntimeError::Sink(error.to_string()))?,
-                ),
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
-            CanonicalEvent::ToolFailed(tool) => history.push(Message {
-                role: MessageRole::Tool,
-                content: Some(
-                    serde_json::to_string(&json!({
-                        "error": tool.message,
-                        "errorCode": tool.error_code,
-                    }))
-                    .map_err(|error| RuntimeError::Sink(error.to_string()))?,
-                ),
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-            }),
+                    ),
+                    parts: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(tool.call_id.clone()),
+                    name: Some(tool.name.clone()),
+                },
+            )),
+            CanonicalEvent::SessionCompacted(compacted) => {
+                let Some(summary) = compacted
+                    .summary
+                    .as_ref()
+                    .filter(|summary| !summary.is_empty())
+                else {
+                    continue;
+                };
+                covered_through = covered_through.max(compacted.compact_up_to_cursor.unwrap_or(0));
+                summaries.push((*cursor, summary.clone()));
+            }
             _ => {}
         }
     }
+    let mut history: Vec<Message> = entries
+        .into_iter()
+        .filter(|(cursor, _)| *cursor > covered_through)
+        .map(|(_, message)| message)
+        .collect();
+    let insert_at = history
+        .iter()
+        .position(|message| message.role == MessageRole::System)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    for (offset, (_, summary)) in summaries
+        .iter()
+        .filter(|(cursor, _)| *cursor > covered_through)
+        .enumerate()
+    {
+        history.insert(
+            (insert_at + offset).min(history.len()),
+            Message::text(
+                MessageRole::System,
+                format!("[Summary of earlier work]\n{summary}"),
+            ),
+        );
+    }
     Ok(history)
+}
+
+/// The subject a `PolicyRule` is matched against, derived from the call:
+/// `"program args…"` for process tools, the workspace-relative path for file
+/// tools, the host for network tools, `None` otherwise.
+pub fn rule_subject(call: &ToolCall) -> RuleSubject {
+    let arguments = &call.arguments;
+    let arg_str = |key: &str| arguments.get(key).and_then(Value::as_str);
+    match call.name.as_str() {
+        "shell" => {
+            let program = arg_str("program").unwrap_or_default();
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            RuleSubject::Command(format!("{program} {args}").trim_end().to_owned())
+        }
+        "git" => {
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            RuleSubject::Command(format!("git {args}").trim_end().to_owned())
+        }
+        _ if arg_str("path").is_some() => {
+            RuleSubject::Path(arg_str("path").unwrap_or_default().to_owned())
+        }
+        _ => {
+            for key in ["url", "host", "domain"] {
+                if let Some(value) = arg_str(key) {
+                    let host = url::Url::parse(value)
+                        .ok()
+                        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                        .unwrap_or_else(|| value.to_owned());
+                    return RuleSubject::Domain(host);
+                }
+            }
+            RuleSubject::None
+        }
+    }
+}
+
+/// The suggested persistent rule for an approval card — a command-prefix glob
+/// for process tools, a path glob for file tools, a domain for network tools.
+/// `None` when no stable suggestion exists.
+pub fn suggest_policy_rule(call: &ToolCall) -> Option<PolicyRule> {
+    let scope_default = |rule: PolicyRule| rule.scoped(RuleScope::Project);
+    match call.name.as_str() {
+        "shell" => {
+            let program = call
+                .arguments
+                .get("program")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if program.is_empty() {
+                return None;
+            }
+            Some(scope_default(PolicyRule::new(
+                "shell",
+                RulePatternKind::Command,
+                format!("{program} *"),
+                Decision::Allow,
+            )))
+        }
+        "git" => {
+            let args = call
+                .arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let sub = args.first().and_then(Value::as_str).unwrap_or_default();
+            let pattern = if sub.is_empty() || sub.starts_with('-') {
+                "git *".to_owned()
+            } else {
+                format!("git {sub} *")
+            };
+            Some(scope_default(PolicyRule::new(
+                "git",
+                RulePatternKind::Command,
+                pattern,
+                Decision::Allow,
+            )))
+        }
+        "write_file" | "edit_file" => call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                scope_default(PolicyRule::new(
+                    call.name.as_str(),
+                    RulePatternKind::PathGlob,
+                    path,
+                    Decision::Allow,
+                ))
+            }),
+        _ => None,
+    }
+}
+
+/// Protocol wire mirror for a `PolicyRule`.
+pub fn policy_rule_record(rule: &PolicyRule) -> cool_protocol::PolicyRuleRecord {
+    cool_protocol::PolicyRuleRecord {
+        id: rule.id.clone(),
+        tool: rule.tool.clone(),
+        kind: rule.kind.name().to_owned(),
+        pattern: rule.pattern.clone(),
+        decision: match rule.decision {
+            Decision::Allow => "allow",
+            Decision::Ask => "ask",
+            Decision::Deny => "deny",
+        }
+        .to_owned(),
+        scope: rule.scope.name().to_owned(),
+        note: rule.note.clone(),
+    }
+}
+
+/// Parse a wire `PolicyRuleRecord` back into a `PolicyRule` (unknown kind /
+/// decision / scope strings fail closed with `None`).
+pub fn policy_rule_from_record(record: &cool_protocol::PolicyRuleRecord) -> Option<PolicyRule> {
+    let kind = RulePatternKind::parse(&record.kind)?;
+    let decision = match record.decision.as_str() {
+        "allow" => Decision::Allow,
+        "ask" => Decision::Ask,
+        "deny" => Decision::Deny,
+        _ => return None,
+    };
+    let scope = RuleScope::parse(&record.scope)?;
+    Some(PolicyRule {
+        tool: record.tool.clone(),
+        kind,
+        pattern: record.pattern.clone(),
+        decision,
+        scope,
+        note: record.note.clone(),
+        id: record.id.clone(),
+    })
 }
 
 fn timestamp() -> String {

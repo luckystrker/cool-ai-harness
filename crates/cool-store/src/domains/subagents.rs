@@ -557,6 +557,8 @@ impl crate::LegacyStore {
                     "image_analyze",
                     "read_file",
                     "list_files",
+                    "search_files",
+                    "find_files",
                 ],
                 &[
                     ("read", "allow"),
@@ -574,7 +576,7 @@ impl crate::LegacyStore {
                 "You are a senior code reviewer. Analyze the provided code carefully, \
                  identifying bugs, security issues, performance problems, and style \
                  violations. Provide specific, actionable feedback with code examples.",
-                &["read_file", "list_files"],
+                &["read_file", "list_files", "search_files", "find_files"],
                 &[
                     ("read", "allow"),
                     ("write", "deny"),
@@ -589,7 +591,7 @@ impl crate::LegacyStore {
                 "You are a summarization expert. Read the provided content and produce \
                  a clear, concise summary that captures all key points. Structure your \
                  summary with headings and bullet points for readability.",
-                &["read_file", "list_files"],
+                &["read_file", "list_files", "search_files", "find_files"],
                 &[
                     ("read", "allow"),
                     ("write", "deny"),
@@ -624,15 +626,33 @@ impl crate::LegacyStore {
                     })?;
                 }
                 Some(role) => {
-                    // Forward migration: the legacy built-in researcher shipped
-                    // with the four-tool list; rewrite it only when the stored
-                    // list still matches it exactly.
-                    let legacy_tool_list =
-                        json!(["web_fetch", "web_search", "read_file", "list_files"]);
-                    if role.is_builtin
-                        && role.name == "researcher"
-                        && role.tool_names.as_ref() == Some(&legacy_tool_list)
-                    {
+                    // Forward migration: rewrite a builtin's stored tool list
+                    // only when it still matches a list we previously shipped —
+                    // user-edited lists are left untouched.
+                    let legacy_lists: &[&[&str]] = match role.name.as_str() {
+                        "researcher" => &[
+                            &["web_fetch", "web_search", "read_file", "list_files"],
+                            &[
+                                "web_fetch",
+                                "web_search",
+                                "browser_navigate",
+                                "browser_click",
+                                "browser_extract",
+                                "browser_scroll",
+                                "browser_screenshot",
+                                "browser_close",
+                                "image_analyze",
+                                "read_file",
+                                "list_files",
+                            ],
+                        ],
+                        "code-reviewer" | "summarizer" => &[&["read_file", "list_files"]],
+                        _ => &[],
+                    };
+                    let is_legacy = legacy_lists
+                        .iter()
+                        .any(|list| role.tool_names.as_ref() == Some(&json!(list)));
+                    if role.is_builtin && is_legacy {
                         self.update_subagent_role(
                             role.id,
                             &SubagentRolePatch {

@@ -72,6 +72,20 @@
       "command": "conversations.approvals"
     },
     {
+      "file": "conversations.ts",
+      "member": "forkFromCursor",
+      "http": "POST /api/rpc (session.fork + conversations.create + session.for_conversation)",
+      "status": "sdk",
+      "command": "session.fork"
+    },
+    {
+      "file": "conversations.ts",
+      "member": "rewindToCursor",
+      "http": "POST /api/rpc (session.rewind)",
+      "status": "sdk",
+      "command": "session.rewind"
+    },
+    {
       "file": "providers.ts",
       "member": "list",
       "http": "GET /api/providers",

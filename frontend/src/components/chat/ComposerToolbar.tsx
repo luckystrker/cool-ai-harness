@@ -51,6 +51,9 @@ export interface ComposerToolbarProps {
   /** Plan Mode toggle (Фаза 2 §1). */
   planMode?: boolean
   onPlanModeChange?: (enabled: boolean) => void
+  /** Long-running task mode: resume/track `.cool/task/progress.md` state. */
+  longTaskMode?: boolean
+  onLongTaskModeChange?: (enabled: boolean) => void
 }
 
 /** Last path segment — used as the compact display name for a directory. */
@@ -81,6 +84,8 @@ export function ComposerToolbar({
   disabled,
   planMode,
   onPlanModeChange,
+  longTaskMode,
+  onLongTaskModeChange,
 }: ComposerToolbarProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
 
@@ -200,6 +205,24 @@ export function ComposerToolbar({
               Plan
             </button>
           </div>
+        )}
+
+        {/* --- Long-running task mode toggle --- */}
+        {onLongTaskModeChange && (
+          <button
+            disabled={disabled}
+            className={cn(
+              "h-7 rounded-md border px-2 text-xs transition-colors",
+              longTaskMode
+                ? "bg-primary text-primary-foreground border-primary"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+            title="Long-running task mode: the agent tracks progress in .cool/task/progress.md and resumes it on the next run"
+            aria-pressed={longTaskMode}
+            onClick={() => onLongTaskModeChange(!longTaskMode)}
+          >
+            Long task
+          </button>
         )}
 
         <div className="flex-1" />

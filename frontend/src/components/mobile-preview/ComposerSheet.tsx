@@ -41,7 +41,7 @@ const MODELS = [
 ]
 
 const CAPABILITIES: { key: string; label: string; hint: string }[] = [
-  { key: "read", label: "Read files", hint: "read_file, list_files" },
+  { key: "read", label: "Read files", hint: "read_file, list_files, search_files" },
   { key: "write", label: "Write files", hint: "write_file, artifacts" },
   { key: "execute", label: "Execute code", hint: "shell, git" },
   { key: "network", label: "Network", hint: "web_search, web_fetch" },

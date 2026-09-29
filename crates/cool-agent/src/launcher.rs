@@ -1,0 +1,729 @@
+//! Process launchers (P0.3 / P2.17).
+//!
+//! Every tool that runs a host process goes through [`ProcessLauncher`] — the
+//! trait is the single gate between the agent's tool calls and OS process
+//! creation. The default is [`DisabledLauncher`], which fails closed; the
+//! operator opts in per process via `COOL_PROCESS_LAUNCHER`, a profile
+//! `settings["process_launcher"]` value, or a CLI flag (`--allow-shell`,
+//! `--process-launcher=…`, `--sandbox=…`).
+//!
+//! - [`HostLauncher`] keeps the existing trusted-host containment: sanitized
+//!   `env_clear` environment, `KillOnDrop`, and a killable containment unit
+//!   (Windows Job Object / Unix process group). It cannot isolate the
+//!   filesystem or network, so a `LaunchSpec` asking for `NetAccess` below
+//!   `Full` fails closed.
+//! - [`SandboxedLauncher`] wraps argv in an OS sandbox backend: `bwrap` on
+//!   Linux, `sandbox-exec` (seatbelt) on macOS, `jobobject` on Windows
+//!   (containment only — no FS/Net isolation in v1, see module docs on
+//!   [`SandboxBackend`]).
+
+use std::collections::HashMap;
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use cool_security::RuleState;
+use process_wrap::tokio::ChildWrapper;
+
+use crate::tools::ToolError;
+
+/// Which launcher implementation backs a `ToolContext`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LauncherKind {
+    Disabled,
+    Host,
+    Sandboxed,
+}
+
+/// Network access requested for one launch. `Host` cannot isolate the
+/// network; `SandboxedLauncher` enforces `None` via `--unshare-net` (bwrap) or
+/// by omitting the network clause (seatbelt). `Pinned` fails closed in v1:
+/// enforcing a domain allowlist needs a proxy that does not exist yet, so
+/// requesting it is an error rather than silently sharing host networking.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum NetAccess {
+    None,
+    Pinned(Vec<String>),
+    #[default]
+    Full,
+}
+
+/// Per-launch resource bounds; the capture layer in `tools.rs` enforces them.
+#[derive(Clone, Debug)]
+pub struct ResourceLimits {
+    pub timeout: Duration,
+    pub max_output_bytes: usize,
+}
+
+/// Everything a launcher needs to spawn one bounded process.
+#[derive(Clone, Debug)]
+pub struct LaunchSpec {
+    pub cwd: PathBuf,
+    /// Sanitized environment pairs — applied under `env_clear`.
+    pub env: Vec<(String, String)>,
+    /// Bytes piped to the child's stdin, when the caller streams input.
+    pub stdin: Option<Vec<u8>>,
+    pub net: NetAccess,
+    pub limits: ResourceLimits,
+}
+
+pub trait ProcessLauncher: Send + Sync + fmt::Debug {
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        spec: &LaunchSpec,
+    ) -> Result<Box<dyn ChildWrapper>, ToolError>;
+
+    fn kind(&self) -> LauncherKind;
+}
+
+/// Fail-closed default: no process may be spawned.
+#[derive(Debug)]
+pub struct DisabledLauncher;
+
+impl ProcessLauncher for DisabledLauncher {
+    fn spawn(
+        &self,
+        _program: &str,
+        _args: &[String],
+        _spec: &LaunchSpec,
+    ) -> Result<Box<dyn ChildWrapper>, ToolError> {
+        Err(ToolError::Security(
+            "process launcher is disabled; run with --allow-shell or enable a launcher".to_owned(),
+        ))
+    }
+
+    fn kind(&self) -> LauncherKind {
+        LauncherKind::Disabled
+    }
+}
+
+/// Trusted-host launcher: the child runs directly on the host inside a
+/// killable containment unit (Job Object on Windows, process group on Unix)
+/// with an `env_clear` sanitized environment. Network/filesystem isolation
+/// beyond that is not possible — anything below `NetAccess::Full` fails closed.
+#[derive(Debug)]
+pub struct HostLauncher;
+
+impl ProcessLauncher for HostLauncher {
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        spec: &LaunchSpec,
+    ) -> Result<Box<dyn ChildWrapper>, ToolError> {
+        if spec.net != NetAccess::Full {
+            return Err(ToolError::Security(
+                "host launcher cannot isolate network access".to_owned(),
+            ));
+        }
+        spawn_wrapped(
+            &[program.to_owned()]
+                .into_iter()
+                .chain(args.iter().cloned())
+                .collect::<Vec<_>>(),
+            spec,
+        )
+    }
+
+    fn kind(&self) -> LauncherKind {
+        LauncherKind::Host
+    }
+}
+
+/// OS sandbox backends for [`SandboxedLauncher`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxBackend {
+    /// Linux `bwrap` (bubblewrap): workspace bound read-write over a read-only
+    /// root, `--unshare-net` on `NetAccess::None`.
+    Bwrap,
+    /// macOS `sandbox-exec` seatbelt profile: deny-by-default, workspace
+    /// write-only subtree, optional network clause.
+    Seatbelt,
+    /// Windows Job Object containment only — **no** filesystem or network
+    /// isolation in v1 (documented limitation).
+    JobObject,
+}
+
+impl SandboxBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bwrap => "bwrap",
+            Self::Seatbelt => "seatbelt",
+            Self::JobObject => "jobobject",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "bwrap" => Some(Self::Bwrap),
+            "seatbelt" | "sandbox-exec" | "sandbox_exec" => Some(Self::Seatbelt),
+            "jobobject" | "job_object" | "job" => Some(Self::JobObject),
+            _ => None,
+        }
+    }
+
+    /// Whether the backend can actually run on this host — a present-but-
+    /// unusable binary is probed by launching a trivial sandboxed command,
+    /// so selection never picks a launcher that fails at runtime (e.g.
+    /// `bwrap` installed while unprivileged user namespaces are disabled).
+    pub fn available(self) -> bool {
+        match self {
+            Self::Bwrap => {
+                cfg!(target_os = "linux")
+                    && ["/bin/true", "/usr/bin/true"].iter().any(|bin| {
+                        probe_runs(&[
+                            "bwrap",
+                            "--die-with-parent",
+                            "--ro-bind",
+                            bin,
+                            "/__cool_probe__",
+                            "--unshare-net",
+                            "--",
+                            "/__cool_probe__",
+                        ])
+                    })
+            }
+            Self::Seatbelt => {
+                cfg!(target_os = "macos")
+                    && probe_runs(&[
+                        "/usr/bin/sandbox-exec",
+                        "-p",
+                        "(version 1)(allow default)",
+                        "/usr/bin/true",
+                    ])
+            }
+            // Job Objects are a kernel feature — always available on Windows.
+            Self::JobObject => cfg!(windows),
+        }
+    }
+
+    /// The backend the current OS would auto-select, when any is available.
+    pub fn detect() -> Option<Self> {
+        [Self::Bwrap, Self::Seatbelt, Self::JobObject]
+            .into_iter()
+            .find(|backend| backend.available())
+    }
+}
+
+/// Runs `argv` once and reports whether it executed successfully — used to
+/// probe that a sandbox backend binary is actually usable, not just present.
+fn probe_runs(argv: &[&str]) -> bool {
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Availability of each sandbox backend on this host, for `cool doctor`.
+pub fn sandbox_backend_status() -> Vec<serde_json::Value> {
+    [
+        SandboxBackend::Bwrap,
+        SandboxBackend::Seatbelt,
+        SandboxBackend::JobObject,
+    ]
+    .into_iter()
+    .map(|backend| {
+        serde_json::json!({
+            "backend": backend.name(),
+            "available": backend.available(),
+            "isolation": match backend {
+                SandboxBackend::Bwrap | SandboxBackend::Seatbelt => "filesystem+network",
+                // v1: JobObject provides process containment only.
+                SandboxBackend::JobObject => "containment-only",
+            },
+        })
+    })
+    .collect()
+}
+
+/// Sandboxed process launcher (P2.17). Wraps argv in the OS sandbox before
+/// delegating to the same spawn path as [`HostLauncher`], so containment and
+/// kill semantics are unchanged. Missing backend binary fails closed.
+#[derive(Debug)]
+pub struct SandboxedLauncher {
+    backend: SandboxBackend,
+}
+
+impl SandboxedLauncher {
+    pub fn new(backend: SandboxBackend) -> Result<Self, String> {
+        if !backend.available() {
+            return Err(format!(
+                "sandbox backend '{}' is not available on this host",
+                backend.name()
+            ));
+        }
+        Ok(Self { backend })
+    }
+
+    /// Auto-select an available backend for the current OS.
+    pub fn detect() -> Result<Self, String> {
+        match SandboxBackend::detect() {
+            Some(backend) => Self::new(backend),
+            None => Err("no sandbox backend is available on this host".to_owned()),
+        }
+    }
+
+    pub fn backend(&self) -> SandboxBackend {
+        self.backend
+    }
+}
+
+impl ProcessLauncher for SandboxedLauncher {
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        spec: &LaunchSpec,
+    ) -> Result<Box<dyn ChildWrapper>, ToolError> {
+        if let NetAccess::Pinned(_) = spec.net {
+            // Fail closed: no backend can enforce a domain allowlist without
+            // an allowlist proxy. Silently sharing host networking would
+            // grant more access than the caller asked for.
+            return Err(ToolError::Security(
+                "NetAccess::Pinned requires an allowlist proxy, unsupported in v1".to_owned(),
+            ));
+        }
+        let argv = match self.backend {
+            SandboxBackend::Bwrap => bwrap_argv(program, args, spec),
+            SandboxBackend::Seatbelt => seatbelt_argv(program, args, spec)?,
+            SandboxBackend::JobObject => {
+                // v1: Job Object containment only (no FS/Net isolation);
+                // HostLauncher still rejects NetAccess below Full.
+                return HostLauncher.spawn(program, args, spec);
+            }
+        };
+        spawn_wrapped(&argv, spec)
+    }
+
+    fn kind(&self) -> LauncherKind {
+        LauncherKind::Sandboxed
+    }
+}
+
+/// `bwrap` argv: only system/toolchain paths bound read-only plus the
+/// workspace bound read-write — the rest of the host filesystem (home dirs,
+/// credentials) is invisible inside the sandbox. `--unshare-net` when the
+/// spec denies network access.
+pub fn bwrap_argv(program: &str, args: &[String], spec: &LaunchSpec) -> Vec<String> {
+    let workspace = spec.cwd.to_string_lossy().into_owned();
+    let mut argv = vec![
+        "bwrap".to_owned(),
+        "--die-with-parent".to_owned(),
+        "--dev".to_owned(),
+        "/dev".to_owned(),
+        "--proc".to_owned(),
+        "/proc".to_owned(),
+        "--tmpfs".to_owned(),
+        "/tmp".to_owned(),
+    ];
+    // Read-only binds for the paths a toolchain legitimately needs — never
+    // a blanket `/`, which would expose host secrets to the child. `/etc`
+    // is NOT bound wholesale: it holds host credentials (shadow, private
+    // keys, cloud/agent configs). Instead it gets an empty tmpfs plus only
+    // the specific files a toolchain resolver/TLS stack actually reads.
+    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/opt"] {
+        if std::path::Path::new(dir).is_dir() {
+            argv.push("--ro-bind".to_owned());
+            argv.push(dir.to_owned());
+            argv.push(dir.to_owned());
+        }
+    }
+    argv.push("--tmpfs".to_owned());
+    argv.push("/etc".to_owned());
+    for entry in [
+        "resolv.conf",
+        "hosts",
+        "nsswitch.conf",
+        "localtime",
+        "os-release",
+        "ld.so.cache",
+        "ld.so.conf",
+        "ld.so.conf.d",
+        "ssl",
+        "pki",
+        "ca-certificates",
+        "alternatives",
+        "mime.types",
+        "services",
+        "protocols",
+    ] {
+        let path = format!("/etc/{entry}");
+        if std::path::Path::new(&path).exists() {
+            argv.push("--ro-bind".to_owned());
+            argv.push(path.clone());
+            argv.push(path);
+        }
+    }
+    argv.extend([
+        "--bind".to_owned(),
+        workspace.clone(),
+        workspace.clone(),
+        "--chdir".to_owned(),
+        workspace,
+    ]);
+    if spec.net == NetAccess::None {
+        argv.push("--unshare-net".to_owned());
+    }
+    argv.push("--".to_owned());
+    argv.push(program.to_owned());
+    argv.extend(args.iter().cloned());
+    argv
+}
+
+/// Escapes a path for a double-quoted seatbelt string literal — `\"` and
+/// `\\` are escaped so a crafted workspace path cannot inject profile
+/// clauses; control characters (which can break the string outright) are
+/// rejected with a security error.
+fn seatbelt_escape(path: &std::path::Path) -> Result<String, ToolError> {
+    let text = path.to_string_lossy();
+    if text.chars().any(|ch| ch.is_control()) {
+        return Err(ToolError::Security(format!(
+            "workspace path is not representable in a sandbox profile: {}",
+            path.display()
+        )));
+    }
+    Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// `sandbox-exec` seatbelt argv: deny-by-default profile — reads confined to
+/// system/toolchain subtrees and the workspace (home directories and
+/// credentials stay unreadable; `/private` is narrowed to the resolver config
+/// and temp trees, not the whole host-private store), writes confined to the
+/// workspace plus temp dirs, process exec/fork allowed, and a network clause
+/// only when the spec allows network access.
+pub fn seatbelt_argv(
+    program: &str,
+    args: &[String],
+    spec: &LaunchSpec,
+) -> Result<Vec<String>, ToolError> {
+    let workspace = seatbelt_escape(&spec.cwd)?;
+    let network = match spec.net {
+        NetAccess::None | NetAccess::Pinned(_) => "",
+        NetAccess::Full => "(allow network*)",
+    };
+    let profile = format!(
+        "(version 1)(deny default)\
+         (allow file-read*\
+           (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\")\
+           (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/opt\")\
+           (subpath \"/dev\") (subpath \"/Applications\")\
+           (subpath \"/private/etc\") (subpath \"/private/tmp\")\
+           (subpath \"{workspace}\"))\
+         (allow file-write* (subpath \"{workspace}\") (subpath \"/private/tmp\"))\
+         (allow process-exec)(allow process-fork)(allow signal (target self))\
+         {network}"
+    );
+    Ok(["sandbox-exec", "-p", profile.as_str(), program]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(args.iter().cloned())
+        .collect())
+}
+
+/// Shared spawn path: `env_clear` + sanitized env, piped stdio, killable
+/// containment unit (Windows Job Object / Unix process group), KillOnDrop.
+fn spawn_wrapped(argv: &[String], spec: &LaunchSpec) -> Result<Box<dyn ChildWrapper>, ToolError> {
+    let Some((program, args)) = argv.split_first() else {
+        return Err(ToolError::InvalidArguments(
+            "empty argv for process spawn".to_owned(),
+        ));
+    };
+    let mut command = process_wrap::tokio::CommandWrap::with_new(program, |command| {
+        command
+            .args(args)
+            .current_dir(&spec.cwd)
+            .env_clear()
+            .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdin(if spec.stdin.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    });
+    command.wrap(process_wrap::tokio::KillOnDrop);
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(process_wrap::tokio::JobObject);
+    command.spawn().map_err(ToolError::Io)
+}
+
+/// The host-side context every executor injects into a `ToolContext` so the
+/// main loop, the scheduler and subagents share one launcher, host
+/// environment and live rule state.
+#[derive(Clone)]
+pub struct HostContext {
+    pub launcher: Arc<dyn ProcessLauncher>,
+    /// Host environment launched processes inherit (through `env_clear` +
+    /// `sanitize_environment`); empty when no launcher is configured.
+    pub environment: HashMap<String, String>,
+    /// Shared project + session rule state (P1.6).
+    pub rules: Arc<RuleState>,
+}
+
+impl fmt::Debug for HostContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostContext")
+            .field("launcher", &self.launcher)
+            .field("environment", &self.environment.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for HostContext {
+    fn default() -> Self {
+        Self {
+            launcher: Arc::new(DisabledLauncher),
+            environment: HashMap::new(),
+            rules: Arc::new(RuleState::default()),
+        }
+    }
+}
+
+/// Resolve a launcher from the selection chain's final choice.
+/// `kind` vocabulary: `disabled|none`, `host|trusted`, `sandboxed|sandbox`,
+/// or a backend name (`bwrap`/`seatbelt`/`jobobject`) which implies sandboxed.
+pub fn resolve_launcher(
+    kind: &str,
+    backend: Option<SandboxBackend>,
+) -> Result<Arc<dyn ProcessLauncher>, String> {
+    match kind {
+        "" | "disabled" | "none" | "off" => Ok(Arc::new(DisabledLauncher)),
+        "host" | "trusted" | "allow-shell" | "allow_shell" => Ok(Arc::new(HostLauncher)),
+        "sandboxed" | "sandbox" | "auto" => {
+            let launcher = match backend {
+                Some(backend) => SandboxedLauncher::new(backend),
+                None => SandboxedLauncher::detect(),
+            }?;
+            Ok(Arc::new(launcher))
+        }
+        other => match SandboxBackend::parse(other) {
+            Some(backend) => Ok(Arc::new(SandboxedLauncher::new(backend)?)),
+            None => Err(format!(
+                "unknown process launcher '{other}' (expected disabled|host|sandboxed|bwrap|seatbelt|jobobject)"
+            )),
+        },
+    }
+}
+
+/// The launcher selection chain (P0.3):
+/// `COOL_PROCESS_LAUNCHER` env → profile `settings["process_launcher"]` →
+/// explicit flag → default disabled. `COOL_SANDBOX_BACKEND` /
+/// `settings["sandbox_backend"]` pick the backend when the kind is sandboxed.
+pub fn launcher_from_env() -> Result<Option<Arc<dyn ProcessLauncher>>, String> {
+    let kind = std::env::var("COOL_PROCESS_LAUNCHER").unwrap_or_default();
+    if kind.is_empty() {
+        return Ok(None);
+    }
+    let backend = std::env::var("COOL_SANDBOX_BACKEND")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            SandboxBackend::parse(&value)
+                .ok_or_else(|| format!("unknown COOL_SANDBOX_BACKEND '{value}'"))
+        })
+        .transpose()?;
+    resolve_launcher(&kind, backend).map(Some)
+}
+
+/// Build the profile-level override: `settings["process_launcher"]` (+ optional
+/// `settings["sandbox_backend"]`). Missing key → `None` (chain continues).
+pub fn launcher_from_profile(
+    settings: Option<&serde_json::Value>,
+) -> Result<Option<Arc<dyn ProcessLauncher>>, String> {
+    let Some(settings) = settings.and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    let kind = settings
+        .get("process_launcher")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if kind.is_empty() {
+        return Ok(None);
+    }
+    let backend = settings
+        .get("sandbox_backend")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            SandboxBackend::parse(value).ok_or_else(|| format!("unknown sandbox_backend '{value}'"))
+        })
+        .transpose()?;
+    resolve_launcher(kind, backend).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(net: NetAccess) -> LaunchSpec {
+        LaunchSpec {
+            cwd: PathBuf::from("/ws/project"),
+            env: Vec::new(),
+            stdin: None,
+            net,
+            limits: ResourceLimits {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn disabled_launcher_fails_closed() {
+        let launcher = DisabledLauncher;
+        assert_eq!(launcher.kind(), LauncherKind::Disabled);
+        let error = launcher
+            .spawn("echo", &["hi".to_owned()], &spec(NetAccess::Full))
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Security(_)));
+    }
+
+    #[test]
+    fn host_launcher_rejects_network_isolation() {
+        let error = HostLauncher
+            .spawn("echo", &[], &spec(NetAccess::None))
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Security(_)));
+    }
+
+    #[test]
+    fn bwrap_argv_binds_workspace_and_unshares_net_when_denied() {
+        let argv = bwrap_argv("cargo", &["check".to_owned()], &spec(NetAccess::None));
+        assert_eq!(argv.first().map(String::as_str), Some("bwrap"));
+        let tail = argv.split(|item| item == "--").nth(1).unwrap();
+        assert_eq!(tail, ["cargo", "check"]);
+        assert!(argv.iter().any(|item| item == "--unshare-net"));
+        let bind = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--bind")
+            .expect("workspace rw bind present");
+        assert_eq!(bind[1], "/ws/project");
+    }
+
+    #[test]
+    fn bwrap_argv_never_binds_the_whole_root() {
+        let argv = bwrap_argv("echo", &[], &spec(NetAccess::Full));
+        assert!(
+            !argv
+                .windows(3)
+                .any(|triple| triple == ["--ro-bind", "/", "/"]),
+            "no read-only bind of the host root"
+        );
+    }
+
+    #[test]
+    fn pinned_network_fails_closed() {
+        // Every launcher refuses a request it cannot actually enforce.
+        let spec = spec(NetAccess::Pinned(vec!["api.example.com".to_owned()]));
+        assert!(matches!(
+            HostLauncher.spawn("echo", &[], &spec).unwrap_err(),
+            ToolError::Security(_)
+        ));
+        if let Ok(launcher) = SandboxedLauncher::detect() {
+            assert!(matches!(
+                launcher.spawn("echo", &[], &spec).unwrap_err(),
+                ToolError::Security(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn bwrap_argv_keeps_network_when_full() {
+        let argv = bwrap_argv("echo", &[], &spec(NetAccess::Full));
+        assert!(!argv.iter().any(|item| item == "--unshare-net"));
+    }
+
+    #[test]
+    fn seatbelt_argv_denies_by_default_and_confines_writes() {
+        let argv = seatbelt_argv("tsc", &["--noEmit".to_owned()], &spec(NetAccess::None))
+            .expect("seatbelt argv");
+        assert_eq!(argv.first().map(String::as_str), Some("sandbox-exec"));
+        let profile = argv.get(2).expect("profile");
+        assert!(profile.contains("(deny default)"));
+        assert!(profile.contains("/ws/project"));
+        assert!(!profile.contains("network"));
+        let argv = seatbelt_argv("tsc", &[], &spec(NetAccess::Full)).expect("seatbelt argv");
+        assert!(argv.get(2).unwrap().contains("(allow network*)"));
+    }
+
+    #[test]
+    fn seatbelt_argv_escapes_workspace_and_rejects_control_chars() {
+        let mut spec = spec(NetAccess::None);
+        spec.cwd = std::path::PathBuf::from("/ws/qu\"ote");
+        let argv = seatbelt_argv("tsc", &[], &spec).expect("seatbelt argv");
+        let profile = argv.get(2).expect("profile");
+        // The quote is escaped — it cannot break out of the string literal.
+        assert!(profile.contains("\"/ws/qu\\\"ote\""));
+        assert!(!profile.contains("\"/ws/qu\"ote\""));
+        spec.cwd = std::path::PathBuf::from("/ws/con\ntrol");
+        assert!(matches!(
+            seatbelt_argv("tsc", &[], &spec),
+            Err(ToolError::Security(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_launcher_vocabulary_fails_closed_on_unknown() {
+        assert_eq!(
+            resolve_launcher("", None).unwrap().kind(),
+            LauncherKind::Disabled
+        );
+        assert_eq!(
+            resolve_launcher("host", None).unwrap().kind(),
+            LauncherKind::Host
+        );
+        assert!(resolve_launcher("definitely-not-a-launcher", None).is_err());
+        assert!(
+            resolve_launcher("sandboxed", Some(SandboxBackend::Bwrap)).is_err()
+                || cfg!(target_os = "linux")
+        );
+    }
+
+    #[test]
+    fn backend_parsing_and_status_report() {
+        assert_eq!(SandboxBackend::parse("bwrap"), Some(SandboxBackend::Bwrap));
+        assert_eq!(
+            SandboxBackend::parse("sandbox-exec"),
+            Some(SandboxBackend::Seatbelt)
+        );
+        assert_eq!(SandboxBackend::parse("bogus"), None);
+        let status = sandbox_backend_status();
+        assert_eq!(status.len(), 3);
+        assert_eq!(
+            status
+                .iter()
+                .map(|entry| entry["backend"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["bwrap", "seatbelt", "jobobject"]
+        );
+    }
+
+    /// Real sandbox exec — only runs where the backend exists.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn jobobject_sandbox_spawns_a_real_process() {
+        let launcher = SandboxedLauncher::new(SandboxBackend::JobObject).unwrap();
+        assert_eq!(launcher.kind(), LauncherKind::Sandboxed);
+        let mut spec = spec(NetAccess::Full);
+        spec.cwd = std::env::temp_dir();
+        let mut child = launcher
+            .spawn("cmd.exe", &["/c".to_owned(), "exit 0".to_owned()], &spec)
+            .unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+    }
+}

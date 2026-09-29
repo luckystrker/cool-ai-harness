@@ -1,10 +1,11 @@
-import { User, Sparkles, Terminal } from "lucide-react"
+import { User, Sparkles, Terminal, GitBranchPlus, History } from "lucide-react"
 import { cn, formatDuration, formatMessageTime } from "@/lib/utils"
 import type { Plan, UsagePayload } from "@/api/types"
 import { Markdown } from "./Markdown"
 import { ToolCallBlock, type ToolCallBlockProps } from "./ToolCallBlock"
 import { ThinkingBlock } from "./ThinkingBlock"
-import { ApprovalCard, type InlineApproval } from "./ApprovalCard"
+import { ApprovalCard, type InlineApproval, type RememberScope } from "./ApprovalCard"
+import type { JsonValue } from "@/api/generated/cool_protocol"
 import { PlanCard } from "./PlanCard"
 
 /**
@@ -22,6 +23,8 @@ export interface MessageViewModel {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string
+  /** Durable history cursor (`rust_events.rowid`) for fork/rewind (P2.13). */
+  cursor?: number
   /** Tool calls attached to this assistant message, with optional result. */
   toolCalls?: (ToolCallBlockProps & { key: string })[]
   /** Reasoning / chain-of-thought text, when the provider exposes one. */
@@ -58,14 +61,20 @@ export function MessageBubble({
   onRespondApproval,
   onPlanApprove,
   onPlanExecute,
+  onForkFromHere,
+  onRewindToHere,
 }: {
   msg: MessageViewModel
-  /** Callback to resolve an inline approval (approve/deny). */
-  onRespondApproval?: (approved: boolean) => void
+  /** Callback to resolve an inline approval (approve/deny + optional rule remember). */
+  onRespondApproval?: (approved: boolean, remember?: RememberScope, answer?: JsonValue) => void
   /** Callback to approve/reject a plan (Фаза 2 §1). */
   onPlanApprove?: (approved: boolean) => void
   /** Callback to execute an approved plan. */
   onPlanExecute?: () => void
+  /** Fork the session into a new conversation at this message (P2.13). */
+  onForkFromHere?: () => void
+  /** Rewind the session to this message + restore the workspace (P2.13/P2.18). */
+  onRewindToHere?: () => void
 }) {
   if (msg.role === "tool") return null // tool results render inside the assistant message that called them
   const meta = ROLE_META[msg.role]
@@ -109,6 +118,32 @@ export function MessageBubble({
           {msg.createdAt && (
             <span className="text-[10px] text-muted-foreground/70">
               {formatMessageTime(msg.createdAt)}
+            </span>
+          )}
+          {/* Fork/rewind points (P2.13): shown on hover for durable
+              history rows only — the cursor identifies the event-log row. */}
+          {msg.cursor != null && (onForkFromHere || onRewindToHere) && (
+            <span className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              {onForkFromHere && (
+                <button
+                  type="button"
+                  title="Fork from here"
+                  className="rounded p-0.5 hover:bg-muted hover:text-foreground"
+                  onClick={onForkFromHere}
+                >
+                  <GitBranchPlus className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {onRewindToHere && (
+                <button
+                  type="button"
+                  title="Rewind to here"
+                  className="rounded p-0.5 hover:bg-muted hover:text-foreground"
+                  onClick={onRewindToHere}
+                >
+                  <History className="h-3.5 w-3.5" />
+                </button>
+              )}
             </span>
           )}
         </div>

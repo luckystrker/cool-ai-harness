@@ -1,7 +1,11 @@
 import { useState } from "react"
-import { ShieldAlert, ShieldCheck, ShieldX, Bug, Loader2, FileDiff } from "lucide-react"
+import { ShieldAlert, ShieldCheck, ShieldX, Bug, HelpCircle, Loader2, FileDiff, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import type { JsonValue, PolicyRuleRecord } from "@/api/generated/cool_protocol"
+
+/** Policy-rule persistence scope sent as `remember` on approval.resolve. */
+export type RememberScope = "session" | "project" | "user"
 
 /** Approval request rendered inline in the chat flow (replaces the modal dialog). */
 export interface InlineApproval {
@@ -20,13 +24,18 @@ export interface InlineApproval {
   resultPreview?: string
   /** Current file content before the write (for diff/preview). */
   currentContent?: string
+  /** The policy rule that matched this call, when a rule produced the ask (P1.6). */
+  matchedRule?: string
+  /** Server-suggested rule for "don't ask again" persistence (P1.6). */
+  suggestedRule?: PolicyRuleRecord
   /** Lifecycle: waiting for the user → resolving → resolved outcome. */
   status: "pending" | "resolving" | "approved" | "denied" | "timed_out"
 }
 
 interface ApprovalCardProps {
   approval: InlineApproval
-  onRespond: (approved: boolean) => void
+  /** `answer` carries the question-card response for `breakpointType === "question"` (P1.8 ask_user). */
+  onRespond: (approved: boolean, remember?: RememberScope, answer?: JsonValue) => void
 }
 
 /**
@@ -37,9 +46,15 @@ interface ApprovalCardProps {
  */
 export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
   const [argsOpen, setArgsOpen] = useState(false)
+  const [remember, setRemember] = useState<RememberScope | null>(null)
   const isBreakpoint = approval.isBreakpoint ?? false
   const hasArgs = Object.keys(approval.arguments ?? {}).length > 0
   const resolved = approval.status !== "pending" && approval.status !== "resolving"
+
+  // P1.8 ask_user — breakpointType "question" renders an answering card.
+  if (approval.breakpointType === "question") {
+    return <QuestionCard approval={approval} onRespond={onRespond} />
+  }
 
   return (
     <div
@@ -85,6 +100,9 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           {isBreakpoint
             ? `A ${approval.breakpointType ?? ""} breakpoint fired. Review before proceeding.`
             : approval.reason || "The agent wants to run a tool that requires your approval."}
+          {approval.matchedRule && (
+            <span className="block font-mono text-[11px]">{approval.matchedRule}</span>
+          )}
         </p>
       )}
 
@@ -151,7 +169,7 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           </span>
         ) : (
           <>
-            <Button size="sm" className="h-7 px-3 text-xs" onClick={() => onRespond(true)}>
+            <Button size="sm" className="h-7 px-3 text-xs" onClick={() => onRespond(true, remember ?? undefined)}>
               Allow
             </Button>
             <Button
@@ -162,9 +180,146 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
             >
               Deny
             </Button>
+            {approval.suggestedRule && (
+              <label className="ml-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-amber-500"
+                  checked={remember !== null}
+                  onChange={(e) => setRemember(e.target.checked ? "project" : null)}
+                />
+                don't ask again
+                {remember && (
+                  <select
+                    className="h-6 rounded border bg-background px-1 text-xs"
+                    value={remember}
+                    onChange={(e) => setRemember(e.target.value as RememberScope)}
+                  >
+                    <option value="session">this session</option>
+                    <option value="project">this project</option>
+                    <option value="user">all projects</option>
+                  </select>
+                )}
+              </label>
+            )}
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * P1.8 question card (ask_user): the agent is blocked on an answer, not on
+ * allow/deny. Renders the question text, clickable option buttons, and an
+ * optional free-form input; answering resolves the approval with `approved`
+ * plus the answer payload; "Dismiss" denies.
+ */
+function QuestionCard({ approval, onRespond }: ApprovalCardProps) {
+  const [text, setText] = useState("")
+  const args = approval.arguments ?? {}
+  const question = typeof args.question === "string" && args.question ? args.question : approval.reason
+  const options = Array.isArray(args.options)
+    ? args.options.filter((o): o is string => typeof o === "string")
+    : []
+  const allowFreeText = args.allow_free_text !== false
+  const resolved = approval.status !== "pending" && approval.status !== "resolving"
+
+  const answer = (value: JsonValue) => onRespond(true, undefined, value)
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-3 py-2.5 text-sm",
+        resolved
+          ? approval.status === "approved"
+            ? "border-emerald-500/40 bg-emerald-500/5"
+            : "border-destructive/30 bg-destructive/5"
+          : "border-blue-500/50 bg-blue-500/5"
+      )}
+    >
+      <div className="flex items-center gap-2">
+        {resolved ? (
+          approval.status === "approved" ? (
+            <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" />
+          ) : (
+            <ShieldX className="h-4 w-4 shrink-0 text-destructive" />
+          )
+        ) : (
+          <HelpCircle className="h-4 w-4 shrink-0 text-blue-500" />
+        )}
+        <span className="font-medium">
+          {resolved
+            ? approval.status === "approved"
+              ? "Answered"
+              : "Dismissed"
+            : "Question for you"}
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">{approval.name}</span>
+      </div>
+
+      <p className="mt-1.5 whitespace-pre-wrap text-sm">{question}</p>
+
+      {!resolved && approval.status !== "resolving" && (
+        <div className="mt-2 space-y-2">
+          {options.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {options.map((option) => (
+                <Button
+                  key={option}
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-3 text-xs"
+                  onClick={() => answer(option)}
+                >
+                  {option}
+                </Button>
+              ))}
+            </div>
+          )}
+          {allowFreeText && (
+            <form
+              className="flex items-center gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (text.trim()) answer(text.trim())
+              }}
+            >
+              <input
+                className="h-7 flex-1 rounded border bg-background px-2 text-xs"
+                placeholder="Type an answer…"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+              />
+              <Button type="submit" size="sm" className="h-7 px-2.5 text-xs" disabled={!text.trim()}>
+                <Send className="h-3 w-3" />
+              </Button>
+            </form>
+          )}
+          <button
+            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+            onClick={() => onRespond(false)}
+          >
+            Dismiss question
+          </button>
+        </div>
+      )}
+
+      {approval.status === "resolving" && (
+        <span className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Sending answer…
+        </span>
+      )}
+      {resolved && (
+        <span
+          className={cn(
+            "mt-2 inline-block text-xs font-medium",
+            approval.status === "approved" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
+          )}
+        >
+          {approval.status === "approved" ? "✓ Answer sent — continuing…" : "✗ Dismissed — the agent was notified."}
+        </span>
+      )}
     </div>
   )
 }

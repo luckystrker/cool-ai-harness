@@ -6,7 +6,7 @@ use cool_agent::{
     ScriptedDriver, StoreEventSink, ToolCall, ToolContext, builtin_registry,
 };
 use cool_protocol::{ApprovalOutcome, CanonicalEvent};
-use cool_security::{Capability, CapabilityPolicy, Decision, Workspace};
+use cool_security::{Capability, CapabilityPolicy, Decision, PolicyRule, Workspace};
 use cool_state::DurableStore;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -19,6 +19,8 @@ struct Scenario {
     calls: Vec<FixtureCall>,
     capability: Option<String>,
     decision: Option<String>,
+    #[serde(default)]
+    rules: Vec<PolicyRule>,
     approval: String,
     expected_events: Vec<String>,
     expected_file: bool,
@@ -41,6 +43,9 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
         let mut policy = CapabilityPolicy::new(Some(Decision::Allow));
         if let (Some(capability), Some(decision)) = (&scenario.capability, &scenario.decision) {
             policy.set(parse_capability(capability), parse_decision(decision));
+        }
+        if !scenario.rules.is_empty() {
+            policy.set_rules(scenario.rules);
         }
         let calls = scenario
             .calls
@@ -80,6 +85,8 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     model: "scripted".to_owned(),
                     history: Vec::new(),
                     user_input: scenario.id.clone(),
+                    user_parts: Vec::new(),
+                    user_replay_parts: Vec::new(),
                     system_prompt: None,
                     mode: None,
                     temperature: 0.0,
@@ -88,6 +95,11 @@ async fn critical_deterministic_scenarios_pass_on_the_rust_runtime() {
                     tool_names: Some(BTreeSet::from([
                         "read_file".to_owned(),
                         "write_file".to_owned(),
+                        "edit_file".to_owned(),
+                        "search_files".to_owned(),
+                        "find_files".to_owned(),
+                        "shell".to_owned(),
+                        "view_image".to_owned(),
                     ])),
                     tool_context: ToolContext::new(
                         Workspace::new(directory.path()).unwrap(),
