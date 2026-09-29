@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Bump the workspace version in Cargo.toml and the cool-* entries in Cargo.lock.
-// Usage: node scripts/bump-version.mjs 0.2.0
-import { readFileSync, writeFileSync } from "node:fs";
+// Bump the workspace version in Cargo.toml, the cool-* path-dependency
+// version requirements in each crate's Cargo.toml, and the cool-* entries in
+// Cargo.lock. Usage: node scripts/bump-version.mjs 0.2.0
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +24,23 @@ if (updated === toml) {
   process.exit(1);
 }
 writeFileSync(tomlPath, updated);
+
+// Intra-workspace path dependencies pin `version = "x.y.z"`; a workspace
+// bump must move them too or `cargo build` fails resolution.
+let depPins = 0;
+for (const entry of readdirSync(join(root, "crates"), { withFileTypes: true })) {
+  if (!entry.isDirectory() || !entry.name.startsWith("cool-")) continue;
+  const manifest = join(root, "crates", entry.name, "Cargo.toml");
+  const source = readFileSync(manifest, "utf8");
+  const rewritten = source.replace(
+    /(^cool-[a-z-]+ = \{[^}]*?version = )"[^"]*"/gm,
+    `$1"${version}"`,
+  );
+  if (rewritten !== source) {
+    depPins += 1;
+    writeFileSync(manifest, rewritten);
+  }
+}
 
 const lockPath = join(root, "Cargo.lock");
 const lines = readFileSync(lockPath, "utf8").split("\n");
